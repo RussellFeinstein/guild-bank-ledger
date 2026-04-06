@@ -17,6 +17,7 @@ read_globals = {
     "GetGuildBankMoneyTransaction",
     "GetNumGuildBankMoneyTransactions",
     "IsInGuild",
+    "UnitName",
 
     -- WoW constants and tables
     "Enum",

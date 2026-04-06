@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.1.0"
+local VERSION = "0.2.0"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -126,6 +126,13 @@ function GBL:OnBankOpened()
     if self.db.profile.scanning.autoScan then
         self:StartFullScan()
     end
+
+    -- M2: Scan transaction logs and compact old data
+    self:ScanTransactions()
+    local guildData = self:GetGuildData()
+    if guildData then
+        self:RunCompaction(guildData)
+    end
 end
 
 function GBL:OnBankClosed()
@@ -180,9 +187,11 @@ end
 function GBL:PrintStatus()
     local guildName = self:GetGuildName() or "Not in a guild"
     local txCount = 0
+    local moneyCount = 0
     local guildData = self:GetGuildData()
     if guildData then
         txCount = #guildData.transactions
+        moneyCount = #guildData.moneyTransactions
     end
 
     local lastScan = "Never"
@@ -193,6 +202,7 @@ function GBL:PrintStatus()
     self:Print("|cffffcc00GuildBankLedger v" .. self.version .. "|r")
     self:Print("Guild: " .. guildName)
     self:Print("Transactions: " .. txCount)
+    self:Print("Money transactions: " .. moneyCount)
     self:Print("Last scan: " .. lastScan)
     self:Print("Bank open: " .. (self.bankOpen and "Yes" or "No"))
 end

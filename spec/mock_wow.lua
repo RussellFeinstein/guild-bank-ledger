@@ -11,6 +11,9 @@ MockWoW.guildBank = {
     tabs = {},       -- array of { name, icon, isViewable, numSlots, slots = {} }
     numTabs = 0,
     queriedTabs = {},  -- tabIndex -> true after QueryGuildBankTab
+    transactionLogs = {},  -- tabIndex -> array of {type, name, itemLink, count, tab1, tab2, year, month, day, hour}
+    moneyTransactions = {},  -- array of {type, name, amount, year, month, day, hour}
+    queriedLogs = {},  -- tabIndex -> true after QueryGuildBankLog
 }
 
 -- Mock guild state
@@ -19,6 +22,12 @@ MockWoW.guild = {
     faction = nil,
     realm = nil,
 }
+
+-- Mock player state
+MockWoW.player = { name = "TestOfficer", realm = "TestRealm" }
+
+-- Mock item info (itemID -> {classID, subclassID})
+MockWoW.itemInfo = {}
 
 -- Mock server time
 MockWoW.serverTime = 1711700000
@@ -39,12 +48,17 @@ function MockWoW.reset()
         tabs = {},
         numTabs = 0,
         queriedTabs = {},
+        transactionLogs = {},
+        moneyTransactions = {},
+        queriedLogs = {},
     }
     MockWoW.guild = {
         name = nil,
         faction = nil,
         realm = nil,
     }
+    MockWoW.player = { name = "TestOfficer", realm = "TestRealm" }
+    MockWoW.itemInfo = {}
     MockWoW.serverTime = 1711700000
     MockWoW.pendingTimers = {}
     MockWoW.frames = {}
@@ -166,6 +180,36 @@ function MockWoW.install()
         MockWoW.guildBank.queriedTabs[tabIndex] = true
     end
 
+    -- Query transaction log (marks tab log as ready)
+    _G.QueryGuildBankLog = function(tab)
+        MockWoW.guildBank.queriedLogs[tab] = true
+    end
+
+    -- Transaction log access
+    _G.GetNumGuildBankTransactions = function(tab)
+        local log = MockWoW.guildBank.transactionLogs[tab]
+        return log and #log or 0
+    end
+
+    _G.GetGuildBankTransaction = function(tab, index)
+        local log = MockWoW.guildBank.transactionLogs[tab]
+        if not log or not log[index] then return nil end
+        local tx = log[index]
+        return tx.type, tx.name, tx.itemLink, tx.count,
+               tx.tab1, tx.tab2, tx.year, tx.month, tx.day, tx.hour
+    end
+
+    -- Money transaction log access
+    _G.GetNumGuildBankMoneyTransactions = function()
+        return #MockWoW.guildBank.moneyTransactions
+    end
+
+    _G.GetGuildBankMoneyTransaction = function(index)
+        local tx = MockWoW.guildBank.moneyTransactions[index]
+        if not tx then return nil end
+        return tx.type, tx.name, tx.amount, tx.year, tx.month, tx.day, tx.hour
+    end
+
     -- Guild bank item access
     _G.GetGuildBankItemLink = function(tabIndex, slotIndex)
         local tab = MockWoW.guildBank.tabs[tabIndex]
@@ -192,11 +236,22 @@ function MockWoW.install()
         end,
     }
 
-    -- C_Item
+    -- Player info
+    _G.UnitName = function(unit)
+        if unit == "player" then
+            return MockWoW.player.name, MockWoW.player.realm
+        end
+        return nil
+    end
+
+    -- C_Item (configurable per itemID via MockWoW.itemInfo)
     _G.C_Item = {
         GetItemInfoInstant = function(itemID)
             -- Returns: itemID, itemType, itemSubType, itemEquipLoc, icon, classID, subclassID
-            return itemID, "", "", "", "", 0, 0
+            local info = MockWoW.itemInfo[itemID]
+            local classID = info and info.classID or 0
+            local subclassID = info and info.subclassID or 0
+            return itemID, "", "", "", "", classID, subclassID
         end,
     }
 
@@ -230,7 +285,7 @@ function MockWoW.install()
     -- GetAddOnMetadata
     _G.GetAddOnMetadata = function(addon, field)
         if addon == "GuildBankLedger" and field == "Version" then
-            return "0.1.0"
+            return "0.2.0"
         end
         return nil
     end

@@ -61,6 +61,10 @@ function Helpers.resetAll()
     -- Clear any previously loaded addon modules
     package.loaded["Core"] = nil
     package.loaded["Scanner"] = nil
+    package.loaded["Categories"] = nil
+    package.loaded["Dedup"] = nil
+    package.loaded["Ledger"] = nil
+    package.loaded["Storage"] = nil
 end
 
 --- Initialize mocks (call in before_each).
@@ -70,13 +74,31 @@ function Helpers.setupMocks()
     MockAce.install()
 end
 
---- Load the addon Core module after mocks are installed.
+--- Safely load a Lua file (no error if file does not exist).
+local function safeDofile(path)
+    local f = io.open(path, "r")
+    if f then
+        f:close()
+        dofile(path)
+    end
+end
+
+--- Load the addon modules after mocks are installed.
+-- Core and Scanner are required; M2+ modules are loaded if present.
 -- @return table The addon object
 function Helpers.loadAddon()
     package.loaded["Core"] = nil
     package.loaded["Scanner"] = nil
+    package.loaded["Categories"] = nil
+    package.loaded["Dedup"] = nil
+    package.loaded["Ledger"] = nil
+    package.loaded["Storage"] = nil
     dofile("Core.lua")
     dofile("Scanner.lua")
+    safeDofile("Categories.lua")
+    safeDofile("Dedup.lua")
+    safeDofile("Ledger.lua")
+    safeDofile("Storage.lua")
     return MockAce.addon
 end
 
@@ -101,6 +123,75 @@ function Helpers.printContains(substring)
         end
     end
     return false
+end
+
+---------------------------------------------------------------------------
+-- M2 transaction helpers
+---------------------------------------------------------------------------
+
+--- Create a mock item transaction log entry.
+-- @param txType string "deposit"|"withdraw"|"move"
+-- @param name string Player name
+-- @param itemLink string Item link (use makeItemLink)
+-- @param count number Stack count
+-- @param tab number Source tab index
+-- @param destTab number|nil Destination tab (for moves)
+-- @param hoursAgo number Hours ago the transaction occurred
+-- @return table Transaction entry for mock log
+function Helpers.makeTransaction(txType, name, itemLink, count, tab, destTab, hoursAgo)
+    hoursAgo = hoursAgo or 0
+    return {
+        type = txType,
+        name = name,
+        itemLink = itemLink,
+        count = count or 1,
+        tab1 = tab or 1,
+        tab2 = destTab,
+        year = 0,
+        month = 0,
+        day = math.floor(hoursAgo / 24),
+        hour = hoursAgo % 24,
+    }
+end
+
+--- Create a mock money transaction log entry.
+-- @param txType string "deposit"|"withdraw"|"repair"|"buyTab"|"depositSummary"
+-- @param name string Player name
+-- @param amount number Copper amount
+-- @param hoursAgo number Hours ago the transaction occurred
+-- @return table Money transaction entry for mock log
+function Helpers.makeMoneyTransaction(txType, name, amount, hoursAgo)
+    hoursAgo = hoursAgo or 0
+    return {
+        type = txType,
+        name = name,
+        amount = amount or 0,
+        year = 0,
+        month = 0,
+        day = math.floor(hoursAgo / 24),
+        hour = hoursAgo % 24,
+    }
+end
+
+--- Configure C_Item.GetItemInfoInstant return values for a specific itemID.
+-- @param itemID number
+-- @param classID number
+-- @param subclassID number
+function Helpers.setItemInfo(itemID, classID, subclassID)
+    MockWoW.itemInfo[itemID] = { classID = classID, subclassID = subclassID }
+end
+
+--- Populate a tab's transaction log.
+-- @param tab number Tab index
+-- @param transactions table Array of transaction entries (from makeTransaction)
+function Helpers.addTabTransactions(tab, transactions)
+    MockWoW.guildBank.transactionLogs[tab] = transactions
+end
+
+--- Populate the money transaction log.
+-- @param transactions table Array of money transaction entries (from makeMoneyTransaction)
+function Helpers.addMoneyTransactions(transactions)
+    MockWoW.guildBank.moneyTransactions = transactions
 end
 
 -- Export mocks for direct access in tests

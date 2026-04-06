@@ -2,7 +2,7 @@
 ## Title: GuildBankLedger
 ## Notes: Persistent guild bank transaction logging with per-player consumption tracking
 ## Author: RussellFeinstein
-## Version: 0.1.0
+## Version: 0.2.0
 ## SavedVariables: GuildBankLedgerDB
 ## OptionalDeps: Ace3
 ## X-Category: Guild
@@ -19,3 +19,7 @@ Libs\AceEvent-3.0\AceEvent-3.0.lua
 # Core
 Core.lua
 Scanner.lua
+Categories.lua
+Dedup.lua
+Ledger.lua
+Storage.lua
