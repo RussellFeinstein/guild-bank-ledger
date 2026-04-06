@@ -1,0 +1,6 @@
+return {
+    _all = {
+        lpath = "?.lua;spec/?.lua",
+        pattern = "_spec",
+    },
+}
