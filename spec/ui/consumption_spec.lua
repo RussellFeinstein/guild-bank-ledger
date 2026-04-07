@@ -390,4 +390,118 @@ describe("ConsumptionView", function()
             assert.equals(link, summary[1].topItems[1].itemLink)
         end)
     end)
+
+    describe("Money transaction aggregation", function()
+        --- Build a money-only transaction (no itemID/itemLink/category/tab).
+        local function makeMoneyTx(overrides)
+            local rec = {
+                id = "moneyhash",
+                type = "deposit",
+                player = "Alice",
+                amount = 500000,  -- 50g
+                timestamp = MockWoW.serverTime - 3600,
+                scanTime = MockWoW.serverTime,
+                scannedBy = "TestOfficer",
+            }
+            if overrides then
+                for k, v in pairs(overrides) do
+                    rec[k] = v
+                end
+            end
+            return rec
+        end
+
+        it("aggregates money deposits", function()
+            local txns = {
+                makeMoneyTx({ player = "Alice", type = "deposit", amount = 500000 }),
+                makeMoneyTx({ player = "Alice", type = "deposit", amount = 300000 }),
+            }
+            local summary = GBL:BuildConsumptionSummary(txns)
+            assert.equals(1, #summary)
+            assert.equals(800000, summary[1].moneyDeposited)
+            assert.equals(800000, summary[1].moneyNet)
+        end)
+
+        it("aggregates repair withdrawals", function()
+            local txns = {
+                makeMoneyTx({ player = "Alice", type = "repair", amount = 100000 }),
+            }
+            local summary = GBL:BuildConsumptionSummary(txns)
+            assert.equals(100000, summary[1].moneyWithdrawn)
+            assert.equals(-100000, summary[1].moneyNet)
+        end)
+
+        it("aggregates buyTab as withdrawal", function()
+            local txns = {
+                makeMoneyTx({ player = "Bob", type = "buyTab", amount = 1000000 }),
+            }
+            local summary = GBL:BuildConsumptionSummary(txns)
+            assert.equals(1000000, summary[1].moneyWithdrawn)
+        end)
+
+        it("aggregates depositSummary as deposit", function()
+            local txns = {
+                makeMoneyTx({ player = "Bob", type = "depositSummary", amount = 200000 }),
+            }
+            local summary = GBL:BuildConsumptionSummary(txns)
+            assert.equals(200000, summary[1].moneyDeposited)
+        end)
+
+        it("computes correct moneyNet with mixed types", function()
+            local txns = {
+                makeMoneyTx({ player = "Alice", type = "deposit", amount = 800000 }),
+                makeMoneyTx({ player = "Alice", type = "repair", amount = 50000 }),
+                makeMoneyTx({ player = "Alice", type = "withdraw", amount = 100000 }),
+            }
+            local summary = GBL:BuildConsumptionSummary(txns)
+            assert.equals(800000, summary[1].moneyDeposited)
+            assert.equals(150000, summary[1].moneyWithdrawn)
+            assert.equals(650000, summary[1].moneyNet)
+        end)
+
+        it("merges item + money tx for same player", function()
+            local txns = {
+                makeTx({ player = "Alice", type = "withdraw", itemID = 100, count = 5 }),
+                makeMoneyTx({ player = "Alice", type = "deposit", amount = 500000 }),
+            }
+            local summary = GBL:BuildConsumptionSummary(txns)
+            assert.equals(1, #summary)
+            assert.equals("Alice", summary[1].player)
+            assert.equals(5, summary[1].totalWithdrawn)
+            assert.equals(500000, summary[1].moneyDeposited)
+        end)
+
+        it("money-only player appears in summary", function()
+            local txns = {
+                makeMoneyTx({ player = "Banker", type = "deposit", amount = 1000000 }),
+            }
+            local summary = GBL:BuildConsumptionSummary(txns)
+            assert.equals(1, #summary)
+            assert.equals("Banker", summary[1].player)
+            assert.equals(0, summary[1].netConsumed)
+            assert.equals(1000000, summary[1].moneyDeposited)
+        end)
+
+        it("money tx passes through FilterTransactions with default filters", function()
+            local txns = {
+                makeTx({ player = "Alice", type = "withdraw" }),
+                makeMoneyTx({ player = "Alice", type = "deposit", amount = 500000 }),
+            }
+            local filters = GBL:CreateDefaultFilters()
+            local filtered = GBL:FilterTransactions(txns, filters)
+            assert.equals(2, #filtered)
+        end)
+
+        it("money tx survives category filter", function()
+            local txns = {
+                makeTx({ player = "Alice", type = "withdraw", category = "flask" }),
+                makeMoneyTx({ player = "Alice", type = "deposit", amount = 500000 }),
+            }
+            local filters = GBL:CreateDefaultFilters()
+            filters.category = "flask"
+            local filtered = GBL:FilterTransactions(txns, filters)
+            -- Item tx matches flask, money tx passes (no category = skip check)
+            assert.equals(2, #filtered)
+        end)
+    end)
 end)

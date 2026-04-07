@@ -118,7 +118,9 @@ function GBL:CreateTxRecord(txType, name, itemLink, count, tab, destTab, year, m
 end
 
 --- Build a normalized money transaction record.
--- @param txType string "deposit"|"withdraw"|"repair"|"buyTab"|"depositSummary"
+-- WoW API returns "withdrawal" for money but "withdraw" for items;
+-- we normalize to "withdraw" so all downstream code uses one string.
+-- @param txType string "deposit"|"withdrawal"|"withdraw"|"repair"|"buyTab"|"depositSummary"
 -- @param name string Player name
 -- @param amount number Copper amount
 -- @param year number Relative year offset
@@ -127,6 +129,9 @@ end
 -- @param hour number Relative hour offset
 -- @return table Money transaction record
 function GBL:CreateMoneyTxRecord(txType, name, amount, year, month, day, hour)
+    -- Normalize WoW API type: "withdrawal" → "withdraw" for consistency with item tx
+    if txType == "withdrawal" then txType = "withdraw" end
+
     local timestamp = self:ComputeAbsoluteTimestamp(year, month, day, hour)
     local scanTime = GetServerTime()
     local scannedBy = UnitName("player") or "Unknown"
@@ -212,11 +217,11 @@ function GBL:UpdatePlayerStats(record, guildData)
         end
     end
 
-    -- Money transactions
+    -- Money transactions (repair and buyTab are withdrawals, depositSummary is a deposit)
     if record.amount then
-        if record.type == "deposit" then
+        if record.type == "deposit" or record.type == "depositSummary" then
             stats.moneyDeposited = stats.moneyDeposited + record.amount
-        elseif record.type == "withdraw" then
+        elseif record.type == "withdraw" or record.type == "repair" or record.type == "buyTab" then
             stats.moneyWithdrawn = stats.moneyWithdrawn + record.amount
         end
     end
@@ -232,8 +237,6 @@ end
 -- @return number Count of newly stored (non-duplicate) records
 function GBL:ReadTabTransactions(tab, guildData)
     if not guildData then return 0 end
-
-    QueryGuildBankLog(tab)
 
     local numTx = GetNumGuildBankTransactions(tab)
     local stored = 0
@@ -262,9 +265,6 @@ end
 function GBL:ReadMoneyTransactions(guildData)
     if not guildData then return 0 end
 
-    local moneyTab = GetNumGuildBankTabs() + 1
-    QueryGuildBankLog(moneyTab)
-
     local numTx = GetNumGuildBankMoneyTransactions()
     local stored = 0
 
@@ -290,11 +290,10 @@ end
 -- Entry point
 ------------------------------------------------------------------------
 
---- Scan all transaction logs (item + money) and store new records.
--- Called from Core.lua OnBankOpened.
+--- Read all available transaction data and return count of new records.
+-- @param guildData table Guild data from AceDB
 -- @return number count of newly stored records
-function GBL:ScanTransactions()
-    local guildData = self:GetGuildData()
+function GBL:ReadAllTransactions(guildData)
     if not guildData then return 0 end
 
     local totalStored = 0
@@ -303,9 +302,68 @@ function GBL:ScanTransactions()
     for tab = 1, numTabs do
         totalStored = totalStored + self:ReadTabTransactions(tab, guildData)
     end
-
     totalStored = totalStored + self:ReadMoneyTransactions(guildData)
 
-    self:SendMessage("GBL_LEDGER_SCAN_COMPLETE", totalStored)
     return totalStored
+end
+
+--- Query all transaction logs and read them when the server responds.
+-- Uses GUILD_BANK_LOG_UPDATE event with a debounced read.
+-- Each event resets a 0.5s timer so we wait for ALL tab responses
+-- (including money tab) to arrive before reading.
+-- @param callback function(totalStored) called when all logs are read
+function GBL:ScanTransactions(callback)
+    local guildData = self:GetGuildData()
+    if not guildData then
+        if callback then callback(0) end
+        return 0
+    end
+
+    local numTabs = GetNumGuildBankTabs()
+    -- Money log is always at MAX_GUILDBANK_TABS+1 (constant 9), NOT numTabs+1.
+    -- GetNumGuildBankTabs() returns purchased tabs (1-8), but the money log
+    -- index is fixed at 9 regardless of how many tabs the guild has.
+    local moneyTab = (MAX_GUILDBANK_TABS or 8) + 1
+    local completed = false
+    local debounceTimer = nil
+
+    local function finishScan()
+        if completed then return end
+        completed = true
+        debounceTimer = nil
+        pcall(function() self:UnregisterEvent("GUILD_BANK_LOG_UPDATE") end)
+
+        if not self.bankOpen then
+            if callback then callback(0) end
+            return
+        end
+
+        local totalStored = self:ReadAllTransactions(guildData)
+        self:SendMessage("GBL_LEDGER_SCAN_COMPLETE", totalStored)
+        if callback then callback(totalStored) end
+    end
+
+    -- Listen for server response — debounce so we wait for all tabs
+    -- including money tab to arrive before reading
+    self.GUILD_BANK_LOG_UPDATE = function()
+        if completed then return end
+        -- Cancel previous timer and restart — ensures we wait 0.5s
+        -- after the LAST event, giving all tab responses time to arrive
+        if debounceTimer then
+            debounceTimer.cancelled = true
+        end
+        debounceTimer = C_Timer.After(0.5, finishScan)
+    end
+    self:RegisterEvent("GUILD_BANK_LOG_UPDATE")
+
+    -- Query all logs (item tabs + money tab)
+    for tab = 1, numTabs do
+        QueryGuildBankLog(tab)
+    end
+    QueryGuildBankLog(moneyTab)
+
+    -- Fallback: if event never fires (data already cached), read after 2s
+    C_Timer.After(2, finishScan)
+
+    return 0
 end

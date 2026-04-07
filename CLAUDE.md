@@ -27,7 +27,9 @@ WoW addon that persistently logs guild bank transactions. Lua 5.1 + Ace3 stack. 
 - Use `GetServerTime()` — never `time()` or `os.time()`
 - Use numeric `classID`/`subclassID` via `C_Item.GetItemInfoInstant()` — never localized strings
 - `MAX_GUILDBANK_SLOTS_PER_TAB = 98`
-- Money log tab index: `GetNumGuildBankTabs() + 1`
+- `MAX_GUILDBANK_TABS = 8` (constant — max purchasable tabs)
+- Money log tab index: `MAX_GUILDBANK_TABS + 1` (always 9, NOT `GetNumGuildBankTabs() + 1`)
+- `GetGuildBankMoneyTransaction` returns type `"withdrawal"` (not `"withdraw"`) — normalize at record creation
 
 ## Testing
 
@@ -53,4 +55,4 @@ luacheck .                 # lint production code
 
 ## Version
 
-Current: 0.4.0 (see `VERSION` file)
+Current: 0.4.1 (see `VERSION` file)

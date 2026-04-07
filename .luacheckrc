@@ -24,6 +24,7 @@ read_globals = {
     -- WoW constants and tables
     "Enum",
     "MAX_GUILDBANK_SLOTS_PER_TAB",
+    "MAX_GUILDBANK_TABS",
     "NORMAL_FONT_COLOR",
     "HIGHLIGHT_FONT_COLOR",
     "SOUNDKIT",

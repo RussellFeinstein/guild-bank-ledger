@@ -42,11 +42,15 @@ function GBL:MatchesFilters(record, filters)
         return false
     end
 
+    -- Money transactions (no itemID) skip item-specific filters
+    local isMoneyTx = not record.itemID
+
     -- Search text (case-insensitive substring against player or itemLink)
     if filters.searchText and filters.searchText ~= "" then
         local needle = filters.searchText:lower()
         local playerMatch = record.player and record.player:lower():find(needle, 1, true)
         local itemMatch = record.itemLink and record.itemLink:lower():find(needle, 1, true)
+        -- Money tx: match on player name only (no itemLink)
         if not playerMatch and not itemMatch then
             return false
         end
@@ -83,8 +87,8 @@ function GBL:MatchesFilters(record, filters)
         end
     end
 
-    -- Category
-    if filters.category and filters.category ~= "ALL" then
+    -- Category (skip for money transactions — they have no category)
+    if not isMoneyTx and filters.category and filters.category ~= "ALL" then
         if record.category ~= filters.category then
             return false
         end
@@ -104,8 +108,8 @@ function GBL:MatchesFilters(record, filters)
         end
     end
 
-    -- Tab
-    if filters.tab and filters.tab ~= 0 then
+    -- Tab (skip for money transactions — they have no tab)
+    if not isMoneyTx and filters.tab and filters.tab ~= 0 then
         if record.tab ~= filters.tab then
             return false
         end

@@ -5,6 +5,21 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-04-07
+
+### Fixed
+- Gold/money transactions now appear in the Transactions tab (were previously only visible in Consumption)
+- Added "Amount" column to ledger view showing formatted gold amounts for money transactions
+- Money transaction types (Repair, Tab Purchase, Deposit Summary) now appear in the Type filter dropdown
+- Player stats now correctly track repair, buyTab, and depositSummary money types (were silently dropped)
+- Money transactions no longer show misleading "0" in Count column or blank Item/Category/Location fields
+- Transaction scan now uses debounced GUILD_BANK_LOG_UPDATE handler (0.5s after last event) so money tab data arrives before reading — previous next-frame read was too fast and missed money log responses
+- Money log now queried at `MAX_GUILDBANK_TABS+1` (constant 9), not `GetNumGuildBankTabs()+1` — guilds with <8 tabs were querying the wrong tab index, so money data was never loaded from the server
+- WoW API returns `"withdrawal"` for money transactions but code checked for `"withdraw"` — added normalization in CreateMoneyTxRecord so all downstream code matches correctly
+
+### Changed
+- Ledger "Action" column widened to 80px to fit "Tab Purchase" label; "Item" narrowed to 180px to accommodate new Amount column
+
 ## [0.4.0] — 2026-04-07
 
 **Milestone M4: Consumption Detail + UI Polish**

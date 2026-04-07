@@ -150,6 +150,55 @@ describe("Ledger", function()
             assert.equals(MockWoW.serverTime - 100, stats.firstSeen)
             assert.equals(MockWoW.serverTime, stats.lastSeen)
         end)
+
+        it("tracks repair as money withdrawal", function()
+            local guildData = GBL:GetGuildData()
+            GBL:UpdatePlayerStats({
+                type = "repair", player = "Thrall",
+                amount = 75000,
+                timestamp = MockWoW.serverTime,
+            }, guildData)
+            local stats = guildData.playerStats["Thrall"]
+            assert.equals(75000, stats.moneyWithdrawn)
+            assert.equals(0, stats.moneyDeposited)
+        end)
+
+        it("tracks buyTab as money withdrawal", function()
+            local guildData = GBL:GetGuildData()
+            GBL:UpdatePlayerStats({
+                type = "buyTab", player = "Jaina",
+                amount = 1000000,
+                timestamp = MockWoW.serverTime,
+            }, guildData)
+            local stats = guildData.playerStats["Jaina"]
+            assert.equals(1000000, stats.moneyWithdrawn)
+        end)
+
+        it("tracks depositSummary as money deposit", function()
+            local guildData = GBL:GetGuildData()
+            GBL:UpdatePlayerStats({
+                type = "depositSummary", player = "Thrall",
+                amount = 250000,
+                timestamp = MockWoW.serverTime,
+            }, guildData)
+            local stats = guildData.playerStats["Thrall"]
+            assert.equals(250000, stats.moneyDeposited)
+            assert.equals(0, stats.moneyWithdrawn)
+        end)
+
+        it("accumulates all 5 money types correctly", function()
+            local guildData = GBL:GetGuildData()
+            local player = "Varian"
+            GBL:UpdatePlayerStats({ type = "deposit", player = player, amount = 1000000, timestamp = MockWoW.serverTime }, guildData)
+            GBL:UpdatePlayerStats({ type = "depositSummary", player = player, amount = 500000, timestamp = MockWoW.serverTime }, guildData)
+            GBL:UpdatePlayerStats({ type = "withdraw", player = player, amount = 200000, timestamp = MockWoW.serverTime }, guildData)
+            GBL:UpdatePlayerStats({ type = "repair", player = player, amount = 100000, timestamp = MockWoW.serverTime }, guildData)
+            GBL:UpdatePlayerStats({ type = "buyTab", player = player, amount = 50000, timestamp = MockWoW.serverTime }, guildData)
+
+            local stats = guildData.playerStats[player]
+            assert.equals(1500000, stats.moneyDeposited)
+            assert.equals(350000, stats.moneyWithdrawn)
+        end)
     end)
 
     describe("ReadTabTransactions", function()
@@ -170,6 +219,136 @@ describe("Ledger", function()
             assert.equals(2, #guildData.transactions)
             assert.equals("deposit", guildData.transactions[1].type)
             assert.equals("withdraw", guildData.transactions[2].type)
+        end)
+    end)
+
+    describe("ReadMoneyTransactions", function()
+        it("reads money transactions and normalizes 'withdrawal' to 'withdraw'", function()
+            local guildData = GBL:GetGuildData()
+
+            -- WoW API returns "withdrawal" (not "withdraw") for money
+            Helpers.addMoneyTransactions({
+                Helpers.makeMoneyTransaction("deposit", "Alice", 500000, 1),
+                Helpers.makeMoneyTransaction("repair", "Bob", 75000, 2),
+                Helpers.makeMoneyTransaction("withdrawal", "Alice", 100000, 3),
+            })
+
+            local stored = GBL:ReadMoneyTransactions(guildData)
+
+            assert.equals(3, stored)
+            assert.equals(3, #guildData.moneyTransactions)
+            assert.equals("deposit", guildData.moneyTransactions[1].type)
+            assert.equals(500000, guildData.moneyTransactions[1].amount)
+            assert.equals("Alice", guildData.moneyTransactions[1].player)
+            assert.equals("repair", guildData.moneyTransactions[2].type)
+            -- "withdrawal" from API is normalized to "withdraw" in storage
+            assert.equals("withdraw", guildData.moneyTransactions[3].type)
+            assert.equals(100000, guildData.moneyTransactions[3].amount)
+        end)
+
+        it("updates player stats for money transactions", function()
+            local guildData = GBL:GetGuildData()
+
+            -- Use "withdrawal" as WoW API returns it
+            Helpers.addMoneyTransactions({
+                Helpers.makeMoneyTransaction("deposit", "Alice", 500000, 1),
+                Helpers.makeMoneyTransaction("repair", "Alice", 75000, 2),
+            })
+
+            GBL:ReadMoneyTransactions(guildData)
+
+            local stats = guildData.playerStats["Alice"]
+            assert.equals(500000, stats.moneyDeposited)
+            assert.equals(75000, stats.moneyWithdrawn)
+        end)
+
+        it("normalizes 'withdrawal' so consumption summary sees money withdrawals", function()
+            local guildData = GBL:GetGuildData()
+
+            -- "withdrawal" is what WoW actually returns for money withdrawals
+            Helpers.addMoneyTransactions({
+                Helpers.makeMoneyTransaction("deposit", "Alice", 500000, 1),
+                Helpers.makeMoneyTransaction("withdrawal", "Alice", 200000, 2),
+            })
+
+            GBL:ReadMoneyTransactions(guildData)
+
+            -- Merge for consumption (same as SelectTab does)
+            local allTx = {}
+            for i = 1, #guildData.moneyTransactions do
+                allTx[#allTx + 1] = guildData.moneyTransactions[i]
+            end
+
+            local summaries = GBL:BuildConsumptionSummary(allTx)
+            assert.equals(1, #summaries)
+            assert.equals(500000, summaries[1].moneyDeposited)
+            assert.equals(200000, summaries[1].moneyWithdrawn)
+            assert.equals(300000, summaries[1].moneyNet)
+        end)
+    end)
+
+    describe("ReadAllTransactions — end-to-end with money", function()
+        it("reads both item and money transactions", function()
+            local guildData = GBL:GetGuildData()
+            local link = Helpers.makeItemLink(111, "Flask", 3)
+
+            MockWoW.addTab("Supplies", "icon", true)
+            Helpers.addTabTransactions(1, {
+                Helpers.makeTransaction("deposit", "Alice", link, 5, 1, nil, 1),
+            })
+            Helpers.addMoneyTransactions({
+                Helpers.makeMoneyTransaction("deposit", "Alice", 500000, 1),
+                Helpers.makeMoneyTransaction("repair", "Bob", 75000, 2),
+            })
+
+            local totalStored = GBL:ReadAllTransactions(guildData)
+
+            assert.equals(3, totalStored)
+            assert.equals(1, #guildData.transactions)
+            assert.equals(2, #guildData.moneyTransactions)
+        end)
+
+        it("consumption summary shows non-zero gold from stored money tx", function()
+            local guildData = GBL:GetGuildData()
+            local link = Helpers.makeItemLink(111, "Flask", 3)
+
+            MockWoW.addTab("Supplies", "icon", true)
+            Helpers.addTabTransactions(1, {
+                Helpers.makeTransaction("withdraw", "Alice", link, 5, 1, nil, 1),
+            })
+            Helpers.addMoneyTransactions({
+                Helpers.makeMoneyTransaction("deposit", "Alice", 500000, 1),
+                Helpers.makeMoneyTransaction("repair", "Bob", 75000, 2),
+            })
+
+            GBL:ReadAllTransactions(guildData)
+
+            -- Merge item + money transactions (same as SelectTab does)
+            local allTx = {}
+            for i = 1, #guildData.transactions do
+                allTx[#allTx + 1] = guildData.transactions[i]
+            end
+            for i = 1, #guildData.moneyTransactions do
+                allTx[#allTx + 1] = guildData.moneyTransactions[i]
+            end
+
+            local summaries = GBL:BuildConsumptionSummary(allTx)
+
+            -- Find Alice and Bob
+            local alice, bob
+            for _, s in ipairs(summaries) do
+                if s.player == "Alice" then alice = s end
+                if s.player == "Bob" then bob = s end
+            end
+
+            assert.is_not_nil(alice)
+            assert.equals(500000, alice.moneyDeposited)
+            assert.equals(0, alice.moneyWithdrawn)
+            assert.equals(500000, alice.moneyNet)
+
+            assert.is_not_nil(bob)
+            assert.equals(75000, bob.moneyWithdrawn)
+            assert.equals(-75000, bob.moneyNet)
         end)
     end)
 end)

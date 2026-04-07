@@ -100,6 +100,7 @@ function MockWoW.install()
 
     -- Constants
     _G.MAX_GUILDBANK_SLOTS_PER_TAB = 98
+    _G.MAX_GUILDBANK_TABS = 8
 
     -- Print capture
     _G.print = function(...)
@@ -298,7 +299,7 @@ function MockWoW.install()
     -- GetAddOnMetadata
     _G.GetAddOnMetadata = function(addon, field)
         if addon == "GuildBankLedger" and field == "Version" then
-            return "0.4.0"
+            return "0.4.1"
         end
         return nil
     end

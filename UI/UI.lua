@@ -18,7 +18,7 @@ function GBL:CreateMainFrame()
 
     local frame = AceGUI:Create("Frame")
     frame:SetTitle("GuildBankLedger")
-    frame:SetWidth(self.db.profile.ui.width or 800)
+    frame:SetWidth(self.db.profile.ui.width or 1000)
     frame:SetHeight(self.db.profile.ui.height or 600)
     frame:SetLayout("Fill")
     frame:SetCallback("OnClose", function(widget)
@@ -31,6 +31,7 @@ function GBL:CreateMainFrame()
     tabGroup:SetLayout("List")
     tabGroup:SetTabs({
         { value = "transactions", text = "Transactions" },
+        { value = "goldlog", text = "Gold Log" },
         { value = "consumption", text = "Consumption" },
     })
     tabGroup:SetCallback("OnGroupSelected", function(_widget, _event, group)
@@ -63,7 +64,7 @@ function GBL:RefreshUI()
 end
 
 --- Switch between tabs.
--- @param tabName string "transactions" or "consumption"
+-- @param tabName string "transactions", "goldlog", or "consumption"
 function GBL:SelectTab(tabName)
     if not self.tabGroup then return end
     self.activeTab = tabName
@@ -76,11 +77,18 @@ function GBL:SelectTab(tabName)
 
     local guildData = self:GetGuildData()
     local transactions = guildData and guildData.transactions or {}
+    local moneyTransactions = guildData and guildData.moneyTransactions or {}
 
     if tabName == "transactions" then
         self:BuildTransactionsTab(self.tabGroup, transactions)
+    elseif tabName == "goldlog" then
+        self:BuildGoldLogTab(self.tabGroup, moneyTransactions)
     elseif tabName == "consumption" then
-        self:BuildConsumptionTab(self.tabGroup, transactions)
+        -- Merge item + money transactions for consumption aggregation
+        local allTx = {}
+        for i = 1, #transactions do allTx[#allTx + 1] = transactions[i] end
+        for i = 1, #moneyTransactions do allTx[#allTx + 1] = moneyTransactions[i] end
+        self:BuildConsumptionTab(self.tabGroup, allTx)
     end
 end
 
@@ -154,6 +162,211 @@ function GBL:BuildTransactionsTab(container, transactions)
 end
 
 ------------------------------------------------------------------------
+-- Gold Log tab
+------------------------------------------------------------------------
+
+--- Gold log column definitions.
+GBL.GOLD_LOG_COLUMNS = {
+    { key = "timestamp", label = "Timestamp",  width = 145 },
+    { key = "player",    label = "Player",     width = 120 },
+    { key = "type",      label = "Action",     width = 115 },
+    { key = "amount",    label = "Amount",     width = 120 },
+}
+
+-- Gold log sort state (session-only)
+GBL.goldLogSortColumn = "timestamp"
+GBL.goldLogSortAscending = false
+
+function GBL:SetGoldLogSort(column)
+    if self.goldLogSortColumn == column then
+        self.goldLogSortAscending = not self.goldLogSortAscending
+    else
+        self.goldLogSortColumn = column
+        self.goldLogSortAscending = true
+    end
+end
+
+function GBL:GetGoldLogSortIndicator(column, label)
+    if self.goldLogSortColumn ~= column then
+        return label
+    end
+    if self.goldLogSortAscending then
+        return label .. " [asc]"
+    else
+        return label .. " [desc]"
+    end
+end
+
+function GBL:BuildGoldLogTab(container, moneyTransactions)
+    local AceGUI = LibStub("AceGUI-3.0")
+
+    -- Filter bar
+    local filterGroup = AceGUI:Create("SimpleGroup")
+    filterGroup:SetFullWidth(true)
+    filterGroup:SetLayout("Flow")
+    container:AddChild(filterGroup)
+
+    -- Content area
+    local contentGroup = AceGUI:Create("ScrollFrame")
+    contentGroup:SetFullWidth(true)
+    contentGroup:SetFullHeight(true)
+    contentGroup:SetLayout("Flow")
+
+    local filters = self:CreateDefaultFilters()
+
+    -- Search box
+    local searchBox = AceGUI:Create("EditBox")
+    searchBox:SetLabel("Search")
+    searchBox:SetWidth(150)
+    searchBox:SetText("")
+    searchBox:SetCallback("OnEnterPressed", function(_widget, _event, text)
+        filters.searchText = text
+        self:RenderGoldLog(contentGroup, moneyTransactions, filters)
+    end)
+    filterGroup:AddChild(searchBox)
+
+    -- Date range dropdown
+    local dateDropdown = AceGUI:Create("Dropdown")
+    dateDropdown:SetLabel("Date Range")
+    dateDropdown:SetWidth(120)
+    dateDropdown:SetList({
+        ["all"] = "All Time",
+        ["7d"] = "Last 7 Days",
+        ["30d"] = "Last 30 Days",
+    })
+    dateDropdown:SetValue("30d")
+    dateDropdown:SetCallback("OnValueChanged", function(_widget, _event, value)
+        filters.dateRange = value
+        self:RenderGoldLog(contentGroup, moneyTransactions, filters)
+    end)
+    filterGroup:AddChild(dateDropdown)
+
+    -- Type dropdown (money-specific types only)
+    local typeDropdown = AceGUI:Create("Dropdown")
+    typeDropdown:SetLabel("Type")
+    typeDropdown:SetWidth(120)
+    typeDropdown:SetList({
+        ["ALL"] = "All Types",
+        ["withdraw"] = "Withdraw",
+        ["deposit"] = "Deposit",
+        ["repair"] = "Repair",
+    })
+    typeDropdown:SetValue("ALL")
+    typeDropdown:SetCallback("OnValueChanged", function(_widget, _event, value)
+        filters.txType = value
+        self:RenderGoldLog(contentGroup, moneyTransactions, filters)
+    end)
+    filterGroup:AddChild(typeDropdown)
+
+    -- Reset button
+    local resetBtn = AceGUI:Create("Button")
+    resetBtn:SetText("Reset")
+    resetBtn:SetWidth(80)
+    resetBtn:SetCallback("OnClick", function()
+        local defaults = GBL:CreateDefaultFilters()
+        for k, v in pairs(defaults) do
+            filters[k] = v
+        end
+        searchBox:SetText("")
+        dateDropdown:SetValue("30d")
+        typeDropdown:SetValue("ALL")
+        self:RenderGoldLog(contentGroup, moneyTransactions, filters)
+    end)
+    filterGroup:AddChild(resetBtn)
+
+    container:AddChild(contentGroup)
+
+    -- Store references for refresh
+    self._goldLogContainer = contentGroup
+    self._goldLogTransactions = moneyTransactions
+    self._goldLogFilters = filters
+
+    self:RenderGoldLog(contentGroup, moneyTransactions, filters)
+end
+
+--- Render the gold log transaction list.
+function GBL:RenderGoldLog(container, moneyTransactions, filters)
+    container:ReleaseChildren()
+
+    local AceGUI = LibStub("AceGUI-3.0")
+
+    -- Filter and sort
+    local filtered = self:FilterTransactions(moneyTransactions or {}, filters)
+    self:SortTransactions(filtered, self.goldLogSortColumn, self.goldLogSortAscending)
+
+    -- Status line
+    local status = AceGUI:Create("Label")
+    status:SetFullWidth(true)
+    status:SetText(#filtered .. " gold transactions")
+    container:AddChild(status)
+
+    -- Column headers
+    local headerGroup = AceGUI:Create("SimpleGroup")
+    headerGroup:SetFullWidth(true)
+    headerGroup:SetLayout("Flow")
+    container:AddChild(headerGroup)
+
+    for _, col in ipairs(self.GOLD_LOG_COLUMNS) do
+        local btn = AceGUI:Create("InteractiveLabel")
+        btn:SetWidth(col.width)
+        btn:SetText(self:GetGoldLogSortIndicator(col.key, col.label))
+        btn:SetCallback("OnClick", function()
+            self:SetGoldLogSort(col.key)
+            self:RenderGoldLog(container, moneyTransactions, filters)
+        end)
+        headerGroup:AddChild(btn)
+    end
+
+    -- Empty state
+    if #filtered == 0 then
+        local emptyLabel = AceGUI:Create("Label")
+        emptyLabel:SetFullWidth(true)
+        emptyLabel:SetText(
+            (#(moneyTransactions or {}) == 0)
+                and "No gold transactions recorded yet. Open your guild bank to start scanning."
+                or "No gold transactions match your filters."
+        )
+        container:AddChild(emptyLabel)
+        return
+    end
+
+    -- Data rows
+    for i = 1, #filtered do
+        local tx = filtered[i]
+        local rowGroup = AceGUI:Create("SimpleGroup")
+        rowGroup:SetFullWidth(true)
+        rowGroup:SetLayout("Flow")
+        container:AddChild(rowGroup)
+
+        for _, col in ipairs(self.GOLD_LOG_COLUMNS) do
+            local lbl = AceGUI:Create("Label")
+            lbl:SetWidth(col.width)
+            if col.key == "timestamp" then
+                lbl:SetText(self:FormatTimestamp(tx.timestamp))
+            elseif col.key == "player" then
+                lbl:SetText(tx.player or "Unknown")
+            elseif col.key == "type" then
+                lbl:SetText(self:GetTxTypeDisplay(tx.type).label)
+            elseif col.key == "amount" then
+                lbl:SetText(self:FormatMoney(tx.amount))
+            end
+            rowGroup:AddChild(lbl)
+        end
+    end
+end
+
+--- Refresh the gold log with current data and filters.
+function GBL:RefreshGoldLog()
+    if self._goldLogContainer and self._goldLogTransactions then
+        self:RenderGoldLog(
+            self._goldLogContainer,
+            self._goldLogTransactions,
+            self._goldLogFilters
+        )
+    end
+end
+
+------------------------------------------------------------------------
 -- Consumption tab — sort & expand state
 ------------------------------------------------------------------------
 
@@ -208,8 +421,9 @@ end
 --- Consumption column definitions for sortable headers.
 GBL.CONSUMPTION_COLUMNS = {
     { key = "player",         label = "Player",       width = 120, sortKey = "player" },
-    { key = "netConsumed",    label = "Consumed",     width = 80,  sortKey = "netConsumed" },
-    { key = "netContributed", label = "Contributed",   width = 90,  sortKey = "netContributed" },
+    { key = "netConsumed",    label = "Withdrawn",    width = 95,  sortKey = "netConsumed" },
+    { key = "netContributed", label = "Deposited",    width = 95,  sortKey = "netContributed" },
+    { key = "moneyNet",       label = "Gold Net",     width = 105, sortKey = "moneyNet" },
     { key = "topItems",       label = "Top Item",     width = 160, sortKey = nil },
     { key = "lastActive",     label = "Last Active",  width = 140, sortKey = "lastActive" },
 }
@@ -377,15 +591,21 @@ function GBL:RenderConsumptionTable(container, transactions, filters)
         ctLabel:SetText(tostring(p.netContributed))
         rowGroup:AddChild(ctLabel)
 
+        -- Gold Net
+        local goldLabel = AceGUI:Create("Label")
+        goldLabel:SetWidth(self.CONSUMPTION_COLUMNS[4].width)
+        goldLabel:SetText(self:FormatMoney(p.moneyNet))
+        rowGroup:AddChild(goldLabel)
+
         -- Top Items
         local topLabel = AceGUI:Create("Label")
-        topLabel:SetWidth(self.CONSUMPTION_COLUMNS[4].width)
+        topLabel:SetWidth(self.CONSUMPTION_COLUMNS[5].width)
         topLabel:SetText(self:FormatTopItems(p.topItems))
         rowGroup:AddChild(topLabel)
 
         -- Last Active
         local laLabel = AceGUI:Create("Label")
-        laLabel:SetWidth(self.CONSUMPTION_COLUMNS[5].width)
+        laLabel:SetWidth(self.CONSUMPTION_COLUMNS[6].width)
         laLabel:SetText(self:FormatTimestamp(p.lastActive))
         rowGroup:AddChild(laLabel)
 

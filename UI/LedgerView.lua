@@ -11,13 +11,13 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 ------------------------------------------------------------------------
 
 GBL.LEDGER_COLUMNS = {
-    { key = "timestamp", label = "Timestamp",  width = 130 },
-    { key = "player",    label = "Player",     width = 90  },
-    { key = "type",      label = "Action",     width = 70  },
-    { key = "itemLink",  label = "Item",       width = 200 },
-    { key = "count",     label = "Count",      width = 40  },
-    { key = "category",  label = "Category",   width = 80  },
-    { key = "tab",       label = "Location",    width = 120 },
+    { key = "timestamp", label = "Timestamp",  width = 145 },
+    { key = "player",    label = "Player",     width = 110 },
+    { key = "type",      label = "Action",     width = 100 },
+    { key = "itemLink",  label = "Item",       width = 220 },
+    { key = "count",     label = "Count",      width = 55  },
+    { key = "category",  label = "Category",   width = 100 },
+    { key = "tab",       label = "Location",   width = 130 },
 }
 
 ------------------------------------------------------------------------

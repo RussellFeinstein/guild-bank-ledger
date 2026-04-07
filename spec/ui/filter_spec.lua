@@ -222,4 +222,95 @@ describe("FilterBar", function()
             assert.equals(2, GBL:CountFilterResults(txns, filters))
         end)
     end)
+
+    describe("Money transaction filtering", function()
+        --- Build a money transaction record (no itemID, itemLink, category, tab).
+        local function makeMoneyRecord(overrides)
+            local rec = {
+                id = "moneyhash",
+                type = "deposit",
+                player = "Alice",
+                amount = 500000,  -- 50g
+                timestamp = MockWoW.serverTime - 3600,
+                scanTime = MockWoW.serverTime,
+                scannedBy = "TestOfficer",
+            }
+            if overrides then
+                for k, v in pairs(overrides) do
+                    rec[k] = v
+                end
+            end
+            return rec
+        end
+
+        it("passes money tx with default filters", function()
+            local filters = GBL:CreateDefaultFilters()
+            assert.is_true(GBL:MatchesFilters(makeMoneyRecord(), filters))
+        end)
+
+        it("passes money tx when category filter is set", function()
+            local filters = GBL:CreateDefaultFilters()
+            filters.category = "flask"
+            assert.is_true(GBL:MatchesFilters(makeMoneyRecord(), filters))
+        end)
+
+        it("passes money tx when tab filter is set", function()
+            local filters = GBL:CreateDefaultFilters()
+            filters.tab = 2
+            assert.is_true(GBL:MatchesFilters(makeMoneyRecord(), filters))
+        end)
+
+        it("filters money tx by player", function()
+            local filters = GBL:CreateDefaultFilters()
+            filters.player = "Bob"
+            assert.is_false(GBL:MatchesFilters(makeMoneyRecord({ player = "Alice" }), filters))
+        end)
+
+        it("filters money tx by date range", function()
+            local filters = GBL:CreateDefaultFilters()
+            filters.dateRange = "7d"
+            -- Recent tx passes
+            assert.is_true(GBL:MatchesFilters(makeMoneyRecord(), filters))
+            -- Old tx fails
+            assert.is_false(GBL:MatchesFilters(makeMoneyRecord({
+                timestamp = MockWoW.serverTime - (8 * 86400),
+            }), filters))
+        end)
+
+        it("filters money tx by type", function()
+            local filters = GBL:CreateDefaultFilters()
+            filters.txType = "repair"
+            assert.is_false(GBL:MatchesFilters(makeMoneyRecord({ type = "deposit" }), filters))
+            assert.is_true(GBL:MatchesFilters(makeMoneyRecord({ type = "repair" }), filters))
+        end)
+
+        it("matches money tx by player name in search", function()
+            local filters = GBL:CreateDefaultFilters()
+            filters.searchText = "Alice"
+            assert.is_true(GBL:MatchesFilters(makeMoneyRecord({ player = "Alice" }), filters))
+        end)
+
+        it("mixed item + money tx both pass default filters", function()
+            local filters = GBL:CreateDefaultFilters()
+            local txns = {
+                makeTxRecord({ player = "Alice" }),
+                makeMoneyRecord({ player = "Alice" }),
+            }
+            local result = GBL:FilterTransactions(txns, filters)
+            assert.equals(2, #result)
+        end)
+    end)
+
+    describe("GOLD_LOG_COLUMNS", function()
+        it("includes an amount column", function()
+            local found = false
+            for _, col in ipairs(GBL.GOLD_LOG_COLUMNS) do
+                if col.key == "amount" then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found)
+        end)
+    end)
 end)

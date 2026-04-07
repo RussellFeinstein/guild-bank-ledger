@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.4.0"
+local VERSION = "0.4.1"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -45,7 +45,7 @@ local defaults = {
     profile = {
         minimap = { hide = false },
         ui = {
-            scale = 1.0, width = 900, height = 600,
+            scale = 1.0, width = 1000, height = 600,
             font = "Fonts\\FRIZQT__.TTF", fontSize = 12,
             colorblindMode = false, highContrast = false, lockFrame = false,
             openOnBankOpen = true,
@@ -154,14 +154,17 @@ function GBL:OnBankOpened()
         -- Defer transaction scan and compaction so the bank frame renders first
         C_Timer.After(0, function()
             if not self.bankOpen then return end
-            local newCount = self:ScanTransactions()
-            self:PrintScanResult(newCount)
-            C_Timer.After(0, function()
+            self:ScanTransactions(function(newCount)
                 if not self.bankOpen then return end
-                local guildData = self:GetGuildData()
-                if guildData then
-                    self:RunCompaction(guildData)
-                end
+                self:PrintScanResult(newCount)
+                self:RefreshUI()
+                C_Timer.After(0, function()
+                    if not self.bankOpen then return end
+                    local guildData = self:GetGuildData()
+                    if guildData then
+                        self:RunCompaction(guildData)
+                    end
+                end)
             end)
         end)
     end)

@@ -95,12 +95,14 @@ function GBL:BuildConsumptionSummary(transactions, filters)
                 p.totalDeposited = p.totalDeposited + count
             end
 
-            -- Money transactions
+            -- Money transactions (repair and buyTab are withdrawals from the bank)
             local amount = tx.amount or 0
-            if tx.type == "withdraw" and amount > 0 then
-                p.moneyWithdrawn = p.moneyWithdrawn + amount
-            elseif tx.type == "deposit" and amount > 0 then
-                p.moneyDeposited = p.moneyDeposited + amount
+            if amount > 0 then
+                if tx.type == "withdraw" or tx.type == "repair" or tx.type == "buyTab" then
+                    p.moneyWithdrawn = p.moneyWithdrawn + amount
+                elseif tx.type == "deposit" or tx.type == "depositSummary" then
+                    p.moneyDeposited = p.moneyDeposited + amount
+                end
             end
 
             -- Per-item tracking (for top items and breakdown)
