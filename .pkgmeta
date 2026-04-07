@@ -22,6 +22,12 @@ externals:
     Libs/AceEvent-3.0:
         url: https://repos.curseforge.com/wow/ace3/trunk/AceEvent-3.0
         tag: latest
+    Libs/AceComm-3.0:
+        url: https://repos.curseforge.com/wow/ace3/trunk/AceComm-3.0
+        tag: latest
+    Libs/AceSerializer-3.0:
+        url: https://repos.curseforge.com/wow/ace3/trunk/AceSerializer-3.0
+        tag: latest
     Libs/AceGUI-3.0:
         url: https://repos.curseforge.com/wow/ace3/trunk/AceGUI-3.0
         tag: latest

@@ -65,6 +65,7 @@ function Helpers.resetAll()
     package.loaded["Dedup"] = nil
     package.loaded["Ledger"] = nil
     package.loaded["Storage"] = nil
+    package.loaded["Sync"] = nil
     package.loaded["UI.Accessibility"] = nil
     package.loaded["UI.FilterBar"] = nil
     package.loaded["UI.ConsumptionView"] = nil
@@ -98,17 +99,20 @@ function Helpers.loadAddon()
     package.loaded["Dedup"] = nil
     package.loaded["Ledger"] = nil
     package.loaded["Storage"] = nil
+    package.loaded["Sync"] = nil
     dofile("Core.lua")
     dofile("Scanner.lua")
     safeDofile("Categories.lua")
     safeDofile("Dedup.lua")
     safeDofile("Ledger.lua")
     safeDofile("Storage.lua")
+    safeDofile("Sync.lua")
     -- UI modules (M3+)
     safeDofile("UI/Accessibility.lua")
     safeDofile("UI/FilterBar.lua")
     safeDofile("UI/ConsumptionView.lua")
     safeDofile("UI/LedgerView.lua")
+    safeDofile("UI/SyncStatus.lua")
     safeDofile("UI/UI.lua")
     return MockAce.addon
 end

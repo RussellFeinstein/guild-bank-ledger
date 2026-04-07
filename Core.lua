@@ -4,11 +4,13 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.4.1"
+local VERSION = "0.5.0"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
-    "AceEvent-3.0"
+    "AceEvent-3.0",
+    "AceComm-3.0",
+    "AceSerializer-3.0"
 )
 
 -- AceDB defaults
@@ -90,6 +92,9 @@ function GBL:OnEnable()
 
     self:RegisterEvent("GUILD_ROSTER_UPDATE")
     self:InstallBankCloseHook()
+
+    -- Initialize sync system (M5)
+    self:InitSync()
 end
 
 function GBL:OnDisable()
@@ -210,6 +215,9 @@ function GBL:OnBankClosed()
         self.mainFrame:Hide()
         self._autoOpenedFrame = nil
     end
+
+    -- Broadcast HELLO so other officers know we have fresh data
+    self:BroadcastHello()
 end
 
 function GBL:IsBankOpen()

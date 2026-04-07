@@ -33,6 +33,7 @@ function GBL:CreateMainFrame()
         { value = "transactions", text = "Transactions" },
         { value = "goldlog", text = "Gold Log" },
         { value = "consumption", text = "Consumption" },
+        { value = "sync", text = "Sync" },
     })
     tabGroup:SetCallback("OnGroupSelected", function(_widget, _event, group)
         self:SelectTab(group)
@@ -89,6 +90,8 @@ function GBL:SelectTab(tabName)
         for i = 1, #transactions do allTx[#allTx + 1] = transactions[i] end
         for i = 1, #moneyTransactions do allTx[#allTx + 1] = moneyTransactions[i] end
         self:BuildConsumptionTab(self.tabGroup, allTx)
+    elseif tabName == "sync" then
+        self:BuildSyncTab(self.tabGroup)
     end
 end
 

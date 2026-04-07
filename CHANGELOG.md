@@ -5,6 +5,30 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-04-07
+
+**Milestone M5: Multi-Officer Sync**
+
+### Added
+- Multi-officer transaction sync via AceComm addon channel (prefix `GBLSync`)
+- HELLO broadcast on login and bank close — announces version, tx count, and last scan time to guild
+- Automatic sync: when a peer's HELLO shows more transactions, requests delta sync with chunked transfer (200 tx/chunk with ACK flow)
+- Sync tab in main UI with enable/disable toggle, auto-sync toggle, and Broadcast Hello button
+- Peer list showing online officers with version, tx count, and last seen time
+- Sync audit trail (last 50 events) displayed in the Sync tab
+- Sync progress messages (`GBL_SYNC_STARTED`, `GBL_SYNC_PROGRESS`, `GBL_SYNC_COMPLETE`) for UI updates
+- ACK timeout (10s) — aborts stalled transfers, retries on next HELLO
+- Receive timeout (30s) — resets stuck receive state if sender goes offline mid-sync
+- Major version mismatch detection — warns in audit log and refuses sync across incompatible versions
+- HELLO cooldown (60s) prevents broadcast flooding
+- Wrong-sender guard — rejects SYNC_DATA from a third party during an active receive session
+- 68 new tests (241 total) covering HELLO, sync request/response, chunking, dedup, dispatch, audit trail, and edge cases
+
+### Changed
+- Core addon now mixes in `AceComm-3.0` and `AceSerializer-3.0`
+- Bank close now broadcasts HELLO to notify peers of fresh scan data
+- Delta sync filters by `scanTime` (when record was created) instead of `timestamp` (when event happened) — ensures recently-scanned old transactions are not missed
+
 ## [0.4.1] — 2026-04-07
 
 ### Fixed

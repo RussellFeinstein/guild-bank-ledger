@@ -3,11 +3,15 @@
 
 local MockAce = {}
 
--- Track registered events and slash commands
+-- Track registered events, slash commands, and comms
 MockAce.registeredEvents = {}
 MockAce.registeredMessages = {}
 MockAce.registeredSlashCommands = {}
 MockAce.sentMessages = {}
+MockAce.registeredComms = {}
+MockAce.sentCommMessages = {}
+MockAce._serialized = {}
+MockAce._serializedCounter = 0
 
 -- The addon object (set after NewAddon)
 MockAce.addon = nil
@@ -24,6 +28,10 @@ function MockAce.reset()
     MockAce.registeredMessages = {}
     MockAce.registeredSlashCommands = {}
     MockAce.sentMessages = {}
+    MockAce.registeredComms = {}
+    MockAce.sentCommMessages = {}
+    MockAce._serialized = {}
+    MockAce._serializedCounter = 0
     MockAce.addon = nil
     MockAce.dbInstance = nil
 end
@@ -130,6 +138,37 @@ local consoleMixin = {
     end,
 }
 
+local commMixin = {
+    RegisterComm = function(self, prefix, method)
+        MockAce.registeredComms[prefix] = method
+    end,
+    SendCommMessage = function(self, prefix, text, distribution, target)
+        table.insert(MockAce.sentCommMessages, {
+            prefix = prefix,
+            text = text,
+            distribution = distribution,
+            target = target,
+        })
+    end,
+}
+
+local serializerMixin = {
+    Serialize = function(self, ...)
+        MockAce._serializedCounter = MockAce._serializedCounter + 1
+        local id = MockAce._serializedCounter
+        MockAce._serialized[id] = { ... }
+        return "SER:" .. id
+    end,
+    Deserialize = function(self, str)
+        if type(str) ~= "string" then return false, "not a string" end
+        local id = tonumber(str:match("^SER:(%d+)$"))
+        if id and MockAce._serialized[id] then
+            return true, unpack(MockAce._serialized[id])
+        end
+        return false, "invalid serialized data"
+    end,
+}
+
 ---------------------------------------------------------------------------
 -- Install LibStub + Ace library mocks
 ---------------------------------------------------------------------------
@@ -176,6 +215,12 @@ function MockAce.install()
         for k, v in pairs(consoleMixin) do
             addon[k] = v
         end
+        for k, v in pairs(commMixin) do
+            addon[k] = v
+        end
+        for k, v in pairs(serializerMixin) do
+            addon[k] = v
+        end
 
         -- Module support
         addon.NewModule = function(self2, modName, ...)
@@ -215,6 +260,12 @@ function MockAce.install()
 
     -- AceConsole-3.0 (mixin, already applied via NewAddon)
     libs["AceConsole-3.0"] = {}
+
+    -- AceComm-3.0 (mixin, already applied via NewAddon)
+    libs["AceComm-3.0"] = {}
+
+    -- AceSerializer-3.0 (mixin, already applied via NewAddon)
+    libs["AceSerializer-3.0"] = {}
 
     -- AceGUI-3.0 mock (stub widgets as plain Lua tables)
     local AceGUI = {}
@@ -349,6 +400,21 @@ function MockAce.fireMessage(message, ...)
         if method then
             method(addon, message, ...)
         end
+    end
+end
+
+--- Simulate receiving an AceComm message from another player.
+-- @param prefix string AceComm prefix
+-- @param message string Serialized message text
+-- @param distribution string "GUILD" or "WHISPER"
+-- @param sender string Sender name
+function MockAce.fireComm(prefix, message, distribution, sender)
+    local addon = MockAce.addon
+    if not addon then return end
+
+    local handler = MockAce.registeredComms[prefix]
+    if handler and addon[handler] then
+        addon[handler](addon, prefix, message, distribution, sender)
     end
 end
 

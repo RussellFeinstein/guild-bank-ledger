@@ -11,8 +11,10 @@
 - **M3 (v0.3.0)** — UI (frame, ledger view, filters, consumption, minimap, accessibility)
 - **Patches (v0.3.1–v0.3.3)** — Lib URL fixes, scroll overflow, interface version, sort indicators
 - **M4 (v0.4.0)** — Consumption detail (click-to-expand breakdown, sortable headers, category filter, top item names, ledger column fix)
+- **Patches (v0.4.1)** — Gold transaction recording fixes, Gold Log tab
+- **M5 (v0.5.0)** — Multi-officer sync via AceComm (HELLO/SYNC_REQUEST/SYNC_DATA/ACK protocol, peer tracking, audit trail, Sync tab)
 
-**Current state:** 173 tests, 11 production files, luacheck clean.
+**Current state:** 241 tests, 13 production files, luacheck clean.
 
 ---
 
@@ -61,7 +63,7 @@ commits of wiring existing logic — not a new system.
 
 ---
 
-## M5: Sync (v0.5.0)
+## ~~M5: Sync (v0.5.0)~~ COMPLETE
 
 **Goal:** Multi-officer transaction sync via AceComm. Two officers scan the
 bank at different times → their data merges automatically with no
@@ -429,8 +431,8 @@ M6, M7, M8 can parallel after M5 but benefit from ordering shown.
 | M1 | 20 | 20 |
 | M2 | 54 | 74 |
 | M3 | 78 | 152 |
-| M4 | ~10 | ~162 |
-| M5 | ~16 | ~178 |
+| M4 | 21 | 173 |
+| M5 | 68 | 241 |
 | M6 | ~13 | ~191 |
 | M7 | ~24 | ~215 |
 | M8 | ~19 | ~234 |

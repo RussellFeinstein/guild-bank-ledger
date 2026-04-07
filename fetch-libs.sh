@@ -22,6 +22,8 @@ ACE3_LIBS=(
     AceDBOptions-3.0
     AceConsole-3.0
     AceEvent-3.0
+    AceComm-3.0
+    AceSerializer-3.0
     AceGUI-3.0
     AceConfig-3.0
 )
