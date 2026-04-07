@@ -2,9 +2,9 @@
 ## Title: GuildBankLedger
 ## Notes: Persistent guild bank transaction logging with per-player consumption tracking
 ## Author: RussellFeinstein
-## Version: 0.3.0
+## Version: 0.3.1
 ## SavedVariables: GuildBankLedgerDB
-## OptionalDeps: Ace3, LibDBIcon-1.0, LibDataBroker-1.1, LibSharedMedia-3.0
+## OptionalDeps: Ace3, LibDBIcon-1.0, LibDataBroker-1.1
 ## X-Category: Guild
 ## X-License: MIT
 
@@ -22,7 +22,6 @@ Libs\AceConfigCmd-3.0\AceConfigCmd-3.0.lua
 Libs\AceDBOptions-3.0\AceDBOptions-3.0.lua
 Libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
 Libs\LibDBIcon-1.0\lib.xml
-Libs\LibSharedMedia-3.0\lib.xml
 
 # Core
 Core.lua
