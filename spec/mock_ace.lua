@@ -215,6 +215,108 @@ function MockAce.install()
 
     -- AceConsole-3.0 (mixin, already applied via NewAddon)
     libs["AceConsole-3.0"] = {}
+
+    -- AceGUI-3.0 mock (stub widgets as plain Lua tables)
+    local AceGUI = {}
+    libs["AceGUI-3.0"] = AceGUI
+
+    local function createMockWidget(widgetType)
+        local widget = {
+            _type = widgetType,
+            _callbacks = {},
+            _children = {},
+            _text = "",
+            _value = nil,
+            _label = "",
+            _list = {},
+            _width = 0,
+            _height = 0,
+            _fullWidth = false,
+            _shown = true,
+            _disabled = false,
+            _title = "",
+            _statusText = "",
+        }
+        widget.SetCallback = function(self, event, func)
+            self._callbacks[event] = func
+        end
+        widget.Fire = function(self, event, ...)
+            if self._callbacks[event] then
+                self._callbacks[event](self, event, ...)
+            end
+        end
+        widget.SetText = function(self, text) self._text = text end
+        widget.GetText = function(self) return self._text end
+        widget.SetValue = function(self, value) self._value = value end
+        widget.GetValue = function(self) return self._value end
+        widget.SetLabel = function(self, label) self._label = label end
+        widget.SetList = function(self, list) self._list = list end
+        widget.SetWidth = function(self, w) self._width = w end
+        widget.SetHeight = function(self, h) self._height = h end
+        widget.SetFullWidth = function(self, fw) self._fullWidth = fw end
+        widget.SetRelativeWidth = function(self, rw) self._relWidth = rw end
+        widget.AddChild = function(self, child)
+            table.insert(self._children, child)
+            child._parent = self
+        end
+        widget.ReleaseChildren = function(self) self._children = {} end
+        widget.Release = function() end
+        widget.Show = function(self) self._shown = true end
+        widget.Hide = function(self) self._shown = false end
+        widget.SetDisabled = function(self, d) self._disabled = d end
+        widget.SetLayout = function() end
+        widget.SetTitle = function(self, t) self._title = t end
+        widget.SetStatusText = function(self, t) self._statusText = t end
+        widget.SetAutoAdjustHeight = function() end
+        widget.SetStatusTable = function() end
+        widget.EnableResize = function() end
+        return widget
+    end
+
+    AceGUI.Create = function(_self, widgetType)
+        return createMockWidget(widgetType)
+    end
+    AceGUI.RegisterWidgetType = function() end
+    AceGUI.ClearFocus = function() end
+
+    -- AceConfig-3.0 mock
+    libs["AceConfig-3.0"] = {
+        RegisterOptionsTable = function() end,
+    }
+
+    -- AceConfigDialog-3.0 mock
+    libs["AceConfigDialog-3.0"] = {
+        Open = function() end,
+        Close = function() end,
+    }
+
+    -- AceConfigCmd-3.0 mock
+    libs["AceConfigCmd-3.0"] = {
+        CreateChatCommand = function() end,
+    }
+
+    -- LibDataBroker-1.1 mock
+    local LDB = {
+        _objects = {},
+    }
+    LDB.NewDataObject = function(self, name, obj)
+        self._objects[name] = obj
+        return obj
+    end
+    libs["LibDataBroker-1.1"] = LDB
+    MockAce.ldb = LDB
+
+    -- LibDBIcon-1.0 mock
+    local LDBIcon = {
+        _registered = {},
+    }
+    LDBIcon.Register = function(self, name, obj, dbTable)
+        self._registered[name] = { obj = obj, db = dbTable }
+    end
+    LDBIcon.Show = function() end
+    LDBIcon.Hide = function() end
+    libs["LibDBIcon-1.0"] = LDBIcon
+    MockAce.ldbIcon = LDBIcon
 end
 
 --- Fire an event on the addon object (simulates WoW event dispatch).

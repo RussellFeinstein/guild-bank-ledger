@@ -2,7 +2,7 @@
 ## Title: GuildBankLedger
 ## Notes: Persistent guild bank transaction logging with per-player consumption tracking
 ## Author: RussellFeinstein
-## Version: 0.2.2
+## Version: 0.2.3
 ## SavedVariables: GuildBankLedgerDB
 ## OptionalDeps: Ace3
 ## X-Category: Guild
