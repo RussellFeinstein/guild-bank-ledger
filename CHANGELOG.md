@@ -5,6 +5,15 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] — 2026-04-07
+
+### Added
+- Per-player consumption aggregation (`UI/ConsumptionView.lua`): withdrawal/deposit totals, net contribution, money tracking, top items, last active timestamp
+- Sortable consumption summaries by any column (player, withdrawn, deposited, net, last active)
+- Per-player item breakdown with withdrawn/deposited per item
+- Money formatting utility (`FormatMoney`: copper to "Xg Ys Zc")
+- 18 new consumption tests (139 total)
+
 ## [0.2.3] — 2026-04-07
 
 ### Added
