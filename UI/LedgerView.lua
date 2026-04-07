@@ -11,13 +11,13 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 ------------------------------------------------------------------------
 
 GBL.LEDGER_COLUMNS = {
-    { key = "timestamp", label = "Timestamp",  width = 140 },
-    { key = "player",    label = "Player",     width = 100 },
-    { key = "type",      label = "Action",     width = 80  },
+    { key = "timestamp", label = "Timestamp",  width = 130 },
+    { key = "player",    label = "Player",     width = 90  },
+    { key = "type",      label = "Action",     width = 70  },
     { key = "itemLink",  label = "Item",       width = 200 },
-    { key = "count",     label = "Count",      width = 50  },
-    { key = "category",  label = "Category",   width = 100 },
-    { key = "tab",       label = "Tab",        width = 50  },
+    { key = "count",     label = "Count",      width = 40  },
+    { key = "category",  label = "Category",   width = 80  },
+    { key = "tab",       label = "Location",    width = 120 },
 }
 
 ------------------------------------------------------------------------
@@ -98,6 +98,21 @@ end
 -- Ledger view rendering (AceGUI)
 ------------------------------------------------------------------------
 
+--- Get the visible columns based on current filters.
+-- Hides the Location column when moves are hidden.
+-- @param filters table current filter criteria
+-- @return table array of column definitions to render
+function GBL:GetVisibleColumns(filters)
+    local cols = {}
+    for _, col in ipairs(self.LEDGER_COLUMNS) do
+        local hide = col.key == "tab" and filters and filters.hideMoves
+        if not hide then
+            cols[#cols + 1] = col
+        end
+    end
+    return cols
+end
+
 --- Create the ledger view (transaction list) inside a container.
 -- @param container AceGUI container widget
 -- @param transactions table array of transaction records
@@ -105,24 +120,28 @@ end
 function GBL:CreateLedgerView(container, transactions, filters)
     container:ReleaseChildren()
 
+    local AceGUI = LibStub("AceGUI-3.0")
+
     -- Apply filters and sort
     local filtered = self:FilterTransactions(transactions or {}, filters)
     self:SortTransactions(filtered, self.ledgerSortColumn, self.ledgerSortAscending)
 
+    local visibleCols = self:GetVisibleColumns(filters)
+
     -- Status line
-    local status = LibStub("AceGUI-3.0"):Create("Label")
+    local status = AceGUI:Create("Label")
     status:SetFullWidth(true)
     status:SetText(#filtered .. " transactions")
     container:AddChild(status)
 
     -- Column headers
-    local headerGroup = LibStub("AceGUI-3.0"):Create("SimpleGroup")
+    local headerGroup = AceGUI:Create("SimpleGroup")
     headerGroup:SetFullWidth(true)
     headerGroup:SetLayout("Flow")
     container:AddChild(headerGroup)
 
-    for _, col in ipairs(self.LEDGER_COLUMNS) do
-        local btn = LibStub("AceGUI-3.0"):Create("InteractiveLabel")
+    for _, col in ipairs(visibleCols) do
+        local btn = AceGUI:Create("InteractiveLabel")
         btn:SetWidth(col.width)
         btn:SetText(self:GetSortIndicator(col.key, col.label))
         btn:SetCallback("OnClick", function()
@@ -134,7 +153,7 @@ function GBL:CreateLedgerView(container, transactions, filters)
 
     -- Empty state
     if #filtered == 0 then
-        local emptyLabel = LibStub("AceGUI-3.0"):Create("Label")
+        local emptyLabel = AceGUI:Create("Label")
         emptyLabel:SetFullWidth(true)
         emptyLabel:SetText(
             (#(transactions or {}) == 0)
@@ -145,58 +164,45 @@ function GBL:CreateLedgerView(container, transactions, filters)
         return
     end
 
-    -- Transaction rows (ScrollFrame parent handles scrolling)
-    local rowCount = #filtered
+    -- Column value getters
+    local function getCellText(tx, col)
+        if col.key == "timestamp" then
+            return self:FormatTimestamp(tx.timestamp)
+        elseif col.key == "player" then
+            return tx.player or "Unknown"
+        elseif col.key == "type" then
+            return self:GetTxTypeDisplay(tx.type).label
+        elseif col.key == "itemLink" then
+            return tx.itemLink or ""
+        elseif col.key == "count" then
+            return tostring(tx.count or 0)
+        elseif col.key == "category" then
+            return tx.category or ""
+        elseif col.key == "tab" then
+            local tabText = tx.tabName or tostring(tx.tab or "")
+            if tx.type == "move" then
+                local destText = tx.destTabName or tostring(tx.destTab or "")
+                tabText = tabText .. ">" .. destText
+            end
+            return tabText
+        end
+        return ""
+    end
 
-    for i = 1, rowCount do
+    -- Transaction rows
+    for i = 1, #filtered do
         local tx = filtered[i]
-        local rowGroup = LibStub("AceGUI-3.0"):Create("SimpleGroup")
+        local rowGroup = AceGUI:Create("SimpleGroup")
         rowGroup:SetFullWidth(true)
         rowGroup:SetLayout("Flow")
         container:AddChild(rowGroup)
 
-        -- Timestamp
-        local tsLabel = LibStub("AceGUI-3.0"):Create("Label")
-        tsLabel:SetWidth(self.LEDGER_COLUMNS[1].width)
-        tsLabel:SetText(self:FormatTimestamp(tx.timestamp))
-        rowGroup:AddChild(tsLabel)
-
-        -- Player
-        local playerLabel = LibStub("AceGUI-3.0"):Create("Label")
-        playerLabel:SetWidth(self.LEDGER_COLUMNS[2].width)
-        playerLabel:SetText(tx.player or "Unknown")
-        rowGroup:AddChild(playerLabel)
-
-        -- Action (with triple encoding)
-        local display = self:GetTxTypeDisplay(tx.type)
-        local actionLabel = LibStub("AceGUI-3.0"):Create("Label")
-        actionLabel:SetWidth(self.LEDGER_COLUMNS[3].width)
-        actionLabel:SetText(display.label)
-        rowGroup:AddChild(actionLabel)
-
-        -- Item
-        local itemLabel = LibStub("AceGUI-3.0"):Create("Label")
-        itemLabel:SetWidth(self.LEDGER_COLUMNS[4].width)
-        itemLabel:SetText(tx.itemLink or "")
-        rowGroup:AddChild(itemLabel)
-
-        -- Count
-        local countLabel = LibStub("AceGUI-3.0"):Create("Label")
-        countLabel:SetWidth(self.LEDGER_COLUMNS[5].width)
-        countLabel:SetText(tostring(tx.count or 0))
-        rowGroup:AddChild(countLabel)
-
-        -- Category
-        local catLabel = LibStub("AceGUI-3.0"):Create("Label")
-        catLabel:SetWidth(self.LEDGER_COLUMNS[6].width)
-        catLabel:SetText(tx.category or "")
-        rowGroup:AddChild(catLabel)
-
-        -- Tab
-        local tabLabel = LibStub("AceGUI-3.0"):Create("Label")
-        tabLabel:SetWidth(self.LEDGER_COLUMNS[7].width)
-        tabLabel:SetText(tostring(tx.tab or ""))
-        rowGroup:AddChild(tabLabel)
+        for _, col in ipairs(visibleCols) do
+            local lbl = AceGUI:Create("Label")
+            lbl:SetWidth(col.width)
+            lbl:SetText(getCellText(tx, col))
+            rowGroup:AddChild(lbl)
+        end
     end
 
     -- Store filtered data for refresh

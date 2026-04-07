@@ -2,7 +2,7 @@
 
 Persistent guild bank transaction logging for World of Warcraft. WoW's built-in guild bank log only stores 25 entries per tab, which rolls over in minutes for active guilds. GuildBankLedger captures every transaction before it's lost.
 
-## Features (v0.3.3)
+## Features (v0.4.0)
 
 - **Persistent logging** — Transactions are saved to `SavedVariables` and survive log rollovers
 - **Automatic scanning** — Scans all guild bank tabs when you open the bank
@@ -17,7 +17,7 @@ Persistent guild bank transaction logging for World of Warcraft. WoW's built-in 
 - **UI window** — Tabbed interface with Transactions and Consumption views, opened via `/gbl` or minimap button
 - **Transaction list** — Scrolling list with sortable columns: Timestamp, Player, Action, Item, Count, Category, Tab
 - **Filter bar** — Search by player/item, filter by date range, category, transaction type, tab, with reset button
-- **Consumption view** — Per-player withdrawal/deposit totals, net contribution, top items, last active
+- **Consumption view** — Per-player withdrawal/deposit totals with click-to-expand per-item breakdown, sortable headers, category filter, top items with names
 - **Minimap button** — Left-click to toggle the ledger window
 - **Accessibility** — Colorblind-safe palettes (auto-detected from WoW settings), high contrast mode, triple encoding (shape + color + text), keyboard navigation (Tab/Shift+Tab), font scaling (8-24pt)
 

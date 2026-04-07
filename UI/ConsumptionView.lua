@@ -128,14 +128,25 @@ function GBL:BuildConsumptionSummary(transactions, filters)
         p.net = p.totalDeposited - p.totalWithdrawn
         p.moneyNet = p.moneyDeposited - p.moneyWithdrawn
 
-        -- Top 3 items by total activity (withdrawn + deposited)
+        -- Compute net consumed/contributed per item
+        p.netConsumed = 0    -- items taken and kept
+        p.netContributed = 0 -- items given more than taken
         local itemList = {}
         for itemID, counts in pairs(p.itemCounts) do
-            itemList[#itemList + 1] = {
-                itemID = itemID,
-                count = counts.withdrawn + counts.deposited,
-                itemLink = counts.itemLink,
-            }
+            local itemNet = counts.withdrawn - counts.deposited
+            if itemNet > 0 then
+                p.netConsumed = p.netConsumed + itemNet
+            elseif itemNet < 0 then
+                p.netContributed = p.netContributed + (-itemNet)
+            end
+            -- Top items by net consumption (only items actually kept)
+            if itemNet > 0 then
+                itemList[#itemList + 1] = {
+                    itemID = itemID,
+                    count = itemNet,
+                    itemLink = counts.itemLink,
+                }
+            end
         end
         table.sort(itemList, function(a, b) return a.count > b.count end)
         p.topItems = {}
@@ -158,6 +169,8 @@ local SORT_KEYS = {
     player = "player",
     totalWithdrawn = "totalWithdrawn",
     totalDeposited = "totalDeposited",
+    netConsumed = "netConsumed",
+    netContributed = "netContributed",
     net = "net",
     lastActive = "lastActive",
     moneyWithdrawn = "moneyWithdrawn",
@@ -194,6 +207,72 @@ function GBL:SortConsumptionSummary(summaries, column, ascending)
     end)
 
     return summaries
+end
+
+------------------------------------------------------------------------
+-- Item name extraction
+------------------------------------------------------------------------
+
+--- Extract the display name from a WoW item link.
+-- WoW links: |cff...|Hitem:...|h[Item Name]|h|r
+-- @param itemLink string|nil WoW item link
+-- @param itemID number|nil fallback item ID
+-- @return string extracted name, or fallback
+function GBL:ExtractItemName(itemLink, itemID)
+    if itemLink then
+        local name = itemLink:match("%[(.-)%]")
+        if name and name ~= "" then
+            return name
+        end
+        -- Strip color codes as fallback
+        local stripped = itemLink:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("|H.-|h", ""):gsub("|h", "")
+        if stripped ~= "" then
+            return stripped
+        end
+    end
+    if itemID then
+        return "Item #" .. tostring(itemID)
+    end
+    return "Unknown Item"
+end
+
+------------------------------------------------------------------------
+-- Breakdown for display
+------------------------------------------------------------------------
+
+--- Transform a raw item breakdown into a sorted display array.
+-- Filters out zero-net items (fully returned) by default.
+-- @param breakdown table itemID -> { withdrawn=N, deposited=N, itemLink=string }
+-- @return table array of { itemID, itemName, itemLink, category, categoryDisplay, withdrawn, deposited, net }
+function GBL:GetBreakdownForDisplay(breakdown)
+    if not breakdown then return {} end
+
+    local result = {}
+    for itemID, data in pairs(breakdown) do
+        local net = data.withdrawn - data.deposited
+        -- Skip items with zero net (fully returned)
+        if net ~= 0 then
+            local category = self:GetItemCategory(itemID)
+            result[#result + 1] = {
+                itemID = itemID,
+                itemName = self:ExtractItemName(data.itemLink, itemID),
+                itemLink = data.itemLink,
+                category = category,
+                categoryDisplay = self:GetCategoryDisplayName(category),
+                withdrawn = data.withdrawn,
+                deposited = data.deposited,
+                net = net,
+                total = data.withdrawn + data.deposited,
+            }
+        end
+    end
+
+    -- Sort by absolute net descending (biggest consumers/contributors first)
+    table.sort(result, function(a, b)
+        return math.abs(a.net) > math.abs(b.net)
+    end)
+
+    return result
 end
 
 ------------------------------------------------------------------------

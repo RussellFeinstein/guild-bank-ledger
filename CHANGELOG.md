@@ -5,6 +5,27 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-04-07
+
+**Milestone M4: Consumption Detail + UI Polish**
+
+### Added
+- Click-to-expand player rows in consumption tab — click a player to see per-item breakdown with item name, category, withdrawn/deposited counts
+- Sortable column headers on consumption tab (Player, Withdrawn, Deposited, Net, Last Active) with [asc]/[desc] indicators
+- Category filter dropdown on consumption tab (reuses existing filter pipeline)
+- Top Item column showing the #1 most active item name (extracted from item link)
+- `ExtractItemName()` utility for extracting display names from WoW item links
+- `GetBreakdownForDisplay()` transforms raw breakdown data into sorted display arrays with category labels
+- `FormatTopItems()` formats top items as truncated comma-separated names
+- 21 new tests (173 total) covering breakdown display, sort state, indicators, category filtering, item name extraction, edge cases
+
+### Changed
+- Ledger view column widths tightened to fit 720px usable frame (645px total: 130+90+70+200+40+80+35)
+- Consumption tab filter bar now includes date range, category dropdown, and reset button (was date-only)
+
+### Fixed
+- Guild bank open no longer stutters — transaction scanning and compaction deferred via `C_Timer.After(0)` so the bank frame renders first
+
 ## [0.3.3] — 2026-04-07
 
 ### Fixed

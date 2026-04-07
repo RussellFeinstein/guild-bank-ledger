@@ -17,13 +17,14 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 function GBL:CreateDefaultFilters()
     return {
         searchText = "",           -- substring match on player or itemLink
-        dateRange  = "all",        -- "7d", "30d", "all"
+        dateRange  = "30d",        -- "7d", "30d", "all"
         customStartTime = nil,     -- number or nil (only when dateRange == "custom")
         customEndTime   = nil,     -- number or nil
         category   = "ALL",        -- "ALL" or a category key
         txType     = "ALL",        -- "ALL", "withdraw", "deposit", "move"
         player     = "ALL",        -- "ALL" or a player name
         tab        = 0,            -- 0 = all tabs, or a specific tab number
+        hideMoves  = true,         -- hide move transactions by default
     }
 end
 
@@ -108,6 +109,11 @@ function GBL:MatchesFilters(record, filters)
         if record.tab ~= filters.tab then
             return false
         end
+    end
+
+    -- Hide moves
+    if filters.hideMoves and record.type == "move" then
+        return false
     end
 
     return true

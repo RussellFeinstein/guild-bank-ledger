@@ -66,11 +66,14 @@ describe("Core", function()
             assert.is_false(GBL:IsBankOpen())
         end)
 
-        it("does not open bank when not in a guild", function()
+        it("marks bank open but does not scan when not in a guild", function()
             MockWoW.guild.name = nil
             MockAce.fireEvent("PLAYER_INTERACTION_MANAGER_FRAME_SHOW",
                 Enum.PlayerInteractionType.GuildBanker)
-            assert.is_false(GBL:IsBankOpen())
+            -- Bank frame is physically open
+            assert.is_true(GBL:IsBankOpen())
+            -- But no scan starts because guild name is nil
+            assert.is_false(GBL.scanInProgress)
         end)
     end)
 
@@ -112,7 +115,7 @@ describe("Core", function()
         it("status prints version and guild info", function()
             MockWoW.guild.name = "Test Guild"
             GBL:HandleSlashCommand("status")
-            assert.is_true(Helpers.printContains("0.3.3"))
+            assert.is_true(Helpers.printContains("0.4.0"))
             assert.is_true(Helpers.printContains("Test Guild"))
         end)
 

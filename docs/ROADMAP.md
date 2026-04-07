@@ -9,13 +9,14 @@
 - **M1 (v0.1.0)** — Scaffold + Scanner
 - **M2 (v0.2.0)** — Ledger + Dedup + Categories + Storage
 - **M3 (v0.3.0)** — UI (frame, ledger view, filters, consumption, minimap, accessibility)
-- **Patches (v0.3.1–v0.3.2)** — Lib URL fixes, scroll overflow, interface version
+- **Patches (v0.3.1–v0.3.3)** — Lib URL fixes, scroll overflow, interface version, sort indicators
+- **M4 (v0.4.0)** — Consumption detail (click-to-expand breakdown, sortable headers, category filter, top item names, ledger column fix)
 
-**Current state:** 152 tests, 11 production files, luacheck clean.
+**Current state:** 173 tests, 11 production files, luacheck clean.
 
 ---
 
-## M4: Consumption Detail + UI Polish (v0.4.0)
+## ~~M4: Consumption Detail + UI Polish (v0.4.0)~~ COMPLETE
 
 **Goal:** Make the consumption tab actually useful for officers. Wire the
 existing `GetPlayerItemBreakdown()` to the UI, add category grouping, and

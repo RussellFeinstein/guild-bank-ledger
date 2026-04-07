@@ -204,5 +204,190 @@ describe("ConsumptionView", function()
             for _ in pairs(breakdown) do count = count + 1 end
             assert.equals(0, count)
         end)
+
+        it("respects category filter", function()
+            local txns = {
+                makeTx({ player = "Alice", type = "withdraw", itemID = 100, count = 5, category = "flask" }),
+                makeTx({ player = "Alice", type = "withdraw", itemID = 200, count = 3, category = "herb" }),
+            }
+            local filters = GBL:CreateDefaultFilters()
+            filters.category = "flask"
+            local breakdown = GBL:GetPlayerItemBreakdown(txns, "Alice", filters)
+            assert.equals(5, breakdown[100].withdrawn)
+            assert.is_nil(breakdown[200])
+        end)
+    end)
+
+    describe("ExtractItemName", function()
+        it("extracts name from valid WoW item link", function()
+            local link = Helpers.makeItemLink(100, "Flask of Power", 3)
+            assert.equals("Flask of Power", GBL:ExtractItemName(link, 100))
+        end)
+
+        it("returns Item #ID for nil itemLink", function()
+            assert.equals("Item #42", GBL:ExtractItemName(nil, 42))
+        end)
+
+        it("returns Unknown Item for nil link and nil ID", function()
+            assert.equals("Unknown Item", GBL:ExtractItemName(nil, nil))
+        end)
+
+        it("returns stripped text for malformed link without brackets", function()
+            assert.equals("no brackets here", GBL:ExtractItemName("no brackets here", 99))
+        end)
+    end)
+
+    describe("GetBreakdownForDisplay", function()
+        before_each(function()
+            -- Set up item info for category lookup
+            Helpers.setItemInfo(100, 0, 3)  -- classID=0 subclassID=3 → flask
+            Helpers.setItemInfo(200, 7, 9)  -- classID=7 subclassID=9 → herb
+        end)
+
+        it("returns sorted array with category fields", function()
+            local breakdown = {
+                [100] = { withdrawn = 3, deposited = 1, itemLink = Helpers.makeItemLink(100, "Flask of Power", 3) },
+                [200] = { withdrawn = 10, deposited = 0, itemLink = Helpers.makeItemLink(200, "Dreamfoil", 1) },
+            }
+            local display = GBL:GetBreakdownForDisplay(breakdown)
+            assert.equals(2, #display)
+            -- Sorted by total desc: Dreamfoil (10) > Flask (4)
+            assert.equals(200, display[1].itemID)
+            assert.equals("Dreamfoil", display[1].itemName)
+            assert.equals("herb", display[1].category)
+            assert.equals("Herb", display[1].categoryDisplay)
+            assert.equals(10, display[1].withdrawn)
+            assert.equals(0, display[1].deposited)
+            assert.equals(10, display[1].total)
+
+            assert.equals(100, display[2].itemID)
+            assert.equals("Flask of Power", display[2].itemName)
+            assert.equals("flask", display[2].category)
+            assert.equals("Flask", display[2].categoryDisplay)
+        end)
+
+        it("returns empty array for empty breakdown", function()
+            local display = GBL:GetBreakdownForDisplay({})
+            assert.equals(0, #display)
+        end)
+
+        it("returns empty array for nil breakdown", function()
+            local display = GBL:GetBreakdownForDisplay(nil)
+            assert.equals(0, #display)
+        end)
+
+        it("falls back to Item #ID when itemLink is nil", function()
+            Helpers.setItemInfo(300, 0, 0)  -- consumable
+            local breakdown = {
+                [300] = { withdrawn = 5, deposited = 0, itemLink = nil },
+            }
+            local display = GBL:GetBreakdownForDisplay(breakdown)
+            assert.equals(1, #display)
+            assert.equals("Item #300", display[1].itemName)
+        end)
+    end)
+
+    describe("Consumption sort state", function()
+        it("toggles direction on same column", function()
+            GBL.consumptionSortColumn = "totalWithdrawn"
+            GBL.consumptionSortAscending = false
+
+            GBL:SetConsumptionSort("totalWithdrawn")
+            assert.equals("totalWithdrawn", GBL.consumptionSortColumn)
+            assert.is_true(GBL.consumptionSortAscending)
+        end)
+
+        it("switches to ascending on new column", function()
+            GBL.consumptionSortColumn = "totalWithdrawn"
+            GBL.consumptionSortAscending = false
+
+            GBL:SetConsumptionSort("player")
+            assert.equals("player", GBL.consumptionSortColumn)
+            assert.is_true(GBL.consumptionSortAscending)
+        end)
+    end)
+
+    describe("GetConsumptionSortIndicator", function()
+        it("returns label with [desc] for active descending column", function()
+            GBL.consumptionSortColumn = "totalWithdrawn"
+            GBL.consumptionSortAscending = false
+            assert.equals("Withdrawn [desc]", GBL:GetConsumptionSortIndicator("totalWithdrawn", "Withdrawn"))
+        end)
+
+        it("returns label with [asc] for active ascending column", function()
+            GBL.consumptionSortColumn = "player"
+            GBL.consumptionSortAscending = true
+            assert.equals("Player [asc]", GBL:GetConsumptionSortIndicator("player", "Player"))
+        end)
+
+        it("returns plain label for non-active column", function()
+            GBL.consumptionSortColumn = "totalWithdrawn"
+            assert.equals("Player", GBL:GetConsumptionSortIndicator("player", "Player"))
+        end)
+    end)
+
+    describe("FormatTopItems", function()
+        it("shows only the #1 most active item", function()
+            local topItems = {
+                { itemID = 1, count = 10, itemLink = Helpers.makeItemLink(1, "Flask", 1) },
+                { itemID = 2, count = 5, itemLink = Helpers.makeItemLink(2, "Food", 1) },
+                { itemID = 3, count = 3, itemLink = Helpers.makeItemLink(3, "Elixir", 1) },
+            }
+            assert.equals("Flask", GBL:FormatTopItems(topItems))
+        end)
+
+        it("returns empty string for nil topItems", function()
+            assert.equals("", GBL:FormatTopItems(nil))
+        end)
+
+        it("returns empty string for empty topItems", function()
+            assert.equals("", GBL:FormatTopItems({}))
+        end)
+
+        it("shows full item name without truncation", function()
+            local topItems = {
+                { itemID = 1, count = 10, itemLink = Helpers.makeItemLink(1, "Super Long Item Name Here", 1) },
+            }
+            local result = GBL:FormatTopItems(topItems)
+            assert.equals("Super Long Item Name Here", result)
+        end)
+    end)
+
+    describe("BuildConsumptionSummary with category filter", function()
+        it("only counts items matching category filter", function()
+            local txns = {
+                makeTx({ player = "Alice", type = "withdraw", itemID = 100, count = 5, category = "flask" }),
+                makeTx({ player = "Alice", type = "withdraw", itemID = 200, count = 3, category = "herb" }),
+            }
+            local filters = GBL:CreateDefaultFilters()
+            filters.category = "flask"
+            local summary = GBL:BuildConsumptionSummary(txns, filters)
+            assert.equals(1, #summary)
+            assert.equals(5, summary[1].totalWithdrawn)
+        end)
+
+        it("excludes player entirely when no items match filter", function()
+            local txns = {
+                makeTx({ player = "Alice", type = "withdraw", category = "flask" }),
+                makeTx({ player = "Bob", type = "withdraw", category = "herb" }),
+            }
+            local filters = GBL:CreateDefaultFilters()
+            filters.category = "herb"
+            local summary = GBL:BuildConsumptionSummary(txns, filters)
+            assert.equals(1, #summary)
+            assert.equals("Bob", summary[1].player)
+        end)
+    end)
+
+    describe("topItems contains itemLink", function()
+        it("preserves itemLink in topItems entries", function()
+            local link = Helpers.makeItemLink(100, "Flask of Power", 3)
+            local txns = {
+                makeTx({ player = "Alice", type = "withdraw", itemID = 100, count = 5, itemLink = link }),
+            }
+            local summary = GBL:BuildConsumptionSummary(txns)
+            assert.equals(1, #summary[1].topItems)
+            assert.equals(link, summary[1].topItems[1].itemLink)
+        end)
     end)
 end)

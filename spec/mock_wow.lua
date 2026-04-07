@@ -19,6 +19,8 @@ MockWoW.guildBank = {
 -- Mock guild state
 MockWoW.guild = {
     name = nil,      -- nil = not in guild
+    rankName = "Officer",
+    rankIndex = 1,
     faction = nil,
     realm = nil,
 }
@@ -154,7 +156,7 @@ function MockWoW.install()
     -- Guild info
     _G.GetGuildInfo = function(_unit)
         if MockWoW.guild.name then
-            return MockWoW.guild.name, MockWoW.guild.faction, nil, MockWoW.guild.realm
+            return MockWoW.guild.name, MockWoW.guild.rankName, MockWoW.guild.rankIndex, MockWoW.guild.realm
         end
         return nil
     end
@@ -237,6 +239,16 @@ function MockWoW.install()
         end,
     }
 
+    -- Combat state
+    _G.InCombatLockdown = function() return false end
+    _G.UnitAffectingCombat = function() return false end
+
+    -- Bank close (hookable)
+    _G.C_PlayerInteractionManager = {
+        ClearInteraction = function() end,
+    }
+    _G.CloseGuildBankFrame = function() end
+
     -- Player info
     _G.UnitName = function(unit)
         if unit == "player" then
@@ -286,7 +298,7 @@ function MockWoW.install()
     -- GetAddOnMetadata
     _G.GetAddOnMetadata = function(addon, field)
         if addon == "GuildBankLedger" and field == "Version" then
-            return "0.3.3"
+            return "0.4.0"
         end
         return nil
     end

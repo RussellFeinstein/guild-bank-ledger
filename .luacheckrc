@@ -16,7 +16,9 @@ read_globals = {
     "GetNumGuildBankTransactions",
     "GetGuildBankMoneyTransaction",
     "GetNumGuildBankMoneyTransactions",
+    "InCombatLockdown",
     "IsInGuild",
+    "UnitAffectingCombat",
     "UnitName",
 
     -- WoW constants and tables
@@ -55,10 +57,12 @@ read_globals = {
     "LibStub",
 }
 
--- Addon global
+-- Addon global + hookable WoW APIs
 globals = {
     "GuildBankLedger",
     "GuildBankLedgerDB",
+    "C_PlayerInteractionManager",
+    "CloseGuildBankFrame",
 }
 
 exclude_files = {

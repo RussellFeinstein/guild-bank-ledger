@@ -43,6 +43,24 @@ function GBL:ExtractItemID(itemLink)
 end
 
 ------------------------------------------------------------------------
+-- Tab name lookup
+------------------------------------------------------------------------
+
+--- Get the display name for a guild bank tab.
+-- @param tab number Tab index
+-- @return string Tab name, or fallback to "Tab N"
+function GBL:GetTabName(tab)
+    if not tab then return nil end
+    if GetGuildBankTabInfo then
+        local name = GetGuildBankTabInfo(tab)
+        if name and name ~= "" then
+            return name
+        end
+    end
+    return "Tab " .. tostring(tab)
+end
+
+------------------------------------------------------------------------
 -- Record creation
 ------------------------------------------------------------------------
 
@@ -73,6 +91,10 @@ function GBL:CreateTxRecord(txType, name, itemLink, count, tab, destTab, year, m
     local scanTime = GetServerTime()
     local scannedBy = UnitName("player") or "Unknown"
 
+    -- Resolve tab names (available while bank is open)
+    local tabName = self:GetTabName(tab)
+    local destTabName = (txType == "move" and destTab) and self:GetTabName(destTab) or nil
+
     local record = {
         type = txType,
         player = name,
@@ -80,7 +102,9 @@ function GBL:CreateTxRecord(txType, name, itemLink, count, tab, destTab, year, m
         itemID = itemID,
         count = count or 0,
         tab = tab,
+        tabName = tabName,
         destTab = (txType == "move") and destTab or nil,
+        destTabName = destTabName,
         classID = classID,
         subclassID = subclassID,
         category = category,
@@ -268,9 +292,10 @@ end
 
 --- Scan all transaction logs (item + money) and store new records.
 -- Called from Core.lua OnBankOpened.
+-- @return number count of newly stored records
 function GBL:ScanTransactions()
     local guildData = self:GetGuildData()
-    if not guildData then return end
+    if not guildData then return 0 end
 
     local totalStored = 0
     local numTabs = GetNumGuildBankTabs()
@@ -282,4 +307,5 @@ function GBL:ScanTransactions()
     totalStored = totalStored + self:ReadMoneyTransactions(guildData)
 
     self:SendMessage("GBL_LEDGER_SCAN_COMPLETE", totalStored)
+    return totalStored
 end

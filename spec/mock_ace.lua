@@ -263,6 +263,11 @@ function MockAce.install()
         widget.Release = function() end
         widget.Show = function(self) self._shown = true end
         widget.Hide = function(self) self._shown = false end
+        -- Mock underlying WoW frame (for IsShown checks)
+        widget.frame = {
+            IsShown = function() return widget._shown end,
+            SetClampedToScreen = function() end,
+        }
         widget.SetDisabled = function(self, d) self._disabled = d end
         widget.SetLayout = function() end
         widget.SetTitle = function(self, t) self._title = t end
