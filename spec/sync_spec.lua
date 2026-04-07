@@ -689,6 +689,62 @@ describe("Sync", function()
             assert.equals(0, #MockAce.sentCommMessages)
         end)
 
+        it("resets lastSyncTimestamp to 0 when still behind after sync", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Peer reported 50 tx in their HELLO
+            GBL:UpdatePeer("OfficerB", {
+                version = GBL.version, txCount = 50, lastScanTime = 1000,
+            })
+
+            -- We receive a sync but end up with fewer records (relay gap)
+            -- Simulate: we have 30 tx, peer has 50
+            for i = 1, 30 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "P" .. i, timestamp = i,
+                    scanTime = i, id = "h" .. i,
+                })
+                guildData.seenTxHashes["h" .. i] = i
+            end
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {},
+                moneyTransactions = {},
+            })
+
+            -- Still behind (30 < 50) — lastSyncTimestamp should reset to 0
+            assert.equals(0, guildData.syncState.lastSyncTimestamp)
+
+            -- Audit trail should mention the fallback
+            local trail = GBL:GetAuditTrail()
+            local found = false
+            for _, e in ipairs(trail) do
+                if e.message:find("next sync will be full") then found = true end
+            end
+            assert.is_true(found)
+        end)
+
+        it("sets lastSyncTimestamp normally when counts match after sync", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Peer reported 0 tx
+            GBL:UpdatePeer("OfficerB", {
+                version = GBL.version, txCount = 0, lastScanTime = 1000,
+            })
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {},
+                moneyTransactions = {},
+            })
+
+            -- Counts match (both 0) — timestamp should be set normally
+            assert.is_true(guildData.syncState.lastSyncTimestamp > 0)
+        end)
+
         it("second HELLO from same peer updates peer info", function()
             GBL:HandleHello("OfficerB", {
                 version = "0.5.0", txCount = 10, lastScanTime = 1000,

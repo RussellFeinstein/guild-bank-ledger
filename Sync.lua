@@ -475,7 +475,22 @@ function GBL:FinishReceiving(sender)
 
     local guildData = self:GetGuildData()
     if guildData then
-        guildData.syncState.lastSyncTimestamp = GetServerTime()
+        -- Compare counts with what the peer reported in their last HELLO.
+        -- If we're still behind after this sync, a relayed record was likely
+        -- filtered by the delta timestamp. Reset to 0 so the next request
+        -- does a full sync instead of repeating the same miss.
+        local localCount = #guildData.transactions + #guildData.moneyTransactions
+        local peerInfo = syncState.peers[sender]
+        local peerCount = peerInfo and peerInfo.txCount or 0
+        if localCount < peerCount then
+            guildData.syncState.lastSyncTimestamp = 0
+            self:AddAuditEntry("Still behind " .. sender
+                .. " (" .. localCount .. " vs " .. peerCount
+                .. ") — next sync will be full")
+        else
+            guildData.syncState.lastSyncTimestamp = GetServerTime()
+        end
+
         guildData.syncState.peers[sender] = {
             lastSync = GetServerTime(),
             stored = totalStored,
