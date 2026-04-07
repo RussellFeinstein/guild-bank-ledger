@@ -655,6 +655,44 @@ describe("Sync", function()
             assert.is_false(status.receiving)
         end)
 
+        it("rejects messages from a different guild", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local msg = GBL:Serialize({
+                type = "HELLO", version = GBL.version,
+                txCount = 999, protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Other Guild",
+            })
+            GBL:OnSyncMessage("GBLSync", msg, "GUILD", "OfficerB")
+
+            -- Should have been rejected — wrong guild
+            local peers = GBL:GetSyncPeers()
+            assert.is_nil(peers["OfficerB"])
+        end)
+
+        it("accepts messages from same guild", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local msg = GBL:Serialize({
+                type = "HELLO", version = GBL.version,
+                txCount = 5, protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            GBL:OnSyncMessage("GBLSync", msg, "GUILD", "OfficerB")
+
+            local peers = GBL:GetSyncPeers()
+            assert.is_not_nil(peers["OfficerB"])
+        end)
+
+        it("HELLO includes guild name in broadcast", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:BroadcastHello()
+
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok)
+            assert.equals("Test Guild", data.guild)
+        end)
+
         it("corrupted message data is silently dropped", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 

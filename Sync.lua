@@ -99,6 +99,7 @@ function GBL:BroadcastHello()
         type = "HELLO",
         version = self.version,
         protocolVersion = PROTOCOL_VERSION,
+        guild = self:GetGuildName(),
         txCount = txCount,
         lastScanTime = self.lastScanTime or 0,
     })
@@ -131,6 +132,14 @@ function GBL:OnSyncMessage(_prefix, message, _distribution, sender)
         self:AddAuditEntry("Ignored message from " .. sender
             .. " (protocol v" .. tostring(data.protocolVersion) .. ")")
         return
+    end
+
+    -- Guild isolation — reject messages from a different guild
+    if data.guild then
+        local myGuild = self:GetGuildName()
+        if myGuild and data.guild ~= myGuild then
+            return
+        end
     end
 
     local msgType = data.type
@@ -201,6 +210,7 @@ function GBL:RequestSync(target, sinceTimestamp)
         type = "SYNC_REQUEST",
         sinceTimestamp = sinceTimestamp,
         protocolVersion = PROTOCOL_VERSION,
+        guild = self:GetGuildName(),
     })
 
     self:SendCommMessage(PREFIX, msg, "WHISPER", target)
@@ -254,6 +264,7 @@ function GBL:HandleSyncRequest(sender, data)
             transactions = {},
             moneyTransactions = {},
             protocolVersion = PROTOCOL_VERSION,
+            guild = self:GetGuildName(),
         })
         self:SendCommMessage(PREFIX, msg, "WHISPER", sender)
         self:AddAuditEntry("Sent empty sync to " .. sender)
@@ -343,6 +354,7 @@ function GBL:SendNextChunk()
         transactions = chunk.transactions,
         moneyTransactions = chunk.moneyTransactions,
         protocolVersion = PROTOCOL_VERSION,
+        guild = self:GetGuildName(),
     })
 
     self:SendCommMessage(PREFIX, msg, "WHISPER", syncState.sendTarget)
@@ -434,6 +446,7 @@ function GBL:HandleSyncData(sender, data)
         chunk = data.chunk,
         stored = stored,
         protocolVersion = PROTOCOL_VERSION,
+        guild = self:GetGuildName(),
     })
     self:SendCommMessage(PREFIX, ackMsg, "WHISPER", sender)
 
