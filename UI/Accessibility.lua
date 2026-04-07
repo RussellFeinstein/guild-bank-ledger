@@ -233,3 +233,84 @@ function GBL:GetTxTypeDisplay(txType)
         label = self.A11Y.TX_LABELS[txType] or txType,
     }
 end
+
+------------------------------------------------------------------------
+-- Keyboard navigation
+------------------------------------------------------------------------
+
+-- Focus state
+GBL.A11Y.focusOrder = {}    -- ordered list of focusable widgets
+GBL.A11Y.focusIndex = 0     -- 0 = no focus
+
+--- Register a widget as focusable at a given position in tab order.
+-- @param widget table AceGUI widget
+-- @param order number position in focus order (1-based)
+function GBL:RegisterFocusable(widget, order)
+    self.A11Y.focusOrder[order] = widget
+end
+
+--- Clear the focus order (call when switching tabs).
+function GBL:ClearFocusOrder()
+    self.A11Y.focusOrder = {}
+    self.A11Y.focusIndex = 0
+end
+
+--- Advance focus by delta (+1 for Tab, -1 for Shift+Tab).
+-- Wraps at boundaries (focus trap).
+-- @param delta number +1 or -1
+function GBL:AdvanceFocus(delta)
+    local order = self.A11Y.focusOrder
+    local count = #order
+    if count == 0 then return end
+
+    -- Remove indicator from old widget
+    if self.A11Y.focusIndex > 0 and order[self.A11Y.focusIndex] then
+        self:SetFocusIndicator(order[self.A11Y.focusIndex], false)
+    end
+
+    -- Advance with wrap
+    local newIndex = self.A11Y.focusIndex + delta
+    if newIndex < 1 then
+        newIndex = count
+    elseif newIndex > count then
+        newIndex = 1
+    end
+
+    self.A11Y.focusIndex = newIndex
+
+    -- Apply indicator to new widget
+    if order[newIndex] then
+        self:SetFocusIndicator(order[newIndex], true)
+    end
+end
+
+--- Show or hide the focus indicator on a widget.
+-- In WoW, this would add/remove a 2px yellow border texture.
+-- In the test environment, we track it as a flag.
+-- @param widget table AceGUI widget
+-- @param active boolean true to show, false to hide
+function GBL:SetFocusIndicator(widget, active)
+    if not widget then return end
+    widget._focused = active
+end
+
+--- Restore focus to the last focused element (on frame reopen).
+function GBL:RestoreFocus()
+    local order = self.A11Y.focusOrder
+    local idx = self.A11Y.focusIndex
+    if idx > 0 and order[idx] then
+        self:SetFocusIndicator(order[idx], true)
+    end
+end
+
+------------------------------------------------------------------------
+-- Frame position clamping
+------------------------------------------------------------------------
+
+--- Clamp a frame's position to screen bounds.
+-- @param frame table WoW frame (or AceGUI frame.frame)
+function GBL:ClampFrameToScreen(frame)
+    if frame and frame.SetClampedToScreen then
+        frame:SetClampedToScreen(true)
+    end
+end

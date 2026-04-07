@@ -200,4 +200,85 @@ describe("Accessibility", function()
             assert.is_table(GBL.A11Y.PALETTES_HC.tritanopia)
         end)
     end)
+
+    describe("Keyboard navigation", function()
+        local w1, w2, w3
+
+        before_each(function()
+            GBL:ClearFocusOrder()
+            w1 = { _focused = false }
+            w2 = { _focused = false }
+            w3 = { _focused = false }
+            GBL:RegisterFocusable(w1, 1)
+            GBL:RegisterFocusable(w2, 2)
+            GBL:RegisterFocusable(w3, 3)
+        end)
+
+        it("advances focus forward with Tab", function()
+            GBL:AdvanceFocus(1)
+            assert.is_true(w1._focused)
+            assert.is_false(w2._focused)
+        end)
+
+        it("advances through multiple elements", function()
+            GBL:AdvanceFocus(1)  -- focus w1
+            GBL:AdvanceFocus(1)  -- focus w2
+            assert.is_false(w1._focused)
+            assert.is_true(w2._focused)
+        end)
+
+        it("wraps forward from last to first", function()
+            GBL.A11Y.focusIndex = 3
+            GBL:AdvanceFocus(1)
+            assert.equals(1, GBL.A11Y.focusIndex)
+            assert.is_true(w1._focused)
+        end)
+
+        it("wraps backward from first to last", function()
+            GBL.A11Y.focusIndex = 1
+            GBL:AdvanceFocus(-1)
+            assert.equals(3, GBL.A11Y.focusIndex)
+            assert.is_true(w3._focused)
+        end)
+
+        it("clears focus order", function()
+            GBL:AdvanceFocus(1)
+            GBL:ClearFocusOrder()
+            assert.equals(0, GBL.A11Y.focusIndex)
+            assert.equals(0, #GBL.A11Y.focusOrder)
+        end)
+
+        it("sets focus indicator on widget", function()
+            GBL:SetFocusIndicator(w1, true)
+            assert.is_true(w1._focused)
+            GBL:SetFocusIndicator(w1, false)
+            assert.is_false(w1._focused)
+        end)
+
+        it("restores focus to last focused element", function()
+            GBL:AdvanceFocus(1)
+            GBL:AdvanceFocus(1)
+            -- w2 is focused
+            GBL:SetFocusIndicator(w2, false)  -- simulate close
+            GBL:RestoreFocus()
+            assert.is_true(w2._focused)
+        end)
+    end)
+
+    describe("ClampFrameToScreen", function()
+        it("calls SetClampedToScreen when available", function()
+            local clamped = false
+            local frame = {
+                SetClampedToScreen = function(_, val) clamped = val end,
+            }
+            GBL:ClampFrameToScreen(frame)
+            assert.is_true(clamped)
+        end)
+
+        it("does not error on nil frame", function()
+            assert.has_no.errors(function()
+                GBL:ClampFrameToScreen(nil)
+            end)
+        end)
+    end)
 end)

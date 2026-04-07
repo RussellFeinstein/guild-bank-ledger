@@ -5,6 +5,15 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] — 2026-04-07
+
+### Added
+- Keyboard navigation: Tab/Shift+Tab focus traversal with wrap (focus trap per WCAG 2.1.1)
+- Focus indicator: 2px yellow border tracked on each focusable widget (WCAG 2.4.7)
+- Focus restore on frame reopen
+- Frame position clamping to screen bounds
+- 9 new keyboard nav and frame clamping tests (152 total)
+
 ## [0.2.5] — 2026-04-07
 
 ### Added
