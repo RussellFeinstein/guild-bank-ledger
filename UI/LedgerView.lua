@@ -88,9 +88,9 @@ function GBL:GetSortIndicator(column, label)
         return label
     end
     if self.ledgerSortAscending then
-        return label .. " " .. string.char(0xE2, 0x96, 0xB2)  -- ▲
+        return label .. " [asc]"
     else
-        return label .. " " .. string.char(0xE2, 0x96, 0xBC)  -- ▼
+        return label .. " [desc]"
     end
 end
 
