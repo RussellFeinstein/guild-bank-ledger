@@ -65,6 +65,11 @@ function Helpers.resetAll()
     package.loaded["Dedup"] = nil
     package.loaded["Ledger"] = nil
     package.loaded["Storage"] = nil
+    package.loaded["UI.Accessibility"] = nil
+    package.loaded["UI.FilterBar"] = nil
+    package.loaded["UI.ConsumptionView"] = nil
+    package.loaded["UI.LedgerView"] = nil
+    package.loaded["UI.UI"] = nil
 end
 
 --- Initialize mocks (call in before_each).
@@ -99,6 +104,12 @@ function Helpers.loadAddon()
     safeDofile("Dedup.lua")
     safeDofile("Ledger.lua")
     safeDofile("Storage.lua")
+    -- UI modules (M3+)
+    safeDofile("UI/Accessibility.lua")
+    safeDofile("UI/FilterBar.lua")
+    safeDofile("UI/ConsumptionView.lua")
+    safeDofile("UI/LedgerView.lua")
+    safeDofile("UI/UI.lua")
     return MockAce.addon
 end
 

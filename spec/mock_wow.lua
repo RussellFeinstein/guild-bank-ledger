@@ -62,6 +62,7 @@ function MockWoW.reset()
     MockWoW.serverTime = 1711700000
     MockWoW.pendingTimers = {}
     MockWoW.frames = {}
+    MockWoW.cvars = {}
 end
 
 ---------------------------------------------------------------------------
@@ -285,7 +286,7 @@ function MockWoW.install()
     -- GetAddOnMetadata
     _G.GetAddOnMetadata = function(addon, field)
         if addon == "GuildBankLedger" and field == "Version" then
-            return "0.2.1"
+            return "0.2.2"
         end
         return nil
     end
@@ -294,6 +295,53 @@ function MockWoW.install()
     _G.GetTime = function()
         return MockWoW.serverTime + 0.0
     end
+
+    -- CVars (for colorblind mode detection etc.)
+    MockWoW.cvars = MockWoW.cvars or {}
+    _G.GetCVar = function(name)
+        return MockWoW.cvars[name]
+    end
+    _G.SetCVar = function(name, value)
+        MockWoW.cvars[name] = value
+    end
+
+    -- UIParent stub
+    _G.UIParent = _G.UIParent or {
+        GetEffectiveScale = function() return 1.0 end,
+        GetWidth = function() return 1920 end,
+        GetHeight = function() return 1080 end,
+    }
+
+    -- UISpecialFrames (ESC-to-close registration)
+    _G.UISpecialFrames = _G.UISpecialFrames or {}
+
+    -- GameTooltip stub
+    _G.GameTooltip = _G.GameTooltip or {
+        _lines = {},
+        SetOwner = function() end,
+        ClearLines = function(self) self._lines = {} end,
+        AddLine = function(self, text) table.insert(self._lines, text) end,
+        Show = function() end,
+        Hide = function() end,
+        SetHyperlink = function() end,
+    }
+
+    -- Font object stubs
+    local fontStub = {
+        GetFont = function() return "Fonts\\FRIZQT__.TTF", 12, "" end,
+        SetFont = function() end,
+    }
+    _G.GameFontNormal = _G.GameFontNormal or fontStub
+    _G.GameFontHighlight = _G.GameFontHighlight or fontStub
+    _G.ChatFontNormal = _G.ChatFontNormal or fontStub
+
+    -- Color constants
+    _G.NORMAL_FONT_COLOR = _G.NORMAL_FONT_COLOR or { r = 1.0, g = 0.82, b = 0.0 }
+    _G.HIGHLIGHT_FONT_COLOR = _G.HIGHLIGHT_FONT_COLOR or { r = 1.0, g = 1.0, b = 1.0 }
+
+    -- Sound stubs
+    _G.PlaySound = function() end
+    _G.SOUNDKIT = _G.SOUNDKIT or { IG_MAINMENU_OPEN = 850, IG_MAINMENU_CLOSE = 851 }
 
     -- Slash command registration support
     _G.SlashCmdList = _G.SlashCmdList or {}

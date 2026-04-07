@@ -5,6 +5,17 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] — 2026-04-06
+
+### Added
+- Accessibility module (`UI/Accessibility.lua`) with WCAG 2.1 AA-adapted design
+- 4 colorblind-safe palettes: normal, protanopia, deuteranopia, tritanopia (auto-detected from WoW CVar)
+- High-contrast palette variants (WCAG AAA 7:1+ contrast)
+- Triple encoding for transaction types: shape icon + color + text label (WCAG 1.4.1)
+- Font scaling utilities with 8-24pt clamping
+- Timestamp formatting from profile settings
+- 28 new accessibility tests (102 total)
+
 ## [0.2.1] — 2026-04-06
 
 ### Added
