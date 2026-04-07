@@ -112,7 +112,7 @@ describe("Core", function()
         it("status prints version and guild info", function()
             MockWoW.guild.name = "Test Guild"
             GBL:HandleSlashCommand("status")
-            assert.is_true(Helpers.printContains("0.2.4"))
+            assert.is_true(Helpers.printContains("0.2.5"))
             assert.is_true(Helpers.printContains("Test Guild"))
         end)
 
@@ -121,6 +121,38 @@ describe("Core", function()
             assert.is_true(Helpers.printContains("/gbl status"))
             assert.is_true(Helpers.printContains("/gbl scan"))
             assert.is_true(Helpers.printContains("/gbl help"))
+        end)
+
+        it("empty command calls ToggleMainFrame", function()
+            local called = false
+            local origToggle = GBL.ToggleMainFrame
+            GBL.ToggleMainFrame = function() called = true end
+            GBL:HandleSlashCommand("")
+            GBL.ToggleMainFrame = origToggle
+            assert.is_true(called)
+        end)
+
+        it("'show' command calls ToggleMainFrame", function()
+            local called = false
+            local origToggle = GBL.ToggleMainFrame
+            GBL.ToggleMainFrame = function() called = true end
+            GBL:HandleSlashCommand("show")
+            GBL.ToggleMainFrame = origToggle
+            assert.is_true(called)
+        end)
+    end)
+
+    describe("minimap button", function()
+        it("registers LibDataBroker data object on init", function()
+            GBL:OnInitialize()
+            local ldb = MockAce.ldb
+            assert.is_not_nil(ldb._objects["GuildBankLedger"])
+        end)
+
+        it("registers with LibDBIcon on init", function()
+            GBL:OnInitialize()
+            local icon = MockAce.ldbIcon
+            assert.is_not_nil(icon._registered["GuildBankLedger"])
         end)
     end)
 end)

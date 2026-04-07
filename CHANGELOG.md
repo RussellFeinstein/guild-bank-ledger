@@ -5,6 +5,22 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] — 2026-04-07
+
+### Added
+- Main UI window (`UI/UI.lua`) with tabbed view: Transactions and Consumption
+- Scrolling transaction list (`UI/LedgerView.lua`) with sortable columns (Timestamp, Player, Action, Item, Count, Category, Tab)
+- Filter bar widgets: search box, date range, category, type dropdowns, reset button
+- Consumption table with per-player summaries, net contribution, last active
+- Minimap button via LibDataBroker + LibDBIcon (left-click toggles window)
+- `.toc` updated with all M3 library and UI file entries
+- 4 new integration tests (143 total)
+
+### Changed
+- `/gbl` (no args) now opens the UI window instead of showing help
+- `/gbl show` added as alias for toggling the UI
+- Help moved to `/gbl help` only
+
 ## [0.2.4] — 2026-04-07
 
 ### Added

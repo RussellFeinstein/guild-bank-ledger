@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.2.4"
+local VERSION = "0.2.5"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -70,6 +70,9 @@ function GBL:OnInitialize()
 
     self:RegisterChatCommand("gbl", "HandleSlashCommand")
     self:RegisterChatCommand("guildbankledger", "HandleSlashCommand")
+
+    -- Minimap button (M3)
+    self:SetupMinimapButton()
 end
 
 function GBL:OnEnable()
@@ -173,11 +176,13 @@ function GBL:HandleSlashCommand(input)
     input = input and strtrim(input) or ""
     local command = input:lower()
 
-    if command == "status" then
+    if command == "" or command == "show" then
+        self:ToggleMainFrame()
+    elseif command == "status" then
         self:PrintStatus()
     elseif command == "scan" then
         self:ManualScan()
-    elseif command == "help" or command == "" then
+    elseif command == "help" then
         self:PrintHelp()
     else
         self:Print("Unknown command: " .. command .. ". Type /gbl help for usage.")
@@ -209,6 +214,8 @@ end
 
 function GBL:PrintHelp()
     self:Print("|cffffcc00GuildBankLedger v" .. self.version .. " — Commands:|r")
+    self:Print("  /gbl         — Toggle the ledger window")
+    self:Print("  /gbl show    — Toggle the ledger window")
     self:Print("  /gbl status  — Show addon status")
     self:Print("  /gbl scan    — Manually scan the guild bank")
     self:Print("  /gbl help    — Show this help message")
