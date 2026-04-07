@@ -60,7 +60,7 @@ local defaults = {
         },
         alerts = { enabled = true, chatNotify = true, soundNotify = true },
         export = { delimiter = ",", includeHeaders = true, dateFormat = "%Y-%m-%d %H:%M" },
-        sync = { enabled = false, autoSync = true },
+        sync = { enabled = true, autoSync = true },
         filters = { defaultDays = 7, defaultCategory = "ALL" },
     },
 }
