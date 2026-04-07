@@ -22,6 +22,27 @@ externals:
     Libs/AceEvent-3.0:
         url: https://repos.curseforge.com/wow/ace3/trunk/AceEvent-3.0
         tag: latest
+    Libs/AceGUI-3.0:
+        url: https://repos.curseforge.com/wow/ace3/trunk/AceGUI-3.0
+        tag: latest
+    Libs/AceConfig-3.0:
+        url: https://repos.curseforge.com/wow/ace3/trunk/AceConfig-3.0
+        tag: latest
+    Libs/AceConfigDialog-3.0:
+        url: https://repos.curseforge.com/wow/ace3/trunk/AceConfigDialog-3.0
+        tag: latest
+    Libs/AceConfigCmd-3.0:
+        url: https://repos.curseforge.com/wow/ace3/trunk/AceConfigCmd-3.0
+        tag: latest
+    Libs/LibDataBroker-1.1:
+        url: https://repos.curseforge.com/wow/libdatabroker-1-1/trunk
+        tag: latest
+    Libs/LibDBIcon-1.0:
+        url: https://repos.curseforge.com/wow/libdbicon-1-0/trunk/LibDBIcon-1.0
+        tag: latest
+    Libs/LibSharedMedia-3.0:
+        url: https://repos.curseforge.com/wow/libsharedmedia-3-0/trunk/LibSharedMedia-3.0
+        tag: latest
 
 ignore:
     - spec
