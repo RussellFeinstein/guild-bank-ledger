@@ -7,6 +7,7 @@
 ## OptionalDeps: Ace3, LibDBIcon-1.0, LibDataBroker-1.1
 ## X-Category: Guild
 ## X-License: MIT
+## X-Curse-Project-ID: CHANGEME
 
 # Libraries
 Libs\LibStub\LibStub.lua
