@@ -5,6 +5,13 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] — 2026-04-07
+
+### Fixed
+- UI rows overflowed frame — ledger and consumption views now use AceGUI ScrollFrame for scrollable content
+- LibDBIcon-1.0 `.toc` path pointed to nonexistent `lib.xml`; corrected to `LibDBIcon-1.0.lua`
+- Interface version updated from 110105 to 120001 (WoW Midnight Season 1)
+
 ## [0.3.1] — 2026-04-07
 
 ### Fixed

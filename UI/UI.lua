@@ -28,7 +28,7 @@ function GBL:CreateMainFrame()
 
     -- Tab group
     local tabGroup = AceGUI:Create("TabGroup")
-    tabGroup:SetLayout("Flow")
+    tabGroup:SetLayout("List")
     tabGroup:SetTabs({
         { value = "transactions", text = "Transactions" },
         { value = "consumption", text = "Consumption" },
@@ -91,9 +91,10 @@ function GBL:BuildTransactionsTab(container, transactions)
     filterGroup:SetLayout("Flow")
     container:AddChild(filterGroup)
 
-    -- Ledger view (declared before filter closure to avoid forward reference)
-    local ledgerGroup = AceGUI:Create("SimpleGroup")
+    -- Ledger view (ScrollFrame for scrollable transaction list)
+    local ledgerGroup = AceGUI:Create("ScrollFrame")
     ledgerGroup:SetFullWidth(true)
+    ledgerGroup:SetFullHeight(true)
     ledgerGroup:SetLayout("Flow")
 
     local filters = self:CreateDefaultFilters()
@@ -126,8 +127,8 @@ function GBL:BuildConsumptionTab(container, transactions)
     filterGroup:SetLayout("Flow")
     container:AddChild(filterGroup)
 
-    -- Content area (declared before dropdown closure to avoid forward reference)
-    local contentGroup = AceGUI:Create("SimpleGroup")
+    -- Content area (ScrollFrame for scrollable consumption list)
+    local contentGroup = AceGUI:Create("ScrollFrame")
 
     local filters = self:CreateDefaultFilters()
 
@@ -147,6 +148,7 @@ function GBL:BuildConsumptionTab(container, transactions)
     end)
     filterGroup:AddChild(dateDropdown)
     contentGroup:SetFullWidth(true)
+    contentGroup:SetFullHeight(true)
     contentGroup:SetLayout("Flow")
     container:AddChild(contentGroup)
 

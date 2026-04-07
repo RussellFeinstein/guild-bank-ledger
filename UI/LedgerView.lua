@@ -145,9 +145,8 @@ function GBL:CreateLedgerView(container, transactions, filters)
         return
     end
 
-    -- Transaction rows (virtual scroll: show up to visible rows)
-    local maxVisible = 50  -- rows per page (AceGUI ScrollFrame handles scrolling)
-    local rowCount = math.min(#filtered, maxVisible)
+    -- Transaction rows (ScrollFrame parent handles scrolling)
+    local rowCount = #filtered
 
     for i = 1, rowCount do
         local tx = filtered[i]
