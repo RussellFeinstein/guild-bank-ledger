@@ -2,7 +2,7 @@
 
 Persistent guild bank transaction logging for World of Warcraft. WoW's built-in guild bank log only stores 25 entries per tab, which rolls over in minutes for active guilds. GuildBankLedger captures every transaction before it's lost.
 
-## Features (v0.2.6)
+## Features (v0.3.0)
 
 - **Persistent logging** — Transactions are saved to `SavedVariables` and survive log rollovers
 - **Automatic scanning** — Scans all guild bank tabs when you open the bank
@@ -14,7 +14,12 @@ Persistent guild bank transaction logging for World of Warcraft. WoW's built-in 
 - **Per-player statistics** — Tracks deposit/withdrawal counts, money totals, first/last seen timestamps
 - **Tiered storage** — Full records (0-30d), daily summaries (30-90d), weekly summaries (90d+)
 - **Automatic compaction** — Old data compressed into summaries on bank open
-- **Slash commands** — `/gbl status`, `/gbl scan`, `/gbl help`
+- **UI window** — Tabbed interface with Transactions and Consumption views, opened via `/gbl` or minimap button
+- **Transaction list** — Scrolling list with sortable columns: Timestamp, Player, Action, Item, Count, Category, Tab
+- **Filter bar** — Search by player/item, filter by date range, category, transaction type, tab, with reset button
+- **Consumption view** — Per-player withdrawal/deposit totals, net contribution, top items, last active
+- **Minimap button** — Left-click to toggle the ledger window
+- **Accessibility** — Colorblind-safe palettes (auto-detected from WoW settings), high contrast mode, triple encoding (shape + color + text), keyboard navigation (Tab/Shift+Tab), font scaling (8-24pt)
 
 ### Planned Features
 
@@ -25,23 +30,24 @@ Persistent guild bank transaction logging for World of Warcraft. WoW's built-in 
 - Stock level alerts
 - CSV/Discord/BBCode export
 - Guild Bank Sort addon integration
-- Accessibility-first UI (colorblind mode, keyboard nav, font scaling)
 
 ## Installation
 
 1. Download from CurseForge (or clone this repo)
 2. Copy `GuildBankLedger/` to your `Interface/AddOns/` directory
-3. If installing from source, install dependencies via `.pkgmeta` externals (or use CurseForge packager)
+3. If installing from source, run `bash fetch-libs.sh` to download dependencies, or use CurseForge packager
 
 ### Dependencies
 
-- Ace3 (AceAddon, AceDB, AceConsole, AceEvent)
+- Ace3 (AceAddon, AceDB, AceConsole, AceEvent, AceGUI, AceConfig, AceConfigDialog, AceConfigCmd)
+- LibDBIcon-1.0, LibDataBroker-1.1, LibSharedMedia-3.0
 
 ## Usage
 
 | Command | Description |
 |---------|-------------|
-| `/gbl` | Show help |
+| `/gbl` | Toggle the ledger window |
+| `/gbl show` | Toggle the ledger window |
 | `/gbl status` | Show addon version, guild name, transaction count, last scan time |
 | `/gbl scan` | Manually trigger a full guild bank scan |
 | `/gbl help` | Show available commands |
@@ -55,6 +61,12 @@ Scanning happens automatically when you open the guild bank. Results are saved p
 - Lua 5.1
 - LuaRocks
 - busted (test runner)
+
+### Setup (from source)
+
+```bash
+bash fetch-libs.sh    # download Ace3 and supporting libraries
+```
 
 ### Running Tests
 

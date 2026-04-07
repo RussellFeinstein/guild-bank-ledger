@@ -5,6 +5,29 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-04-07
+
+**Milestone M3: UI**
+
+### Added
+- Main UI window toggled via `/gbl` or minimap button (left-click)
+- Transaction ledger view with sortable columns (Timestamp, Player, Action, Item, Count, Category, Tab)
+- Filter bar: text search, date range (7d/30d/all), category, transaction type, reset button
+- Per-player consumption summary with net contribution, top items, last active
+- Minimap button via LibDataBroker + LibDBIcon
+- Accessibility: 4 colorblind-safe palettes auto-detected from WoW CVar, high contrast mode (WCAG AAA)
+- Triple encoding for transaction types: shape icon + color + text label (WCAG 1.4.1)
+- Keyboard navigation (Tab/Shift+Tab) with visible 2px yellow focus indicator, focus trap (WCAG 2.1.1, 2.4.7)
+- Font size scaling (8-24pt) via addon settings
+- Frame position clamping to screen bounds
+- Library fetch script (`fetch-libs.sh`) for development setup
+- 78 new tests (152 total) covering accessibility, filters, consumption, keyboard nav
+
+### Changed
+- `/gbl` (no args) now opens the UI window instead of showing help
+- `/gbl show` added as alias for toggling the UI
+- Help moved to `/gbl help` only
+
 ## [0.2.6] — 2026-04-07
 
 ### Added

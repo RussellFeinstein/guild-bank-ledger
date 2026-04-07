@@ -12,6 +12,11 @@ WoW addon that persistently logs guild bank transactions. Lua 5.1 + Ace3 stack. 
 - **Dedup.lua** — Deduplication engine (hour-bucket fuzzy matching across officers)
 - **Ledger.lua** — Transaction recording from GetGuildBankTransaction API
 - **Storage.lua** — Tiered storage, compaction (30d daily, 90d weekly), pruning
+- **UI/Accessibility.lua** — Colorblind-safe palettes, font scaling, keyboard nav, triple encoding
+- **UI/FilterBar.lua** — Transaction filter logic and AceGUI filter widgets
+- **UI/ConsumptionView.lua** — Per-player consumption aggregation and rendering
+- **UI/LedgerView.lua** — Virtual-scrolling transaction list with sortable columns
+- **UI/UI.lua** — Main AceGUI frame, tab switching, minimap button
 - **spec/** — busted tests with WoW API and Ace3 mocks
 
 ## Critical WoW API Facts
@@ -48,4 +53,4 @@ luacheck .                 # lint production code
 
 ## Version
 
-Current: 0.2.6 (see `VERSION` file)
+Current: 0.3.0 (see `VERSION` file)
