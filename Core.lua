@@ -384,7 +384,7 @@ function GBL:PrintStatus()
     elseif self.db.profile.scanning.rescanEnabled then
         rescanStatus = "Enabled (bank closed)"
     end
-    self:Print("Money re-scan: " .. rescanStatus)
+    self:Print("Auto re-scan: " .. rescanStatus)
 end
 
 function GBL:PrintHelp()

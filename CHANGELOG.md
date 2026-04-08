@@ -8,8 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.0] — 2026-04-07
 
 ### Added
-- Periodic money log re-scan while guild bank is open (every 5 seconds)
-- Catches repair transactions before they roll off the 25-entry WoW API limit
+- Periodic re-scan of all transaction logs while guild bank is open (every 5 seconds)
+- Catches item and money transactions before they roll off the 25-entry-per-tab WoW API limit
 - Auto-starts after initial scan completes, stops on bank close
 - "Auto re-scan" toggle in settings row
 - Re-scan status shown in `/gbl status` output

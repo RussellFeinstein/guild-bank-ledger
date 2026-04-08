@@ -1,4 +1,4 @@
---- rescan_spec.lua — Tests for periodic money log re-scan
+--- rescan_spec.lua — Tests for periodic transaction log re-scan
 
 local Helpers = require("spec.helpers")
 
@@ -16,20 +16,20 @@ describe("Periodic Rescan", function()
         GBL._initialScanComplete = true
     end)
 
-    describe("RescanMoneyLog", function()
-        it("queries money tab 9", function()
-            MockWoW.guildBank.numTabs = 2
+    describe("RescanTransactionLogs", function()
+        it("queries all item tabs plus money tab 9", function()
+            MockWoW.guildBank.numTabs = 3
             MockWoW.guildBank.queriedLogs = {}
 
-            GBL:RescanMoneyLog(function() end)
+            GBL:RescanTransactionLogs(function() end)
 
+            assert.is_true(MockWoW.guildBank.queriedLogs[1])
+            assert.is_true(MockWoW.guildBank.queriedLogs[2])
+            assert.is_true(MockWoW.guildBank.queriedLogs[3])
             assert.is_true(MockWoW.guildBank.queriedLogs[9])
-            -- Should NOT query item tabs
-            assert.is_nil(MockWoW.guildBank.queriedLogs[1])
-            assert.is_nil(MockWoW.guildBank.queriedLogs[2])
         end)
 
-        it("returns correct new count", function()
+        it("returns correct new count for money transactions", function()
             MockWoW.guildBank.numTabs = 1
             Helpers.addMoneyTransactions({
                 Helpers.makeMoneyTransaction("repair", "Raider1", 50000, 0),
@@ -37,7 +37,39 @@ describe("Periodic Rescan", function()
             })
 
             local result
-            GBL:RescanMoneyLog(function(count) result = count end)
+            GBL:RescanTransactionLogs(function(count) result = count end)
+            MockWoW.fireTimers()
+
+            assert.equals(2, result)
+        end)
+
+        it("returns correct new count for item transactions", function()
+            MockWoW.guildBank.numTabs = 1
+            local link = Helpers.makeItemLink(12345, "Flask", 1)
+            Helpers.addTabTransactions(1, {
+                Helpers.makeTransaction("withdraw", "Raider1", link, 5, 1, nil, 0),
+                Helpers.makeTransaction("withdraw", "Raider2", link, 3, 1, nil, 1),
+            })
+
+            local result
+            GBL:RescanTransactionLogs(function(count) result = count end)
+            MockWoW.fireTimers()
+
+            assert.equals(2, result)
+        end)
+
+        it("returns combined count for items and money", function()
+            MockWoW.guildBank.numTabs = 1
+            local link = Helpers.makeItemLink(12345, "Flask", 1)
+            Helpers.addTabTransactions(1, {
+                Helpers.makeTransaction("deposit", "Officer1", link, 10, 1, nil, 0),
+            })
+            Helpers.addMoneyTransactions({
+                Helpers.makeMoneyTransaction("repair", "Raider1", 50000, 0),
+            })
+
+            local result
+            GBL:RescanTransactionLogs(function(count) result = count end)
             MockWoW.fireTimers()
 
             assert.equals(2, result)
@@ -45,18 +77,17 @@ describe("Periodic Rescan", function()
 
         it("deduplicates existing entries", function()
             MockWoW.guildBank.numTabs = 1
-            local txs = {
+            Helpers.addMoneyTransactions({
                 Helpers.makeMoneyTransaction("repair", "Raider1", 50000, 0),
-            }
-            Helpers.addMoneyTransactions(txs)
+            })
 
             -- First scan stores them
             local guildData = GBL:GetGuildData()
-            GBL:ReadMoneyTransactions(guildData)
+            GBL:ReadAllTransactions(guildData)
 
             -- Second scan via rescan should find 0 new
             local result
-            GBL:RescanMoneyLog(function(count) result = count end)
+            GBL:RescanTransactionLogs(function(count) result = count end)
             MockWoW.fireTimers()
 
             assert.equals(0, result)
@@ -67,7 +98,7 @@ describe("Periodic Rescan", function()
             MockWoW.guildBank.queriedLogs = {}
 
             local result
-            GBL:RescanMoneyLog(function(count) result = count end)
+            GBL:RescanTransactionLogs(function(count) result = count end)
 
             assert.equals(0, result)
             assert.is_nil(MockWoW.guildBank.queriedLogs[9])
@@ -80,7 +111,7 @@ describe("Periodic Rescan", function()
             })
 
             local result
-            GBL:RescanMoneyLog(function(count) result = count end)
+            GBL:RescanTransactionLogs(function(count) result = count end)
 
             -- Close bank before timer fires
             GBL.bankOpen = false
@@ -94,7 +125,7 @@ describe("Periodic Rescan", function()
             GBL._cachedGuildName = nil
 
             local result
-            GBL:RescanMoneyLog(function(count) result = count end)
+            GBL:RescanTransactionLogs(function(count) result = count end)
 
             assert.equals(0, result)
         end)
@@ -185,7 +216,7 @@ describe("Periodic Rescan", function()
             local origRefresh = GBL.RefreshUI
             GBL.RefreshUI = function() refreshCount = refreshCount + 1 end
 
-            -- First tick: no money transactions -> no refresh
+            -- First tick: no transactions -> no refresh
             Helpers.addMoneyTransactions({})
             GBL:StartPeriodicRescan()
             MockWoW.fireTimers()  -- interval tick

@@ -369,14 +369,14 @@ function GBL:ScanTransactions(callback)
 end
 
 ------------------------------------------------------------------------
--- Periodic re-scan (raid-only, money log)
+-- Periodic re-scan (all tabs + money)
 ------------------------------------------------------------------------
 
---- Lightweight re-scan of the money log only.
--- Queries tab 9 (money), waits 0.5s for server, then reads.
+--- Lightweight re-scan of all transaction logs.
+-- Queries all item tabs + money tab 9, waits 0.5s for server, then reads.
 -- Dedup prevents storing duplicates. Much simpler than initial ScanTransactions.
 -- @param callback function(newCount) called with count of new records
-function GBL:RescanMoneyLog(callback)
+function GBL:RescanTransactionLogs(callback)
     if not self.bankOpen then
         if callback then callback(0) end
         return
@@ -388,7 +388,11 @@ function GBL:RescanMoneyLog(callback)
         return
     end
 
+    local numTabs = GetNumGuildBankTabs()
     local moneyTab = (MAX_GUILDBANK_TABS or 8) + 1
+    for tab = 1, numTabs do
+        QueryGuildBankLog(tab)
+    end
     QueryGuildBankLog(moneyTab)
 
     C_Timer.After(0.5, function()
@@ -403,12 +407,12 @@ function GBL:RescanMoneyLog(callback)
             return
         end
 
-        local newCount = self:ReadMoneyTransactions(freshGuildData)
+        local newCount = self:ReadAllTransactions(freshGuildData)
         if callback then callback(newCount) end
     end)
 end
 
---- Start the periodic money log re-scan timer.
+--- Start the periodic transaction log re-scan timer.
 -- Runs whenever the bank is open and rescan is enabled.
 -- Self-chaining: each tick schedules the next after completing.
 function GBL:StartPeriodicRescan()
@@ -426,7 +430,7 @@ function GBL:StartPeriodicRescan()
             return
         end
 
-        self:RescanMoneyLog(function(newCount)
+        self:RescanTransactionLogs(function(newCount)
             if newCount and newCount > 0 then
                 self:Print(format("Re-scan: %d new transaction%s.",
                     newCount, newCount == 1 and "" or "s"))
