@@ -328,7 +328,7 @@ function GBL:ReadAllTransactions(guildData)
 end
 
 --- Query all transaction logs and read them when the server responds.
--- Uses GUILD_BANK_LOG_UPDATE event with a debounced read.
+-- Uses GUILDBANKLOG_UPDATE event with a debounced read.
 -- Each event resets a 0.5s timer so we wait for ALL tab responses
 -- (including money tab) to arrive before reading.
 -- @param callback function(totalStored) called when all logs are read
@@ -351,7 +351,7 @@ function GBL:ScanTransactions(callback)
         if completed then return end
         completed = true
         debounceTimer = nil
-        pcall(function() self:UnregisterEvent("GUILD_BANK_LOG_UPDATE") end)
+        pcall(function() self:UnregisterEvent("GUILDBANKLOG_UPDATE") end)
 
         if not self.bankOpen then
             if callback then callback(0) end
@@ -365,7 +365,7 @@ function GBL:ScanTransactions(callback)
 
     -- Listen for server response — debounce so we wait for all tabs
     -- including money tab to arrive before reading
-    self.GUILD_BANK_LOG_UPDATE = function()
+    self.GUILDBANKLOG_UPDATE = function()
         if completed then return end
         -- Cancel previous timer and restart — ensures we wait 0.5s
         -- after the LAST event, giving all tab responses time to arrive
@@ -374,7 +374,7 @@ function GBL:ScanTransactions(callback)
         end
         debounceTimer = C_Timer.After(0.5, finishScan)
     end
-    self:RegisterEvent("GUILD_BANK_LOG_UPDATE")
+    self:RegisterEvent("GUILDBANKLOG_UPDATE")
 
     -- Query all logs (item tabs + money tab)
     for tab = 1, numTabs do
@@ -393,8 +393,8 @@ end
 ------------------------------------------------------------------------
 
 --- Lightweight re-scan of all transaction logs.
--- Queries all item tabs + money tab 9, waits for GUILD_BANK_LOG_UPDATE
--- event (with 2s fallback), then reads. Dedup prevents duplicates.
+-- Queries all item tabs + money tab 9, waits for GUILDBANKLOG_UPDATE
+-- event (with 1.5s fallback), then reads. Dedup prevents duplicates.
 -- @param callback function(newCount) called with count of new records
 function GBL:RescanTransactionLogs(callback)
     if not self.bankOpen then
@@ -414,35 +414,29 @@ function GBL:RescanTransactionLogs(callback)
     local function finishRescan()
         if completed then return end
         completed = true
-        debounceTimer = nil
-        pcall(function() self:UnregisterEvent("GUILD_BANK_LOG_UPDATE") end)
+        pcall(function() self:UnregisterEvent("GUILDBANKLOG_UPDATE") end)
 
-        if not self.bankOpen then
-            if callback then callback(0) end
-            return
-        end
-
-        local freshGuildData = self:GetGuildData()
-        if not freshGuildData then
-            if callback then callback(0) end
-            return
-        end
-
-        local newCount = self:ReadAllTransactions(freshGuildData)
-        if callback then callback(newCount) end
+        -- Protected read so errors never break the rescan chain
+        local ok, newCount = pcall(function()
+            if not self.bankOpen then return 0 end
+            local freshGuildData = self:GetGuildData()
+            if not freshGuildData then return 0 end
+            return self:ReadAllTransactions(freshGuildData)
+        end)
+        if callback then callback(ok and newCount or 0) end
     end
 
-    -- Listen for server response with 0.5s debounce (same pattern as ScanTransactions)
-    self.GUILD_BANK_LOG_UPDATE = function()
+    -- Listen for server response — 0.3s debounce so we wait for all tabs
+    self.GUILDBANKLOG_UPDATE = function()
         if completed then return end
         if debounceTimer then
             debounceTimer.cancelled = true
         end
-        debounceTimer = C_Timer.After(0.5, finishRescan)
+        debounceTimer = C_Timer.After(0.3, finishRescan)
     end
-    self:RegisterEvent("GUILD_BANK_LOG_UPDATE")
+    self:RegisterEvent("GUILDBANKLOG_UPDATE")
 
-    -- Query all logs
+    -- Query all logs (item tabs + money tab)
     local numTabs = GetNumGuildBankTabs()
     local moneyTab = (MAX_GUILDBANK_TABS or 8) + 1
     for tab = 1, numTabs do
@@ -451,57 +445,78 @@ function GBL:RescanTransactionLogs(callback)
     QueryGuildBankLog(moneyTab)
 
     -- Fallback if event never fires (data already cached)
-    C_Timer.After(2, finishRescan)
+    C_Timer.After(1.5, finishRescan)
 end
 
 --- Start the periodic transaction log re-scan timer.
 -- Runs whenever the bank is open and rescan is enabled.
 -- Self-chaining: each tick schedules the next after completing.
+-- Uses a boolean flag for state tracking (immune to C_Timer.After
+-- return-value differences across WoW versions).
 function GBL:StartPeriodicRescan()
     if not self.bankOpen then return end
     if not self._initialScanComplete then return end
     if not self.db.profile.scanning.rescanEnabled then return end
     if self:IsPeriodicRescanActive() then return end
 
-    local interval = self.db.profile.scanning.rescanInterval or 5
+    self._rescanActive = true
+    local interval = self.db.profile.scanning.rescanInterval or 3
 
     local function tick()
-        if not self.bankOpen then return end
+        -- Check stop conditions at start of every tick
+        if not self._rescanActive then return end
+        if not self.bankOpen then
+            self._rescanActive = false
+            return
+        end
         if not self.db.profile.scanning.rescanEnabled then
-            self._rescanTimer = nil
+            self._rescanActive = false
             return
         end
 
-        self:RescanTransactionLogs(function(newCount)
-            if newCount and newCount > 0 then
-                self:Print(format("Re-scan: %d new transaction%s.",
-                    newCount, newCount == 1 and "" or "s"))
-                self:RefreshUI()
-            end
+        -- Protected call so errors never break the chain
+        local ok, err = pcall(function()
+            self:RescanTransactionLogs(function(newCount)
+                if newCount and newCount > 0 then
+                    self:Print(format("Re-scan: %d new transaction%s.",
+                        newCount, newCount == 1 and "" or "s"))
+                    self:RefreshUI()
+                end
 
-            -- Schedule next tick (only if still valid)
-            if self.bankOpen
-                and self.db.profile.scanning.rescanEnabled then
-                self._rescanTimer = C_Timer.After(interval, tick)
-            else
-                self._rescanTimer = nil
-            end
+                -- Schedule next tick (re-check conditions)
+                if self._rescanActive
+                    and self.bankOpen
+                    and self.db.profile.scanning.rescanEnabled then
+                    C_Timer.After(interval, tick)
+                else
+                    self._rescanActive = false
+                end
+            end)
         end)
+
+        -- If pcall caught an error, log it and still schedule next tick
+        if not ok then
+            if self.db.profile.scanning.notifyOnScan then
+                self:Print("Re-scan error: " .. tostring(err))
+            end
+            if self._rescanActive and self.bankOpen then
+                C_Timer.After(interval, tick)
+            else
+                self._rescanActive = false
+            end
+        end
     end
 
-    self._rescanTimer = C_Timer.After(interval, tick)
+    C_Timer.After(interval, tick)
 end
 
 --- Stop the periodic re-scan timer.
 function GBL:StopPeriodicRescan()
-    if self._rescanTimer then
-        self._rescanTimer.cancelled = true
-        self._rescanTimer = nil
-    end
+    self._rescanActive = false
 end
 
 --- Check whether the periodic re-scan timer is running.
 -- @return boolean
 function GBL:IsPeriodicRescanActive()
-    return self._rescanTimer ~= nil and not self._rescanTimer.cancelled
+    return self._rescanActive == true
 end

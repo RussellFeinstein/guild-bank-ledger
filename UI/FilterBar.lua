@@ -17,7 +17,7 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 function GBL:CreateDefaultFilters()
     return {
         searchText = "",           -- substring match on player or itemLink
-        dateRange  = "30d",        -- "7d", "30d", "all"
+        dateRange  = "30d",        -- "1h", "3h", "1d", "7d", "30d", "all"
         customStartTime = nil,     -- number or nil (only when dateRange == "custom")
         customEndTime   = nil,     -- number or nil
         category   = "ALL",        -- "ALL" or a category key
@@ -61,7 +61,13 @@ function GBL:MatchesFilters(record, filters)
         local now = GetServerTime()
         local cutoff
 
-        if filters.dateRange == "7d" then
+        if filters.dateRange == "1h" then
+            cutoff = now - 3600
+        elseif filters.dateRange == "3h" then
+            cutoff = now - (3 * 3600)
+        elseif filters.dateRange == "1d" then
+            cutoff = now - (24 * 3600)
+        elseif filters.dateRange == "7d" then
             cutoff = now - (7 * 24 * 3600)
         elseif filters.dateRange == "30d" then
             cutoff = now - (30 * 24 * 3600)

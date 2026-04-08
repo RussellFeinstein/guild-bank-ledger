@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.6.0"
+local VERSION = "0.7.0"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -57,7 +57,7 @@ local defaults = {
             autoScan = true, scanDelay = 0.5, notifyOnScan = true,
             thankYouMessage = "Thanks for helping run the guild!",
             lockBankWhileScanning = false,
-            rescanEnabled = true, rescanInterval = 5,
+            rescanEnabled = true, rescanInterval = 3,
         },
         alerts = { enabled = true, chatNotify = true, soundNotify = true },
         export = { delimiter = ",", includeHeaders = true, dateFormat = "%Y-%m-%d %H:%M" },

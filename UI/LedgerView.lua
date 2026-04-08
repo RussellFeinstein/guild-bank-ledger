@@ -65,6 +65,9 @@ end
 -- Ledger view state
 ------------------------------------------------------------------------
 
+-- Pagination: rows rendered per page
+GBL.LEDGER_PAGE_SIZE = 100
+
 -- Sorting state (managed per-session)
 GBL.ledgerSortColumn = "timestamp"
 GBL.ledgerSortAscending = false  -- newest first by default
@@ -128,10 +131,22 @@ function GBL:CreateLedgerView(container, transactions, filters)
 
     local visibleCols = self:GetVisibleColumns(filters)
 
+    -- Pagination
+    local pageSize = self.LEDGER_PAGE_SIZE
+    local totalPages = math.max(1, math.ceil(#filtered / pageSize))
+    local currentPage = math.min(self._ledgerCurrentPage or 1, totalPages)
+    self._ledgerCurrentPage = currentPage
+    local startIdx = (currentPage - 1) * pageSize + 1
+    local endIdx = math.min(currentPage * pageSize, #filtered)
+
     -- Status line
     local status = AceGUI:Create("Label")
     status:SetFullWidth(true)
-    status:SetText(#filtered .. " transactions")
+    if #filtered > pageSize then
+        status:SetText("Showing " .. startIdx .. "-" .. endIdx .. " of " .. #filtered .. " transactions")
+    else
+        status:SetText(#filtered .. " transactions")
+    end
     container:AddChild(status)
 
     -- Column headers
@@ -189,8 +204,8 @@ function GBL:CreateLedgerView(container, transactions, filters)
         return ""
     end
 
-    -- Transaction rows
-    for i = 1, #filtered do
+    -- Transaction rows (current page only)
+    for i = startIdx, endIdx do
         local tx = filtered[i]
         local rowGroup = AceGUI:Create("SimpleGroup")
         rowGroup:SetFullWidth(true)
@@ -205,6 +220,9 @@ function GBL:CreateLedgerView(container, transactions, filters)
         end
     end
 
+    -- TODO: Pagination controls not rendering in AceGUI ScrollFrame — fix layout
+    -- Page data is capped to 100 rows; controls needed to navigate pages.
+
     -- Store filtered data for refresh
     self._ledgerFiltered = filtered
 end
@@ -212,6 +230,7 @@ end
 --- Refresh the ledger view with current data and filters.
 function GBL:RefreshLedgerView()
     if self._ledgerContainer and self._ledgerTransactions then
+        self._ledgerCurrentPage = 1  -- reset pagination on refresh
         self:CreateLedgerView(
             self._ledgerContainer,
             self._ledgerTransactions,

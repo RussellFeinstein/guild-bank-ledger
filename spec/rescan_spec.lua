@@ -148,11 +148,12 @@ describe("Periodic Rescan", function()
 
         it("is no-op if already running (idempotent)", function()
             GBL:StartPeriodicRescan()
-            local firstTimer = GBL._rescanTimer
+            assert.is_true(GBL:IsPeriodicRescanActive())
 
+            -- Call again — should not error or change state
             GBL:StartPeriodicRescan()
 
-            assert.equals(firstTimer, GBL._rescanTimer)
+            assert.is_true(GBL:IsPeriodicRescanActive())
         end)
 
         it("is no-op when rescanEnabled is false", function()
@@ -187,6 +188,14 @@ describe("Periodic Rescan", function()
                 GBL:StopPeriodicRescan()
             end)
             assert.is_false(GBL:IsPeriodicRescanActive())
+        end)
+
+        it("sets _rescanActive to false", function()
+            GBL:StartPeriodicRescan()
+            assert.is_true(GBL._rescanActive)
+
+            GBL:StopPeriodicRescan()
+            assert.is_false(GBL._rescanActive)
         end)
     end)
 
@@ -243,10 +252,30 @@ describe("Periodic Rescan", function()
 
             -- Disable before tick fires
             GBL.db.profile.scanning.rescanEnabled = false
-            MockWoW.fireTimers()  -- interval tick
-            MockWoW.fireTimers()  -- 0.5s delay
+            MockWoW.fireTimers()  -- interval tick (bails due to rescanEnabled=false)
 
-            assert.is_nil(GBL._rescanTimer)
+            assert.is_false(GBL:IsPeriodicRescanActive())
+        end)
+
+        it("survives an error in ReadAllTransactions and schedules next tick", function()
+            MockWoW.guildBank.numTabs = 1
+            Helpers.addMoneyTransactions({
+                Helpers.makeMoneyTransaction("repair", "Raider1", 50000, 0),
+            })
+
+            local origRead = GBL.ReadAllTransactions
+            GBL.ReadAllTransactions = function() error("test explosion") end
+
+            GBL:StartPeriodicRescan()
+            MockWoW.fireTimers()  -- interval tick
+            MockWoW.fireTimers()  -- 0.5s delay (error occurs here, caught by pcall)
+
+            -- Should still be active (next tick scheduled)
+            assert.is_true(GBL:IsPeriodicRescanActive())
+            -- Verify a new timer was queued
+            assert.is_true(#MockWoW.pendingTimers > 0)
+
+            GBL.ReadAllTransactions = origRead
         end)
     end)
 

@@ -59,9 +59,33 @@ function GBL:ToggleMainFrame()
 end
 
 --- Refresh the active tab's content.
+-- Uses per-tab refresh when possible to preserve filter/sort state.
+-- Falls back to full tab rebuild if the tab hasn't been built yet.
 function GBL:RefreshUI()
     if not self.tabGroup then return end
-    self.tabGroup:SelectTab(self.activeTab or "transactions")
+
+    local guildData = self:GetGuildData()
+    local tab = self.activeTab or "transactions"
+
+    if tab == "goldlog" and self._goldLogContainer then
+        -- Update stored data reference, re-render with existing filters
+        self._goldLogTransactions = guildData and guildData.moneyTransactions or {}
+        self:RefreshGoldLog()
+    elseif tab == "transactions" and self._ledgerContainer then
+        self._ledgerTransactions = guildData and guildData.transactions or {}
+        self:RefreshLedgerView()
+    elseif tab == "consumption" and self._consumptionContainer then
+        local transactions = guildData and guildData.transactions or {}
+        local moneyTransactions = guildData and guildData.moneyTransactions or {}
+        local allTx = {}
+        for i = 1, #transactions do allTx[#allTx + 1] = transactions[i] end
+        for i = 1, #moneyTransactions do allTx[#allTx + 1] = moneyTransactions[i] end
+        self._consumptionTransactions = allTx
+        self:RefreshConsumptionView()
+    else
+        -- Tab not built yet or sync tab — full rebuild
+        self.tabGroup:SelectTab(tab)
+    end
 end
 
 --- Switch between tabs.
@@ -165,6 +189,7 @@ function GBL:BuildTransactionsTab(container, transactions)
 
     -- Create filter widgets (references ledgerGroup via closure)
     self:CreateFilterWidgets(filterGroup, filters, function()
+        self._ledgerCurrentPage = 1  -- reset pagination on filter change
         self:CreateLedgerView(ledgerGroup, transactions, filters)
     end)
 
@@ -190,7 +215,8 @@ GBL.GOLD_LOG_COLUMNS = {
     { key = "amount",    label = "Amount",     width = 120 },
 }
 
--- Gold log sort state (session-only)
+-- Gold log pagination and sort state (session-only)
+GBL.GOLD_LOG_PAGE_SIZE = 100
 GBL.goldLogSortColumn = "timestamp"
 GBL.goldLogSortAscending = false
 
@@ -223,11 +249,12 @@ function GBL:BuildGoldLogTab(container, moneyTransactions)
     filterGroup:SetLayout("Flow")
     container:AddChild(filterGroup)
 
-    -- Content area
+    -- Content area (full width — summary renders to the right of data columns)
     local contentGroup = AceGUI:Create("ScrollFrame")
     contentGroup:SetFullWidth(true)
     contentGroup:SetFullHeight(true)
     contentGroup:SetLayout("Flow")
+    container:AddChild(contentGroup)
 
     local filters = self:CreateDefaultFilters()
 
@@ -238,6 +265,7 @@ function GBL:BuildGoldLogTab(container, moneyTransactions)
     searchBox:SetText("")
     searchBox:SetCallback("OnEnterPressed", function(_widget, _event, text)
         filters.searchText = text
+        self._goldLogCurrentPage = 1
         self:RenderGoldLog(contentGroup, moneyTransactions, filters)
     end)
     filterGroup:AddChild(searchBox)
@@ -247,13 +275,17 @@ function GBL:BuildGoldLogTab(container, moneyTransactions)
     dateDropdown:SetLabel("Date Range")
     dateDropdown:SetWidth(120)
     dateDropdown:SetList({
-        ["all"] = "All Time",
+        ["1h"] = "Last Hour",
+        ["3h"] = "Last 3 Hours",
+        ["1d"] = "Last 24 Hours",
         ["7d"] = "Last 7 Days",
         ["30d"] = "Last 30 Days",
-    })
+        ["all"] = "All Time",
+    }, { "1h", "3h", "1d", "7d", "30d", "all" })
     dateDropdown:SetValue("30d")
     dateDropdown:SetCallback("OnValueChanged", function(_widget, _event, value)
         filters.dateRange = value
+        self._goldLogCurrentPage = 1
         self:RenderGoldLog(contentGroup, moneyTransactions, filters)
     end)
     filterGroup:AddChild(dateDropdown)
@@ -271,6 +303,7 @@ function GBL:BuildGoldLogTab(container, moneyTransactions)
     typeDropdown:SetValue("ALL")
     typeDropdown:SetCallback("OnValueChanged", function(_widget, _event, value)
         filters.txType = value
+        self._goldLogCurrentPage = 1
         self:RenderGoldLog(contentGroup, moneyTransactions, filters)
     end)
     filterGroup:AddChild(typeDropdown)
@@ -287,11 +320,10 @@ function GBL:BuildGoldLogTab(container, moneyTransactions)
         searchBox:SetText("")
         dateDropdown:SetValue("30d")
         typeDropdown:SetValue("ALL")
+        self._goldLogCurrentPage = 1
         self:RenderGoldLog(contentGroup, moneyTransactions, filters)
     end)
     filterGroup:AddChild(resetBtn)
-
-    container:AddChild(contentGroup)
 
     -- Store references for refresh
     self._goldLogContainer = contentGroup
@@ -301,7 +333,51 @@ function GBL:BuildGoldLogTab(container, moneyTransactions)
     self:RenderGoldLog(contentGroup, moneyTransactions, filters)
 end
 
---- Render the gold log transaction list.
+--- Build an array of summary line descriptors for the gold log.
+-- Each entry: { label=string, value=string, color=table|nil, isHeader=bool }
+-- Rendered to the right of data rows in RenderGoldLog.
+function GBL:BuildGoldLogSummaryLines(sums)
+    local depositColor = self:GetAccessibleColor("DEPOSIT")
+    local withdrawColor = self:GetAccessibleColor("WITHDRAW")
+    local netColor = sums.net >= 0 and depositColor or withdrawColor
+
+    local lines = {}
+    local function add(label, amount, color, indent)
+        local text = self:FormatMoney(math.abs(amount))
+        if amount < 0 then text = "-" .. text end
+        if amount > 0 and label == "Net" then text = "+" .. text end
+        lines[#lines + 1] = {
+            label = (indent and "  " or "") .. label,
+            value = text,
+            color = color,
+        }
+    end
+    local function header(text)
+        lines[#lines + 1] = { label = text, value = "", color = nil, isHeader = true }
+    end
+    local function spacer()
+        lines[#lines + 1] = { label = "", value = "", color = nil }
+    end
+
+    header("Income")
+    if sums.deposit > 0 then add("Deposits", sums.deposit, depositColor, true) end
+    if sums.depositSummary > 0 then add("Deposit Summary", sums.depositSummary, depositColor, true) end
+    add("Total In", sums.totalDeposited, depositColor, false)
+
+    spacer()
+    header("Outflow")
+    if sums.withdraw > 0 then add("Withdrawals", sums.withdraw, withdrawColor, true) end
+    if sums.repair > 0 then add("Repairs", sums.repair, withdrawColor, true) end
+    if sums.buyTab > 0 then add("Tab Purchases", sums.buyTab, withdrawColor, true) end
+    add("Total Out", sums.totalWithdrawn, withdrawColor, false)
+
+    spacer()
+    add("Net", sums.net, netColor, false)
+
+    return lines
+end
+
+--- Render the gold log transaction list with summary to the right of data columns.
 function GBL:RenderGoldLog(container, moneyTransactions, filters)
     container:ReleaseChildren()
 
@@ -311,13 +387,68 @@ function GBL:RenderGoldLog(container, moneyTransactions, filters)
     local filtered = self:FilterTransactions(moneyTransactions or {}, filters)
     self:SortTransactions(filtered, self.goldLogSortColumn, self.goldLogSortAscending)
 
+    -- Pagination
+    local pageSize = self.GOLD_LOG_PAGE_SIZE
+    local totalPages = math.max(1, math.ceil(#filtered / pageSize))
+    local currentPage = math.min(self._goldLogCurrentPage or 1, totalPages)
+    self._goldLogCurrentPage = currentPage
+    local startIdx = (currentPage - 1) * pageSize + 1
+    local endIdx = math.min(currentPage * pageSize, #filtered)
+
+    -- Compute summary lines (rendered to the right of data rows)
+    local sums = self:ComputeGoldLogSums(filtered)
+    local summaryLines = self:BuildGoldLogSummaryLines(sums)
+
+    local function colorHex(c)
+        return string.format("|cff%02x%02x%02x", c.r * 255, c.g * 255, c.b * 255)
+    end
+
+    -- Append summary labels to a row at the given summary line index.
+    local SUMMARY_DIV_W = 20   -- width of the vertical divider
+    local SUMMARY_LABEL_W = 140
+    local SUMMARY_VALUE_W = 130
+    local function appendDivider(rowGroup)
+        local div = AceGUI:Create("Label")
+        div:SetWidth(SUMMARY_DIV_W)
+        div:SetText("|cff666666\124\124")
+        rowGroup:AddChild(div)
+    end
+
+    local function appendSummary(rowGroup, lineIdx)
+        local line = summaryLines[lineIdx]
+        if not line then return end
+
+        if line.isHeader then
+            local hdr = AceGUI:Create("Label")
+            hdr:SetWidth(SUMMARY_LABEL_W + SUMMARY_VALUE_W)
+            hdr:SetText("|cffffcc00" .. line.label .. "|r")
+            rowGroup:AddChild(hdr)
+        elseif line.label == "" and line.value == "" then
+            -- spacer line — no widgets needed
+        else
+            local lbl = AceGUI:Create("Label")
+            lbl:SetWidth(SUMMARY_LABEL_W)
+            lbl:SetText(line.label)
+            rowGroup:AddChild(lbl)
+
+            local val = AceGUI:Create("Label")
+            val:SetWidth(SUMMARY_VALUE_W)
+            val:SetText(line.color and (colorHex(line.color) .. line.value .. "|r") or line.value)
+            rowGroup:AddChild(val)
+        end
+    end
+
     -- Status line
     local status = AceGUI:Create("Label")
     status:SetFullWidth(true)
-    status:SetText(#filtered .. " gold transactions")
+    if #filtered > pageSize then
+        status:SetText("Showing " .. startIdx .. "-" .. endIdx .. " of " .. #filtered .. " gold transactions")
+    else
+        status:SetText(#filtered .. " gold transactions")
+    end
     container:AddChild(status)
 
-    -- Column headers
+    -- Column headers + "Summary" header on the right
     local headerGroup = AceGUI:Create("SimpleGroup")
     headerGroup:SetFullWidth(true)
     headerGroup:SetLayout("Flow")
@@ -329,9 +460,22 @@ function GBL:RenderGoldLog(container, moneyTransactions, filters)
         btn:SetText(self:GetGoldLogSortIndicator(col.key, col.label))
         btn:SetCallback("OnClick", function()
             self:SetGoldLogSort(col.key)
+            self._goldLogCurrentPage = 1
             self:RenderGoldLog(container, moneyTransactions, filters)
         end)
         headerGroup:AddChild(btn)
+    end
+
+    if #filtered > 0 then
+        local divHdr = AceGUI:Create("Label")
+        divHdr:SetWidth(SUMMARY_DIV_W)
+        divHdr:SetText("|cff666666\124\124")
+        headerGroup:AddChild(divHdr)
+
+        local summaryHeader = AceGUI:Create("Label")
+        summaryHeader:SetWidth(SUMMARY_LABEL_W + SUMMARY_VALUE_W)
+        summaryHeader:SetText("|cffffcc00Summary|r")
+        headerGroup:AddChild(summaryHeader)
     end
 
     -- Empty state
@@ -347,34 +491,62 @@ function GBL:RenderGoldLog(container, moneyTransactions, filters)
         return
     end
 
-    -- Data rows
-    for i = 1, #filtered do
-        local tx = filtered[i]
+    -- Data rows with summary to the right
+    local summaryLineIdx = 1
+    local numRows = math.max(endIdx - startIdx + 1, #summaryLines)
+
+    for rowNum = 1, numRows do
         local rowGroup = AceGUI:Create("SimpleGroup")
         rowGroup:SetFullWidth(true)
         rowGroup:SetLayout("Flow")
         container:AddChild(rowGroup)
 
-        for _, col in ipairs(self.GOLD_LOG_COLUMNS) do
-            local lbl = AceGUI:Create("Label")
-            lbl:SetWidth(col.width)
-            if col.key == "timestamp" then
-                lbl:SetText(self:FormatTimestamp(tx.timestamp))
-            elseif col.key == "player" then
-                lbl:SetText(tx.player or "Unknown")
-            elseif col.key == "type" then
-                lbl:SetText(self:GetTxTypeDisplay(tx.type).label)
-            elseif col.key == "amount" then
-                lbl:SetText(self:FormatMoney(tx.amount))
+        -- Data columns (left side)
+        local dataIdx = startIdx + rowNum - 1
+        if dataIdx <= endIdx then
+            local tx = filtered[dataIdx]
+            for _, col in ipairs(self.GOLD_LOG_COLUMNS) do
+                local lbl = AceGUI:Create("Label")
+                lbl:SetWidth(col.width)
+                if col.key == "timestamp" then
+                    lbl:SetText(self:FormatTimestamp(tx.timestamp))
+                elseif col.key == "player" then
+                    lbl:SetText(tx.player or "Unknown")
+                elseif col.key == "type" then
+                    lbl:SetText(self:GetTxTypeDisplay(tx.type).label)
+                elseif col.key == "amount" then
+                    lbl:SetText(self:FormatMoney(tx.amount))
+                end
+                rowGroup:AddChild(lbl)
             end
-            rowGroup:AddChild(lbl)
+        else
+            -- Padding row (no data, just summary on right)
+            local colWidth = 0
+            for _, col in ipairs(self.GOLD_LOG_COLUMNS) do colWidth = colWidth + col.width end
+            local pad = AceGUI:Create("Label")
+            pad:SetWidth(colWidth)
+            pad:SetText("")
+            rowGroup:AddChild(pad)
+        end
+
+        -- Vertical divider (continues on every row)
+        appendDivider(rowGroup)
+
+        -- Summary content (right side, only on first N rows)
+        if summaryLineIdx <= #summaryLines then
+            appendSummary(rowGroup, summaryLineIdx)
+            summaryLineIdx = summaryLineIdx + 1
         end
     end
+
+    -- TODO: Pagination controls not rendering in AceGUI ScrollFrame — fix layout
+    -- Page data is capped to 100 rows; controls needed to navigate pages.
 end
 
 --- Refresh the gold log with current data and filters.
 function GBL:RefreshGoldLog()
     if self._goldLogContainer and self._goldLogTransactions then
+        self._goldLogCurrentPage = 1  -- reset pagination on refresh
         self:RenderGoldLog(
             self._goldLogContainer,
             self._goldLogTransactions,
@@ -464,10 +636,13 @@ function GBL:BuildConsumptionTab(container, transactions)
     dateDropdown:SetLabel("Date Range")
     dateDropdown:SetWidth(120)
     dateDropdown:SetList({
-        ["all"] = "All Time",
+        ["1h"] = "Last Hour",
+        ["3h"] = "Last 3 Hours",
+        ["1d"] = "Last 24 Hours",
         ["7d"] = "Last 7 Days",
         ["30d"] = "Last 30 Days",
-    })
+        ["all"] = "All Time",
+    }, { "1h", "3h", "1d", "7d", "30d", "all" })
     dateDropdown:SetValue("30d")
     dateDropdown:SetCallback("OnValueChanged", function(_widget, _event, value)
         filters.dateRange = value
@@ -718,10 +893,13 @@ function GBL:CreateFilterWidgets(container, filters, onChange)
     dateDropdown:SetLabel("Date Range")
     dateDropdown:SetWidth(120)
     dateDropdown:SetList({
-        ["all"] = "All Time",
+        ["1h"] = "Last Hour",
+        ["3h"] = "Last 3 Hours",
+        ["1d"] = "Last 24 Hours",
         ["7d"] = "Last 7 Days",
         ["30d"] = "Last 30 Days",
-    })
+        ["all"] = "All Time",
+    }, { "1h", "3h", "1d", "7d", "30d", "all" })
     dateDropdown:SetValue("30d")
     dateDropdown:SetCallback("OnValueChanged", function(_widget, _event, value)
         filters.dateRange = value

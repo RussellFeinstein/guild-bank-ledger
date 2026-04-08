@@ -5,6 +5,33 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-04-08
+
+### Added
+- Gold summary panel on Gold Log tab with per-type breakdown (deposits, withdrawals, repairs, tab purchases, net) rendered to the right of transaction columns with vertical divider
+- Date range filters: added Last Hour, Last 3 Hours, Last 24 Hours to all tabs
+- Pagination for Transactions tab (100 rows per page)
+
+### Fixed
+- Re-scan no longer resets selected date range and filters — `RefreshUI` now uses per-tab refresh functions that preserve filter state
+- Runtime crash: `attempt to register unknown event "GUILD_BANK_LOG_UPDATE"` — corrected to `GUILDBANKLOG_UPDATE` (WoW uses `GUILDBANK` as a single token in event names)
+
+## [0.6.2] — 2026-04-07
+
+### Fixed
+- Re-scan not detecting new transactions (withdrawals, deposits) while guild bank remains open — restored event-driven `GUILDBANKLOG_UPDATE` listener so reads happen after server responds, not after an arbitrary delay
+
+## [0.6.1] — 2026-04-07
+
+### Fixed
+- Periodic re-scan not functioning in-game due to unreliable `C_Timer.After` return value tracking and event-driven overhead
+- Re-scan chain silently breaking on Lua errors (now protected with pcall)
+
+### Changed
+- Reduced default re-scan interval from 5s to 3s (effective ~3.5s cycles, within 2-4s target)
+- Simplified re-scan to use fixed 0.5s delay instead of event-driven debounce with 2s fallback
+- Re-scan state tracked via boolean flag instead of timer handle (works across all WoW versions)
+
 ## [0.6.0] — 2026-04-07
 
 ### Added
@@ -46,7 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Money transaction types (Repair, Tab Purchase, Deposit Summary) now appear in the Type filter dropdown
 - Player stats now correctly track repair, buyTab, and depositSummary money types (were silently dropped)
 - Money transactions no longer show misleading "0" in Count column or blank Item/Category/Location fields
-- Transaction scan now uses debounced GUILD_BANK_LOG_UPDATE handler (0.5s after last event) so money tab data arrives before reading — previous next-frame read was too fast and missed money log responses
+- Transaction scan now uses debounced GUILDBANKLOG_UPDATE handler (0.5s after last event) so money tab data arrives before reading — previous next-frame read was too fast and missed money log responses
 - Money log now queried at `MAX_GUILDBANK_TABS+1` (constant 9), not `GetNumGuildBankTabs()+1` — guilds with <8 tabs were querying the wrong tab index, so money data was never loaded from the server
 - WoW API returns `"withdrawal"` for money transactions but code checked for `"withdraw"` — added normalization in CreateMoneyTxRecord so all downstream code matches correctly
 

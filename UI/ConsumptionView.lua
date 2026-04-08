@@ -163,6 +163,50 @@ function GBL:BuildConsumptionSummary(transactions, filters)
 end
 
 ------------------------------------------------------------------------
+-- Gold log sums
+------------------------------------------------------------------------
+
+--- Compute totals for a set of money transactions, broken down by type.
+-- @param filteredTransactions table array of money transaction records (already filtered)
+-- @return table { totalDeposited, totalWithdrawn, net, deposit, depositSummary, withdraw, repair, buyTab } in copper
+function GBL:ComputeGoldLogSums(filteredTransactions)
+    local sums = {
+        totalDeposited = 0, totalWithdrawn = 0, net = 0,
+        deposit = 0, depositSummary = 0,
+        withdraw = 0, repair = 0, buyTab = 0,
+    }
+    if not filteredTransactions then return sums end
+
+    for i = 1, #filteredTransactions do
+        local tx = filteredTransactions[i]
+        local amount = tx.amount or 0
+        if amount > 0 then
+            -- Same classification as BuildConsumptionSummary (keep in sync)
+            local t = tx.type
+            if t == "deposit" then
+                sums.deposit = sums.deposit + amount
+                sums.totalDeposited = sums.totalDeposited + amount
+            elseif t == "depositSummary" then
+                sums.depositSummary = sums.depositSummary + amount
+                sums.totalDeposited = sums.totalDeposited + amount
+            elseif t == "withdraw" then
+                sums.withdraw = sums.withdraw + amount
+                sums.totalWithdrawn = sums.totalWithdrawn + amount
+            elseif t == "repair" then
+                sums.repair = sums.repair + amount
+                sums.totalWithdrawn = sums.totalWithdrawn + amount
+            elseif t == "buyTab" then
+                sums.buyTab = sums.buyTab + amount
+                sums.totalWithdrawn = sums.totalWithdrawn + amount
+            end
+        end
+    end
+
+    sums.net = sums.totalDeposited - sums.totalWithdrawn
+    return sums
+end
+
+------------------------------------------------------------------------
 -- Sorting
 ------------------------------------------------------------------------
 
