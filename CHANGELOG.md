@@ -5,6 +5,15 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-04-07
+
+### Added
+- Periodic money log re-scan while guild bank is open (every 5 seconds)
+- Catches repair transactions before they roll off the 25-entry WoW API limit
+- Auto-starts after initial scan completes, stops on bank close
+- "Auto re-scan" toggle in settings row
+- Re-scan status shown in `/gbl status` output
+
 ## [0.5.0] — 2026-04-07
 
 **Milestone M5: Multi-Officer Sync**

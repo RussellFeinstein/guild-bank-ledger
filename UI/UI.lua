@@ -126,6 +126,20 @@ function GBL:AddSettingsRow(container)
         self.db.profile.scanning.lockBankWhileScanning = value
     end)
     row:AddChild(lockCB)
+
+    local rescanCB = AceGUI:Create("CheckBox")
+    rescanCB:SetLabel("Auto re-scan")
+    rescanCB:SetWidth(200)
+    rescanCB:SetValue(self.db.profile.scanning.rescanEnabled)
+    rescanCB:SetCallback("OnValueChanged", function(_widget, _event, value)
+        self.db.profile.scanning.rescanEnabled = value
+        if value and self:IsBankOpen() then
+            self:StartPeriodicRescan()
+        else
+            self:StopPeriodicRescan()
+        end
+    end)
+    row:AddChild(rescanCB)
 end
 
 ------------------------------------------------------------------------

@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.5.0"
+local VERSION = "0.6.0"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -57,6 +57,7 @@ local defaults = {
             autoScan = true, scanDelay = 0.5, notifyOnScan = true,
             thankYouMessage = "Thanks for helping run the guild!",
             lockBankWhileScanning = false,
+            rescanEnabled = true, rescanInterval = 5,
         },
         alerts = { enabled = true, chatNotify = true, soundNotify = true },
         export = { delimiter = ",", includeHeaders = true, dateFormat = "%Y-%m-%d %H:%M" },
@@ -132,6 +133,7 @@ end
 
 function GBL:OnBankOpened()
     self.bankOpen = true
+    self._initialScanComplete = false
 
     -- GetGuildInfo("player") can return nil if the roster hasn't loaded yet.
     -- Retry a few times before giving up.
@@ -169,6 +171,8 @@ function GBL:OnBankOpened()
                     if guildData then
                         self:RunCompaction(guildData)
                     end
+                    self._initialScanComplete = true
+                    self:StartPeriodicRescan()
                 end)
             end)
         end)
@@ -204,6 +208,8 @@ function GBL:OnBankClosed()
     local wasScanning = self.scanInProgress
     self.bankOpen = false
     self.scanInProgress = false
+    self._initialScanComplete = false
+    self:StopPeriodicRescan()
     self:SendMessage("GBL_BANK_CLOSED")
 
     if wasScanning then
@@ -371,6 +377,14 @@ function GBL:PrintStatus()
     self:Print("Money transactions: " .. moneyCount)
     self:Print("Last scan: " .. lastScan)
     self:Print("Bank open: " .. (self.bankOpen and "Yes" or "No"))
+
+    local rescanStatus = "Off"
+    if self.db.profile.scanning.rescanEnabled and self:IsPeriodicRescanActive() then
+        rescanStatus = format("Every %ds", self.db.profile.scanning.rescanInterval)
+    elseif self.db.profile.scanning.rescanEnabled then
+        rescanStatus = "Enabled (bank closed)"
+    end
+    self:Print("Money re-scan: " .. rescanStatus)
 end
 
 function GBL:PrintHelp()

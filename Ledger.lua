@@ -367,3 +367,95 @@ function GBL:ScanTransactions(callback)
 
     return 0
 end
+
+------------------------------------------------------------------------
+-- Periodic re-scan (raid-only, money log)
+------------------------------------------------------------------------
+
+--- Lightweight re-scan of the money log only.
+-- Queries tab 9 (money), waits 0.5s for server, then reads.
+-- Dedup prevents storing duplicates. Much simpler than initial ScanTransactions.
+-- @param callback function(newCount) called with count of new records
+function GBL:RescanMoneyLog(callback)
+    if not self.bankOpen then
+        if callback then callback(0) end
+        return
+    end
+
+    local guildData = self:GetGuildData()
+    if not guildData then
+        if callback then callback(0) end
+        return
+    end
+
+    local moneyTab = (MAX_GUILDBANK_TABS or 8) + 1
+    QueryGuildBankLog(moneyTab)
+
+    C_Timer.After(0.5, function()
+        if not self.bankOpen then
+            if callback then callback(0) end
+            return
+        end
+
+        local freshGuildData = self:GetGuildData()
+        if not freshGuildData then
+            if callback then callback(0) end
+            return
+        end
+
+        local newCount = self:ReadMoneyTransactions(freshGuildData)
+        if callback then callback(newCount) end
+    end)
+end
+
+--- Start the periodic money log re-scan timer.
+-- Runs whenever the bank is open and rescan is enabled.
+-- Self-chaining: each tick schedules the next after completing.
+function GBL:StartPeriodicRescan()
+    if not self.bankOpen then return end
+    if not self._initialScanComplete then return end
+    if not self.db.profile.scanning.rescanEnabled then return end
+    if self:IsPeriodicRescanActive() then return end
+
+    local interval = self.db.profile.scanning.rescanInterval or 5
+
+    local function tick()
+        if not self.bankOpen then return end
+        if not self.db.profile.scanning.rescanEnabled then
+            self._rescanTimer = nil
+            return
+        end
+
+        self:RescanMoneyLog(function(newCount)
+            if newCount and newCount > 0 then
+                self:Print(format("Re-scan: %d new transaction%s.",
+                    newCount, newCount == 1 and "" or "s"))
+                self:RefreshUI()
+            end
+
+            -- Schedule next tick (only if still valid)
+            if self.bankOpen
+                and self.db.profile.scanning.rescanEnabled then
+                self._rescanTimer = C_Timer.After(interval, tick)
+            else
+                self._rescanTimer = nil
+            end
+        end)
+    end
+
+    self._rescanTimer = C_Timer.After(interval, tick)
+end
+
+--- Stop the periodic re-scan timer.
+function GBL:StopPeriodicRescan()
+    if self._rescanTimer then
+        self._rescanTimer.cancelled = true
+        self._rescanTimer = nil
+    end
+end
+
+--- Check whether the periodic re-scan timer is running.
+-- @return boolean
+function GBL:IsPeriodicRescanActive()
+    return self._rescanTimer ~= nil and not self._rescanTimer.cancelled
+end

@@ -28,6 +28,9 @@ MockWoW.guild = {
 -- Mock player state
 MockWoW.player = { name = "TestOfficer", realm = "TestRealm" }
 
+-- Mock group state
+MockWoW.inRaid = false
+
 -- Mock item info (itemID -> {classID, subclassID})
 MockWoW.itemInfo = {}
 
@@ -60,6 +63,7 @@ function MockWoW.reset()
         realm = nil,
     }
     MockWoW.player = { name = "TestOfficer", realm = "TestRealm" }
+    MockWoW.inRaid = false
     MockWoW.itemInfo = {}
     MockWoW.serverTime = 1711700000
     MockWoW.pendingTimers = {}
@@ -164,6 +168,10 @@ function MockWoW.install()
 
     _G.IsInGuild = function()
         return MockWoW.guild.name ~= nil
+    end
+
+    _G.IsInRaid = function()
+        return MockWoW.inRaid
     end
 
     -- Guild bank tabs
@@ -299,7 +307,7 @@ function MockWoW.install()
     -- GetAddOnMetadata
     _G.GetAddOnMetadata = function(addon, field)
         if addon == "GuildBankLedger" and field == "Version" then
-            return "0.5.0"
+            return "0.6.0"
         end
         return nil
     end
