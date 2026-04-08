@@ -232,14 +232,17 @@ end
 ------------------------------------------------------------------------
 
 --- Read all item transactions from a single guild bank tab.
+-- Uses batch dedup: counts occurrences of each hash in the log and
+-- only stores records that exceed the previously stored count.
 -- @param tab number Tab index
 -- @param guildData table Guild data from AceDB
 -- @return number Count of newly stored (non-duplicate) records
 function GBL:ReadTabTransactions(tab, guildData)
     if not guildData then return 0 end
 
+    -- Phase 1: Read all entries into a batch
     local numTx = GetNumGuildBankTransactions(tab)
-    local stored = 0
+    local batch = {}
 
     for i = 1, numTx do
         local txType, name, itemLink, count, tab1, tab2, year, month, day, hour =
@@ -250,23 +253,34 @@ function GBL:ReadTabTransactions(tab, guildData)
                 txType, name, itemLink, count, tab1, tab2,
                 year, month, day, hour
             )
-            if self:StoreTx(record, guildData) then
-                stored = stored + 1
-            end
+            table.insert(batch, record)
         end
     end
 
-    return stored
+    -- Phase 2: Filter to only genuinely new records
+    local newRecords = self:FilterNewRecords(batch, guildData)
+
+    -- Phase 3: Store the new records
+    for _, record in ipairs(newRecords) do
+        self:MarkSeen(record.id, record.timestamp, guildData)
+        table.insert(guildData.transactions, record)
+        self:UpdatePlayerStats(record, guildData)
+    end
+
+    return #newRecords
 end
 
 --- Read all money transactions from the guild bank money log.
+-- Uses batch dedup: counts occurrences of each hash in the log and
+-- only stores records that exceed the previously stored count.
 -- @param guildData table Guild data from AceDB
 -- @return number Count of newly stored (non-duplicate) records
 function GBL:ReadMoneyTransactions(guildData)
     if not guildData then return 0 end
 
+    -- Phase 1: Read all entries into a batch
     local numTx = GetNumGuildBankMoneyTransactions()
-    local stored = 0
+    local batch = {}
 
     for i = 1, numTx do
         local txType, name, amount, year, month, day, hour =
@@ -277,13 +291,21 @@ function GBL:ReadMoneyTransactions(guildData)
                 txType, name, amount,
                 year, month, day, hour
             )
-            if self:StoreMoneyTx(record, guildData) then
-                stored = stored + 1
-            end
+            table.insert(batch, record)
         end
     end
 
-    return stored
+    -- Phase 2: Filter to only genuinely new records
+    local newRecords = self:FilterNewRecords(batch, guildData)
+
+    -- Phase 3: Store the new records
+    for _, record in ipairs(newRecords) do
+        self:MarkSeen(record.id, record.timestamp, guildData)
+        table.insert(guildData.moneyTransactions, record)
+        self:UpdatePlayerStats(record, guildData)
+    end
+
+    return #newRecords
 end
 
 ------------------------------------------------------------------------
