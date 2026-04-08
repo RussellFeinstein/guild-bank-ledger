@@ -373,8 +373,8 @@ end
 ------------------------------------------------------------------------
 
 --- Lightweight re-scan of all transaction logs.
--- Queries all item tabs + money tab 9, waits 0.5s for server, then reads.
--- Dedup prevents storing duplicates. Much simpler than initial ScanTransactions.
+-- Queries all item tabs + money tab 9, waits for GUILD_BANK_LOG_UPDATE
+-- event (with 2s fallback), then reads. Dedup prevents duplicates.
 -- @param callback function(newCount) called with count of new records
 function GBL:RescanTransactionLogs(callback)
     if not self.bankOpen then
@@ -388,14 +388,15 @@ function GBL:RescanTransactionLogs(callback)
         return
     end
 
-    local numTabs = GetNumGuildBankTabs()
-    local moneyTab = (MAX_GUILDBANK_TABS or 8) + 1
-    for tab = 1, numTabs do
-        QueryGuildBankLog(tab)
-    end
-    QueryGuildBankLog(moneyTab)
+    local completed = false
+    local debounceTimer = nil
 
-    C_Timer.After(0.5, function()
+    local function finishRescan()
+        if completed then return end
+        completed = true
+        debounceTimer = nil
+        pcall(function() self:UnregisterEvent("GUILD_BANK_LOG_UPDATE") end)
+
         if not self.bankOpen then
             if callback then callback(0) end
             return
@@ -409,7 +410,28 @@ function GBL:RescanTransactionLogs(callback)
 
         local newCount = self:ReadAllTransactions(freshGuildData)
         if callback then callback(newCount) end
-    end)
+    end
+
+    -- Listen for server response with 0.5s debounce (same pattern as ScanTransactions)
+    self.GUILD_BANK_LOG_UPDATE = function()
+        if completed then return end
+        if debounceTimer then
+            debounceTimer.cancelled = true
+        end
+        debounceTimer = C_Timer.After(0.5, finishRescan)
+    end
+    self:RegisterEvent("GUILD_BANK_LOG_UPDATE")
+
+    -- Query all logs
+    local numTabs = GetNumGuildBankTabs()
+    local moneyTab = (MAX_GUILDBANK_TABS or 8) + 1
+    for tab = 1, numTabs do
+        QueryGuildBankLog(tab)
+    end
+    QueryGuildBankLog(moneyTab)
+
+    -- Fallback if event never fires (data already cached)
+    C_Timer.After(2, finishRescan)
 end
 
 --- Start the periodic transaction log re-scan timer.
