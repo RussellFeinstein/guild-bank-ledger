@@ -16,6 +16,7 @@ describe("Dedup", function()
             seenTxHashes = {},
             transactions = {},
             moneyTransactions = {},
+            playerStats = {},
         }
     end)
 
@@ -62,234 +63,157 @@ describe("Dedup", function()
         end)
     end)
 
+    describe("AssignOccurrenceIndices", function()
+        it("assigns :0 to unique records", function()
+            local rec1 = itemRecord({ player = "Thrall" })
+            local rec2 = itemRecord({ player = "Jaina" })
+
+            GBL:AssignOccurrenceIndices({ rec1, rec2 })
+
+            assert.is_truthy(rec1.id:find(":0$"))
+            assert.is_truthy(rec2.id:find(":0$"))
+        end)
+
+        it("assigns incrementing indices to identical records", function()
+            local rec1 = itemRecord({})
+            local rec2 = itemRecord({})
+            local rec3 = itemRecord({})
+
+            GBL:AssignOccurrenceIndices({ rec1, rec2, rec3 })
+
+            assert.is_truthy(rec1.id:find(":0$"))
+            assert.is_truthy(rec2.id:find(":1$"))
+            assert.is_truthy(rec3.id:find(":2$"))
+        end)
+
+        it("tracks occurrences per unique base hash", function()
+            local a1 = itemRecord({ player = "Thrall" })
+            local b1 = itemRecord({ player = "Jaina" })
+            local a2 = itemRecord({ player = "Thrall" })
+
+            GBL:AssignOccurrenceIndices({ a1, b1, a2 })
+
+            assert.is_truthy(a1.id:find(":0$"))
+            assert.is_truthy(b1.id:find(":0$"))
+            assert.is_truthy(a2.id:find(":1$"))
+        end)
+    end)
+
     describe("IsDuplicate", function()
         it("detects identical transaction as duplicate", function()
             local rec = itemRecord({})
-            local hash = GBL:ComputeTxHash(rec)
-            GBL:MarkSeen(hash, rec.timestamp, guildData)
+            rec.id = rec.id .. ":0"
+            rec._occurrence = 0
+            GBL:MarkSeen(rec.id, rec.timestamp, guildData)
 
             assert.is_true(GBL:IsDuplicate(rec, guildData))
         end)
 
-        it("detects 30-min drift in same hour bucket as duplicate", function()
-            local baseTime = 3600 * 100  -- exactly on an hour boundary
-            local rec1 = itemRecord({ timestamp = baseTime + 600 })   -- :10
-            local rec2 = itemRecord({ timestamp = baseTime + 2400 })  -- :40
-
-            local hash = GBL:ComputeTxHash(rec1)
-            GBL:MarkSeen(hash, rec1.timestamp, guildData)
-
-            -- rec2 is in the same hour bucket, should be duplicate
-            assert.is_true(GBL:IsDuplicate(rec2, guildData))
-        end)
-
-        it("detects 45-min drift across adjacent hour bucket as duplicate", function()
+        it("detects adjacent hour slot as duplicate", function()
             local baseTime = 3600 * 100
             local rec1 = itemRecord({ timestamp = baseTime + 3000 })  -- :50 in hour 100
+            rec1._occurrence = 0
+            rec1.id = rec1.id .. ":0"
+            GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
+
             local rec2 = itemRecord({ timestamp = baseTime + 4500 })  -- :15 in hour 101
+            rec2._occurrence = 0
+            rec2.id = rec2.id .. ":0"
 
-            local hash = GBL:ComputeTxHash(rec1)
-            GBL:MarkSeen(hash, rec1.timestamp, guildData)
-
-            -- rec2 is in adjacent hour bucket, should be caught by 3-slot check
             assert.is_true(GBL:IsDuplicate(rec2, guildData))
         end)
 
         it("does NOT detect 2-hour drift as duplicate", function()
             local baseTime = 3600 * 100
             local rec1 = itemRecord({ timestamp = baseTime })
-            local rec2 = itemRecord({ timestamp = baseTime + 7200 })  -- 2 hours later
+            rec1._occurrence = 0
+            rec1.id = rec1.id .. ":0"
+            GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
 
-            local hash = GBL:ComputeTxHash(rec1)
-            GBL:MarkSeen(hash, rec1.timestamp, guildData)
+            local rec2 = itemRecord({ timestamp = baseTime + 7200 })  -- 2 hours later
+            rec2._occurrence = 0
+            rec2.id = rec2.id .. ":0"
 
             assert.is_false(GBL:IsDuplicate(rec2, guildData))
         end)
 
         it("different player is not duplicate", function()
             local rec1 = itemRecord({ player = "Thrall" })
+            rec1._occurrence = 0
+            rec1.id = rec1.id .. ":0"
+            GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
+
             local rec2 = itemRecord({ player = "Jaina" })
-
-            local hash = GBL:ComputeTxHash(rec1)
-            GBL:MarkSeen(hash, rec1.timestamp, guildData)
-
-            assert.is_false(GBL:IsDuplicate(rec2, guildData))
-        end)
-
-        it("different item is not duplicate", function()
-            local rec1 = itemRecord({ itemID = 12345 })
-            local rec2 = itemRecord({ itemID = 67890 })
-
-            local hash = GBL:ComputeTxHash(rec1)
-            GBL:MarkSeen(hash, rec1.timestamp, guildData)
+            rec2._occurrence = 0
+            rec2.id = rec2.id .. ":0"
 
             assert.is_false(GBL:IsDuplicate(rec2, guildData))
         end)
 
-        it("different count is not duplicate", function()
-            local rec1 = itemRecord({ count = 5 })
-            local rec2 = itemRecord({ count = 10 })
+        it("different occurrence index is not duplicate", function()
+            local rec1 = itemRecord({})
+            rec1._occurrence = 0
+            rec1.id = rec1.id .. ":0"
+            GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
 
-            local hash = GBL:ComputeTxHash(rec1)
-            GBL:MarkSeen(hash, rec1.timestamp, guildData)
-
-            assert.is_false(GBL:IsDuplicate(rec2, guildData))
-        end)
-
-        it("different tab is not duplicate", function()
-            local rec1 = itemRecord({ tab = 1 })
-            local rec2 = itemRecord({ tab = 2 })
-
-            local hash = GBL:ComputeTxHash(rec1)
-            GBL:MarkSeen(hash, rec1.timestamp, guildData)
+            local rec2 = itemRecord({})
+            rec2._occurrence = 1
+            rec2.id = rec2.id .. ":1"
 
             assert.is_false(GBL:IsDuplicate(rec2, guildData))
         end)
     end)
 
     describe("MarkSeen", function()
-        it("stores hash with count 1 on first call", function()
+        it("stores hash with timestamp", function()
             local rec = itemRecord({})
-            local hash = GBL:ComputeTxHash(rec)
+            local hash = rec.id .. ":0"
             GBL:MarkSeen(hash, rec.timestamp, guildData)
 
-            local entry = guildData.seenTxHashes[hash]
-            assert.equals(1, entry.count)
-            assert.equals(rec.timestamp, entry.timestamp)
-        end)
-
-        it("increments count on subsequent calls", function()
-            local rec = itemRecord({})
-            local hash = GBL:ComputeTxHash(rec)
-            GBL:MarkSeen(hash, rec.timestamp, guildData)
-            GBL:MarkSeen(hash, rec.timestamp, guildData)
-            GBL:MarkSeen(hash, rec.timestamp, guildData)
-
-            local entry = guildData.seenTxHashes[hash]
-            assert.equals(3, entry.count)
-        end)
-
-        it("migrates old number format to table", function()
-            local hash = "old|format|hash"
-            local oldTimestamp = 1000000
-            guildData.seenTxHashes[hash] = oldTimestamp  -- old format
-
-            GBL:MarkSeen(hash, 2000000, guildData)
-
-            local entry = guildData.seenTxHashes[hash]
-            assert.equals(2, entry.count)
-            assert.equals(2000000, entry.timestamp)
+            assert.equals(rec.timestamp, guildData.seenTxHashes[hash])
         end)
     end)
 
-    describe("GetSeenCount", function()
-        it("returns 0 for unseen record", function()
-            local rec = itemRecord({})
-            assert.equals(0, GBL:GetSeenCount(rec, guildData))
-        end)
-
-        it("returns count for seen record", function()
-            local rec = itemRecord({})
-            local hash = GBL:ComputeTxHash(rec)
-            GBL:MarkSeen(hash, rec.timestamp, guildData)
-            GBL:MarkSeen(hash, rec.timestamp, guildData)
-
-            assert.equals(2, GBL:GetSeenCount(rec, guildData))
-        end)
-
-        it("counts across adjacent hour slots", function()
-            local baseTime = 3600 * 100
-            local rec1 = itemRecord({ timestamp = baseTime + 3500 })  -- end of hour 100
-            local rec2 = itemRecord({ timestamp = baseTime + 3700 })  -- start of hour 101
-
-            local hash1 = GBL:ComputeTxHash(rec1)
-            GBL:MarkSeen(hash1, rec1.timestamp, guildData)
-
-            -- rec2 is in adjacent slot, should see count from rec1
-            assert.equals(1, GBL:GetSeenCount(rec2, guildData))
-        end)
-
-        it("handles old number format", function()
-            local rec = itemRecord({})
-            local hash = GBL:ComputeTxHash(rec)
-            guildData.seenTxHashes[hash] = rec.timestamp  -- old format
-
-            assert.equals(1, GBL:GetSeenCount(rec, guildData))
-        end)
-    end)
-
-    describe("FilterNewRecords", function()
-        it("returns all records when none seen before", function()
-            local rec1 = itemRecord({ player = "Thrall" })
-            local rec2 = itemRecord({ player = "Jaina" })
-
-            local result = GBL:FilterNewRecords({ rec1, rec2 }, guildData)
-            assert.equals(2, #result)
-        end)
-
-        it("returns no records when all already seen", function()
-            local rec = itemRecord({})
-            GBL:MarkSeen(rec.id, rec.timestamp, guildData)
-
-            local result = GBL:FilterNewRecords({ rec }, guildData)
-            assert.equals(0, #result)
-        end)
-
-        it("allows duplicate transactions in same batch", function()
-            -- Two identical withdrawals in the same hour
+    describe("duplicate identical transactions", function()
+        it("two identical withdrawals both get stored via occurrence indices", function()
             local rec1 = itemRecord({})
-            local rec2 = itemRecord({})  -- same hash
+            local rec2 = itemRecord({})  -- same fields = same base hash
+            local batch = { rec1, rec2 }
 
-            local result = GBL:FilterNewRecords({ rec1, rec2 }, guildData)
-            assert.equals(2, #result)
-        end)
+            GBL:AssignOccurrenceIndices(batch)
 
-        it("stores second occurrence when first already seen", function()
-            local rec1 = itemRecord({})
-            -- First already stored
+            -- First passes dedup
+            assert.is_false(GBL:IsDuplicate(rec1, guildData))
             GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
 
-            -- Batch has two identical entries
-            local batch_a = itemRecord({})
-            local batch_b = itemRecord({})
-
-            local result = GBL:FilterNewRecords({ batch_a, batch_b }, guildData)
-            -- Stored count is 1, batch count is 2, deficit is 1
-            assert.equals(1, #result)
+            -- Second also passes (different occurrence index)
+            assert.is_false(GBL:IsDuplicate(rec2, guildData))
+            GBL:MarkSeen(rec2.id, rec2.timestamp, guildData)
         end)
 
-        it("handles mixed new and seen records", function()
-            local seen = itemRecord({ player = "Thrall" })
-            GBL:MarkSeen(seen.id, seen.timestamp, guildData)
+        it("re-scan of same batch produces no new stores", function()
+            -- First scan
+            local batch1 = { itemRecord({}), itemRecord({}) }
+            GBL:AssignOccurrenceIndices(batch1)
+            for _, r in ipairs(batch1) do
+                GBL:MarkSeen(r.id, r.timestamp, guildData)
+            end
 
-            local batch = {
-                itemRecord({ player = "Thrall" }),  -- already seen
-                itemRecord({ player = "Jaina" }),   -- new
-            }
+            -- Re-scan: same entries, same occurrence indices
+            local batch2 = { itemRecord({}), itemRecord({}) }
+            GBL:AssignOccurrenceIndices(batch2)
 
-            local result = GBL:FilterNewRecords(batch, guildData)
-            assert.equals(1, #result)
-            assert.equals("Jaina", result[1].player)
-        end)
-
-        it("handles triple identical transactions correctly", function()
-            -- 1 already stored, batch has 3 identical
-            local rec = itemRecord({})
-            GBL:MarkSeen(rec.id, rec.timestamp, guildData)
-
-            local batch = { itemRecord({}), itemRecord({}), itemRecord({}) }
-
-            local result = GBL:FilterNewRecords(batch, guildData)
-            -- Stored 1, batch has 3, deficit = 2
-            assert.equals(2, #result)
+            for _, r in ipairs(batch2) do
+                assert.is_true(GBL:IsDuplicate(r, guildData))
+            end
         end)
     end)
 
     describe("PruneSeenHashes", function()
         it("removes old entries and preserves recent", function()
             local now = Helpers.MockWoW.serverTime
-            guildData.seenTxHashes["old_hash"] = { count = 1, timestamp = now - (91 * 86400) }
-            guildData.seenTxHashes["recent_hash"] = { count = 1, timestamp = now - (10 * 86400) }
+            guildData.seenTxHashes["old_hash"] = now - (91 * 86400)   -- 91 days ago
+            guildData.seenTxHashes["recent_hash"] = now - (10 * 86400)  -- 10 days ago
 
             GBL:PruneSeenHashes(90, guildData)
 
@@ -297,15 +221,15 @@ describe("Dedup", function()
             assert.is_not_nil(guildData.seenTxHashes["recent_hash"])
         end)
 
-        it("handles old number format during pruning", function()
+        it("handles table format entries during pruning", function()
             local now = Helpers.MockWoW.serverTime
-            guildData.seenTxHashes["old_num"] = now - (91 * 86400)  -- old format, old
-            guildData.seenTxHashes["recent_num"] = now - (10 * 86400)  -- old format, recent
+            guildData.seenTxHashes["old_table"] = { count = 2, timestamp = now - (91 * 86400) }
+            guildData.seenTxHashes["recent_table"] = { count = 1, timestamp = now - (10 * 86400) }
 
             GBL:PruneSeenHashes(90, guildData)
 
-            assert.is_nil(guildData.seenTxHashes["old_num"])
-            assert.is_not_nil(guildData.seenTxHashes["recent_num"])
+            assert.is_nil(guildData.seenTxHashes["old_table"])
+            assert.is_not_nil(guildData.seenTxHashes["recent_table"])
         end)
     end)
 end)
