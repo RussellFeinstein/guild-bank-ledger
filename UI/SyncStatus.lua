@@ -150,8 +150,15 @@ function GBL:RenderPeerList(container)
             agoStr = math.floor(ago / 3600) .. "h ago"
         end
 
+        -- Version status indicator
+        local peerVersion = info.version or "?"
+        local versionTag = ""
+        if peerVersion ~= self.version then
+            versionTag = " |cffff6600(outdated)|r"
+        end
+
         lbl:SetText("  " .. name
-            .. " — v" .. (info.version or "?")
+            .. " — v" .. peerVersion .. versionTag
             .. ", " .. (info.txCount or 0) .. " tx"
             .. ", seen " .. agoStr)
         container:AddChild(lbl)

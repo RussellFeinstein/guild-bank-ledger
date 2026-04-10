@@ -169,7 +169,14 @@ end
 -- @param sender string Sender name
 -- @param data table Deserialized HELLO payload
 function GBL:HandleHello(sender, data)
+    local isNewPeer = not syncState.peers[sender]
     self:UpdatePeer(sender, data)
+
+    -- Reply with our own HELLO so the sender discovers us too.
+    -- Uses the normal cooldown to avoid infinite HELLO ping-pong.
+    if isNewPeer then
+        self:BroadcastHello()
+    end
 
     -- Major version mismatch — warn and refuse sync
     if data.version and self:MajorVersion(data.version) ~= self:MajorVersion(self.version) then

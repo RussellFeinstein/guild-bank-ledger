@@ -101,9 +101,9 @@ describe("Sync", function()
                 lastScanTime = 1000,
             })
 
-            -- Should have sent a SYNC_REQUEST whisper
-            assert.is_true(#MockAce.sentCommMessages > 0)
-            local sent = MockAce.sentCommMessages[1]
+            -- First message is HELLO response (new peer), second is SYNC_REQUEST
+            assert.is_true(#MockAce.sentCommMessages >= 2)
+            local sent = MockAce.sentCommMessages[2]
             assert.equals("WHISPER", sent.distribution)
             assert.equals("OfficerB", sent.target)
 
@@ -120,7 +120,13 @@ describe("Sync", function()
                 lastScanTime = 1000,
             })
 
-            assert.equals(0, #MockAce.sentCommMessages)
+            -- Only a HELLO response (new peer), no SYNC_REQUEST
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok then
+                    assert.not_equals("SYNC_REQUEST", data.type)
+                end
+            end
         end)
 
         it("does NOT trigger sync when remote has fewer", function()
@@ -132,7 +138,13 @@ describe("Sync", function()
                 lastScanTime = 1000,
             })
 
-            assert.equals(0, #MockAce.sentCommMessages)
+            -- Only a HELLO response (new peer), no SYNC_REQUEST
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok then
+                    assert.not_equals("SYNC_REQUEST", data.type)
+                end
+            end
         end)
 
         it("warns on major version mismatch and refuses sync", function()
@@ -143,8 +155,13 @@ describe("Sync", function()
                 lastScanTime = 1000,
             })
 
-            -- Should NOT send a SYNC_REQUEST despite high txCount
-            assert.equals(0, #MockAce.sentCommMessages)
+            -- Should NOT send a SYNC_REQUEST despite high txCount (HELLO response is OK)
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok then
+                    assert.not_equals("SYNC_REQUEST", data.type)
+                end
+            end
             -- Should have an audit entry about the mismatch
             local trail = GBL:GetAuditTrail()
             assert.is_true(#trail > 0)
