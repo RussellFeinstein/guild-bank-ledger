@@ -9,10 +9,10 @@ WoW addon that persistently logs guild bank transactions. Lua 5.1 + Ace3 stack. 
 - **Core.lua** — AceAddon bootstrap, lifecycle, slash commands, bank open/close detection
 - **Scanner.lua** — Guild bank slot scanning (inventory snapshots)
 - **Categories.lua** — Item classification via WoW classID/subclassID
-- **Dedup.lua** — Deduplication engine (hour-bucket fuzzy matching across officers)
+- **Dedup.lua** — Deduplication engine (hour-bucket fuzzy matching across guild members)
 - **Ledger.lua** — Transaction recording from GetGuildBankTransaction API
 - **Storage.lua** — Tiered storage, compaction (30d daily, 90d weekly), pruning
-- **Sync.lua** — Multi-officer sync via AceComm (HELLO/SYNC_REQUEST/SYNC_DATA/ACK protocol)
+- **Sync.lua** — Guild-wide sync via AceComm (HELLO/SYNC_REQUEST/SYNC_DATA/ACK protocol)
 - **UI/Accessibility.lua** — Colorblind-safe palettes, font scaling, keyboard nav, triple encoding
 - **UI/FilterBar.lua** — Transaction filter logic and AceGUI filter widgets
 - **UI/ConsumptionView.lua** — Per-player consumption aggregation and rendering
@@ -54,7 +54,8 @@ luacheck .                 # lint production code
 - Item IDs: use `C_Item.GetItemInfoInstant()` for classID/subclassID
 - Guard `Enum.PlayerInteractionType.GuildBanker` existence for Classic compat
 - Saved variables: `GuildBankLedgerDB` (AceDB), data keyed per guild name
+- **Sync is guild-wide** — all members participate in HELLO/sync, not just officers. Officer rank only gates UI visibility (settings, admin features). Never add rank checks to the sync protocol.
 
 ## Version
 
-Current: 0.7.2 (see `VERSION` file)
+Current: 0.7.3 (see `VERSION` file)

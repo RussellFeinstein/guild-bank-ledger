@@ -1,6 +1,6 @@
 ------------------------------------------------------------------------
 -- GuildBankLedger — Sync.lua
--- Multi-officer transaction sync via AceComm
+-- Guild-wide transaction sync via AceComm
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
@@ -163,7 +163,7 @@ end
 -- HELLO handling
 ------------------------------------------------------------------------
 
---- Process an incoming HELLO from another officer.
+--- Process an incoming HELLO from another guild member.
 -- Updates peer list. If they have more data and autoSync is on,
 -- initiates a sync request.
 -- @param sender string Sender name
@@ -441,7 +441,7 @@ function GBL:HandleSyncData(sender, data)
         syncState.receiveSource = sender
         syncState.receiveGot = 0
         syncState.receiveStored = 0
-    elseif sender ~= syncState.receiveSource then
+    elseif Ambiguate(sender, "none") ~= Ambiguate(syncState.receiveSource, "none") then
         -- Reject data from a different sender during active receive
         self:AddAuditEntry("Ignored SYNC_DATA from " .. sender
             .. " (receiving from " .. (syncState.receiveSource or "?") .. ")")
@@ -509,7 +509,7 @@ end
 -- @param sender string Sender name
 -- @param data table Deserialized ACK payload
 function GBL:HandleAck(sender, _data)
-    if not syncState.sending or sender ~= syncState.sendTarget then return end
+    if not syncState.sending or Ambiguate(sender, "none") ~= Ambiguate(syncState.sendTarget, "none") then return end
 
     if syncState.sendTimer then
         syncState.sendTimer.cancelled = true

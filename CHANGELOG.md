@@ -5,6 +5,12 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] — 2026-04-10
+
+### Fixed
+- Sync data rejected by receiver due to name format mismatch between GUILD and WHISPER channels — HELLO arrives with "PlayerName" but SYNC_DATA arrives with "PlayerName-RealmName"; now uses `Ambiguate` on all sender comparisons in HandleSyncData and HandleAck
+- Updated sync comments and UI strings from "officers" to "guild members" (sync is guild-wide, officer rank only gates UI)
+
 ## [0.7.2] — 2026-04-10
 
 ### Fixed

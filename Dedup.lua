@@ -55,7 +55,7 @@ function GBL:IsDuplicate(record, guildData)
         return true
     end
 
-    -- Also check adjacent hour slots for drift tolerance (cross-officer sync)
+    -- Also check adjacent hour slots for drift tolerance (cross-member sync)
     local _, timeSlot = self:ComputeTxHash(record)
     local prefix = buildPrefix(record)
     local occ = record._occurrence or 0

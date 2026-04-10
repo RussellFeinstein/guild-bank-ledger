@@ -84,7 +84,7 @@ function GBL:RenderSyncContent(container)
         disabledLabel:SetFullWidth(true)
         disabledLabel:SetText(
             "Sync is disabled. Enable it above to share transaction data"
-            .. " with other officers running this addon.")
+            .. " with other guild members running this addon.")
         container:AddChild(disabledLabel)
         return
     end
@@ -161,7 +161,7 @@ function GBL:RenderPeerList(container)
         local none = AceGUI:Create("Label")
         none:SetFullWidth(true)
         none:SetText("  No peers detected yet."
-            .. " Other officers with the addon will appear here.")
+            .. " Other guild members with the addon will appear here.")
         container:AddChild(none)
     end
 end

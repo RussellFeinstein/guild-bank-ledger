@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.7.2"
+local VERSION = "0.7.3"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -222,7 +222,7 @@ function GBL:OnBankClosed()
         self._autoOpenedFrame = nil
     end
 
-    -- Broadcast HELLO so other officers know we have fresh data
+    -- Broadcast HELLO so other guild members know we have fresh data
     self:BroadcastHello()
 end
 
