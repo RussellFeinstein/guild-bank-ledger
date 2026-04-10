@@ -5,6 +5,16 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.5] — 2026-04-10
+
+### Fixed
+- Peer discovery failure: new-peer HELLO reply was silently blocked by the 60s cooldown, preventing mutual peer detection until one side independently triggered a broadcast (e.g. closing the guild bank)
+- HELLO cooldown consumed even when broadcast fails due to missing guild data at login — subsequent retries blocked for 60s
+
+### Added
+- HELLO broadcast on guild bank open for immediate peer discovery
+- Debounced new-peer HELLO replies bypass the cooldown; multiple new peers discovered within 2s coalesce into a single reply (prevents HELLO flood in large guilds)
+
 ## [0.7.4] — 2026-04-10
 
 ### Added

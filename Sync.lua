@@ -39,6 +39,7 @@ local syncState = {
     peers = {},
     auditTrail = {},
     lastHelloTime = 0,
+    pendingHelloReply = false,
 }
 
 ------------------------------------------------------------------------
@@ -88,15 +89,16 @@ end
 --- Broadcast a HELLO message to the guild channel.
 -- Includes addon version, protocol version, tx count, and last scan time.
 -- Throttled by HELLO_COOLDOWN seconds between broadcasts.
-function GBL:BroadcastHello()
+function GBL:BroadcastHello(force)
     if not self.db.profile.sync.enabled then return end
 
     local now = GetServerTime()
-    if now - syncState.lastHelloTime < HELLO_COOLDOWN then return end
-    syncState.lastHelloTime = now
+    if not force and now - syncState.lastHelloTime < HELLO_COOLDOWN then return end
 
     local guildData = self:GetGuildData()
     if not guildData then return end
+
+    syncState.lastHelloTime = now
 
     local txCount = #guildData.transactions + #guildData.moneyTransactions
 
@@ -172,10 +174,14 @@ function GBL:HandleHello(sender, data)
     local isNewPeer = not syncState.peers[sender]
     self:UpdatePeer(sender, data)
 
-    -- Reply with our own HELLO so the sender discovers us too.
-    -- Uses the normal cooldown to avoid infinite HELLO ping-pong.
-    if isNewPeer then
-        self:BroadcastHello()
+    -- Debounce: coalesce multiple new-peer discoveries into one reply.
+    -- Without this, N online peers would trigger N force-replies on login/reload.
+    if isNewPeer and not syncState.pendingHelloReply then
+        syncState.pendingHelloReply = true
+        C_Timer.After(2, function()
+            syncState.pendingHelloReply = false
+            self:BroadcastHello(true)
+        end)
     end
 
     -- Major version mismatch — warn and refuse sync
@@ -688,4 +694,5 @@ function GBL:ResetSyncState()
     syncState.peers = {}
     syncState.auditTrail = {}
     syncState.lastHelloTime = 0
+    syncState.pendingHelloReply = false
 end

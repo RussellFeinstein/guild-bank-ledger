@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.7.4"
+local VERSION = "0.7.5"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -140,6 +140,7 @@ function GBL:OnBankOpened()
     self:WaitForGuildName(function()
         if not self.bankOpen then return end
         self:SendMessage("GBL_BANK_OPENED")
+        self:BroadcastHello()
 
         if self.db.profile.ui.openOnBankOpen and self:IsOfficerRank() then
             self:CreateMainFrame()

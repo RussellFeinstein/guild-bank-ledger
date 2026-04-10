@@ -73,6 +73,37 @@ describe("Sync", function()
             GBL:BroadcastHello()
             assert.equals(0, #MockAce.sentCommMessages)
         end)
+
+        it("does not consume cooldown when GetGuildData returns nil", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            -- Temporarily clear guild name so GetGuildData returns nil
+            local savedName = MockWoW.guild.name
+            MockWoW.guild.name = nil
+            GBL._cachedGuildName = nil
+
+            GBL:BroadcastHello()
+            assert.equals(0, #MockAce.sentCommMessages)
+
+            -- Restore guild name — HELLO should now succeed (cooldown not consumed)
+            MockWoW.guild.name = savedName
+            GBL._cachedGuildName = nil
+            GBL:BroadcastHello()
+            assert.equals(1, #MockAce.sentCommMessages)
+        end)
+
+        it("force=true bypasses cooldown", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:BroadcastHello()
+            assert.equals(1, #MockAce.sentCommMessages)
+
+            -- Normal call blocked by cooldown
+            GBL:BroadcastHello()
+            assert.equals(1, #MockAce.sentCommMessages)
+
+            -- Force call bypasses cooldown
+            GBL:BroadcastHello(true)
+            assert.equals(2, #MockAce.sentCommMessages)
+        end)
     end)
 
     ---------------------------------------------------------------------------
@@ -101,9 +132,9 @@ describe("Sync", function()
                 lastScanTime = 1000,
             })
 
-            -- First message is HELLO response (new peer), second is SYNC_REQUEST
-            assert.is_true(#MockAce.sentCommMessages >= 2)
-            local sent = MockAce.sentCommMessages[2]
+            -- SYNC_REQUEST sent immediately; HELLO reply is debounced (fires after timer)
+            assert.is_true(#MockAce.sentCommMessages >= 1)
+            local sent = MockAce.sentCommMessages[1]
             assert.equals("WHISPER", sent.distribution)
             assert.equals("OfficerB", sent.target)
 
@@ -145,6 +176,49 @@ describe("Sync", function()
                     assert.not_equals("SYNC_REQUEST", data.type)
                 end
             end
+        end)
+
+        it("schedules debounced HELLO reply for new peers", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version,
+                txCount = 0,
+                lastScanTime = 1000,
+            })
+
+            -- HELLO reply is debounced — not sent immediately
+            assert.equals(0, #MockAce.sentCommMessages)
+
+            -- Fire the 2s debounce timer
+            MockWoW.fireTimers()
+
+            -- Now the forced HELLO reply is sent
+            assert.equals(1, #MockAce.sentCommMessages)
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok)
+            assert.equals("HELLO", data.type)
+        end)
+
+        it("coalesces multiple new peers into one HELLO reply", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Three new peers arrive before timer fires
+            GBL:HandleHello("OfficerB", { version = GBL.version, txCount = 0, lastScanTime = 100 })
+            GBL:HandleHello("OfficerC", { version = GBL.version, txCount = 0, lastScanTime = 200 })
+            GBL:HandleHello("OfficerD", { version = GBL.version, txCount = 0, lastScanTime = 300 })
+
+            -- All three are in peer list
+            local peers = GBL:GetSyncPeers()
+            assert.is_not_nil(peers["OfficerB"])
+            assert.is_not_nil(peers["OfficerC"])
+            assert.is_not_nil(peers["OfficerD"])
+
+            -- No messages yet (debounced)
+            assert.equals(0, #MockAce.sentCommMessages)
+
+            -- Fire timer — only 1 HELLO sent (not 3)
+            MockWoW.fireTimers()
+            assert.equals(1, #MockAce.sentCommMessages)
         end)
 
         it("warns on major version mismatch and refuses sync", function()
