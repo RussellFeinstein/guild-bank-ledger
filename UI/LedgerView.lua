@@ -158,6 +158,7 @@ function GBL:CreateLedgerView(container, transactions, filters)
     for _, col in ipairs(visibleCols) do
         local btn = AceGUI:Create("InteractiveLabel")
         btn:SetWidth(col.width)
+        btn.label:SetWordWrap(false)
         btn:SetText(self:GetSortIndicator(col.key, col.label))
         btn:SetCallback("OnClick", function()
             self:SetLedgerSort(col.key)
@@ -215,6 +216,7 @@ function GBL:CreateLedgerView(container, transactions, filters)
         for _, col in ipairs(visibleCols) do
             local lbl = AceGUI:Create("Label")
             lbl:SetWidth(col.width)
+            lbl.label:SetWordWrap(false)
             lbl:SetText(getCellText(tx, col))
             rowGroup:AddChild(lbl)
         end

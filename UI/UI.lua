@@ -421,6 +421,7 @@ function GBL:RenderGoldLog(container, moneyTransactions, filters)
         if line.isHeader then
             local hdr = AceGUI:Create("Label")
             hdr:SetWidth(SUMMARY_LABEL_W + SUMMARY_VALUE_W)
+            hdr.label:SetWordWrap(false)
             hdr:SetText("|cffffcc00" .. line.label .. "|r")
             rowGroup:AddChild(hdr)
         elseif line.label == "" and line.value == "" then
@@ -428,11 +429,13 @@ function GBL:RenderGoldLog(container, moneyTransactions, filters)
         else
             local lbl = AceGUI:Create("Label")
             lbl:SetWidth(SUMMARY_LABEL_W)
+            lbl.label:SetWordWrap(false)
             lbl:SetText(line.label)
             rowGroup:AddChild(lbl)
 
             local val = AceGUI:Create("Label")
             val:SetWidth(SUMMARY_VALUE_W)
+            val.label:SetWordWrap(false)
             val:SetText(line.color and (colorHex(line.color) .. line.value .. "|r") or line.value)
             rowGroup:AddChild(val)
         end
@@ -457,6 +460,7 @@ function GBL:RenderGoldLog(container, moneyTransactions, filters)
     for _, col in ipairs(self.GOLD_LOG_COLUMNS) do
         local btn = AceGUI:Create("InteractiveLabel")
         btn:SetWidth(col.width)
+        btn.label:SetWordWrap(false)
         btn:SetText(self:GetGoldLogSortIndicator(col.key, col.label))
         btn:SetCallback("OnClick", function()
             self:SetGoldLogSort(col.key)
@@ -508,6 +512,7 @@ function GBL:RenderGoldLog(container, moneyTransactions, filters)
             for _, col in ipairs(self.GOLD_LOG_COLUMNS) do
                 local lbl = AceGUI:Create("Label")
                 lbl:SetWidth(col.width)
+                lbl.label:SetWordWrap(false)
                 if col.key == "timestamp" then
                     lbl:SetText(self:FormatTimestamp(tx.timestamp))
                 elseif col.key == "player" then
@@ -734,6 +739,7 @@ function GBL:RenderConsumptionTable(container, transactions, filters)
         if col.sortKey then
             local btn = AceGUI:Create("InteractiveLabel")
             btn:SetWidth(col.width)
+            btn.label:SetWordWrap(false)
             btn:SetText("|cffffcc00" .. self:GetConsumptionSortIndicator(col.sortKey, col.label) .. "|r")
             btn:SetCallback("OnClick", function()
                 self:SetConsumptionSort(col.sortKey)
@@ -743,6 +749,7 @@ function GBL:RenderConsumptionTable(container, transactions, filters)
         else
             local lbl = AceGUI:Create("Label")
             lbl:SetWidth(col.width)
+            lbl.label:SetWordWrap(false)
             lbl:SetText("|cffffcc00" .. col.label .. "|r")
             headerGroup:AddChild(lbl)
         end
@@ -760,6 +767,7 @@ function GBL:RenderConsumptionTable(container, transactions, filters)
         local prefix = isExpanded and "[-] " or "[+] "
         local playerBtn = AceGUI:Create("InteractiveLabel")
         playerBtn:SetWidth(self.CONSUMPTION_COLUMNS[1].width)
+        playerBtn.label:SetWordWrap(false)
         playerBtn:SetText(prefix .. p.player)
         playerBtn:SetCallback("OnClick", function()
             if self._expandedPlayers[p.player] then
@@ -774,30 +782,35 @@ function GBL:RenderConsumptionTable(container, transactions, filters)
         -- Consumed
         local cLabel = AceGUI:Create("Label")
         cLabel:SetWidth(self.CONSUMPTION_COLUMNS[2].width)
+        cLabel.label:SetWordWrap(false)
         cLabel:SetText(tostring(p.netConsumed))
         rowGroup:AddChild(cLabel)
 
         -- Contributed
         local ctLabel = AceGUI:Create("Label")
         ctLabel:SetWidth(self.CONSUMPTION_COLUMNS[3].width)
+        ctLabel.label:SetWordWrap(false)
         ctLabel:SetText(tostring(p.netContributed))
         rowGroup:AddChild(ctLabel)
 
         -- Gold Net
         local goldLabel = AceGUI:Create("Label")
         goldLabel:SetWidth(self.CONSUMPTION_COLUMNS[4].width)
+        goldLabel.label:SetWordWrap(false)
         goldLabel:SetText(self:FormatMoney(p.moneyNet))
         rowGroup:AddChild(goldLabel)
 
         -- Top Items
         local topLabel = AceGUI:Create("Label")
         topLabel:SetWidth(self.CONSUMPTION_COLUMNS[5].width)
+        topLabel.label:SetWordWrap(false)
         topLabel:SetText(self:FormatTopItems(p.topItems))
         rowGroup:AddChild(topLabel)
 
         -- Last Active
         local laLabel = AceGUI:Create("Label")
         laLabel:SetWidth(self.CONSUMPTION_COLUMNS[6].width)
+        laLabel.label:SetWordWrap(false)
         laLabel:SetText(self:FormatTimestamp(p.lastActive))
         rowGroup:AddChild(laLabel)
 
@@ -831,6 +844,7 @@ function GBL:RenderConsumptionTable(container, transactions, filters)
                 for _, bh in ipairs(bHeaders) do
                     local lbl = AceGUI:Create("Label")
                     lbl:SetWidth(bh.width)
+                    lbl.label:SetWordWrap(false)
                     lbl:SetText("|cff999999" .. bh.label .. "|r")
                     bHeaderRow:AddChild(lbl)
                 end
@@ -845,18 +859,21 @@ function GBL:RenderConsumptionTable(container, transactions, filters)
                     -- Item name (indented)
                     local itemLabel = AceGUI:Create("Label")
                     itemLabel:SetWidth(190)
+                    itemLabel.label:SetWordWrap(false)
                     itemLabel:SetText("    " .. item.itemName)
                     bRow:AddChild(itemLabel)
 
                     -- Category
                     local catLabel = AceGUI:Create("Label")
                     catLabel:SetWidth(100)
+                    catLabel.label:SetWordWrap(false)
                     catLabel:SetText(item.categoryDisplay)
                     bRow:AddChild(catLabel)
 
                     -- Net (positive = consumed, negative = contributed)
                     local netLabel = AceGUI:Create("Label")
                     netLabel:SetWidth(70)
+                    netLabel.label:SetWordWrap(false)
                     local netStr = item.net > 0 and ("+" .. item.net) or tostring(item.net)
                     netLabel:SetText(netStr)
                     bRow:AddChild(netLabel)
