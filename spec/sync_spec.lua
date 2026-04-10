@@ -219,14 +219,14 @@ describe("Sync", function()
     describe("PrepareChunks", function()
         it("splits at CHUNK_SIZE boundary", function()
             local txList = {}
-            for i = 1, 250 do
+            for i = 1, 40 do
                 txList[i] = { type = "deposit", player = "P", timestamp = i, id = "h" .. i }
             end
 
             local chunks = GBL:PrepareChunks(txList, {})
             assert.equals(2, #chunks)
-            assert.equals(200, #chunks[1].transactions)
-            assert.equals(50, #chunks[2].transactions)
+            assert.equals(25, #chunks[1].transactions)
+            assert.equals(15, #chunks[2].transactions)
         end)
 
         it("returns empty table for no transactions", function()
@@ -236,22 +236,22 @@ describe("Sync", function()
 
         it("mixes item and money transactions across chunks", function()
             local txList = {}
-            for i = 1, 150 do
+            for i = 1, 20 do
                 txList[i] = { type = "deposit", player = "P", timestamp = i }
             end
             local moneyList = {}
-            for i = 1, 100 do
+            for i = 1, 15 do
                 moneyList[i] = { type = "deposit", player = "P", amount = i * 100, timestamp = i }
             end
 
             local chunks = GBL:PrepareChunks(txList, moneyList)
             assert.equals(2, #chunks)
-            -- First chunk: 150 item tx + 50 money tx = 200
-            assert.equals(150, #chunks[1].transactions)
-            assert.equals(50, #chunks[1].moneyTransactions)
-            -- Second chunk: remaining 50 money tx
+            -- First chunk: 20 item tx + 5 money tx = 25
+            assert.equals(20, #chunks[1].transactions)
+            assert.equals(5, #chunks[1].moneyTransactions)
+            -- Second chunk: remaining 10 money tx
             assert.equals(0, #chunks[2].transactions)
-            assert.equals(50, #chunks[2].moneyTransactions)
+            assert.equals(10, #chunks[2].moneyTransactions)
         end)
     end)
 
@@ -827,6 +827,225 @@ describe("Sync", function()
 
             -- Should no longer be syncing
             assert.is_false(GBL:IsSyncing())
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- MajorVersion helper
+    ---------------------------------------------------------------------------
+
+    ---------------------------------------------------------------------------
+    -- ACK timer callback behavior
+    ---------------------------------------------------------------------------
+
+    describe("ACK timer callback", function()
+        it("CHUNK_SIZE constant is 25", function()
+            assert.equals(25, GBL.SYNC_CHUNK_SIZE)
+        end)
+
+        it("ACK timer starts after send callback, not immediately", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Override SendCommMessage to NOT invoke callback
+            local storedCallback, storedArg
+            local origSend = GBL.SendCommMessage
+            GBL.SendCommMessage = function(self, prefix, text, dist, target, prio, cbFn, cbArg)
+                table.insert(MockAce.sentCommMessages, {
+                    prefix = prefix, text = text, distribution = dist, target = target,
+                })
+                storedCallback = cbFn
+                storedArg = cbArg
+            end
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "h1",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            -- Count ACK timers — hard timer exists but ACK timer should NOT yet
+            local ackTimerCount = 0
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 15 and not timer.cancelled then
+                    ackTimerCount = ackTimerCount + 1
+                end
+            end
+            assert.equals(0, ackTimerCount, "ACK timer should not exist before callback")
+
+            -- Now invoke the callback (message fully sent)
+            assert.is_not_nil(storedCallback)
+            storedCallback(storedArg, 100, 100)
+
+            -- ACK timer should now exist
+            ackTimerCount = 0
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 15 and not timer.cancelled then
+                    ackTimerCount = ackTimerCount + 1
+                end
+            end
+            assert.equals(1, ackTimerCount, "ACK timer should exist after callback")
+
+            GBL.SendCommMessage = origSend
+        end)
+
+        it("ACK timer does not start on partial send progress", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local storedCallback, storedArg
+            local origSend = GBL.SendCommMessage
+            GBL.SendCommMessage = function(self, prefix, text, dist, target, prio, cbFn, cbArg)
+                table.insert(MockAce.sentCommMessages, {
+                    prefix = prefix, text = text, distribution = dist, target = target,
+                })
+                storedCallback = cbFn
+                storedArg = cbArg
+            end
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "h1",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            -- Invoke callback with partial progress
+            storedCallback(storedArg, 50, 1000)
+
+            local ackTimerCount = 0
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 15 and not timer.cancelled then
+                    ackTimerCount = ackTimerCount + 1
+                end
+            end
+            assert.equals(0, ackTimerCount, "ACK timer should not exist on partial send")
+
+            -- Complete the send
+            storedCallback(storedArg, 1000, 1000)
+
+            ackTimerCount = 0
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 15 and not timer.cancelled then
+                    ackTimerCount = ackTimerCount + 1
+                end
+            end
+            assert.equals(1, ackTimerCount, "ACK timer should exist after full send")
+
+            GBL.SendCommMessage = origSend
+        end)
+
+        it("hard timeout fires if callback never completes", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Override SendCommMessage to suppress callback entirely
+            local origSend = GBL.SendCommMessage
+            GBL.SendCommMessage = function(self, prefix, text, dist, target, prio, cbFn, cbArg)
+                table.insert(MockAce.sentCommMessages, {
+                    prefix = prefix, text = text, distribution = dist, target = target,
+                })
+                -- Do NOT invoke callback
+            end
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "h1",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            -- Should be sending
+            assert.is_true(GBL:GetSyncStatus().sending)
+
+            -- Find and fire the hard timeout (120s)
+            local fired = false
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 120 and not timer.cancelled then
+                    timer.callback()
+                    fired = true
+                    break
+                end
+            end
+            assert.is_true(fired, "hard timeout timer should exist")
+            assert.is_false(GBL:GetSyncStatus().sending, "should have aborted")
+
+            GBL.SendCommMessage = origSend
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- itemLink stripping
+    ---------------------------------------------------------------------------
+
+    describe("itemLink stripping", function()
+        it("strips itemLink from sync payload but preserves itemID", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "Thrall",
+                itemID = 12345, itemLink = "|cff0070dd|Hitem:12345:0|h[Test Item]|h|r",
+                count = 5, tab = 1,
+                timestamp = 1000, scanTime = 1000,
+                scannedBy = "OfficerA", id = "h1",
+            })
+
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok)
+            assert.equals(1, #data.transactions)
+            assert.is_nil(data.transactions[1].itemLink)
+            assert.equals(12345, data.transactions[1].itemID)
+        end)
+
+        it("does not mutate original transaction records", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local originalLink = "|cff0070dd|Hitem:99999:0|h[Original]|h|r"
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "Jaina",
+                itemID = 99999, itemLink = originalLink,
+                count = 1, tab = 1,
+                timestamp = 1000, scanTime = 1000,
+                scannedBy = "OfficerA", id = "h2",
+            })
+
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            -- Original record should still have itemLink
+            assert.equals(originalLink, guildData.transactions[1].itemLink)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Self-message filtering with realm names
+    ---------------------------------------------------------------------------
+
+    describe("self-message filtering", function()
+        it("filters realm-qualified self-messages", function()
+            MockWoW.player.name = "OfficerA"
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local msg = GBL:Serialize({
+                type = "HELLO", version = GBL.version,
+                txCount = 999, protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+            })
+            -- Sender includes realm suffix (retail WoW behavior)
+            GBL:OnSyncMessage("GBLSync", msg, "GUILD", "OfficerA-Stormrage")
+
+            -- Should have been filtered as self-message
+            local peers = GBL:GetSyncPeers()
+            assert.is_nil(peers["OfficerA-Stormrage"])
+        end)
+
+        it("does not filter messages from different players", function()
+            MockWoW.player.name = "OfficerA"
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local msg = GBL:Serialize({
+                type = "HELLO", version = GBL.version,
+                txCount = 5, protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+            })
+            GBL:OnSyncMessage("GBLSync", msg, "GUILD", "OfficerB-Stormrage")
+
+            local peers = GBL:GetSyncPeers()
+            assert.is_not_nil(peers["OfficerB-Stormrage"])
         end)
     end)
 

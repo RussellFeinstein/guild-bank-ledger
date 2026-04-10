@@ -5,6 +5,18 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] — 2026-04-10
+
+### Fixed
+- Sync ACK timeout — timer started immediately on message queue instead of after AceComm finished transmitting; large chunks exceeded the 10s timeout before the receiver even got the data
+- Self-message filtering broken in retail WoW — realm-qualified sender names (e.g. "Player-Realm") never matched `UnitName("player")` output; now uses `Ambiguate`
+
+### Changed
+- Sync chunk size reduced from 200 to 25 transactions per message to fit within AceComm bandwidth constraints
+- ACK timeout increased from 10s to 15s to allow for receiver dedup + round-trip
+- `itemLink` stripped from sync payload (reconstructable from `itemID`) to reduce message size by ~30%
+- Added 120s hard timeout safety net in case AceComm send callback never fires
+
 ## [0.7.0] — 2026-04-08
 
 ### Added

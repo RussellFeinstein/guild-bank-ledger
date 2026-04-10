@@ -20,6 +20,7 @@ read_globals = {
     "IsInGuild",
     "IsInRaid",
     "UnitAffectingCombat",
+    "Ambiguate",
     "UnitName",
 
     -- WoW constants and tables

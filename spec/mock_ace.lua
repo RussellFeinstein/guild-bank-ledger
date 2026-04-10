@@ -142,13 +142,19 @@ local commMixin = {
     RegisterComm = function(self, prefix, method)
         MockAce.registeredComms[prefix] = method
     end,
-    SendCommMessage = function(self, prefix, text, distribution, target)
+    SendCommMessage = function(self, prefix, text, distribution, target, prio, callbackFn, callbackArg)
+        local totalBytes = text and #text or 0
         table.insert(MockAce.sentCommMessages, {
             prefix = prefix,
             text = text,
             distribution = distribution,
             target = target,
+            prio = prio,
         })
+        -- Simulate immediate completion so callback-based logic fires in tests
+        if callbackFn then
+            callbackFn(callbackArg, totalBytes, totalBytes)
+        end
     end,
 }
 

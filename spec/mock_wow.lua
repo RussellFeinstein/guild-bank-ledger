@@ -248,6 +248,14 @@ function MockWoW.install()
         end,
     }
 
+    -- Name disambiguation (retail: sender includes realm suffix)
+    _G.Ambiguate = function(name, context)
+        if context == "none" then
+            return name:match("^([^%-]+)") or name
+        end
+        return name
+    end
+
     -- Combat state
     _G.InCombatLockdown = function() return false end
     _G.UnitAffectingCombat = function() return false end
@@ -307,7 +315,7 @@ function MockWoW.install()
     -- GetAddOnMetadata
     _G.GetAddOnMetadata = function(addon, field)
         if addon == "GuildBankLedger" and field == "Version" then
-            return "0.7.0"
+            return "0.7.1"
         end
         return nil
     end

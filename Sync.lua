@@ -9,8 +9,8 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 -- Protocol constants
 local PREFIX = "GBLSync"
 local PROTOCOL_VERSION = 1
-local CHUNK_SIZE = 200
-local ACK_TIMEOUT = 10
+local CHUNK_SIZE = 25
+local ACK_TIMEOUT = 15
 local RECEIVE_TIMEOUT = 30
 local HELLO_DELAY = 5
 local HELLO_COOLDOWN = 60
@@ -27,6 +27,7 @@ local syncState = {
     sendChunks = {},
     sendChunkIndex = 0,
     sendTimer = nil,
+    sendHardTimer = nil,
 
     receiving = false,
     receiveSource = nil,
@@ -69,6 +70,10 @@ function GBL:DisableSync()
     if syncState.sendTimer then
         syncState.sendTimer.cancelled = true
         syncState.sendTimer = nil
+    end
+    if syncState.sendHardTimer then
+        syncState.sendHardTimer.cancelled = true
+        syncState.sendHardTimer = nil
     end
     if syncState.receiveTimer then
         syncState.receiveTimer.cancelled = true
@@ -120,9 +125,9 @@ end
 function GBL:OnSyncMessage(_prefix, message, _distribution, sender)
     if not self.db.profile.sync.enabled then return end
 
-    -- Ignore our own messages
+    -- Ignore our own messages (Ambiguate handles realm-qualified names in retail)
     local myName = UnitName("player")
-    if sender == myName then return end
+    if Ambiguate(sender, "none") == myName then return end
 
     local success, data = self:Deserialize(message)
     if not success or type(data) ~= "table" then return end
@@ -189,6 +194,24 @@ function GBL:HandleHello(sender, data)
 end
 
 ------------------------------------------------------------------------
+-- Payload helpers
+------------------------------------------------------------------------
+
+--- Strip reconstructable fields from a transaction record for sync.
+-- Removes itemLink (large, reconstructable from itemID) to reduce payload.
+-- Returns a shallow copy — does not mutate the original record.
+-- @param record table Transaction record
+-- @return table Stripped copy
+local function stripForSync(record)
+    local copy = {}
+    for k, v in pairs(record) do
+        copy[k] = v
+    end
+    copy.itemLink = nil
+    return copy
+end
+
+------------------------------------------------------------------------
 -- Sync request / response
 ------------------------------------------------------------------------
 
@@ -241,7 +264,7 @@ function GBL:HandleSyncRequest(sender, data)
     for _, tx in ipairs(guildData.transactions) do
         local when = tx.scanTime or tx.timestamp or 0
         if when > sinceTimestamp then
-            txToSend[#txToSend + 1] = tx
+            txToSend[#txToSend + 1] = stripForSync(tx)
         end
     end
     local moneyToSend = {}
@@ -357,19 +380,33 @@ function GBL:SendNextChunk()
         guild = self:GetGuildName(),
     })
 
-    self:SendCommMessage(PREFIX, msg, "WHISPER", syncState.sendTarget)
-
-    -- ACK timeout — abort if no response in ACK_TIMEOUT seconds
-    if syncState.sendTimer then
-        syncState.sendTimer.cancelled = true
+    -- Hard timeout safety net — fires if AceComm callback never completes
+    if not syncState.sendHardTimer then
+        syncState.sendHardTimer = C_Timer.After(120, function()
+            if syncState.sending then
+                self:AddAuditEntry("Send hard timeout — aborting")
+                self:FinishSending()
+            end
+        end)
     end
-    syncState.sendTimer = C_Timer.After(ACK_TIMEOUT, function()
-        if syncState.sending then
-            self:AddAuditEntry("ACK timeout from "
-                .. (syncState.sendTarget or "unknown") .. " — aborting")
-            self:FinishSending()
-        end
-    end)
+
+    -- ACK timer deferred until message fully transmitted via AceComm callback.
+    -- AceComm calls callbackFn(callbackArg, bytesSent, totalLen) per CTL piece.
+    self:SendCommMessage(PREFIX, msg, "WHISPER", syncState.sendTarget, "NORMAL",
+        function(_cbArg, sent, total)
+            if sent < total then return end
+            -- Message fully transmitted — now start ACK timer
+            if syncState.sendTimer then
+                syncState.sendTimer.cancelled = true
+            end
+            syncState.sendTimer = C_Timer.After(ACK_TIMEOUT, function()
+                if syncState.sending then
+                    self:AddAuditEntry("ACK timeout from "
+                        .. (syncState.sendTarget or "unknown") .. " — aborting")
+                    self:FinishSending()
+                end
+            end)
+        end)
 end
 
 --- Clean up sending state after sync completes or aborts.
@@ -381,6 +418,10 @@ function GBL:FinishSending()
     if syncState.sendTimer then
         syncState.sendTimer.cancelled = true
         syncState.sendTimer = nil
+    end
+    if syncState.sendHardTimer then
+        syncState.sendHardTimer.cancelled = true
+        syncState.sendHardTimer = nil
     end
 end
 
@@ -630,6 +671,7 @@ function GBL:ResetSyncState()
     syncState.sendChunks = {}
     syncState.sendChunkIndex = 0
     syncState.sendTimer = nil
+    syncState.sendHardTimer = nil
     syncState.receiving = false
     syncState.receiveSource = nil
     syncState.receiveExpected = 0
