@@ -5,6 +5,17 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.6] — 2026-04-10
+
+### Fixed
+- Sync timers never firing in WoW — `C_Timer.After` returns nil so timeouts could not be tracked or cancelled; switched all sync timers to `C_Timer.NewTicker(..., 1)` which returns a cancellable handle
+- Timer cancellation using `.cancelled = true` (only worked in tests, not WoW API); replaced with `:Cancel()` method calls
+- Manual "Broadcast Hello" button now bypasses the 60s cooldown
+
+### Added
+- Audit trail entry when receiving a HELLO from a peer (e.g. "Received HELLO from Katorri (tx: 556)")
+- Diagnostic audit entries for chunk send lifecycle: bytes queued, transmission complete, and ACK wait
+
 ## [0.7.5] — 2026-04-10
 
 ### Fixed

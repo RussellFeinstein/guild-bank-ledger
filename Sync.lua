@@ -69,15 +69,15 @@ function GBL:DisableSync()
     syncState.sending = false
     syncState.receiving = false
     if syncState.sendTimer then
-        syncState.sendTimer.cancelled = true
+        syncState.sendTimer:Cancel()
         syncState.sendTimer = nil
     end
     if syncState.sendHardTimer then
-        syncState.sendHardTimer.cancelled = true
+        syncState.sendHardTimer:Cancel()
         syncState.sendHardTimer = nil
     end
     if syncState.receiveTimer then
-        syncState.receiveTimer.cancelled = true
+        syncState.receiveTimer:Cancel()
         syncState.receiveTimer = nil
     end
 end
@@ -173,6 +173,9 @@ end
 function GBL:HandleHello(sender, data)
     local isNewPeer = not syncState.peers[sender]
     self:UpdatePeer(sender, data)
+
+    self:AddAuditEntry("Received HELLO from " .. sender
+        .. " (tx: " .. (data.txCount or 0) .. ")")
 
     -- Debounce: coalesce multiple new-peer discoveries into one reply.
     -- Without this, N online peers would trigger N force-replies on login/reload.
@@ -393,15 +396,22 @@ function GBL:SendNextChunk()
         guild = self:GetGuildName(),
     })
 
-    -- Hard timeout safety net — fires if AceComm callback never completes
-    if not syncState.sendHardTimer then
-        syncState.sendHardTimer = C_Timer.After(120, function()
-            if syncState.sending then
-                self:AddAuditEntry("Send hard timeout — aborting")
-                self:FinishSending()
-            end
-        end)
+    local msgLen = #msg
+    self:AddAuditEntry("Sending chunk " .. idx .. "/" .. #syncState.sendChunks
+        .. " to " .. (syncState.sendTarget or "?") .. " (" .. msgLen .. " bytes)")
+
+    -- Hard timeout safety net — fires if AceComm callback never completes.
+    -- Use C_Timer.NewTicker(n, cb, 1) for a cancellable one-shot timer;
+    -- C_Timer.After returns nil in WoW so it can't be cancelled or tracked.
+    if syncState.sendHardTimer then
+        syncState.sendHardTimer:Cancel()
     end
+    syncState.sendHardTimer = C_Timer.NewTicker(120, function()
+        if syncState.sending then
+            self:AddAuditEntry("Send hard timeout — aborting")
+            self:FinishSending()
+        end
+    end, 1)
 
     -- ACK timer deferred until message fully transmitted via AceComm callback.
     -- AceComm calls callbackFn(callbackArg, bytesSent, totalLen) per CTL piece.
@@ -409,16 +419,18 @@ function GBL:SendNextChunk()
         function(_cbArg, sent, total)
             if sent < total then return end
             -- Message fully transmitted — now start ACK timer
+            self:AddAuditEntry("Chunk " .. idx .. " transmitted ("
+                .. total .. " bytes) — waiting for ACK")
             if syncState.sendTimer then
-                syncState.sendTimer.cancelled = true
+                syncState.sendTimer:Cancel()
             end
-            syncState.sendTimer = C_Timer.After(ACK_TIMEOUT, function()
+            syncState.sendTimer = C_Timer.NewTicker(ACK_TIMEOUT, function()
                 if syncState.sending then
                     self:AddAuditEntry("ACK timeout from "
                         .. (syncState.sendTarget or "unknown") .. " — aborting")
                     self:FinishSending()
                 end
-            end)
+            end, 1)
         end)
 end
 
@@ -429,11 +441,11 @@ function GBL:FinishSending()
     syncState.sendChunks = {}
     syncState.sendChunkIndex = 0
     if syncState.sendTimer then
-        syncState.sendTimer.cancelled = true
+        syncState.sendTimer:Cancel()
         syncState.sendTimer = nil
     end
     if syncState.sendHardTimer then
-        syncState.sendHardTimer.cancelled = true
+        syncState.sendHardTimer:Cancel()
         syncState.sendHardTimer = nil
     end
 end
@@ -484,15 +496,15 @@ function GBL:HandleSyncData(sender, data)
 
     -- Reset receive timeout (fires if no more chunks arrive)
     if syncState.receiveTimer then
-        syncState.receiveTimer.cancelled = true
+        syncState.receiveTimer:Cancel()
     end
-    syncState.receiveTimer = C_Timer.After(RECEIVE_TIMEOUT, function()
+    syncState.receiveTimer = C_Timer.NewTicker(RECEIVE_TIMEOUT, function()
         if syncState.receiving then
             self:AddAuditEntry("Receive timeout from "
                 .. (syncState.receiveSource or "unknown") .. " — aborting")
             self:FinishReceiving(syncState.receiveSource)
         end
-    end)
+    end, 1)
 
     -- Send ACK
     local ackMsg = self:Serialize({
@@ -568,7 +580,7 @@ function GBL:FinishReceiving(sender)
         .. " (" .. totalStored .. " new)")
 
     if syncState.receiveTimer then
-        syncState.receiveTimer.cancelled = true
+        syncState.receiveTimer:Cancel()
         syncState.receiveTimer = nil
     end
 

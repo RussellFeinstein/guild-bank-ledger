@@ -243,6 +243,13 @@ function MockWoW.install()
     _G.C_Timer = {
         After = function(delay, callback)
             local timer = { delay = delay, callback = callback, cancelled = false }
+            timer.Cancel = function(self) self.cancelled = true end
+            table.insert(MockWoW.pendingTimers, timer)
+            return timer
+        end,
+        NewTicker = function(delay, callback, iterations)
+            local timer = { delay = delay, callback = callback, cancelled = false, iterations = iterations or -1 }
+            timer.Cancel = function(self) self.cancelled = true end
             table.insert(MockWoW.pendingTimers, timer)
             return timer
         end,
@@ -315,7 +322,7 @@ function MockWoW.install()
     -- GetAddOnMetadata
     _G.GetAddOnMetadata = function(addon, field)
         if addon == "GuildBankLedger" and field == "Version" then
-            return "0.7.5"
+            return "0.7.6"
         end
         return nil
     end
