@@ -214,6 +214,19 @@ function GBL:HandleHello(sender, data)
     then
         local sinceTimestamp = guildData.syncState.lastSyncTimestamp or 0
         self:RequestSync(sender, sinceTimestamp)
+    else
+        -- Log why we didn't sync so stalls are diagnosable
+        local reason
+        if remoteCount <= localCount then
+            reason = "local=" .. localCount .. " >= remote=" .. remoteCount
+        elseif syncState.receiving then
+            reason = "already receiving from " .. (syncState.receiveSource or "?")
+        elseif not self.db.profile.sync.autoSync then
+            reason = "autoSync disabled"
+        end
+        if reason then
+            self:AddAuditEntry("Skipped sync from " .. sender .. " (" .. reason .. ")")
+        end
     end
 end
 
@@ -301,6 +314,20 @@ function GBL:RequestSync(target, sinceTimestamp)
     self:AddAuditEntry("Requesting sync from " .. target
         .. " (since " .. sinceTimestamp .. ")")
     self:SendMessage("GBL_SYNC_STARTED", target)
+
+    -- Request timeout — if no SYNC_DATA arrives, abort so we don't block forever
+    if syncState.receiveTimer then
+        syncState.receiveTimer:Cancel()
+    end
+    syncState.receiveTimer = C_Timer.NewTicker(RECEIVE_TIMEOUT, function()
+        if syncState.receiving and syncState.receiveGot == 0 then
+            self:Print("Sync: no response from " .. target
+                .. " after " .. RECEIVE_TIMEOUT .. "s — aborting request")
+            self:AddAuditEntry("Request timeout — no data from "
+                .. target .. " after " .. RECEIVE_TIMEOUT .. "s")
+            self:FinishReceiving(target)
+        end
+    end, 1)
 end
 
 --- Handle an incoming SYNC_REQUEST — gather and send matching transactions.
@@ -308,7 +335,10 @@ end
 -- @param data table Deserialized request payload
 function GBL:HandleSyncRequest(sender, data)
     if syncState.sending then
-        self:AddAuditEntry("Declined sync from " .. sender .. " (already sending)")
+        self:Print("Sync: declined request from " .. sender
+            .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
+        self:AddAuditEntry("Declined sync from " .. sender
+            .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
         return
     end
 
@@ -447,10 +477,17 @@ function GBL:SendNextChunk()
     })
 
     local msgLen = #msg
+    local chunkRecords = #chunk.transactions + #chunk.moneyTransactions
+    self:Print("Sync: sending chunk " .. idx .. "/" .. #syncState.sendChunks
+        .. " to " .. (syncState.sendTarget or "?")
+        .. " (" .. chunkRecords .. " records, " .. msgLen .. "b)")
     self:AddAuditEntry("Sending chunk " .. idx .. "/" .. #syncState.sendChunks
-        .. " to " .. (syncState.sendTarget or "?") .. " (" .. msgLen .. " bytes)")
+        .. " to " .. (syncState.sendTarget or "?")
+        .. " (" .. chunkRecords .. " records, " .. msgLen .. " bytes)")
 
     if msgLen > WHISPER_SAFE_BYTES then
+        self:Print("|cffff0000Sync WARNING:|r chunk " .. idx .. " is " .. msgLen
+            .. "b (>" .. WHISPER_SAFE_BYTES .. ") — may be dropped!")
         self:AddAuditEntry("WARNING: chunk " .. idx .. " is " .. msgLen
             .. " bytes (>" .. WHISPER_SAFE_BYTES
             .. ") — may be silently dropped by AceComm WHISPER")
@@ -464,6 +501,7 @@ function GBL:SendNextChunk()
     end
     syncState.sendHardTimer = C_Timer.NewTicker(120, function()
         if syncState.sending then
+            self:Print("Sync: hard timeout (120s) — AceComm never finished transmitting, aborting")
             self:AddAuditEntry("Send hard timeout — aborting")
             self:FinishSending()
         end

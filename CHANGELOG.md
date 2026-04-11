@@ -5,6 +5,18 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.11] — 2026-04-10
+
+### Fixed
+- Sync request could stall permanently if sender never responded — `receiving` stayed true with no timeout, blocking all future syncs. Now aborts after 30s with a chat message.
+
+### Added
+- Chat print when sync request is declined (sender already busy)
+- Chat print per chunk on the send side (record count + byte size)
+- Chat print for oversized chunk warnings (red text)
+- Chat print for hard timeout (AceComm never finished transmitting)
+- Audit trail entry when HELLO decides not to sync (with reason: counts equal, already receiving, or autoSync off)
+
 ## [0.7.10] — 2026-04-10
 
 ### Added

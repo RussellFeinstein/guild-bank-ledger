@@ -322,7 +322,7 @@ function MockWoW.install()
     -- GetAddOnMetadata
     _G.GetAddOnMetadata = function(addon, field)
         if addon == "GuildBankLedger" and field == "Version" then
-            return "0.7.10"
+            return "0.7.11"
         end
         return nil
     end
