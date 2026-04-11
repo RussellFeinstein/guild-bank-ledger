@@ -75,8 +75,8 @@ end
 -- @param timestamp number Transaction timestamp (for pruning)
 -- @param guildData table Guild data table
 function GBL:MarkSeen(hash, timestamp, guildData)
-    if not guildData then return end
-    guildData.seenTxHashes[hash] = timestamp
+    if not guildData or not hash then return end
+    guildData.seenTxHashes[hash] = timestamp or 0
 end
 
 ------------------------------------------------------------------------

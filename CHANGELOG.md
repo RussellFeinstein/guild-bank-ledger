@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.14] — 2026-04-11
+
+### Fixed
+- Crash syncing records from older/newer addon versions with missing fields: `reconstructSyncRecord` now guarantees `id`, `timestamp`, `scanTime`, `scannedBy` are always non-nil regardless of what the sender provides — computes missing `id` from record fields, recovers `timestamp` from id or falls back to current time, and `MarkSeen` guards against nil hash
+
 ## [0.7.13] — 2026-04-10
 
 ### Fixed

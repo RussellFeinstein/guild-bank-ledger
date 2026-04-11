@@ -286,26 +286,40 @@ end
 
 --- Restore fields stripped by stripForSync on received records.
 -- Called on each record before StoreTx/StoreMoneyTx during sync receive.
+-- Must be resilient to any combination of missing fields — the sender
+-- may be running any past or future addon version.
+-- Guarantees after return: record.id, record.timestamp, record.scanTime,
+-- record.scannedBy are always non-nil.
 -- @param record table Transaction record received via sync
 -- @param sender string Name of the peer who sent this record
 local function reconstructSyncRecord(record, sender)
-    -- Restore _occurrence from id (format: "baseHash:N")
-    if record.id then
-        record._occurrence = tonumber(record.id:match(":(%d+)$")) or 0
-    end
-    -- Recover timestamp from id's timeSlot if missing (old-version records)
-    -- id format: "type|player|...|timeSlot" or "type|player|...|timeSlot:occ"
+    -- 1. Ensure timestamp exists (needed for id computation below)
+    --    Priority: explicit timestamp → recover from id → fallback to now
     if not record.timestamp and record.id then
         local timeSlot = record.id:match("(%d+):?%d*$")
         if timeSlot then
             record.timestamp = tonumber(timeSlot) * 3600
         end
     end
-    -- Restore category from classID + subclassID (item records only)
+    if not record.timestamp then
+        record.timestamp = GetServerTime()
+    end
+
+    -- 2. Ensure id exists (needed for dedup)
+    --    Priority: explicit id → compute from fields
+    if not record.id then
+        record.id = GBL:ComputeTxHash(record) .. ":0"
+    end
+
+    -- 3. Restore _occurrence from id suffix (format: "baseHash:N")
+    record._occurrence = tonumber(record.id:match(":(%d+)$")) or 0
+
+    -- 4. Restore category from classID + subclassID (item records only)
     if record.itemID and record.classID then
         record.category = GBL:CategorizeItem(record.classID, record.subclassID or 0)
     end
-    -- Set scanTime to receipt time; mark sync origin
+
+    -- 5. Set scanTime to receipt time; mark sync origin
     record.scanTime = GetServerTime()
     record.scannedBy = "sync:" .. (sender or "unknown")
     -- tabName/destTabName intentionally left nil — BackfillTabNames fills them
