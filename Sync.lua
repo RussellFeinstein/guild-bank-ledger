@@ -110,6 +110,7 @@ function GBL:BroadcastHello(force)
     syncState.lastHelloTime = now
 
     local txCount = #guildData.transactions + #guildData.moneyTransactions
+    local dataHash = self:GetDataHash(guildData)
 
     local msg = self:Serialize({
         type = "HELLO",
@@ -117,11 +118,13 @@ function GBL:BroadcastHello(force)
         protocolVersion = PROTOCOL_VERSION,
         guild = self:GetGuildName(),
         txCount = txCount,
+        dataHash = dataHash,
         lastScanTime = self.lastScanTime or 0,
     })
 
     self:SendCommMessage(PREFIX, msg, "GUILD")
-    self:AddAuditEntry("Sent HELLO (tx: " .. txCount .. ")")
+    self:AddAuditEntry("Sent HELLO (tx: " .. txCount
+        .. ", hash: " .. dataHash .. ")")
 end
 
 ------------------------------------------------------------------------
@@ -211,6 +214,16 @@ function GBL:HandleHello(sender, data)
 
     local localCount = #guildData.transactions + #guildData.moneyTransactions
     local remoteCount = data.txCount or 0
+
+    -- Fast path: skip sync when datasets are identical (dataHash + txCount match)
+    if data.dataHash then
+        local localDataHash = self:GetDataHash(guildData)
+        if data.dataHash == localDataHash and localCount == remoteCount then
+            self:AddAuditEntry("Skipped sync from " .. sender
+                .. " (data hashes match, tx: " .. localCount .. ")")
+            return
+        end
+    end
 
     if remoteCount > localCount
         and not syncState.receiving
@@ -345,9 +358,13 @@ function GBL:RequestSync(target, sinceTimestamp)
 
     sinceTimestamp = sinceTimestamp or 0
 
+    local guildData = self:GetGuildData()
+    local bucketHashes = guildData and self:ComputeBucketHashes(guildData) or nil
+
     local msg = self:Serialize({
         type = "SYNC_REQUEST",
         sinceTimestamp = sinceTimestamp,
+        bucketHashes = bucketHashes,
         protocolVersion = PROTOCOL_VERSION,
         guild = self:GetGuildName(),
     })
@@ -388,24 +405,52 @@ function GBL:HandleSyncRequest(sender, data)
     local guildData = self:GetGuildData()
     if not guildData then return end
 
-    local sinceTimestamp = data.sinceTimestamp or 0
-
-    -- Gather transactions scanned after sinceTimestamp.
-    -- Use scanTime (when the record was created locally), NOT timestamp
-    -- (when the event happened). A recent bank scan may find transactions
-    -- from hours ago — those have old timestamps but new scanTimes.
     local txToSend = {}
-    for _, tx in ipairs(guildData.transactions) do
-        local when = tx.scanTime or tx.timestamp or 0
-        if when > sinceTimestamp then
-            txToSend[#txToSend + 1] = stripForSync(tx)
-        end
-    end
     local moneyToSend = {}
-    for _, tx in ipairs(guildData.moneyTransactions) do
-        local when = tx.scanTime or tx.timestamp or 0
-        if when > sinceTimestamp then
-            moneyToSend[#moneyToSend + 1] = stripForSync(tx)
+
+    if data.bucketHashes then
+        -- Bucket-filtered sync: only send records from days where hashes differ
+        local localBuckets = self:ComputeBucketHashes(guildData)
+        local diffDays = {}
+
+        for dayKey, localHash in pairs(localBuckets) do
+            if localHash ~= (data.bucketHashes[dayKey] or 0) then
+                diffDays[dayKey] = true
+            end
+        end
+
+        for _, tx in ipairs(guildData.transactions) do
+            local dayKey = math.floor((tx.timestamp or 0) / 86400)
+            if diffDays[dayKey] then
+                txToSend[#txToSend + 1] = stripForSync(tx)
+            end
+        end
+        for _, tx in ipairs(guildData.moneyTransactions) do
+            local dayKey = math.floor((tx.timestamp or 0) / 86400)
+            if diffDays[dayKey] then
+                moneyToSend[#moneyToSend + 1] = stripForSync(tx)
+            end
+        end
+
+        local diffCount = 0
+        for _ in pairs(diffDays) do diffCount = diffCount + 1 end
+        self:AddAuditEntry("Bucket filter: " .. diffCount
+            .. " differing day(s), " .. (#txToSend + #moneyToSend)
+            .. " records to send")
+    else
+        -- Fallback: old-style sinceTimestamp filtering (backward compat)
+        local sinceTimestamp = data.sinceTimestamp or 0
+        for _, tx in ipairs(guildData.transactions) do
+            local when = tx.scanTime or tx.timestamp or 0
+            if when > sinceTimestamp then
+                txToSend[#txToSend + 1] = stripForSync(tx)
+            end
+        end
+        for _, tx in ipairs(guildData.moneyTransactions) do
+            local when = tx.scanTime or tx.timestamp or 0
+            if when > sinceTimestamp then
+                moneyToSend[#moneyToSend + 1] = stripForSync(tx)
+            end
         end
     end
 
@@ -751,21 +796,10 @@ function GBL:FinishReceiving(sender)
 
     local guildData = self:GetGuildData()
     if guildData then
-        -- Compare counts with what the peer reported in their last HELLO.
-        -- If we're still behind after this sync, a relayed record was likely
-        -- filtered by the delta timestamp. Reset to 0 so the next request
-        -- does a full sync instead of repeating the same miss.
-        local localCount = #guildData.transactions + #guildData.moneyTransactions
-        local peerInfo = syncState.peers[sender]
-        local peerCount = peerInfo and peerInfo.txCount or 0
-        if localCount < peerCount then
-            guildData.syncState.lastSyncTimestamp = 0
-            self:AddAuditEntry("Still behind " .. sender
-                .. " (" .. localCount .. " vs " .. peerCount
-                .. ") — next sync will be full")
-        else
-            guildData.syncState.lastSyncTimestamp = GetServerTime()
-        end
+        -- Always checkpoint — bucket fingerprints handle the "still behind"
+        -- case more precisely than timestamp rewind. This prevents re-sending
+        -- everything on the next sync after a partial failure.
+        guildData.syncState.lastSyncTimestamp = GetServerTime()
 
         guildData.syncState.peers[sender] = {
             lastSync = GetServerTime(),
@@ -817,6 +851,7 @@ function GBL:UpdatePeer(sender, data)
     syncState.peers[sender] = {
         version = data.version,
         txCount = data.txCount or 0,
+        dataHash = data.dataHash,
         lastScanTime = data.lastScanTime or 0,
         lastSeen = GetServerTime(),
     }

@@ -864,7 +864,7 @@ describe("Sync", function()
             assert.equals(0, #MockAce.sentCommMessages)
         end)
 
-        it("resets lastSyncTimestamp to 0 when still behind after sync", function()
+        it("checkpoints lastSyncTimestamp even when still behind after sync", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
             -- Peer reported 50 tx in their HELLO
@@ -889,16 +889,8 @@ describe("Sync", function()
                 moneyTransactions = {},
             })
 
-            -- Still behind (30 < 50) — lastSyncTimestamp should reset to 0
-            assert.equals(0, guildData.syncState.lastSyncTimestamp)
-
-            -- Audit trail should mention the fallback
-            local trail = GBL:GetAuditTrail()
-            local found = false
-            for _, e in ipairs(trail) do
-                if e.message:find("next sync will be full") then found = true end
-            end
-            assert.is_true(found)
+            -- Always checkpoint — bucket fingerprints handle the "still behind" case
+            assert.is_true(guildData.syncState.lastSyncTimestamp > 0)
         end)
 
         it("sets lastSyncTimestamp normally when counts match after sync", function()
@@ -1619,6 +1611,202 @@ describe("Sync", function()
             end
             assert.is_false(foundAck,
                 "ACK from different player should be rejected")
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Fingerprint-based sync
+    ---------------------------------------------------------------------------
+
+    describe("fingerprint sync", function()
+        it("HELLO includes dataHash field", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P", timestamp = 1000,
+                scanTime = 1000, id = "h1:0",
+            })
+
+            GBL:BroadcastHello(true)
+
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok)
+            assert.is_number(data.dataHash)
+            assert.is_true(data.dataHash > 0)
+        end)
+
+        it("skips sync when dataHash and txCount match", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Both peers have the same record
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P", timestamp = 1000,
+                scanTime = 1000, id = "h1:0",
+            })
+
+            local localHash = GBL:GetDataHash(guildData)
+
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 1,
+                dataHash = localHash,
+                lastScanTime = 1000,
+            })
+
+            -- Should NOT have sent a SYNC_REQUEST
+            local sentRequest = false
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, d = GBL:Deserialize(msg.text)
+                if ok and d.type == "SYNC_REQUEST" then
+                    sentRequest = true
+                end
+            end
+            assert.is_false(sentRequest, "should skip sync when hashes match")
+
+            -- Audit trail should mention hash match
+            local trail = GBL:GetAuditTrail()
+            local found = false
+            for _, e in ipairs(trail) do
+                if e.message:find("data hashes match") then found = true end
+            end
+            assert.is_true(found)
+        end)
+
+        it("falls back to txCount when remote has no dataHash", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Remote has more records but no dataHash (old version)
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 10,
+                -- no dataHash field
+                lastScanTime = 1000,
+            })
+
+            -- Should have sent SYNC_REQUEST (txCount-based fallback)
+            local sentRequest = false
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, d = GBL:Deserialize(msg.text)
+                if ok and d.type == "SYNC_REQUEST" then
+                    sentRequest = true
+                end
+            end
+            assert.is_true(sentRequest, "should fall back to txCount sync")
+        end)
+
+        it("SYNC_REQUEST includes bucketHashes", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P", timestamp = 86400 * 20000,
+                scanTime = 86400 * 20000, id = "h1:0",
+            })
+
+            GBL:RequestSync("OfficerB", 0)
+
+            assert.is_true(#MockAce.sentCommMessages >= 1)
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok)
+            assert.equals("SYNC_REQUEST", data.type)
+            assert.is_table(data.bucketHashes)
+            assert.is_not_nil(data.bucketHashes[20000])
+        end)
+
+        it("HandleSyncRequest filters by differing days when bucketHashes present", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Local has records on day 20000 and day 20001
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "A", timestamp = 86400 * 20000 + 100,
+                scanTime = 86400 * 20000 + 100, id = "day0_rec:0",
+                itemID = 100, count = 1, tab = 1,
+            })
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "B", timestamp = 86400 * 20001 + 100,
+                scanTime = 86400 * 20001 + 100, id = "day1_rec:0",
+                itemID = 200, count = 1, tab = 1,
+            })
+
+            -- Requester already has day 20000 (matching hash) but not day 20001
+            local localBuckets = GBL:ComputeBucketHashes(guildData)
+
+            GBL:HandleSyncRequest("OfficerB", {
+                sinceTimestamp = 0,
+                bucketHashes = { [20000] = localBuckets[20000] },  -- day 20000 matches, 20001 absent
+            })
+
+            -- Should only send records from day 20001 (the differing day)
+            assert.is_true(#MockAce.sentCommMessages >= 1)
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok)
+            assert.equals("SYNC_DATA", data.type)
+            -- Only the day 20001 record should be sent
+            assert.equals(1, #data.transactions)
+            assert.equals("day1_rec:0", data.transactions[1].id)
+        end)
+
+        it("HandleSyncRequest sends nothing when all bucket hashes match", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "A", timestamp = 86400 * 20000 + 100,
+                scanTime = 86400 * 20000 + 100, id = "rec1:0",
+                itemID = 100, count = 1, tab = 1,
+            })
+
+            local localBuckets = GBL:ComputeBucketHashes(guildData)
+
+            GBL:HandleSyncRequest("OfficerB", {
+                sinceTimestamp = 0,
+                bucketHashes = localBuckets,  -- all match
+            })
+
+            -- Should send an empty sync (0 records)
+            assert.is_true(#MockAce.sentCommMessages >= 1)
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok)
+            assert.equals(0, #data.transactions)
+            assert.equals(0, #data.moneyTransactions)
+        end)
+
+        it("HandleSyncRequest falls back to sinceTimestamp without bucketHashes", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "A", timestamp = 500,
+                scanTime = 500, id = "old:0",
+                itemID = 100, count = 1, tab = 1,
+            })
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "B", timestamp = 2000,
+                scanTime = 2000, id = "new:0",
+                itemID = 200, count = 1, tab = 1,
+            })
+
+            -- No bucketHashes — old-style request
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 1000 })
+
+            assert.is_true(#MockAce.sentCommMessages >= 1)
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok)
+            -- Only the record with scanTime > 1000 should be sent
+            assert.equals(1, #data.transactions)
+            assert.equals("new:0", data.transactions[1].id)
+        end)
+
+        it("UpdatePeer stores dataHash from HELLO", function()
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 5,
+                dataHash = 12345,
+                lastScanTime = 1000,
+            })
+
+            local peers = GBL:GetSyncPeers()
+            assert.equals(12345, peers["OfficerB"].dataHash)
         end)
     end)
 end)

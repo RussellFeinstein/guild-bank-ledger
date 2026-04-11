@@ -5,6 +5,16 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-04-11
+
+### Added
+- **Fingerprint-based sync** — HELLO now includes a `dataHash` (XOR-aggregated djb2 of all record IDs). When both `dataHash` and `txCount` match between peers, sync is skipped entirely — zero WHISPER traffic for the common "already in sync" case
+- **Bucket-filtered sync** — SYNC_REQUEST includes per-day bucket fingerprints. When datasets differ, only records from differing days are sent instead of everything, dramatically reducing transfer size for partial sync and retries after failure
+- `Fingerprint.lua` module: `HashString` (djb2), `XOR32` (with pure-Lua fallback for tests), `ComputeDataHash`, `ComputeBucketHashes`, `GetDataHash` (cached)
+
+### Changed
+- `FinishReceiving` always checkpoints `lastSyncTimestamp` (previously reset to 0 when still behind, causing full re-sends). Bucket fingerprints handle the "still behind" case more precisely
+
 ## [0.7.17] — 2026-04-11
 
 ### Changed

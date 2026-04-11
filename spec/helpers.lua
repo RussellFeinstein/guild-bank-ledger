@@ -65,6 +65,7 @@ function Helpers.resetAll()
     package.loaded["Dedup"] = nil
     package.loaded["Ledger"] = nil
     package.loaded["Storage"] = nil
+    package.loaded["Fingerprint"] = nil
     package.loaded["Sync"] = nil
     package.loaded["UI.Accessibility"] = nil
     package.loaded["UI.FilterBar"] = nil
@@ -106,6 +107,7 @@ function Helpers.loadAddon()
     safeDofile("Dedup.lua")
     safeDofile("Ledger.lua")
     safeDofile("Storage.lua")
+    safeDofile("Fingerprint.lua")
     safeDofile("Sync.lua")
     -- UI modules (M3+)
     safeDofile("UI/Accessibility.lua")

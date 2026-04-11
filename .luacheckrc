@@ -56,6 +56,9 @@ read_globals = {
     "date",
     "print",
 
+    -- Lua extensions (WoW LuaJIT)
+    "bit",
+
     -- Ace3 / LibStub
     "LibStub",
 }
