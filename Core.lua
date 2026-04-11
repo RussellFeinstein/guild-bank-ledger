@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.7.7"
+local VERSION = "0.7.8"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -352,6 +352,8 @@ function GBL:HandleSlashCommand(input)
         self:ManualScan()
     elseif command == "help" then
         self:PrintHelp()
+    elseif command == "syncdiag" then
+        self:PrintSyncDiag()
     else
         self:Print("Unknown command: " .. command .. ". Type /gbl help for usage.")
     end
@@ -395,6 +397,22 @@ function GBL:PrintHelp()
     self:Print("  /gbl status  — Show addon status")
     self:Print("  /gbl scan    — Manually scan the guild bank")
     self:Print("  /gbl help    — Show this help message")
+end
+
+function GBL:PrintSyncDiag()
+    self:Print("|cffffcc00Sync Diagnostics:|r")
+    self:Print("Local version: [" .. tostring(self.version) .. "] type=" .. type(self.version))
+    local peers = self:GetSyncPeers()
+    local hasPeers = false
+    for name, info in pairs(peers) do
+        hasPeers = true
+        local pv = info.version
+        local match = (pv == self.version) and "|cff00ff00MATCH|r" or "|cffff0000MISMATCH|r"
+        self:Print("  " .. name .. ": [" .. tostring(pv) .. "] type=" .. type(pv) .. " " .. match)
+    end
+    if not hasPeers then
+        self:Print("  No peers discovered yet")
+    end
 end
 
 function GBL:ManualScan()

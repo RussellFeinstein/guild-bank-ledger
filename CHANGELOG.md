@@ -5,6 +5,13 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.8] — 2026-04-10
+
+### Changed
+- Sync chunk size increased from 3 to 10 records per chunk — ~3x faster sync throughput with fewer round-trips
+- Sync payloads now strip 6 additional reconstructable fields (category, tabName, destTabName, scanTime, scannedBy, _occurrence) — smaller messages, more records fit per chunk
+- Received sync records automatically reconstruct stripped fields (category from classID, occurrence from id, scanTime set to receipt time)
+
 ## [0.7.7] — 2026-04-10
 
 ### Fixed

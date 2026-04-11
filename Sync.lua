@@ -9,7 +9,7 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 -- Protocol constants
 local PREFIX = "GBLSync"
 local PROTOCOL_VERSION = 1
-local CHUNK_SIZE = 3
+local CHUNK_SIZE = 10
 local MAX_RETRIES = 3
 local ACK_TIMEOUT = 15
 local RECEIVE_TIMEOUT = 30
@@ -227,8 +227,34 @@ local function stripForSync(record)
     for k, v in pairs(record) do
         copy[k] = v
     end
-    copy.itemLink = nil
+    -- Strip reconstructable/derivable fields to maximize records per chunk
+    copy.itemLink = nil      -- large, reconstructable from itemID
+    copy.category = nil      -- derivable from classID + subclassID
+    copy.tabName = nil       -- derivable from tab number (backfilled on bank open)
+    copy.destTabName = nil   -- derivable from destTab number
+    copy.scanTime = nil      -- receiver sets receipt time
+    copy.scannedBy = nil     -- receiver knows the sender
+    copy._occurrence = nil   -- embedded in the id string already
     return copy
+end
+
+--- Restore fields stripped by stripForSync on received records.
+-- Called on each record before StoreTx/StoreMoneyTx during sync receive.
+-- @param record table Transaction record received via sync
+-- @param sender string Name of the peer who sent this record
+local function reconstructSyncRecord(record, sender)
+    -- Restore _occurrence from id (format: "baseHash:N")
+    if record.id then
+        record._occurrence = tonumber(record.id:match(":(%d+)$")) or 0
+    end
+    -- Restore category from classID + subclassID (item records only)
+    if record.itemID and record.classID then
+        record.category = GBL:CategorizeItem(record.classID, record.subclassID or 0)
+    end
+    -- Set scanTime to receipt time; mark sync origin
+    record.scanTime = GetServerTime()
+    record.scannedBy = "sync:" .. (sender or "unknown")
+    -- tabName/destTabName intentionally left nil — BackfillTabNames fills them
 end
 
 ------------------------------------------------------------------------
@@ -499,12 +525,14 @@ function GBL:HandleSyncData(sender, data)
     local stored = 0
 
     for _, tx in ipairs(data.transactions or {}) do
+        reconstructSyncRecord(tx, sender)
         if self:StoreTx(tx, guildData) then
             stored = stored + 1
         end
     end
 
     for _, tx in ipairs(data.moneyTransactions or {}) do
+        reconstructSyncRecord(tx, sender)
         if self:StoreMoneyTx(tx, guildData) then
             stored = stored + 1
         end

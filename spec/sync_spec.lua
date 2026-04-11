@@ -310,15 +310,15 @@ describe("Sync", function()
     describe("PrepareChunks", function()
         it("splits at CHUNK_SIZE boundary", function()
             local txList = {}
-            for i = 1, 7 do
+            for i = 1, 25 do
                 txList[i] = { type = "deposit", player = "P", timestamp = i, id = "h" .. i }
             end
 
             local chunks = GBL:PrepareChunks(txList, {})
             assert.equals(3, #chunks)
-            assert.equals(3, #chunks[1].transactions)
-            assert.equals(3, #chunks[2].transactions)
-            assert.equals(1, #chunks[3].transactions)
+            assert.equals(10, #chunks[1].transactions)
+            assert.equals(10, #chunks[2].transactions)
+            assert.equals(5, #chunks[3].transactions)
         end)
 
         it("returns empty table for no transactions", function()
@@ -328,22 +328,22 @@ describe("Sync", function()
 
         it("mixes item and money transactions across chunks", function()
             local txList = {}
-            for i = 1, 2 do
+            for i = 1, 5 do
                 txList[i] = { type = "deposit", player = "P", timestamp = i }
             end
             local moneyList = {}
-            for i = 1, 4 do
+            for i = 1, 12 do
                 moneyList[i] = { type = "deposit", player = "P", amount = i * 100, timestamp = i }
             end
 
             local chunks = GBL:PrepareChunks(txList, moneyList)
             assert.equals(2, #chunks)
-            -- First chunk: 2 item tx + 1 money tx = 3
-            assert.equals(2, #chunks[1].transactions)
-            assert.equals(1, #chunks[1].moneyTransactions)
-            -- Second chunk: remaining 3 money tx
+            -- First chunk: 5 item tx + 5 money tx = 10
+            assert.equals(5, #chunks[1].transactions)
+            assert.equals(5, #chunks[1].moneyTransactions)
+            -- Second chunk: remaining 7 money tx
             assert.equals(0, #chunks[2].transactions)
-            assert.equals(3, #chunks[2].moneyTransactions)
+            assert.equals(7, #chunks[2].moneyTransactions)
         end)
     end)
 
@@ -931,8 +931,8 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
 
     describe("ACK timer callback", function()
-        it("CHUNK_SIZE constant is 3", function()
-            assert.equals(3, GBL.SYNC_CHUNK_SIZE)
+        it("CHUNK_SIZE constant is 10", function()
+            assert.equals(10, GBL.SYNC_CHUNK_SIZE)
         end)
 
         it("ACK timer starts after send callback, not immediately", function()
@@ -1235,15 +1235,17 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
 
     describe("itemLink stripping", function()
-        it("strips itemLink from sync payload but preserves itemID", function()
+        it("strips reconstructable fields from sync payload", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
             table.insert(guildData.transactions, {
                 type = "deposit", player = "Thrall",
                 itemID = 12345, itemLink = "|cff0070dd|Hitem:12345:0|h[Test Item]|h|r",
-                count = 5, tab = 1,
+                count = 5, tab = 1, tabName = "Consumables",
+                classID = 0, subclassID = 3,
+                category = "flask", _occurrence = 0,
                 timestamp = 1000, scanTime = 1000,
-                scannedBy = "OfficerA", id = "h1",
+                scannedBy = "OfficerA", id = "h1:0",
             })
 
             GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
@@ -1251,8 +1253,20 @@ describe("Sync", function()
             local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
             assert.is_true(ok)
             assert.equals(1, #data.transactions)
-            assert.is_nil(data.transactions[1].itemLink)
-            assert.equals(12345, data.transactions[1].itemID)
+            local tx = data.transactions[1]
+            -- Stripped fields
+            assert.is_nil(tx.itemLink)
+            assert.is_nil(tx.category)
+            assert.is_nil(tx.tabName)
+            assert.is_nil(tx.scanTime)
+            assert.is_nil(tx.scannedBy)
+            assert.is_nil(tx._occurrence)
+            -- Preserved fields
+            assert.equals(12345, tx.itemID)
+            assert.equals(0, tx.classID)
+            assert.equals(3, tx.subclassID)
+            assert.equals("h1:0", tx.id)
+            assert.equals(1, tx.tab)
         end)
 
         it("does not mutate original transaction records", function()
@@ -1271,6 +1285,63 @@ describe("Sync", function()
 
             -- Original record should still have itemLink
             assert.equals(originalLink, guildData.transactions[1].itemLink)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Field reconstruction on receive
+    ---------------------------------------------------------------------------
+
+    describe("reconstructSyncRecord", function()
+        it("restores stripped fields on received item transactions", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Simulate receiving a stripped record (no category, tabName, scanTime, etc.)
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        type = "deposit", player = "Thrall",
+                        itemID = 12345, count = 5, tab = 1,
+                        classID = 0, subclassID = 3,
+                        timestamp = 2000,
+                        id = "deposit|Thrall|12345|5|1|0:2",
+                    },
+                },
+                moneyTransactions = {},
+            })
+
+            assert.equals(1, #guildData.transactions)
+            local stored = guildData.transactions[1]
+            -- Reconstructed fields
+            assert.equals("flask", stored.category)
+            assert.equals(2, stored._occurrence)
+            assert.equals("sync:OfficerB", stored.scannedBy)
+            assert.is_number(stored.scanTime)
+        end)
+
+        it("restores fields on money transactions", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {},
+                moneyTransactions = {
+                    {
+                        type = "deposit", player = "Jaina",
+                        amount = 50000, timestamp = 3000,
+                        id = "deposit|Jaina|50000|0:0",
+                    },
+                },
+            })
+
+            assert.equals(1, #guildData.moneyTransactions)
+            local stored = guildData.moneyTransactions[1]
+            assert.equals(0, stored._occurrence)
+            assert.equals("sync:OfficerB", stored.scannedBy)
+            assert.is_number(stored.scanTime)
         end)
     end)
 
