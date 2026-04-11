@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.15] — 2026-04-11
+
+### Changed
+- Reduced CHUNK_BYTE_BUDGET from 1400 to 600 — produces ~3 records per chunk (~800 bytes) to improve AceComm WHISPER reliability in cross-realm guilds
+
 ## [0.7.14] — 2026-04-11
 
 ### Fixed
