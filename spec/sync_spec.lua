@@ -308,17 +308,16 @@ describe("Sync", function()
     end)
 
     describe("PrepareChunks", function()
-        it("splits at CHUNK_SIZE boundary", function()
+        it("splits at MAX_RECORDS_PER_CHUNK boundary", function()
             local txList = {}
             for i = 1, 25 do
                 txList[i] = { type = "deposit", player = "P", timestamp = i, id = "h" .. i }
             end
 
             local chunks = GBL:PrepareChunks(txList, {})
-            assert.equals(3, #chunks)
-            assert.equals(10, #chunks[1].transactions)
+            assert.equals(2, #chunks)
+            assert.equals(15, #chunks[1].transactions)
             assert.equals(10, #chunks[2].transactions)
-            assert.equals(5, #chunks[3].transactions)
         end)
 
         it("returns empty table for no transactions", function()
@@ -338,12 +337,52 @@ describe("Sync", function()
 
             local chunks = GBL:PrepareChunks(txList, moneyList)
             assert.equals(2, #chunks)
-            -- First chunk: 5 item tx + 5 money tx = 10
+            -- First chunk: 5 item tx + 10 money tx = 15 (hard cap)
             assert.equals(5, #chunks[1].transactions)
-            assert.equals(5, #chunks[1].moneyTransactions)
-            -- Second chunk: remaining 7 money tx
+            assert.equals(10, #chunks[1].moneyTransactions)
+            -- Second chunk: remaining 2 money tx
             assert.equals(0, #chunks[2].transactions)
-            assert.equals(7, #chunks[2].moneyTransactions)
+            assert.equals(2, #chunks[2].moneyTransactions)
+        end)
+
+        it("splits by estimated size when records have large fields", function()
+            local txList = {}
+            -- Each record ~180 bytes estimated (long strings push size)
+            for i = 1, 12 do
+                txList[i] = {
+                    type = "withdrawal",
+                    player = "Verylongnamecharacter",
+                    itemID = 200000 + i,
+                    count = 20,
+                    tab = 3,
+                    classID = 0,
+                    subclassID = 5,
+                    timestamp = 1700000000 + i,
+                    id = "withdrawal|Verylongnamecharacter|" .. (200000 + i)
+                        .. "|20|3|472222:" .. i,
+                }
+            end
+            local chunks = GBL:PrepareChunks(txList, {})
+            -- With ~180 bytes/record and 1400 byte budget,
+            -- should split before hitting 15-record hard cap
+            assert.is_true(#chunks >= 2,
+                "should produce multiple chunks from size limit")
+            for _, chunk in ipairs(chunks) do
+                assert.is_true(#chunk.transactions <= GBL.SYNC_CHUNK_SIZE,
+                    "no chunk should exceed hard record cap")
+            end
+        end)
+
+        it("places a single oversized record in its own chunk", function()
+            local bigId = string.rep("x", 2000)
+            local txList = {
+                { type = "deposit", player = "P", timestamp = 1, id = bigId },
+                { type = "deposit", player = "P", timestamp = 2, id = "small" },
+            }
+            local chunks = GBL:PrepareChunks(txList, {})
+            assert.equals(2, #chunks)
+            assert.equals(1, #chunks[1].transactions)
+            assert.equals(1, #chunks[2].transactions)
         end)
     end)
 
@@ -931,8 +970,8 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
 
     describe("ACK timer callback", function()
-        it("CHUNK_SIZE constant is 10", function()
-            assert.equals(10, GBL.SYNC_CHUNK_SIZE)
+        it("MAX_RECORDS_PER_CHUNK constant is 15", function()
+            assert.equals(15, GBL.SYNC_CHUNK_SIZE)
         end)
 
         it("ACK timer starts after send callback, not immediately", function()
@@ -1069,7 +1108,7 @@ describe("Sync", function()
         it("retries same chunk on ACK timeout instead of aborting", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Add enough tx for 2 chunks (CHUNK_SIZE=3, so 4 tx = 2 chunks)
+            -- Add tx (fits in 1 chunk with MAX_RECORDS_PER_CHUNK=15)
             for i = 1, 4 do
                 table.insert(guildData.transactions, {
                     type = "deposit", player = "X", timestamp = 1000 + i,
@@ -1144,7 +1183,7 @@ describe("Sync", function()
         it("resets retry counter on successful ACK", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Add enough tx for 2 chunks
+            -- Add tx (fits in 1 chunk with MAX_RECORDS_PER_CHUNK=15)
             for i = 1, 4 do
                 table.insert(guildData.transactions, {
                     type = "deposit", player = "X", timestamp = 1000 + i,
@@ -1210,8 +1249,7 @@ describe("Sync", function()
         it("logs warning when chunk exceeds safe size", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- We can't easily make a chunk exceed 2000 bytes with CHUNK_SIZE=3,
-            -- so verify the audit trail does NOT contain a warning for normal chunks
+            -- Verify the audit trail does NOT contain a size warning for normal chunks
             table.insert(guildData.transactions, {
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "h1",
@@ -1227,6 +1265,55 @@ describe("Sync", function()
             end
             assert.is_false(hasWarning,
                 "small chunk should not trigger size warning")
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Money transaction stripping
+    ---------------------------------------------------------------------------
+
+    describe("money transaction stripping", function()
+        it("strips money transactions via stripForSync before sending", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.moneyTransactions, {
+                type = "deposit", player = "Jaina",
+                amount = 50000, timestamp = 3000,
+                scanTime = 3000, scannedBy = "OfficerA",
+                id = "deposit|Jaina|50000|0:0",
+            })
+
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok)
+            assert.equals(1, #data.moneyTransactions)
+            local tx = data.moneyTransactions[1]
+            -- Stripped fields should be nil
+            assert.is_nil(tx.scanTime)
+            assert.is_nil(tx.scannedBy)
+            -- Preserved fields
+            assert.equals(50000, tx.amount)
+            assert.equals("deposit", tx.type)
+            assert.equals("Jaina", tx.player)
+            assert.equals("deposit|Jaina|50000|0:0", tx.id)
+        end)
+
+        it("does not mutate original money transaction records", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.moneyTransactions, {
+                type = "deposit", player = "Jaina",
+                amount = 50000, timestamp = 3000,
+                scanTime = 3000, scannedBy = "OfficerA",
+                id = "m1",
+            })
+
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            -- Original record must still have scanTime and scannedBy
+            assert.equals(3000, guildData.moneyTransactions[1].scanTime)
+            assert.equals("OfficerA", guildData.moneyTransactions[1].scannedBy)
         end)
     end)
 

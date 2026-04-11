@@ -9,7 +9,8 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 -- Protocol constants
 local PREFIX = "GBLSync"
 local PROTOCOL_VERSION = 1
-local CHUNK_SIZE = 10
+local MAX_RECORDS_PER_CHUNK = 15
+local CHUNK_BYTE_BUDGET = 1400
 local MAX_RETRIES = 3
 local ACK_TIMEOUT = 15
 local RECEIVE_TIMEOUT = 30
@@ -19,7 +20,7 @@ local WHISPER_SAFE_BYTES = 2000
 
 -- Expose constants for testing and UI
 GBL.SYNC_PROTOCOL_VERSION = PROTOCOL_VERSION
-GBL.SYNC_CHUNK_SIZE = CHUNK_SIZE
+GBL.SYNC_CHUNK_SIZE = MAX_RECORDS_PER_CHUNK
 GBL.SYNC_PREFIX = PREFIX
 GBL.SYNC_MAX_RETRIES = MAX_RETRIES
 
@@ -255,6 +256,20 @@ local function stripForSync(record)
     return copy
 end
 
+--- Estimate the serialized byte size of a single record.
+-- Conservative upper bound matching AceSerializer output.
+-- Does NOT call Serialize() — safe for tests and fast for large batches.
+-- @param record table A stripped transaction record
+-- @return number Estimated byte count
+local function estimateRecordBytes(record)
+    local bytes = 6  -- table wrapper overhead (^T ... ^t)
+    for k, v in pairs(record) do
+        bytes = bytes + #tostring(k) + 3     -- key + delimiters
+        bytes = bytes + #tostring(v) + 3     -- value + delimiters
+    end
+    return bytes
+end
+
 --- Restore fields stripped by stripForSync on received records.
 -- Called on each record before StoreTx/StoreMoneyTx during sync receive.
 -- @param record table Transaction record received via sync
@@ -362,7 +377,7 @@ function GBL:HandleSyncRequest(sender, data)
     for _, tx in ipairs(guildData.moneyTransactions) do
         local when = tx.scanTime or tx.timestamp or 0
         if when > sinceTimestamp then
-            moneyToSend[#moneyToSend + 1] = tx
+            moneyToSend[#moneyToSend + 1] = stripForSync(tx)
         end
     end
 
@@ -405,51 +420,55 @@ end
 -- Chunking
 ------------------------------------------------------------------------
 
---- Split transaction arrays into CHUNK_SIZE-bounded chunks.
--- @param transactions table Array of item transaction records
--- @param moneyTransactions table Array of money transaction records
+--- Split transaction arrays into size-aware chunks.
+-- Each chunk stays under CHUNK_BYTE_BUDGET estimated bytes and
+-- MAX_RECORDS_PER_CHUNK records (hard cap).
+-- @param transactions table Array of stripped item transaction records
+-- @param moneyTransactions table Array of stripped money transaction records
 -- @return table Array of chunk tables, each with .transactions and .moneyTransactions
 function GBL:PrepareChunks(transactions, moneyTransactions)
     local chunks = {}
     local currentTx = {}
     local currentMoney = {}
     local count = 0
+    local estimatedBytes = 0
 
-    for _, tx in ipairs(transactions) do
-        currentTx[#currentTx + 1] = tx
-        count = count + 1
-        if count >= CHUNK_SIZE then
+    local function sealChunk()
+        if #currentTx > 0 or #currentMoney > 0 then
             chunks[#chunks + 1] = {
                 transactions = currentTx,
                 moneyTransactions = currentMoney,
             }
-            currentTx = {}
-            currentMoney = {}
-            count = 0
         end
+        currentTx = {}
+        currentMoney = {}
+        count = 0
+        estimatedBytes = 0
+    end
+
+    for _, tx in ipairs(transactions) do
+        local recBytes = estimateRecordBytes(tx)
+        if count > 0 and (estimatedBytes + recBytes > CHUNK_BYTE_BUDGET
+                          or count >= MAX_RECORDS_PER_CHUNK) then
+            sealChunk()
+        end
+        currentTx[#currentTx + 1] = tx
+        count = count + 1
+        estimatedBytes = estimatedBytes + recBytes
     end
 
     for _, tx in ipairs(moneyTransactions) do
+        local recBytes = estimateRecordBytes(tx)
+        if count > 0 and (estimatedBytes + recBytes > CHUNK_BYTE_BUDGET
+                          or count >= MAX_RECORDS_PER_CHUNK) then
+            sealChunk()
+        end
         currentMoney[#currentMoney + 1] = tx
         count = count + 1
-        if count >= CHUNK_SIZE then
-            chunks[#chunks + 1] = {
-                transactions = currentTx,
-                moneyTransactions = currentMoney,
-            }
-            currentTx = {}
-            currentMoney = {}
-            count = 0
-        end
+        estimatedBytes = estimatedBytes + recBytes
     end
 
-    if #currentTx > 0 or #currentMoney > 0 then
-        chunks[#chunks + 1] = {
-            transactions = currentTx,
-            moneyTransactions = currentMoney,
-        }
-    end
-
+    sealChunk()
     return chunks
 end
 

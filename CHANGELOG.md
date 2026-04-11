@@ -5,6 +5,15 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.12] — 2026-04-10
+
+### Fixed
+- Sync chunks could exceed WHISPER ~2000-byte limit and be silently dropped — PrepareChunks now uses estimated serialized size (1400-byte budget) instead of fixed record count, preventing ACK timeout loops on oversized chunks
+- Money transactions now stripped via stripForSync before sync sending — previously sent raw with scanTime/scannedBy fields, wasting payload bytes and leaking mutable references
+
+### Changed
+- CHUNK_SIZE (10) replaced with MAX_RECORDS_PER_CHUNK (15) as a hard cap alongside new size-based splitting — typical chunks will be 7–9 records based on estimated byte size
+
 ## [0.7.11] — 2026-04-10
 
 ### Fixed

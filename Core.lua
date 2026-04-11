@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.7.11"
+local VERSION = "0.7.12"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
