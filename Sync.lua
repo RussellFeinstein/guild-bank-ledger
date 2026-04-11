@@ -9,16 +9,19 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 -- Protocol constants
 local PREFIX = "GBLSync"
 local PROTOCOL_VERSION = 1
-local CHUNK_SIZE = 25
+local CHUNK_SIZE = 3
+local MAX_RETRIES = 3
 local ACK_TIMEOUT = 15
 local RECEIVE_TIMEOUT = 30
 local HELLO_DELAY = 5
 local HELLO_COOLDOWN = 60
+local WHISPER_SAFE_BYTES = 2000
 
 -- Expose constants for testing and UI
 GBL.SYNC_PROTOCOL_VERSION = PROTOCOL_VERSION
 GBL.SYNC_CHUNK_SIZE = CHUNK_SIZE
 GBL.SYNC_PREFIX = PREFIX
+GBL.SYNC_MAX_RETRIES = MAX_RETRIES
 
 -- Module state (session-only, not persisted)
 local syncState = {
@@ -28,6 +31,7 @@ local syncState = {
     sendChunkIndex = 0,
     sendTimer = nil,
     sendHardTimer = nil,
+    sendRetryCount = 0,
 
     receiving = false,
     receiveSource = nil,
@@ -400,6 +404,12 @@ function GBL:SendNextChunk()
     self:AddAuditEntry("Sending chunk " .. idx .. "/" .. #syncState.sendChunks
         .. " to " .. (syncState.sendTarget or "?") .. " (" .. msgLen .. " bytes)")
 
+    if msgLen > WHISPER_SAFE_BYTES then
+        self:AddAuditEntry("WARNING: chunk " .. idx .. " is " .. msgLen
+            .. " bytes (>" .. WHISPER_SAFE_BYTES
+            .. ") — may be silently dropped by AceComm WHISPER")
+    end
+
     -- Hard timeout safety net — fires if AceComm callback never completes.
     -- Use C_Timer.NewTicker(n, cb, 1) for a cancellable one-shot timer;
     -- C_Timer.After returns nil in WoW so it can't be cancelled or tracked.
@@ -425,9 +435,18 @@ function GBL:SendNextChunk()
                 syncState.sendTimer:Cancel()
             end
             syncState.sendTimer = C_Timer.NewTicker(ACK_TIMEOUT, function()
-                if syncState.sending then
+                if not syncState.sending then return end
+                if syncState.sendRetryCount < MAX_RETRIES then
+                    syncState.sendRetryCount = syncState.sendRetryCount + 1
+                    syncState.sendChunkIndex = syncState.sendChunkIndex - 1
+                    self:AddAuditEntry("Retrying chunk " .. (syncState.sendChunkIndex + 1)
+                        .. " (attempt " .. (syncState.sendRetryCount + 1) .. "/"
+                        .. (MAX_RETRIES + 1) .. ")")
+                    self:SendNextChunk()
+                else
                     self:AddAuditEntry("ACK timeout from "
-                        .. (syncState.sendTarget or "unknown") .. " — aborting")
+                        .. (syncState.sendTarget or "unknown")
+                        .. " after " .. (MAX_RETRIES + 1) .. " attempts — aborting")
                     self:FinishSending()
                 end
             end, 1)
@@ -440,6 +459,7 @@ function GBL:FinishSending()
     syncState.sendTarget = nil
     syncState.sendChunks = {}
     syncState.sendChunkIndex = 0
+    syncState.sendRetryCount = 0
     if syncState.sendTimer then
         syncState.sendTimer:Cancel()
         syncState.sendTimer = nil
@@ -537,9 +557,11 @@ function GBL:HandleAck(sender, _data)
     if not syncState.sending or Ambiguate(sender, "none") ~= Ambiguate(syncState.sendTarget, "none") then return end
 
     if syncState.sendTimer then
-        syncState.sendTimer.cancelled = true
+        syncState.sendTimer:Cancel()
         syncState.sendTimer = nil
     end
+
+    syncState.sendRetryCount = 0
 
     -- Small delay between chunks to avoid flooding
     C_Timer.After(0.1, function()
@@ -697,6 +719,7 @@ function GBL:ResetSyncState()
     syncState.sendChunkIndex = 0
     syncState.sendTimer = nil
     syncState.sendHardTimer = nil
+    syncState.sendRetryCount = 0
     syncState.receiving = false
     syncState.receiveSource = nil
     syncState.receiveExpected = 0

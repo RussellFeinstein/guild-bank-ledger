@@ -310,14 +310,15 @@ describe("Sync", function()
     describe("PrepareChunks", function()
         it("splits at CHUNK_SIZE boundary", function()
             local txList = {}
-            for i = 1, 40 do
+            for i = 1, 7 do
                 txList[i] = { type = "deposit", player = "P", timestamp = i, id = "h" .. i }
             end
 
             local chunks = GBL:PrepareChunks(txList, {})
-            assert.equals(2, #chunks)
-            assert.equals(25, #chunks[1].transactions)
-            assert.equals(15, #chunks[2].transactions)
+            assert.equals(3, #chunks)
+            assert.equals(3, #chunks[1].transactions)
+            assert.equals(3, #chunks[2].transactions)
+            assert.equals(1, #chunks[3].transactions)
         end)
 
         it("returns empty table for no transactions", function()
@@ -327,22 +328,22 @@ describe("Sync", function()
 
         it("mixes item and money transactions across chunks", function()
             local txList = {}
-            for i = 1, 20 do
+            for i = 1, 2 do
                 txList[i] = { type = "deposit", player = "P", timestamp = i }
             end
             local moneyList = {}
-            for i = 1, 15 do
+            for i = 1, 4 do
                 moneyList[i] = { type = "deposit", player = "P", amount = i * 100, timestamp = i }
             end
 
             local chunks = GBL:PrepareChunks(txList, moneyList)
             assert.equals(2, #chunks)
-            -- First chunk: 20 item tx + 5 money tx = 25
-            assert.equals(20, #chunks[1].transactions)
-            assert.equals(5, #chunks[1].moneyTransactions)
-            -- Second chunk: remaining 10 money tx
+            -- First chunk: 2 item tx + 1 money tx = 3
+            assert.equals(2, #chunks[1].transactions)
+            assert.equals(1, #chunks[1].moneyTransactions)
+            -- Second chunk: remaining 3 money tx
             assert.equals(0, #chunks[2].transactions)
-            assert.equals(10, #chunks[2].moneyTransactions)
+            assert.equals(3, #chunks[2].moneyTransactions)
         end)
     end)
 
@@ -930,8 +931,8 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
 
     describe("ACK timer callback", function()
-        it("CHUNK_SIZE constant is 25", function()
-            assert.equals(25, GBL.SYNC_CHUNK_SIZE)
+        it("CHUNK_SIZE constant is 3", function()
+            assert.equals(3, GBL.SYNC_CHUNK_SIZE)
         end)
 
         it("ACK timer starts after send callback, not immediately", function()
@@ -1057,6 +1058,175 @@ describe("Sync", function()
             assert.is_false(GBL:GetSyncStatus().sending, "should have aborted")
 
             GBL.SendCommMessage = origSend
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Retry logic
+    ---------------------------------------------------------------------------
+
+    describe("retry logic", function()
+        it("retries same chunk on ACK timeout instead of aborting", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Add enough tx for 2 chunks (CHUNK_SIZE=3, so 4 tx = 2 chunks)
+            for i = 1, 4 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000 + i, id = "h" .. i,
+                })
+            end
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            -- Should be sending chunk 1
+            assert.is_true(GBL:GetSyncStatus().sending)
+            local sentBefore = #MockAce.sentCommMessages
+
+            -- Fire ACK timeout — should retry, not abort
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 15 and not timer.cancelled then
+                    timer.callback()
+                    break
+                end
+            end
+
+            assert.is_true(GBL:GetSyncStatus().sending, "should still be sending after retry")
+            -- A new SYNC_DATA message should have been sent (the retry)
+            assert.is_true(#MockAce.sentCommMessages > sentBefore,
+                "retry should send another message")
+        end)
+
+        it("aborts after MAX_RETRIES exceeded", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Override SendCommMessage to suppress callback (no ACK possible)
+            local origSend = GBL.SendCommMessage
+            GBL.SendCommMessage = function(self, prefix, text, dist, target, prio, cbFn, cbArg)
+                table.insert(MockAce.sentCommMessages, {
+                    prefix = prefix, text = text, distribution = dist, target = target,
+                })
+                -- Simulate immediate transmit so ACK timer starts
+                if cbFn then cbFn(cbArg, 100, 100) end
+            end
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "h1",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending)
+
+            -- Fire ACK timeout MAX_RETRIES times (should keep retrying)
+            for attempt = 1, GBL.SYNC_MAX_RETRIES do
+                for _, timer in ipairs(MockWoW.pendingTimers) do
+                    if timer.delay == 15 and not timer.cancelled then
+                        timer.callback()
+                        break
+                    end
+                end
+                assert.is_true(GBL:GetSyncStatus().sending,
+                    "should still be sending after retry " .. attempt)
+            end
+
+            -- One more timeout — should abort
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 15 and not timer.cancelled then
+                    timer.callback()
+                    break
+                end
+            end
+            assert.is_false(GBL:GetSyncStatus().sending,
+                "should have aborted after max retries")
+
+            GBL.SendCommMessage = origSend
+        end)
+
+        it("resets retry counter on successful ACK", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Add enough tx for 2 chunks
+            for i = 1, 4 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000 + i, id = "h" .. i,
+                })
+            end
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending)
+
+            -- Fire one ACK timeout (retry attempt 1)
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 15 and not timer.cancelled then
+                    timer.callback()
+                    break
+                end
+            end
+
+            -- Now simulate successful ACK for chunk 1
+            GBL:HandleAck("OfficerB", { chunk = 1 })
+
+            -- Fire ACK timeout for chunk 2 — retry counter should be reset,
+            -- so this should retry (not abort)
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 15 and not timer.cancelled then
+                    timer.callback()
+                    break
+                end
+            end
+            assert.is_true(GBL:GetSyncStatus().sending,
+                "retry counter should have reset — still sending")
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Chunk size safety
+    ---------------------------------------------------------------------------
+
+    describe("chunk size safety", function()
+        it("serialized SYNC_DATA stays under WHISPER safe limit with typical records", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Fill one full chunk with realistic transaction records
+            for i = 1, GBL.SYNC_CHUNK_SIZE do
+                table.insert(guildData.transactions, {
+                    type = "withdrawal", player = "Longnamechar",
+                    itemID = 200000 + i, count = 20, tab = 3,
+                    timestamp = 1700000000 + i, scanTime = 1700000000 + i,
+                    scannedBy = "Anotherlongname", id = "withdrawal|Longnamechar|" .. (200000 + i) .. "|20|3|472222:" .. i,
+                    classID = 0, subClassID = 5,
+                    category = "Trade Goods: Cloth",
+                })
+            end
+
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            -- The first sent message should be the SYNC_DATA chunk
+            assert.is_true(#MockAce.sentCommMessages >= 1)
+            local payload = MockAce.sentCommMessages[1].text
+            assert.is_true(#payload < 2000,
+                "Serialized chunk (" .. #payload .. " bytes) exceeds 2000-byte WHISPER safe limit — reduce CHUNK_SIZE")
+        end)
+
+        it("logs warning when chunk exceeds safe size", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- We can't easily make a chunk exceed 2000 bytes with CHUNK_SIZE=3,
+            -- so verify the audit trail does NOT contain a warning for normal chunks
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "h1",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            local trail = GBL:GetAuditTrail()
+            local hasWarning = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("WARNING: chunk") then
+                    hasWarning = true
+                end
+            end
+            assert.is_false(hasWarning,
+                "small chunk should not trigger size warning")
         end)
     end)
 

@@ -5,6 +5,13 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.7] — 2026-04-10
+
+### Fixed
+- Sync data chunks too large for reliable WHISPER delivery — reduced from 25 to 3 transactions per chunk (~900 bytes vs ~6400 bytes), preventing silent AceComm reassembly failures
+- Single dropped chunk no longer kills entire sync — ACK timeouts now retry the same chunk up to 3 times before aborting
+- HandleAck timer cancellation still using `.cancelled = true` instead of `:Cancel()` (missed in v0.7.6 timer fix pass)
+
 ## [0.7.6] — 2026-04-10
 
 ### Fixed
