@@ -32,13 +32,17 @@ local syncState = {
     sendTimer = nil,
     sendHardTimer = nil,
     sendRetryCount = 0,
+    sendStartTime = 0,
+    sendTotalRecords = 0,
 
     receiving = false,
     receiveSource = nil,
     receiveExpected = 0,
     receiveGot = 0,
     receiveStored = 0,
+    receiveDuped = 0,
     receiveTimer = nil,
+    receiveStartTime = 0,
 
     peers = {},
     auditTrail = {},
@@ -279,7 +283,9 @@ function GBL:RequestSync(target, sinceTimestamp)
     syncState.receiveSource = target
     syncState.receiveGot = 0
     syncState.receiveStored = 0
+    syncState.receiveDuped = 0
     syncState.receiveExpected = 0
+    syncState.receiveStartTime = GetServerTime()
 
     sinceTimestamp = sinceTimestamp or 0
 
@@ -291,6 +297,7 @@ function GBL:RequestSync(target, sinceTimestamp)
     })
 
     self:SendCommMessage(PREFIX, msg, "WHISPER", target)
+    self:Print("Sync: requesting data from " .. target .. "...")
     self:AddAuditEntry("Requesting sync from " .. target
         .. " (since " .. sinceTimestamp .. ")")
     self:SendMessage("GBL_SYNC_STARTED", target)
@@ -352,8 +359,13 @@ function GBL:HandleSyncRequest(sender, data)
     syncState.sendTarget = sender
     syncState.sendChunks = chunks
     syncState.sendChunkIndex = 0
+    syncState.sendStartTime = GetServerTime()
+    syncState.sendTotalRecords = #txToSend + #moneyToSend
 
-    self:AddAuditEntry("Sending " .. (#txToSend + #moneyToSend)
+    local totalTx = #txToSend + #moneyToSend
+    self:Print("Sync: sending " .. totalTx .. " records to " .. sender
+        .. " in " .. #chunks .. " chunk(s)")
+    self:AddAuditEntry("Sending " .. totalTx
         .. " tx to " .. sender .. " in " .. #chunks .. " chunk(s)")
 
     self:SendNextChunk()
@@ -473,11 +485,18 @@ function GBL:SendNextChunk()
                 if syncState.sendRetryCount < MAX_RETRIES then
                     syncState.sendRetryCount = syncState.sendRetryCount + 1
                     syncState.sendChunkIndex = syncState.sendChunkIndex - 1
-                    self:AddAuditEntry("Retrying chunk " .. (syncState.sendChunkIndex + 1)
+                    local retryChunk = syncState.sendChunkIndex + 1
+                    self:Print("Sync: ACK timeout, retrying chunk " .. retryChunk
+                        .. " (attempt " .. (syncState.sendRetryCount + 1)
+                        .. "/" .. (MAX_RETRIES + 1) .. ")")
+                    self:AddAuditEntry("Retrying chunk " .. retryChunk
                         .. " (attempt " .. (syncState.sendRetryCount + 1) .. "/"
                         .. (MAX_RETRIES + 1) .. ")")
                     self:SendNextChunk()
                 else
+                    self:Print("Sync: ACK timeout from "
+                        .. (syncState.sendTarget or "?")
+                        .. " after " .. (MAX_RETRIES + 1) .. " attempts — aborting")
                     self:AddAuditEntry("ACK timeout from "
                         .. (syncState.sendTarget or "unknown")
                         .. " after " .. (MAX_RETRIES + 1) .. " attempts — aborting")
@@ -489,11 +508,24 @@ end
 
 --- Clean up sending state after sync completes or aborts.
 function GBL:FinishSending()
+    local target = syncState.sendTarget or "?"
+    local sent = syncState.sendChunkIndex
+    local total = #syncState.sendChunks
+    local elapsed = GetServerTime() - syncState.sendStartTime
+
+    self:Print("Sync: send complete to " .. target
+        .. " (" .. sent .. "/" .. total .. " chunks, " .. elapsed .. "s)")
+    self:AddAuditEntry("Send complete to " .. target
+        .. " — " .. sent .. "/" .. total .. " chunks"
+        .. ", " .. syncState.sendTotalRecords .. " records, " .. elapsed .. "s")
+
     syncState.sending = false
     syncState.sendTarget = nil
     syncState.sendChunks = {}
     syncState.sendChunkIndex = 0
     syncState.sendRetryCount = 0
+    syncState.sendStartTime = 0
+    syncState.sendTotalRecords = 0
     if syncState.sendTimer then
         syncState.sendTimer:Cancel()
         syncState.sendTimer = nil
@@ -531,6 +563,7 @@ function GBL:HandleSyncData(sender, data)
     if not guildData then return end
 
     local stored = 0
+    local chunkTotal = #(data.transactions or {}) + #(data.moneyTransactions or {})
 
     for _, tx in ipairs(data.transactions or {}) do
         reconstructSyncRecord(tx, sender)
@@ -546,8 +579,10 @@ function GBL:HandleSyncData(sender, data)
         end
     end
 
+    local duped = chunkTotal - stored
     syncState.receiveGot = syncState.receiveGot + 1
     syncState.receiveStored = syncState.receiveStored + stored
+    syncState.receiveDuped = syncState.receiveDuped + duped
     syncState.receiveExpected = data.totalChunks or 1
 
     -- Reset receive timeout (fires if no more chunks arrive)
@@ -556,8 +591,14 @@ function GBL:HandleSyncData(sender, data)
     end
     syncState.receiveTimer = C_Timer.NewTicker(RECEIVE_TIMEOUT, function()
         if syncState.receiving then
-            self:AddAuditEntry("Receive timeout from "
+            self:Print("Sync: receive timeout waiting for chunk "
+                .. (syncState.receiveGot + 1) .. "/"
+                .. syncState.receiveExpected .. " from "
                 .. (syncState.receiveSource or "unknown") .. " — aborting")
+            self:AddAuditEntry("Receive timeout from "
+                .. (syncState.receiveSource or "unknown")
+                .. " at chunk " .. syncState.receiveGot
+                .. "/" .. syncState.receiveExpected .. " — aborting")
             self:FinishReceiving(syncState.receiveSource)
         end
     end, 1)
@@ -572,9 +613,14 @@ function GBL:HandleSyncData(sender, data)
     })
     self:SendCommMessage(PREFIX, ackMsg, "WHISPER", sender)
 
+    self:Print("Sync: chunk " .. (data.chunk or "?") .. "/"
+        .. (data.totalChunks or "?") .. " from " .. sender
+        .. " — " .. stored .. " new, " .. duped .. " duped"
+        .. " (total so far: " .. syncState.receiveStored .. " new)")
+
     self:AddAuditEntry("Received chunk " .. (data.chunk or "?") .. "/"
         .. (data.totalChunks or "?") .. " from " .. sender
-        .. " (" .. stored .. " new)")
+        .. " (" .. chunkTotal .. " records, " .. stored .. " new, " .. duped .. " duped)")
 
     self:SendMessage("GBL_SYNC_PROGRESS", sender,
         data.chunk or 0, data.totalChunks or 0, stored)
@@ -589,13 +635,17 @@ end
 -- Cancels the timeout and schedules the next chunk.
 -- @param sender string Sender name
 -- @param data table Deserialized ACK payload
-function GBL:HandleAck(sender, _data)
+function GBL:HandleAck(sender, data)
     if not syncState.sending or Ambiguate(sender, "none") ~= Ambiguate(syncState.sendTarget, "none") then return end
 
     if syncState.sendTimer then
         syncState.sendTimer:Cancel()
         syncState.sendTimer = nil
     end
+
+    local ackedChunk = data and data.chunk or syncState.sendChunkIndex
+    self:AddAuditEntry("ACK from " .. sender .. " for chunk " .. ackedChunk
+        .. "/" .. #syncState.sendChunks)
 
     syncState.sendRetryCount = 0
 
@@ -634,8 +684,16 @@ function GBL:FinishReceiving(sender)
         }
     end
 
+    local totalDuped = syncState.receiveDuped
+    local elapsed = GetServerTime() - syncState.receiveStartTime
+    local chunksGot = syncState.receiveGot
+
+    self:Print("Sync complete from " .. (sender or "?") .. ": "
+        .. totalStored .. " new, " .. totalDuped .. " duped"
+        .. " (" .. chunksGot .. " chunks, " .. elapsed .. "s)")
     self:AddAuditEntry("Sync complete from " .. (sender or "unknown")
-        .. " (" .. totalStored .. " new)")
+        .. " — " .. totalStored .. " new, " .. totalDuped .. " duped"
+        .. ", " .. chunksGot .. " chunks, " .. elapsed .. "s")
 
     if syncState.receiveTimer then
         syncState.receiveTimer:Cancel()
@@ -647,6 +705,8 @@ function GBL:FinishReceiving(sender)
     syncState.receiveExpected = 0
     syncState.receiveGot = 0
     syncState.receiveStored = 0
+    syncState.receiveDuped = 0
+    syncState.receiveStartTime = 0
 
     self:SendMessage("GBL_SYNC_COMPLETE", sender, totalStored)
 
@@ -756,12 +816,16 @@ function GBL:ResetSyncState()
     syncState.sendTimer = nil
     syncState.sendHardTimer = nil
     syncState.sendRetryCount = 0
+    syncState.sendStartTime = 0
+    syncState.sendTotalRecords = 0
     syncState.receiving = false
     syncState.receiveSource = nil
     syncState.receiveExpected = 0
     syncState.receiveGot = 0
     syncState.receiveStored = 0
+    syncState.receiveDuped = 0
     syncState.receiveTimer = nil
+    syncState.receiveStartTime = 0
     syncState.peers = {}
     syncState.auditTrail = {}
     syncState.lastHelloTime = 0

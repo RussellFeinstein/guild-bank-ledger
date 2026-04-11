@@ -5,6 +5,14 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.10] — 2026-04-10
+
+### Added
+- Chat output for all sync events: request, chunk progress (new/duped counts), retries, timeouts, completion summary with elapsed time
+- ACK receipt logging in audit trail
+- Dedup breakdown per chunk (new vs duplicate record counts)
+- Sync completion summary: total new, total duped, chunks received, elapsed seconds
+
 ## [0.7.9] — 2026-04-10
 
 ### Fixed
