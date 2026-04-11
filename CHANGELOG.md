@@ -5,10 +5,10 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.16] — 2026-04-11
+## [0.7.17] — 2026-04-11
 
 ### Changed
-- Inter-chunk delay increased from 100ms to 1s — prevents ChatThrottleLib rate-limiting drops during sustained cross-realm WHISPER sync
+- Reverted inter-chunk delay back to 100ms — 1s delay reduced throughput without improving reliability
 
 ## [0.7.15] — 2026-04-11
 
