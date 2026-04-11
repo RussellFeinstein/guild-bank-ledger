@@ -200,12 +200,14 @@ function GBL:UpdatePlayerStats(record, guildData)
     -- AceDB wildcard metatable auto-vivifies the player entry
     local stats = guildData.playerStats[record.player]
 
-    -- Update timestamps
-    if stats.firstSeen == 0 or record.timestamp < stats.firstSeen then
-        stats.firstSeen = record.timestamp
-    end
-    if record.timestamp > stats.lastSeen then
-        stats.lastSeen = record.timestamp
+    -- Update timestamps (guard nil — synced records from older versions may lack timestamp)
+    if record.timestamp then
+        if stats.firstSeen == 0 or record.timestamp < stats.firstSeen then
+            stats.firstSeen = record.timestamp
+        end
+        if record.timestamp > stats.lastSeen then
+            stats.lastSeen = record.timestamp
+        end
     end
 
     -- Item transactions

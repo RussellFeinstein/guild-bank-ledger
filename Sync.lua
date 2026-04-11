@@ -247,6 +247,14 @@ local function reconstructSyncRecord(record, sender)
     if record.id then
         record._occurrence = tonumber(record.id:match(":(%d+)$")) or 0
     end
+    -- Recover timestamp from id's timeSlot if missing (old-version records)
+    -- id format: "type|player|...|timeSlot" or "type|player|...|timeSlot:occ"
+    if not record.timestamp and record.id then
+        local timeSlot = record.id:match("(%d+):?%d*$")
+        if timeSlot then
+            record.timestamp = tonumber(timeSlot) * 3600
+        end
+    end
     -- Restore category from classID + subclassID (item records only)
     if record.itemID and record.classID then
         record.category = GBL:CategorizeItem(record.classID, record.subclassID or 0)

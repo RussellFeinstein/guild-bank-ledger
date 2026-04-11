@@ -1343,6 +1343,30 @@ describe("Sync", function()
             assert.equals("sync:OfficerB", stored.scannedBy)
             assert.is_number(stored.scanTime)
         end)
+
+        it("recovers timestamp from id when missing (old-version records)", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        type = "withdraw", player = "Flamess",
+                        itemID = 243954, count = 2, classID = 8, subclassID = 2,
+                        id = "withdraw|Flamess|243954|2|0|493180",
+                        -- no timestamp, no tab — simulates old-version record
+                    },
+                },
+                moneyTransactions = {},
+            })
+
+            assert.equals(1, #guildData.transactions)
+            local stored = guildData.transactions[1]
+            -- timestamp recovered from timeSlot 493180 * 3600
+            assert.equals(493180 * 3600, stored.timestamp)
+            assert.equals("sync:OfficerB", stored.scannedBy)
+        end)
     end)
 
     ---------------------------------------------------------------------------

@@ -5,6 +5,12 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.9] — 2026-04-10
+
+### Fixed
+- Crash when syncing records from older addon versions that lack a `timestamp` field (`attempt to compare nil with number` in UpdatePlayerStats)
+- Sync receiver now recovers missing `timestamp` from the id's timeSlot when receiving old-format records
+
 ## [0.7.8] — 2026-04-10
 
 ### Changed
