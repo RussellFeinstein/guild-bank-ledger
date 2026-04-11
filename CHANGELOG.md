@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] — 2026-04-11
+
+### Changed
+- Verbose sync audit trail: HELLO now logs remote hash/count/version, hash comparison logs both values and trigger reason (hash mismatch vs count), bucket filter logs total/matching/differing day counts with dates, received chunks break out item vs money new/duped counts, sync completion logs post-sync total tx count and updated hash
+
 ## [0.9.1] — 2026-04-11
 
 ### Fixed

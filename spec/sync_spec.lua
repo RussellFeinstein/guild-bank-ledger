@@ -1850,11 +1850,11 @@ describe("Sync", function()
             end
             assert.is_false(sentRequest, "should skip sync when hashes match")
 
-            -- Audit trail should mention hash match
+            -- Audit trail should mention datasets identical
             local trail = GBL:GetAuditTrail()
             local found = false
             for _, e in ipairs(trail) do
-                if e.message:find("data hashes match") then found = true end
+                if e.message:find("datasets identical") then found = true end
             end
             assert.is_true(found)
         end)

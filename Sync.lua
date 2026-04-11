@@ -222,7 +222,9 @@ function GBL:HandleHello(sender, data)
     self:UpdatePeer(sender, data)
 
     self:AddAuditEntry("Received HELLO from " .. sender
-        .. " (tx: " .. (data.txCount or 0) .. ")")
+        .. " (tx: " .. (data.txCount or 0)
+        .. ", hash: " .. tostring(data.dataHash or "none")
+        .. ", v" .. tostring(data.version or "?") .. ")")
 
     -- Debounce: coalesce multiple new-peer discoveries into one reply.
     -- Without this, N online peers would trigger N force-replies on login/reload.
@@ -249,24 +251,34 @@ function GBL:HandleHello(sender, data)
 
     local localDataHash = data.dataHash and self:GetDataHash(guildData) or nil
 
+    self:AddAuditEntry("Hash compare: local=" .. tostring(localDataHash or "none")
+        .. " (" .. localCount .. " tx), remote=" .. tostring(data.dataHash or "none")
+        .. " (" .. remoteCount .. " tx)")
+
     -- Fast path: skip when datasets are identical (hash + count match)
     if localDataHash and data.dataHash == localDataHash and localCount == remoteCount then
         self:AddAuditEntry("Skipped sync from " .. sender
-            .. " (data hashes match, tx: " .. localCount .. ")")
+            .. " — datasets identical (hash: " .. localDataHash
+            .. ", tx: " .. localCount .. ")")
         return
     end
 
     -- Determine if sync is needed
     local shouldSync = false
+    local syncReason
     if localDataHash and data.dataHash ~= localDataHash then
         -- Hashes differ — we have records they don't, or vice versa
         shouldSync = true
+        syncReason = "hash mismatch"
     elseif not data.dataHash and remoteCount > localCount then
         -- No hash support (old version) — fall back to count comparison
         shouldSync = true
+        syncReason = "count (no hash, remote has more)"
     end
 
     if shouldSync and not syncState.receiving and self.db.profile.sync.autoSync then
+        self:AddAuditEntry("Sync triggered by " .. syncReason
+            .. " — requesting from " .. sender)
         local sinceTimestamp = guildData.syncState.lastSyncTimestamp or 0
         self:RequestSync(sender, sinceTimestamp)
     else
@@ -408,10 +420,16 @@ function GBL:RequestSync(target, sinceTimestamp)
         guild = self:GetGuildName(),
     })
 
+    local bucketCount = 0
+    if bucketHashes then
+        for _ in pairs(bucketHashes) do bucketCount = bucketCount + 1 end
+    end
+
     self:SendCommMessage(PREFIX, msg, "WHISPER", target)
     self:Print("Sync: requesting data from " .. target .. "...")
     self:AddAuditEntry("Requesting sync from " .. target
-        .. " (since " .. sinceTimestamp .. ")")
+        .. " (since " .. sinceTimestamp
+        .. ", " .. bucketCount .. " bucket days sent)")
     self:SendMessage("GBL_SYNC_STARTED", target)
 
     -- Request timeout — if no SYNC_DATA arrives, NACK for chunk 1 instead of aborting
@@ -457,12 +475,30 @@ function GBL:HandleSyncRequest(sender, data)
         -- Bucket-filtered sync: only send records from days where hashes differ
         local localBuckets = self:ComputeBucketHashes(guildData)
         local diffDays = {}
+        local totalLocalDays = 0
+        local totalRemoteDays = 0
+        local matchingDays = 0
+
+        for _ in pairs(localBuckets) do totalLocalDays = totalLocalDays + 1 end
+        for _ in pairs(data.bucketHashes) do totalRemoteDays = totalRemoteDays + 1 end
 
         for dayKey, localHash in pairs(localBuckets) do
             if localHash ~= (data.bucketHashes[dayKey] or 0) then
                 diffDays[dayKey] = true
+            else
+                matchingDays = matchingDays + 1
             end
         end
+
+        -- Build human-readable date list for differing days
+        local diffCount = 0
+        local diffDateList = {}
+        for dayKey in pairs(diffDays) do
+            diffCount = diffCount + 1
+            local ts = dayKey * 86400
+            diffDateList[#diffDateList + 1] = date("%Y-%m-%d", ts)
+        end
+        table.sort(diffDateList)
 
         for _, tx in ipairs(guildData.transactions) do
             local dayKey = math.floor((tx.timestamp or 0) / 86400)
@@ -477,11 +513,14 @@ function GBL:HandleSyncRequest(sender, data)
             end
         end
 
-        local diffCount = 0
-        for _ in pairs(diffDays) do diffCount = diffCount + 1 end
-        self:AddAuditEntry("Bucket filter: " .. diffCount
-            .. " differing day(s), " .. (#txToSend + #moneyToSend)
-            .. " records to send")
+        self:AddAuditEntry("Bucket filter: " .. totalLocalDays .. " local day(s), "
+            .. totalRemoteDays .. " remote day(s), "
+            .. matchingDays .. " matching, " .. diffCount .. " differing")
+        if diffCount > 0 then
+            self:AddAuditEntry("Differing dates: " .. table.concat(diffDateList, ", "))
+        end
+        self:AddAuditEntry("Sending " .. #txToSend .. " item tx + "
+            .. #moneyToSend .. " money tx from differing days")
     else
         -- Fallback: old-style sinceTimestamp filtering (backward compat)
         local sinceTimestamp = data.sinceTimestamp or 0
@@ -754,24 +793,30 @@ function GBL:HandleSyncData(sender, data)
     local guildData = self:GetGuildData()
     if not guildData then return end
 
-    local stored = 0
+    local itemStored, itemDuped = 0, 0
+    local moneyStored, moneyDuped = 0, 0
     local chunkTotal = #(data.transactions or {}) + #(data.moneyTransactions or {})
 
     for _, tx in ipairs(data.transactions or {}) do
         reconstructSyncRecord(tx, sender)
         if self:StoreTx(tx, guildData) then
-            stored = stored + 1
+            itemStored = itemStored + 1
+        else
+            itemDuped = itemDuped + 1
         end
     end
 
     for _, tx in ipairs(data.moneyTransactions or {}) do
         reconstructSyncRecord(tx, sender)
         if self:StoreMoneyTx(tx, guildData) then
-            stored = stored + 1
+            moneyStored = moneyStored + 1
+        else
+            moneyDuped = moneyDuped + 1
         end
     end
 
-    local duped = chunkTotal - stored
+    local stored = itemStored + moneyStored
+    local duped = itemDuped + moneyDuped
     syncState.receiveGot = syncState.receiveGot + 1
     syncState.receiveStored = syncState.receiveStored + stored
     syncState.receiveDuped = syncState.receiveDuped + duped
@@ -818,7 +863,9 @@ function GBL:HandleSyncData(sender, data)
 
     self:AddAuditEntry("Received chunk " .. (data.chunk or "?") .. "/"
         .. (data.totalChunks or "?") .. " from " .. sender
-        .. " (" .. chunkTotal .. " records, " .. stored .. " new, " .. duped .. " duped)")
+        .. " (" .. chunkTotal .. " records: "
+        .. itemStored .. " item new, " .. itemDuped .. " item duped, "
+        .. moneyStored .. " money new, " .. moneyDuped .. " money duped)")
 
     self:SendMessage("GBL_SYNC_PROGRESS", sender,
         data.chunk or 0, data.totalChunks or 0, stored)
@@ -879,12 +926,17 @@ function GBL:FinishReceiving(sender)
     local elapsed = GetServerTime() - syncState.receiveStartTime
     local chunksGot = syncState.receiveGot
 
+    local totalTxAfter = guildData
+        and (#guildData.transactions + #guildData.moneyTransactions) or 0
+    local newHash = guildData and self:GetDataHash(guildData) or 0
+
     self:Print("Sync complete from " .. (sender or "?") .. ": "
         .. totalStored .. " new, " .. totalDuped .. " duped"
         .. " (" .. chunksGot .. " chunks, " .. elapsed .. "s)")
     self:AddAuditEntry("Sync complete from " .. (sender or "unknown")
         .. " — " .. totalStored .. " new, " .. totalDuped .. " duped"
-        .. ", " .. chunksGot .. " chunks, " .. elapsed .. "s")
+        .. ", " .. chunksGot .. " chunks, " .. elapsed .. "s"
+        .. " | total tx now: " .. totalTxAfter .. ", hash: " .. newHash)
 
     if syncState.receiveTimer then
         syncState.receiveTimer:Cancel()
