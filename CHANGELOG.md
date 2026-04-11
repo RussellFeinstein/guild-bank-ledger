@@ -5,6 +5,14 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.13] — 2026-04-10
+
+### Fixed
+- Cross-realm sync failures: replaced `Ambiguate` with realm-stripping `baseName()` for peer identity matching in HandleAck and HandleSyncData — Ambiguate is context-dependent (behaves differently per client's realm), causing silent ACK rejection in cross-realm guilds where GUILD and WHISPER channels may format sender names differently
+
+### Added
+- Diagnostic audit entries: "RECV" logs raw channel + sender for all incoming messages, "ACK check" logs raw sender vs target before comparison — aids cross-realm debugging
+
 ## [0.7.12] — 2026-04-10
 
 ### Fixed

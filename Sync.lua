@@ -133,12 +133,15 @@ end
 -- @param message string Serialized message data
 -- @param distribution string Channel type ("GUILD", "WHISPER", etc.)
 -- @param sender string Sender character name
-function GBL:OnSyncMessage(_prefix, message, _distribution, sender)
+function GBL:OnSyncMessage(_prefix, message, distribution, sender)
     if not self.db.profile.sync.enabled then return end
 
     -- Ignore our own messages (Ambiguate handles realm-qualified names in retail)
     local myName = UnitName("player")
     if Ambiguate(sender, "none") == myName then return end
+
+    -- Diagnostic: log channel + raw sender for cross-realm debugging
+    self:AddAuditEntry("RECV " .. tostring(distribution) .. " from " .. tostring(sender))
 
     local success, data = self:Deserialize(message)
     if not success or type(data) ~= "table" then return end
@@ -234,6 +237,17 @@ end
 ------------------------------------------------------------------------
 -- Payload helpers
 ------------------------------------------------------------------------
+
+--- Strip realm suffix from a character name for comparison.
+-- Within a guild, character names are unique, so base name is sufficient.
+-- Unlike Ambiguate, this produces identical results on every client regardless
+-- of the local player's realm — critical for cross-realm guild sync.
+-- @param name string Character name, possibly realm-qualified ("Name-Realm")
+-- @return string Base name without realm suffix
+local function baseName(name)
+    if not name then return "" end
+    return name:match("^([^%-]+)") or name
+end
 
 --- Strip reconstructable fields from a transaction record for sync.
 -- Removes itemLink (large, reconstructable from itemID) to reduce payload.
@@ -609,7 +623,7 @@ function GBL:HandleSyncData(sender, data)
         syncState.receiveSource = sender
         syncState.receiveGot = 0
         syncState.receiveStored = 0
-    elseif Ambiguate(sender, "none") ~= Ambiguate(syncState.receiveSource, "none") then
+    elseif baseName(sender) ~= baseName(syncState.receiveSource) then
         -- Reject data from a different sender during active receive
         self:AddAuditEntry("Ignored SYNC_DATA from " .. sender
             .. " (receiving from " .. (syncState.receiveSource or "?") .. ")")
@@ -693,7 +707,11 @@ end
 -- @param sender string Sender name
 -- @param data table Deserialized ACK payload
 function GBL:HandleAck(sender, data)
-    if not syncState.sending or Ambiguate(sender, "none") ~= Ambiguate(syncState.sendTarget, "none") then return end
+    -- Diagnostic: log raw names for cross-realm debugging
+    self:AddAuditEntry("ACK check: sender=" .. tostring(sender)
+        .. " target=" .. tostring(syncState.sendTarget))
+
+    if not syncState.sending or baseName(sender) ~= baseName(syncState.sendTarget) then return end
 
     if syncState.sendTimer then
         syncState.sendTimer:Cancel()

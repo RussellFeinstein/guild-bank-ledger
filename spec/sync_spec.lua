@@ -1509,4 +1509,110 @@ describe("Sync", function()
             assert.equals(0, GBL:MajorVersion("abc"))
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- Cross-realm name matching
+    ---------------------------------------------------------------------------
+
+    describe("cross-realm name matching", function()
+        it("HandleAck accepts ACK when sender has realm but target does not", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "h1",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending)
+
+            -- ACK comes from realm-qualified name (cross-realm WHISPER)
+            GBL:HandleAck("OfficerB-Stormrage", { chunk = 1 })
+
+            -- Should have accepted the ACK (baseName match)
+            local trail = GBL:GetAuditTrail()
+            local foundAck = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("ACK from OfficerB%-Stormrage for chunk 1") then
+                    foundAck = true
+                end
+            end
+            assert.is_true(foundAck,
+                "ACK should be accepted despite realm suffix mismatch")
+        end)
+
+        it("HandleAck accepts ACK when target has realm but sender does not", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "h1",
+            })
+            -- SYNC_REQUEST came from realm-qualified name (GUILD channel)
+            GBL:HandleSyncRequest("OfficerB-ArgentDawn", { sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending)
+
+            -- ACK comes without realm (WHISPER channel)
+            GBL:HandleAck("OfficerB", { chunk = 1 })
+
+            local trail = GBL:GetAuditTrail()
+            local foundAck = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("ACK from OfficerB for chunk 1") then
+                    foundAck = true
+                end
+            end
+            assert.is_true(foundAck,
+                "ACK should be accepted despite missing realm suffix")
+        end)
+
+        it("HandleSyncData accepts data from differently-qualified sender", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Start receiving — receiveSource set with realm suffix
+            GBL:RequestSync("OfficerB-Stormrage", 0)
+
+            -- SYNC_DATA arrives without realm suffix (different channel format)
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        type = "deposit", player = "Thrall",
+                        itemID = 999, count = 1, timestamp = 2000,
+                        scanTime = 2000, scannedBy = "OfficerB",
+                        id = "deposit|Thrall|999|1|0|0:0",
+                    },
+                },
+                moneyTransactions = {},
+            })
+
+            -- Should have stored the transaction (not rejected as wrong sender)
+            assert.equals(1, #guildData.transactions)
+        end)
+
+        it("still rejects ACK from a completely different player", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "h1",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending)
+
+            -- ACK from wrong person entirely
+            GBL:HandleAck("OfficerC-Tichondrius", { chunk = 1 })
+
+            -- Should NOT have processed the ACK
+            local trail = GBL:GetAuditTrail()
+            local foundAck = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("ACK from OfficerC") then
+                    foundAck = true
+                end
+            end
+            assert.is_false(foundAck,
+                "ACK from different player should be rejected")
+        end)
+    end)
 end)
