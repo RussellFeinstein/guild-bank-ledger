@@ -738,8 +738,9 @@ function GBL:HandleAck(sender, data)
 
     syncState.sendRetryCount = 0
 
-    -- Small delay between chunks to avoid flooding
-    C_Timer.After(0.1, function()
+    -- Delay between chunks — 1s gives ChatThrottleLib time to clear
+    -- and avoids rate-limiting drops on cross-realm WHISPER
+    C_Timer.After(1.0, function()
         self:SendNextChunk()
     end)
 end
