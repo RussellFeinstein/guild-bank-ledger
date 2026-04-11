@@ -37,6 +37,9 @@ MockWoW.itemInfo = {}
 -- Mock server time
 MockWoW.serverTime = 1711700000
 
+-- Mock framerate (for FPS-adaptive throttling)
+MockWoW.framerate = 60
+
 -- Pending timers (for C_Timer.After)
 MockWoW.pendingTimers = {}
 
@@ -69,6 +72,7 @@ function MockWoW.reset()
     MockWoW.pendingTimers = {}
     MockWoW.frames = {}
     MockWoW.cvars = {}
+    MockWoW.framerate = 60
 end
 
 ---------------------------------------------------------------------------
@@ -322,7 +326,7 @@ function MockWoW.install()
     -- GetAddOnMetadata
     _G.GetAddOnMetadata = function(addon, field)
         if addon == "GuildBankLedger" and field == "Version" then
-            return "0.8.0"
+            return "0.9.0"
         end
         return nil
     end
@@ -330,6 +334,11 @@ function MockWoW.install()
     -- GetTime (game time in seconds, fractional)
     _G.GetTime = function()
         return MockWoW.serverTime + 0.0
+    end
+
+    -- GetFramerate (for FPS-adaptive throttling)
+    _G.GetFramerate = function()
+        return MockWoW.framerate
     end
 
     -- CVars (for colorblind mode detection etc.)

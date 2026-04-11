@@ -9,20 +9,30 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 -- Protocol constants
 local PREFIX = "GBLSync"
 local PROTOCOL_VERSION = 1
-local MAX_RECORDS_PER_CHUNK = 15
+local MAX_RECORDS_PER_CHUNK = 5
 local CHUNK_BYTE_BUDGET = 600
 local MAX_RETRIES = 3
 local ACK_TIMEOUT = 15
-local RECEIVE_TIMEOUT = 30
+local RECEIVE_CHUNK_TIMEOUT = 20
+local MAX_NACK_RETRIES = 3
 local HELLO_DELAY = 5
 local HELLO_COOLDOWN = 60
 local WHISPER_SAFE_BYTES = 2000
+local ZONE_COOLDOWN = 5
+local INTER_CHUNK_DELAY_NORMAL = 0.1
+local INTER_CHUNK_DELAY_SLOW = 0.5
+local FPS_THRESHOLD_LOW = 20
+local FPS_THRESHOLD_RECOVER = 25
+local FPS_SAMPLE_INTERVAL = 1.0
+local CTL_BANDWIDTH_MIN = 400
+local CTL_BACKOFF_DELAY = 1.0
 
 -- Expose constants for testing and UI
 GBL.SYNC_PROTOCOL_VERSION = PROTOCOL_VERSION
 GBL.SYNC_CHUNK_SIZE = MAX_RECORDS_PER_CHUNK
 GBL.SYNC_PREFIX = PREFIX
 GBL.SYNC_MAX_RETRIES = MAX_RETRIES
+GBL.SYNC_MAX_NACK_RETRIES = MAX_NACK_RETRIES
 
 -- Module state (session-only, not persisted)
 local syncState = {
@@ -44,11 +54,21 @@ local syncState = {
     receiveDuped = 0,
     receiveTimer = nil,
     receiveStartTime = 0,
+    receiveNackCount = 0,
 
     peers = {},
     auditTrail = {},
     lastHelloTime = 0,
     pendingHelloReply = false,
+
+    -- Zone change protection
+    zonePaused = false,
+    zoneCooldownTimer = nil,
+
+    -- FPS-adaptive throttling
+    currentDelay = INTER_CHUNK_DELAY_NORMAL,
+    fpsFrame = nil,
+    lastFpsCheck = 0,
 }
 
 ------------------------------------------------------------------------
@@ -60,6 +80,8 @@ local syncState = {
 function GBL:InitSync()
     if not self.db.profile.sync.enabled then return end
     self:RegisterComm(PREFIX, "OnSyncMessage")
+    self:RegisterEvent("LOADING_SCREEN_ENABLED", "OnLoadingScreenStart")
+    self:RegisterEvent("LOADING_SCREEN_DISABLED", "OnLoadingScreenEnd")
     C_Timer.After(HELLO_DELAY, function()
         self:BroadcastHello()
     end)
@@ -69,6 +91,8 @@ end
 function GBL:EnableSync()
     self.db.profile.sync.enabled = true
     self:RegisterComm(PREFIX, "OnSyncMessage")
+    self:RegisterEvent("LOADING_SCREEN_ENABLED", "OnLoadingScreenStart")
+    self:RegisterEvent("LOADING_SCREEN_DISABLED", "OnLoadingScreenEnd")
     self:BroadcastHello()
 end
 
@@ -89,6 +113,12 @@ function GBL:DisableSync()
         syncState.receiveTimer:Cancel()
         syncState.receiveTimer = nil
     end
+    syncState.zonePaused = false
+    if syncState.zoneCooldownTimer then
+        syncState.zoneCooldownTimer:Cancel()
+        syncState.zoneCooldownTimer = nil
+    end
+    self:StopFpsMonitor()
 end
 
 ------------------------------------------------------------------------
@@ -173,6 +203,8 @@ function GBL:OnSyncMessage(_prefix, message, distribution, sender)
         self:HandleSyncData(sender, data)
     elseif msgType == "ACK" then
         self:HandleAck(sender, data)
+    elseif msgType == "NACK" then
+        self:HandleNack(sender, data)
     end
 end
 
@@ -375,17 +407,23 @@ function GBL:RequestSync(target, sinceTimestamp)
         .. " (since " .. sinceTimestamp .. ")")
     self:SendMessage("GBL_SYNC_STARTED", target)
 
-    -- Request timeout — if no SYNC_DATA arrives, abort so we don't block forever
+    -- Request timeout — if no SYNC_DATA arrives, NACK for chunk 1 instead of aborting
     if syncState.receiveTimer then
         syncState.receiveTimer:Cancel()
     end
-    syncState.receiveTimer = C_Timer.NewTicker(RECEIVE_TIMEOUT, function()
-        if syncState.receiving and syncState.receiveGot == 0 then
-            self:Print("Sync: no response from " .. target
-                .. " after " .. RECEIVE_TIMEOUT .. "s — aborting request")
-            self:AddAuditEntry("Request timeout — no data from "
-                .. target .. " after " .. RECEIVE_TIMEOUT .. "s")
-            self:FinishReceiving(target)
+    syncState.receiveNackCount = 0
+    syncState.receiveTimer = C_Timer.NewTicker(RECEIVE_CHUNK_TIMEOUT, function()
+        if not syncState.receiving then return end
+        if syncState.receiveGot == 0 then
+            if syncState.receiveNackCount >= MAX_NACK_RETRIES then
+                self:Print("Sync: no response from " .. target
+                    .. " after " .. MAX_NACK_RETRIES .. " retries — aborting")
+                self:AddAuditEntry("Request timeout — no data from "
+                    .. target .. " after " .. MAX_NACK_RETRIES .. " retries")
+                self:FinishReceiving(target)
+            else
+                self:SendNack(target, 1)
+            end
         end
     end, 1)
 end
@@ -479,6 +517,7 @@ function GBL:HandleSyncRequest(sender, data)
     syncState.sendChunkIndex = 0
     syncState.sendStartTime = GetServerTime()
     syncState.sendTotalRecords = #txToSend + #moneyToSend
+    self:StartFpsMonitor()
 
     local totalTx = #txToSend + #moneyToSend
     self:Print("Sync: sending " .. totalTx .. " records to " .. sender
@@ -548,6 +587,21 @@ end
 --- Send the next chunk in the queue. Aborts if no more chunks remain.
 function GBL:SendNextChunk()
     if not syncState.sending then return end
+
+    -- Zone change protection — defer until loading screen ends
+    if syncState.zonePaused then
+        self:AddAuditEntry("SendNextChunk deferred — zone transition in progress")
+        return
+    end
+
+    -- ChatThrottleLib awareness — defer if other addons are using bandwidth
+    if not self:HasSyncBandwidth() then
+        self:AddAuditEntry("SendNextChunk deferred — CTL bandwidth low")
+        C_Timer.After(CTL_BACKOFF_DELAY, function()
+            self:SendNextChunk()
+        end)
+        return
+    end
 
     syncState.sendChunkIndex = syncState.sendChunkIndex + 1
     local idx = syncState.sendChunkIndex
@@ -664,6 +718,7 @@ function GBL:FinishSending()
         syncState.sendHardTimer:Cancel()
         syncState.sendHardTimer = nil
     end
+    self:StopFpsMonitor()
 end
 
 ------------------------------------------------------------------------
@@ -715,23 +770,29 @@ function GBL:HandleSyncData(sender, data)
     syncState.receiveDuped = syncState.receiveDuped + duped
     syncState.receiveExpected = data.totalChunks or 1
 
-    -- Reset receive timeout (fires if no more chunks arrive)
+    -- Reset receive timeout — NACK for missing chunk instead of aborting
     if syncState.receiveTimer then
         syncState.receiveTimer:Cancel()
     end
-    syncState.receiveTimer = C_Timer.NewTicker(RECEIVE_TIMEOUT, function()
-        if syncState.receiving then
-            self:Print("Sync: receive timeout waiting for chunk "
-                .. (syncState.receiveGot + 1) .. "/"
-                .. syncState.receiveExpected .. " from "
-                .. (syncState.receiveSource or "unknown") .. " — aborting")
-            self:AddAuditEntry("Receive timeout from "
-                .. (syncState.receiveSource or "unknown")
-                .. " at chunk " .. syncState.receiveGot
-                .. "/" .. syncState.receiveExpected .. " — aborting")
-            self:FinishReceiving(syncState.receiveSource)
-        end
-    end, 1)
+    syncState.receiveNackCount = 0  -- reset on successful chunk receipt
+
+    -- Only set timeout if more chunks expected
+    if not (data.chunk and data.totalChunks and data.chunk >= data.totalChunks) then
+        syncState.receiveTimer = C_Timer.NewTicker(RECEIVE_CHUNK_TIMEOUT, function()
+            if not syncState.receiving then return end
+            if syncState.receiveNackCount >= MAX_NACK_RETRIES then
+                self:Print("Sync: chunk " .. (syncState.receiveGot + 1) .. "/"
+                    .. syncState.receiveExpected .. " failed after "
+                    .. MAX_NACK_RETRIES .. " retries — aborting")
+                self:AddAuditEntry("NACK limit reached for chunk "
+                    .. (syncState.receiveGot + 1) .. " from "
+                    .. (syncState.receiveSource or "unknown") .. " — aborting")
+                self:FinishReceiving(syncState.receiveSource)
+            else
+                self:SendNack(syncState.receiveSource, syncState.receiveGot + 1)
+            end
+        end, 1)
+    end
 
     -- Send ACK
     local ackMsg = self:Serialize({
@@ -783,8 +844,8 @@ function GBL:HandleAck(sender, data)
 
     syncState.sendRetryCount = 0
 
-    -- Small delay between chunks to avoid flooding
-    C_Timer.After(0.1, function()
+    -- Adaptive delay between chunks (slows down when FPS is low)
+    C_Timer.After(self:GetSyncDelay(), function()
         self:SendNextChunk()
     end)
 end
@@ -830,6 +891,7 @@ function GBL:FinishReceiving(sender)
     syncState.receiveStored = 0
     syncState.receiveDuped = 0
     syncState.receiveStartTime = 0
+    syncState.receiveNackCount = 0
 
     self:SendMessage("GBL_SYNC_COMPLETE", sender, totalStored)
 
@@ -896,6 +958,7 @@ function GBL:GetSyncStatus()
         receiveSource = syncState.receiveSource,
         sendProgress = syncState.sendChunkIndex .. "/" .. #syncState.sendChunks,
         receiveProgress = syncState.receiveGot .. "/" .. syncState.receiveExpected,
+        zonePaused = syncState.zonePaused,
     }
 end
 
@@ -950,8 +1013,196 @@ function GBL:ResetSyncState()
     syncState.receiveDuped = 0
     syncState.receiveTimer = nil
     syncState.receiveStartTime = 0
+    syncState.receiveNackCount = 0
     syncState.peers = {}
     syncState.auditTrail = {}
     syncState.lastHelloTime = 0
     syncState.pendingHelloReply = false
+    syncState.zonePaused = false
+    syncState.zoneCooldownTimer = nil
+    syncState.currentDelay = INTER_CHUNK_DELAY_NORMAL
+    syncState.fpsFrame = nil
+    syncState.lastFpsCheck = 0
+end
+
+------------------------------------------------------------------------
+-- NACK retry
+------------------------------------------------------------------------
+
+--- Send a NACK to request re-transmission of a specific chunk.
+-- @param target string Peer to request from
+-- @param chunkIndex number The chunk number to request
+function GBL:SendNack(target, chunkIndex)
+    syncState.receiveNackCount = syncState.receiveNackCount + 1
+    local msg = self:Serialize({
+        type = "NACK",
+        chunk = chunkIndex,
+        protocolVersion = PROTOCOL_VERSION,
+        guild = self:GetGuildName(),
+    })
+    self:SendCommMessage(PREFIX, msg, "WHISPER", target)
+    self:Print("Sync: requesting re-send of chunk " .. chunkIndex
+        .. " from " .. target .. " (attempt " .. syncState.receiveNackCount
+        .. "/" .. MAX_NACK_RETRIES .. ")")
+    self:AddAuditEntry("Sent NACK for chunk " .. chunkIndex
+        .. " to " .. target .. " (attempt " .. syncState.receiveNackCount .. ")")
+end
+
+--- Handle an incoming NACK — re-transmit the requested chunk.
+-- @param sender string Sender name
+-- @param data table Deserialized NACK payload
+function GBL:HandleNack(sender, data)
+    if not syncState.sending or baseName(sender) ~= baseName(syncState.sendTarget) then
+        return
+    end
+
+    local requestedChunk = data and data.chunk
+    if not requestedChunk or requestedChunk < 1
+        or requestedChunk > #syncState.sendChunks then
+        return
+    end
+
+    -- Cancel any pending ACK timer (the NACK replaces it)
+    if syncState.sendTimer then
+        syncState.sendTimer:Cancel()
+        syncState.sendTimer = nil
+    end
+
+    self:AddAuditEntry("NACK from " .. sender .. " for chunk " .. requestedChunk
+        .. " — re-transmitting")
+
+    -- Rewind to the requested chunk and re-send after a brief delay
+    syncState.sendChunkIndex = requestedChunk - 1
+    C_Timer.After(0.5, function()
+        self:SendNextChunk()
+    end)
+end
+
+------------------------------------------------------------------------
+-- Zone change protection
+------------------------------------------------------------------------
+
+--- Pause sync when a loading screen begins.
+-- Cancels all active timers to prevent false timeouts during loading.
+function GBL:OnLoadingScreenStart()
+    if not syncState.sending and not syncState.receiving then return end
+    syncState.zonePaused = true
+    self:AddAuditEntry("Loading screen detected — sync paused")
+
+    -- Cancel pending cooldown from a prior zone change (double zone change)
+    if syncState.zoneCooldownTimer then
+        syncState.zoneCooldownTimer:Cancel()
+        syncState.zoneCooldownTimer = nil
+    end
+
+    -- Cancel active timers to prevent false timeouts during loading
+    if syncState.sendTimer then
+        syncState.sendTimer:Cancel()
+        syncState.sendTimer = nil
+    end
+    if syncState.sendHardTimer then
+        syncState.sendHardTimer:Cancel()
+        syncState.sendHardTimer = nil
+    end
+    if syncState.receiveTimer then
+        syncState.receiveTimer:Cancel()
+        syncState.receiveTimer = nil
+    end
+end
+
+--- Resume sync after loading screen ends, with a brief cooldown.
+function GBL:OnLoadingScreenEnd()
+    if not syncState.zonePaused then return end
+
+    -- Cancel any pending cooldown timer (safety)
+    if syncState.zoneCooldownTimer then
+        syncState.zoneCooldownTimer:Cancel()
+    end
+
+    syncState.zoneCooldownTimer = C_Timer.NewTicker(ZONE_COOLDOWN, function()
+        syncState.zonePaused = false
+        syncState.zoneCooldownTimer = nil
+        self:AddAuditEntry("Zone cooldown complete — sync resumed")
+
+        -- Resume sending if we were the sender
+        if syncState.sending then
+            self:SendNextChunk()
+        end
+
+        -- Restart receive timeout if we were receiving
+        if syncState.receiving then
+            syncState.receiveTimer = C_Timer.NewTicker(RECEIVE_CHUNK_TIMEOUT, function()
+                if not syncState.receiving then return end
+                if syncState.receiveNackCount >= MAX_NACK_RETRIES then
+                    self:FinishReceiving(syncState.receiveSource)
+                else
+                    self:SendNack(syncState.receiveSource, syncState.receiveGot + 1)
+                end
+            end, 1)
+        end
+    end, 1)
+end
+
+------------------------------------------------------------------------
+-- FPS-adaptive throttling
+------------------------------------------------------------------------
+
+--- Return the current adaptive inter-chunk delay.
+-- @return number Delay in seconds
+function GBL:GetSyncDelay()
+    return syncState.currentDelay or INTER_CHUNK_DELAY_NORMAL
+end
+
+--- Start monitoring FPS to adapt sync speed.
+-- Creates an OnUpdate frame that samples FPS periodically.
+function GBL:StartFpsMonitor()
+    if syncState.fpsFrame then return end
+
+    syncState.fpsFrame = CreateFrame("Frame")
+    syncState.lastFpsCheck = GetTime()
+    syncState.currentDelay = INTER_CHUNK_DELAY_NORMAL
+
+    local self_ref = self
+    syncState.fpsFrame:SetScript("OnUpdate", function(_, _elapsed)
+        local now = GetTime()
+        if now - syncState.lastFpsCheck < FPS_SAMPLE_INTERVAL then return end
+        syncState.lastFpsCheck = now
+
+        local fps = GetFramerate()
+        if fps < FPS_THRESHOLD_LOW and syncState.currentDelay < INTER_CHUNK_DELAY_SLOW then
+            syncState.currentDelay = INTER_CHUNK_DELAY_SLOW
+            self_ref:AddAuditEntry("FPS low (" .. math.floor(fps)
+                .. ") — sync delay increased to " .. INTER_CHUNK_DELAY_SLOW .. "s")
+        elseif fps > FPS_THRESHOLD_RECOVER and syncState.currentDelay > INTER_CHUNK_DELAY_NORMAL then
+            syncState.currentDelay = INTER_CHUNK_DELAY_NORMAL
+            self_ref:AddAuditEntry("FPS recovered (" .. math.floor(fps)
+                .. ") — sync delay restored to " .. INTER_CHUNK_DELAY_NORMAL .. "s")
+        end
+    end)
+end
+
+--- Stop FPS monitoring and reset delay to normal.
+function GBL:StopFpsMonitor()
+    if syncState.fpsFrame then
+        syncState.fpsFrame:SetScript("OnUpdate", nil)
+        syncState.fpsFrame:Hide()
+        syncState.fpsFrame = nil
+    end
+    syncState.currentDelay = INTER_CHUNK_DELAY_NORMAL
+end
+
+------------------------------------------------------------------------
+-- ChatThrottleLib awareness
+------------------------------------------------------------------------
+
+--- Check if enough bandwidth is available for sending a sync chunk.
+-- Reads ChatThrottleLib.avail (a local table field — zero network cost).
+-- @return boolean true if bandwidth is available or CTL is absent
+function GBL:HasSyncBandwidth()
+    local CTL = _G.ChatThrottleLib
+    if not CTL then return true end
+    if CTL.avail and CTL.avail < CTL_BANDWIDTH_MIN then
+        return false
+    end
+    return true
 end

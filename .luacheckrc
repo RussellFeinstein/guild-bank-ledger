@@ -21,6 +21,7 @@ read_globals = {
     "IsInRaid",
     "UnitAffectingCombat",
     "Ambiguate",
+    "GetFramerate",
     "UnitName",
 
     -- WoW constants and tables

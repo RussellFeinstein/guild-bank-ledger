@@ -5,6 +5,20 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-04-11
+
+### Added
+- **Receive-side NACK retry** — when a chunk times out, the receiver requests a specific re-send via NACK instead of aborting the entire sync. Sender re-transmits from stored chunks. Retries up to 3 times per chunk before giving up
+- **Zone change protection** — sync pauses during loading screens (`LOADING_SCREEN_ENABLED`/`DISABLED`) and resumes after a 5-second cooldown, preventing silent message loss during zone transitions
+- **FPS-adaptive throttling** — monitors client framerate via OnUpdate; increases inter-chunk delay from 0.1s to 0.5s when FPS drops below 20, recovers when FPS exceeds 25 (hysteresis prevents oscillation)
+- **ChatThrottleLib awareness** — checks `ChatThrottleLib.avail` before sending; defers chunks by 1 second when other addons are consuming bandwidth, yielding to avoid mutual message drops
+- `GetSyncStatus()` now includes `zonePaused` field for UI display
+
+### Changed
+- Reduced `MAX_RECORDS_PER_CHUNK` from 15 to 5 — smaller chunks mean less data at risk per timeout
+- Replaced fixed 0.1s inter-chunk delay with adaptive `GetSyncDelay()` that responds to FPS conditions
+- Receive timeout now uses `RECEIVE_CHUNK_TIMEOUT` (20s) and sends NACK instead of aborting
+
 ## [0.8.0] — 2026-04-11
 
 ### Added

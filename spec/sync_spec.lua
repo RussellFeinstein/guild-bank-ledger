@@ -928,7 +928,7 @@ describe("Sync", function()
             assert.equals(2000, peers["OfficerB"].lastScanTime)
         end)
 
-        it("receive timeout resets stuck receive state", function()
+        it("receive timeout resets stuck receive state after NACK retries", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
             -- Start receiving (multi-chunk)
@@ -940,19 +940,23 @@ describe("Sync", function()
             })
             assert.is_true(GBL:IsSyncing())
 
-            -- Simulate timeout by firing the pending timer
-            local timers = MockWoW.pendingTimers
-            -- Find and fire the receive timeout timer
-            local found = false
-            for i = #timers, 1, -1 do
-                local timer = timers[i]
-                if timer and timer.callback and not timer.cancelled then
+            -- Fire timeout MAX_NACK_RETRIES times (sends NACKs but stays receiving)
+            for _ = 1, GBL.SYNC_MAX_NACK_RETRIES do
+                for _, timer in ipairs(MockWoW.pendingTimers) do
+                    if timer.delay == 20 and not timer.cancelled then
+                        timer.callback()
+                        break
+                    end
+                end
+            end
+
+            -- One more timeout — should abort after exhausting retries
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 20 and not timer.cancelled then
                     timer.callback()
-                    found = true
                     break
                 end
             end
-            assert.is_true(found, "should have a receive timeout timer")
 
             -- Should no longer be syncing
             assert.is_false(GBL:IsSyncing())
@@ -968,8 +972,8 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
 
     describe("ACK timer callback", function()
-        it("MAX_RECORDS_PER_CHUNK constant is 15", function()
-            assert.equals(15, GBL.SYNC_CHUNK_SIZE)
+        it("MAX_RECORDS_PER_CHUNK constant is 5", function()
+            assert.equals(5, GBL.SYNC_CHUNK_SIZE)
         end)
 
         it("ACK timer starts after send callback, not immediately", function()
@@ -1807,6 +1811,576 @@ describe("Sync", function()
 
             local peers = GBL:GetSyncPeers()
             assert.equals(12345, peers["OfficerB"].dataHash)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- NACK retry
+    ---------------------------------------------------------------------------
+
+    describe("NACK retry", function()
+        it("receiver sends NACK on chunk timeout instead of aborting", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Set up receiver state: received chunk 1, waiting for chunk 2
+            GBL:HandleSyncData("OfficerB", {
+                type = "SYNC_DATA", chunk = 1, totalChunks = 3,
+                transactions = {{
+                    type = "deposit", player = "X", timestamp = 5000,
+                    scanTime = 5000, id = "nack1:0", itemID = 100, count = 1, tab = 1,
+                }},
+                moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            MockAce.sentCommMessages = {}
+
+            -- Fire the receive timeout — should NACK, not abort
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 20 and not timer.cancelled then
+                    timer.callback()
+                    break
+                end
+            end
+
+            assert.is_true(GBL:GetSyncStatus().receiving,
+                "should still be receiving after NACK")
+            -- Should have sent a NACK message
+            assert.is_true(#MockAce.sentCommMessages >= 1)
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[#MockAce.sentCommMessages].text)
+            assert.is_true(ok)
+            assert.equals("NACK", data.type)
+            assert.equals(2, data.chunk)
+        end)
+
+        it("sender re-transmits chunk on NACK receipt", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Set up sender with 2 chunks
+            for i = 1, 8 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000 + i, id = "nk" .. i .. ":0",
+                })
+            end
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending)
+
+            local sentBefore = #MockAce.sentCommMessages
+
+            -- Send NACK for chunk 1
+            GBL:HandleNack("OfficerB", { chunk = 1 })
+
+            -- Fire the 0.5s delayed re-send
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 0.5 and not timer.fired then
+                    timer.callback()
+                    timer.fired = true
+                    break
+                end
+            end
+
+            assert.is_true(#MockAce.sentCommMessages > sentBefore,
+                "should have re-sent chunk after NACK")
+        end)
+
+        it("receiver aborts after MAX_NACK_RETRIES for same chunk", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Set up receiver — got chunk 1, waiting for chunk 2
+            GBL:HandleSyncData("OfficerB", {
+                type = "SYNC_DATA", chunk = 1, totalChunks = 3,
+                transactions = {{
+                    type = "deposit", player = "X", timestamp = 5000,
+                    scanTime = 5000, id = "nklim1:0", itemID = 100, count = 1, tab = 1,
+                }},
+                moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+
+            -- Fire timeout MAX_NACK_RETRIES times
+            for attempt = 1, GBL.SYNC_MAX_NACK_RETRIES do
+                for _, timer in ipairs(MockWoW.pendingTimers) do
+                    if timer.delay == 20 and not timer.cancelled then
+                        timer.callback()
+                        break
+                    end
+                end
+                if attempt < GBL.SYNC_MAX_NACK_RETRIES then
+                    assert.is_true(GBL:GetSyncStatus().receiving,
+                        "should still be receiving after NACK attempt " .. attempt)
+                end
+            end
+
+            -- One more — should abort
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 20 and not timer.cancelled then
+                    timer.callback()
+                    break
+                end
+            end
+            assert.is_false(GBL:GetSyncStatus().receiving,
+                "should have aborted after max NACK retries")
+        end)
+
+        it("NACK counter resets on successful chunk receipt", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Receive chunk 1
+            GBL:HandleSyncData("OfficerB", {
+                type = "SYNC_DATA", chunk = 1, totalChunks = 4,
+                transactions = {{
+                    type = "deposit", player = "X", timestamp = 5000,
+                    scanTime = 5000, id = "nkrst1:0", itemID = 100, count = 1, tab = 1,
+                }},
+                moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+
+            -- Fire timeout twice (2 NACKs sent)
+            for _ = 1, 2 do
+                for _, timer in ipairs(MockWoW.pendingTimers) do
+                    if timer.delay == 20 and not timer.cancelled then
+                        timer.callback()
+                        break
+                    end
+                end
+            end
+
+            -- Now receive chunk 2 — should reset counter
+            GBL:HandleSyncData("OfficerB", {
+                type = "SYNC_DATA", chunk = 2, totalChunks = 4,
+                transactions = {{
+                    type = "deposit", player = "X", timestamp = 5001,
+                    scanTime = 5001, id = "nkrst2:0", itemID = 101, count = 1, tab = 1,
+                }},
+                moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+
+            -- Fire timeout MAX_NACK_RETRIES times — should still be receiving
+            -- because counter was reset
+            for attempt = 1, GBL.SYNC_MAX_NACK_RETRIES do
+                for _, timer in ipairs(MockWoW.pendingTimers) do
+                    if timer.delay == 20 and not timer.cancelled then
+                        timer.callback()
+                        break
+                    end
+                end
+            end
+            -- Should still be receiving (counter was reset after chunk 2)
+            assert.is_true(GBL:GetSyncStatus().receiving,
+                "NACK counter should have reset — still receiving")
+        end)
+
+        it("NACK from wrong sender is ignored", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Set up sender
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "nkign:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            local sentBefore = #MockAce.sentCommMessages
+
+            -- NACK from wrong sender
+            GBL:HandleNack("OfficerC", { chunk = 1 })
+
+            -- Fire any pending timers
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 0.5 and not timer.fired then
+                    timer.callback()
+                    timer.fired = true
+                end
+            end
+
+            -- No new messages should have been sent (NACK was ignored)
+            assert.equals(sentBefore, #MockAce.sentCommMessages)
+        end)
+
+        it("NACK for out-of-range chunk is ignored", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Set up sender with 1 chunk
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "nkoor:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            local sentBefore = #MockAce.sentCommMessages
+
+            -- NACK for chunk 0 (invalid)
+            GBL:HandleNack("OfficerB", { chunk = 0 })
+            -- NACK for chunk 99 (out of range)
+            GBL:HandleNack("OfficerB", { chunk = 99 })
+
+            -- Fire any pending timers
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 0.5 and not timer.fired then
+                    timer.callback()
+                    timer.fired = true
+                end
+            end
+
+            assert.equals(sentBefore, #MockAce.sentCommMessages)
+        end)
+
+        it("initial request timeout sends NACK for chunk 1", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Request sync (puts us in receiving state)
+            GBL:RequestSync("OfficerB", 0)
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            MockAce.sentCommMessages = {}
+
+            -- Fire the initial receive timeout (no data arrived)
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 20 and not timer.cancelled then
+                    timer.callback()
+                    break
+                end
+            end
+
+            -- Should have sent a NACK for chunk 1, not aborted
+            assert.is_true(GBL:GetSyncStatus().receiving,
+                "should still be receiving after initial NACK")
+            assert.is_true(#MockAce.sentCommMessages >= 1)
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[#MockAce.sentCommMessages].text)
+            assert.is_true(ok)
+            assert.equals("NACK", data.type)
+            assert.equals(1, data.chunk)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Zone change protection
+    ---------------------------------------------------------------------------
+
+    describe("zone change protection", function()
+        it("pauses sync on loading screen start during send", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "zone1:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending)
+
+            GBL:OnLoadingScreenStart()
+            assert.is_true(GBL:GetSyncStatus().zonePaused)
+        end)
+
+        it("resumes sync after cooldown on loading screen end", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "zone2:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            GBL:OnLoadingScreenStart()
+            assert.is_true(GBL:GetSyncStatus().zonePaused)
+
+            GBL:OnLoadingScreenEnd()
+            -- Still paused until cooldown fires
+            assert.is_true(GBL:GetSyncStatus().zonePaused)
+
+            -- Fire the cooldown timer
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 5 and not timer.cancelled then
+                    timer.callback()
+                    break
+                end
+            end
+            assert.is_false(GBL:GetSyncStatus().zonePaused)
+        end)
+
+        it("SendNextChunk is no-op while zone paused", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Set up sender
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "zone3:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            local sentBefore = #MockAce.sentCommMessages
+
+            -- Pause and try to send
+            GBL:OnLoadingScreenStart()
+            GBL:SendNextChunk()
+
+            -- No new messages (deferred)
+            assert.equals(sentBefore, #MockAce.sentCommMessages)
+        end)
+
+        it("incoming SYNC_DATA still processed while zone paused", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Start receiving, then pause
+            GBL:HandleSyncData("OfficerB", {
+                type = "SYNC_DATA", chunk = 1, totalChunks = 2,
+                transactions = {{
+                    type = "deposit", player = "X", timestamp = 5000,
+                    scanTime = 5000, id = "zone4a:0", itemID = 100, count = 1, tab = 1,
+                }},
+                moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            GBL:OnLoadingScreenStart()
+
+            -- Receive chunk 2 while paused
+            MockAce.sentCommMessages = {}
+            GBL:HandleSyncData("OfficerB", {
+                type = "SYNC_DATA", chunk = 2, totalChunks = 2,
+                transactions = {{
+                    type = "deposit", player = "X", timestamp = 5001,
+                    scanTime = 5001, id = "zone4b:0", itemID = 101, count = 1, tab = 1,
+                }},
+                moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+
+            -- Data should still have been stored (ACK sent)
+            assert.is_true(#MockAce.sentCommMessages >= 1)
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[#MockAce.sentCommMessages].text)
+            assert.is_true(ok)
+            assert.equals("ACK", data.type)
+        end)
+
+        it("DisableSync clears zone pause state", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "zone5:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:OnLoadingScreenStart()
+            assert.is_true(GBL:GetSyncStatus().zonePaused)
+
+            GBL:DisableSync()
+            assert.is_false(GBL:GetSyncStatus().zonePaused)
+        end)
+
+        it("double zone change cancels pending cooldown timer", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "zone6:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            -- First zone change
+            GBL:OnLoadingScreenStart()
+            GBL:OnLoadingScreenEnd()
+
+            -- Second zone change before cooldown fires
+            GBL:OnLoadingScreenStart()
+
+            -- Count non-cancelled cooldown timers — should be 0
+            -- (the first one was cancelled by the second OnLoadingScreenStart)
+            local activeCooldowns = 0
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 5 and not timer.cancelled then
+                    activeCooldowns = activeCooldowns + 1
+                end
+            end
+            assert.equals(0, activeCooldowns,
+                "first cooldown timer should be cancelled on second zone change")
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- FPS-adaptive throttling
+    ---------------------------------------------------------------------------
+
+    describe("FPS-adaptive throttling", function()
+        it("uses slow delay when FPS below threshold", function()
+            MockWoW.framerate = 15
+            GBL:StartFpsMonitor()
+
+            -- Fire OnUpdate with enough elapsed time
+            local frame = MockWoW.frames[#MockWoW.frames]
+            local onUpdate = frame:GetScript("OnUpdate")
+            assert.is_not_nil(onUpdate)
+
+            -- Advance time past sample interval
+            MockWoW.serverTime = MockWoW.serverTime + 2
+            onUpdate(frame, 2)
+
+            assert.equals(0.5, GBL:GetSyncDelay())
+            GBL:StopFpsMonitor()
+        end)
+
+        it("recovers to normal delay when FPS above recover threshold", function()
+            MockWoW.framerate = 15
+            GBL:StartFpsMonitor()
+
+            local frame = MockWoW.frames[#MockWoW.frames]
+            local onUpdate = frame:GetScript("OnUpdate")
+
+            -- Trigger low FPS
+            MockWoW.serverTime = MockWoW.serverTime + 2
+            onUpdate(frame, 2)
+            assert.equals(0.5, GBL:GetSyncDelay())
+
+            -- Recover FPS
+            MockWoW.framerate = 30
+            MockWoW.serverTime = MockWoW.serverTime + 2
+            onUpdate(frame, 2)
+
+            assert.equals(0.1, GBL:GetSyncDelay())
+            GBL:StopFpsMonitor()
+        end)
+
+        it("FPS monitor starts on sync begin and stops on FinishSending", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local framesBefore = #MockWoW.frames
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "fps1:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            -- FPS frame should have been created
+            assert.is_true(#MockWoW.frames > framesBefore,
+                "FPS monitor frame should be created on sync start")
+
+            -- Finish sending
+            GBL:FinishSending()
+            assert.equals(0.1, GBL:GetSyncDelay(),
+                "delay should reset to normal after FinishSending")
+        end)
+
+        it("HandleAck uses adaptive delay value", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Set up sending with slow delay
+            for i = 1, 8 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000 + i, id = "fps2_" .. i .. ":0",
+                })
+            end
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            -- Simulate low FPS — manually set delay
+            MockWoW.framerate = 10
+            local frame = MockWoW.frames[#MockWoW.frames]
+            local onUpdate = frame:GetScript("OnUpdate")
+            if onUpdate then
+                MockWoW.serverTime = MockWoW.serverTime + 2
+                onUpdate(frame, 2)
+            end
+            assert.equals(0.5, GBL:GetSyncDelay())
+
+            -- Send ACK — the scheduled delay should use adaptive value
+            GBL:HandleAck("OfficerB", { chunk = 1 })
+
+            -- Verify a one-shot timer was created with the slow delay
+            local foundSlowDelay = false
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 0.5 and not timer.fired then
+                    foundSlowDelay = true
+                    break
+                end
+            end
+            assert.is_true(foundSlowDelay,
+                "HandleAck should schedule next chunk with adaptive delay (0.5s)")
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- ChatThrottleLib awareness
+    ---------------------------------------------------------------------------
+
+    describe("ChatThrottleLib awareness", function()
+        it("defers SendNextChunk when CTL bandwidth is low", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Set up CTL with low bandwidth
+            _G.ChatThrottleLib = { avail = 100 }
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "ctl1:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            -- HandleSyncRequest calls SendNextChunk which should defer
+            -- The first message sent is the SYNC_DATA which got deferred
+            -- So we check that the audit trail mentions CTL
+            local trail = GBL:GetAuditTrail()
+            local ctlDeferred = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("CTL bandwidth low") then
+                    ctlDeferred = true
+                    break
+                end
+            end
+            assert.is_true(ctlDeferred,
+                "should log CTL bandwidth deferral")
+
+            _G.ChatThrottleLib = nil
+        end)
+
+        it("sends normally when CTL bandwidth is sufficient", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            _G.ChatThrottleLib = { avail = 1000 }
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "ctl2:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            -- Should have sent normally (no CTL deferral)
+            local trail = GBL:GetAuditTrail()
+            local ctlDeferred = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("CTL bandwidth low") then
+                    ctlDeferred = true
+                    break
+                end
+            end
+            assert.is_false(ctlDeferred)
+            assert.is_true(#MockAce.sentCommMessages >= 1)
+
+            _G.ChatThrottleLib = nil
+        end)
+
+        it("sends normally when ChatThrottleLib is absent", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            _G.ChatThrottleLib = nil
+            assert.is_true(GBL:HasSyncBandwidth())
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "ctl3:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            assert.is_true(#MockAce.sentCommMessages >= 1)
+        end)
+
+        it("graceful fallback when CTL has no avail field", function()
+            _G.ChatThrottleLib = {}
+            assert.is_true(GBL:HasSyncBandwidth())
+            _G.ChatThrottleLib = nil
         end)
     end)
 end)
