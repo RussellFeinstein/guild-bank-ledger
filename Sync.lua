@@ -247,27 +247,34 @@ function GBL:HandleHello(sender, data)
     local localCount = #guildData.transactions + #guildData.moneyTransactions
     local remoteCount = data.txCount or 0
 
-    -- Fast path: skip sync when datasets are identical (dataHash + txCount match)
-    if data.dataHash then
-        local localDataHash = self:GetDataHash(guildData)
-        if data.dataHash == localDataHash and localCount == remoteCount then
-            self:AddAuditEntry("Skipped sync from " .. sender
-                .. " (data hashes match, tx: " .. localCount .. ")")
-            return
-        end
+    local localDataHash = data.dataHash and self:GetDataHash(guildData) or nil
+
+    -- Fast path: skip when datasets are identical (hash + count match)
+    if localDataHash and data.dataHash == localDataHash and localCount == remoteCount then
+        self:AddAuditEntry("Skipped sync from " .. sender
+            .. " (data hashes match, tx: " .. localCount .. ")")
+        return
     end
 
-    if remoteCount > localCount
-        and not syncState.receiving
-        and self.db.profile.sync.autoSync
-    then
+    -- Determine if sync is needed
+    local shouldSync = false
+    if localDataHash and data.dataHash ~= localDataHash then
+        -- Hashes differ — we have records they don't, or vice versa
+        shouldSync = true
+    elseif not data.dataHash and remoteCount > localCount then
+        -- No hash support (old version) — fall back to count comparison
+        shouldSync = true
+    end
+
+    if shouldSync and not syncState.receiving and self.db.profile.sync.autoSync then
         local sinceTimestamp = guildData.syncState.lastSyncTimestamp or 0
         self:RequestSync(sender, sinceTimestamp)
     else
         -- Log why we didn't sync so stalls are diagnosable
         local reason
-        if remoteCount <= localCount then
-            reason = "local=" .. localCount .. " >= remote=" .. remoteCount
+        if not shouldSync then
+            reason = "datasets match or no sync needed (local=" .. localCount
+                .. ", remote=" .. remoteCount .. ")"
         elseif syncState.receiving then
             reason = "already receiving from " .. (syncState.receiveSource or "?")
         elseif not self.db.profile.sync.autoSync then

@@ -241,6 +241,188 @@ describe("Sync", function()
             assert.is_true(#trail > 0)
             assert.truthy(trail[1].message:find("major version mismatch"))
         end)
+
+        it("triggers sync when hash differs and counts are equal", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Add 5 local transactions
+            for i = 1, 5 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000 + i, id = "local" .. i .. ":0",
+                })
+            end
+
+            -- Remote has same count but different hash
+            local localHash = GBL:GetDataHash(guildData)
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 5,
+                dataHash = localHash + 1,  -- different hash
+                lastScanTime = 2000,
+            })
+
+            -- Should send SYNC_REQUEST despite equal counts
+            local foundRequest = false
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "SYNC_REQUEST" then
+                    foundRequest = true
+                end
+            end
+            assert.is_true(foundRequest,
+                "should request sync when hash differs, even with equal counts")
+        end)
+
+        it("triggers sync when hash differs and local has more", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Add 10 local transactions
+            for i = 1, 10 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000 + i, id = "localmore" .. i .. ":0",
+                })
+            end
+
+            -- Remote has fewer but different data
+            local localHash = GBL:GetDataHash(guildData)
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 5,
+                dataHash = localHash + 1,
+                lastScanTime = 2000,
+            })
+
+            -- Should request sync — remote has records we don't
+            local foundRequest = false
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "SYNC_REQUEST" then
+                    foundRequest = true
+                end
+            end
+            assert.is_true(foundRequest,
+                "should request sync when hash differs, even when local has more")
+        end)
+
+        it("skips sync when hash matches and counts match", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Add 3 local transactions
+            for i = 1, 3 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000 + i, id = "match" .. i .. ":0",
+                })
+            end
+
+            local localHash = GBL:GetDataHash(guildData)
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 3,
+                dataHash = localHash,  -- same hash
+                lastScanTime = 2000,
+            })
+
+            -- No SYNC_REQUEST (datasets identical)
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok then
+                    assert.not_equals("SYNC_REQUEST", data.type)
+                end
+            end
+        end)
+
+        it("falls back to count when no hash (backward compat)", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Remote has more, no dataHash
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 50,
+                lastScanTime = 2000,
+            })
+
+            -- Should still request sync via count comparison
+            local foundRequest = false
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "SYNC_REQUEST" then
+                    foundRequest = true
+                end
+            end
+            assert.is_true(foundRequest,
+                "should request sync via count when no hash present")
+        end)
+
+        it("does NOT sync when no hash and counts equal", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- No dataHash, same count
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 0,
+                lastScanTime = 2000,
+            })
+
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok then
+                    assert.not_equals("SYNC_REQUEST", data.type)
+                end
+            end
+        end)
+
+        it("does NOT sync when hash differs but already receiving", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Start a receive (blocks new RequestSync)
+            GBL:RequestSync("OfficerC", 0)
+            MockAce.sentCommMessages = {}
+
+            -- Hash mismatch from different peer
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 5,
+                dataHash = 99999,
+                lastScanTime = 2000,
+            })
+
+            -- Should NOT send SYNC_REQUEST (already receiving from OfficerC)
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok then
+                    assert.not_equals("SYNC_REQUEST", data.type)
+                end
+            end
+        end)
+
+        it("does NOT sync when hash differs but autoSync disabled", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL.db.profile.sync.autoSync = false
+
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 5,
+                dataHash = 99999,
+                lastScanTime = 2000,
+            })
+
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok then
+                    assert.not_equals("SYNC_REQUEST", data.type)
+                end
+            end
+        end)
     end)
 
     ---------------------------------------------------------------------------
