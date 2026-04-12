@@ -2703,6 +2703,85 @@ describe("Sync", function()
             assert.is_nil(GBL:GetSyncPeers()["OfficerB"])
             assert.is_not_nil(GBL:GetAllPeers()["OfficerB"])
         end)
+
+        it("heartbeat keeps idle peer alive in peer list", function()
+            MockWoW.serverTime = 100000
+            GBL:InitSync()
+            GBL:UpdatePeer("OfficerB", {
+                version = GBL.version, txCount = 5, lastScanTime = 99999,
+            })
+
+            -- Advance past heartbeat interval but within stale window
+            MockWoW.serverTime = 100200
+            -- Fire heartbeat timer (broadcasts our HELLO)
+            MockWoW.fireTimers()
+            -- Simulate HELLO reply arriving from OfficerB, refreshing their lastSeen
+            GBL:UpdatePeer("OfficerB", {
+                version = GBL.version, txCount = 5, lastScanTime = 99999,
+            })
+
+            -- Advance to where original lastSeen would be stale, but refreshed one is not
+            MockWoW.serverTime = 100400
+            assert.is_not_nil(GBL:GetSyncPeers()["OfficerB"])
+        end)
+
+        it("peer without heartbeat refresh expires after PEER_STALE_SECONDS", function()
+            MockWoW.serverTime = 100000
+            GBL:UpdatePeer("OfficerB", {
+                version = GBL.version, txCount = 5, lastScanTime = 99999,
+            })
+
+            -- Advance past stale window without any heartbeat or messages
+            MockWoW.serverTime = 100000 + GBL.SYNC_PEER_STALE_SECONDS + 1
+            assert.is_nil(GBL:GetSyncPeers()["OfficerB"])
+        end)
+
+        it("heartbeat timer starts on InitSync", function()
+            MockWoW.pendingTimers = {}
+            GBL:InitSync()
+            -- Should have a pending heartbeat ticker
+            local found = false
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == GBL.SYNC_HELLO_HEARTBEAT_INTERVAL then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found)
+        end)
+
+        it("heartbeat timer cancelled on DisableSync", function()
+            MockWoW.pendingTimers = {}
+            GBL:InitSync()
+            -- Verify timer was started
+            local heartbeat = nil
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == GBL.SYNC_HELLO_HEARTBEAT_INTERVAL then
+                    heartbeat = timer
+                    break
+                end
+            end
+            assert.is_not_nil(heartbeat)
+
+            GBL:DisableSync()
+            assert.is_true(heartbeat.cancelled)
+        end)
+
+        it("heartbeat timer cancelled on ResetSyncState", function()
+            MockWoW.pendingTimers = {}
+            GBL:InitSync()
+            local heartbeat = nil
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == GBL.SYNC_HELLO_HEARTBEAT_INTERVAL then
+                    heartbeat = timer
+                    break
+                end
+            end
+            assert.is_not_nil(heartbeat)
+
+            GBL:ResetSyncState()
+            assert.is_true(heartbeat.cancelled)
+        end)
     end)
 
     ---------------------------------------------------------------------------

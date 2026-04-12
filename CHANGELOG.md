@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] — 2026-04-12
+
+### Fixed
+- **Stale peers wiped while still online** — peers expired from the Online list after 5 minutes even when still logged in, because HELLO broadcasts only fired on discrete events (login, bank open/close) with no periodic heartbeat. Added a HELLO heartbeat timer (every 2 minutes) that keeps peers alive as long as the addon is running. Heartbeat is properly cancelled on sync disable and addon teardown.
+
 ## [0.10.0] — 2026-04-11
 
 ### Added

@@ -26,6 +26,7 @@ local FPS_SAMPLE_INTERVAL = 1.0
 local CTL_BANDWIDTH_MIN = 400
 local CTL_BACKOFF_DELAY = 1.0
 local PEER_STALE_SECONDS = 300
+local HELLO_HEARTBEAT_INTERVAL = 120
 
 -- Expose constants for testing and UI
 GBL.SYNC_PROTOCOL_VERSION = PROTOCOL_VERSION
@@ -34,6 +35,7 @@ GBL.SYNC_PREFIX = PREFIX
 GBL.SYNC_MAX_RETRIES = MAX_RETRIES
 GBL.SYNC_MAX_NACK_RETRIES = MAX_NACK_RETRIES
 GBL.SYNC_PEER_STALE_SECONDS = PEER_STALE_SECONDS
+GBL.SYNC_HELLO_HEARTBEAT_INTERVAL = HELLO_HEARTBEAT_INTERVAL
 
 ------------------------------------------------------------------------
 -- Compression (LibDeflate)
@@ -110,6 +112,7 @@ function GBL:InitSync()
     self:RegisterComm(PREFIX, "OnSyncMessage")
     self:RegisterEvent("LOADING_SCREEN_ENABLED", "OnLoadingScreenStart")
     self:RegisterEvent("LOADING_SCREEN_DISABLED", "OnLoadingScreenEnd")
+    self:StartHelloHeartbeat()
 end
 
 --- Enable sync at runtime (from UI toggle).
@@ -118,7 +121,21 @@ function GBL:EnableSync()
     self:RegisterComm(PREFIX, "OnSyncMessage")
     self:RegisterEvent("LOADING_SCREEN_ENABLED", "OnLoadingScreenStart")
     self:RegisterEvent("LOADING_SCREEN_DISABLED", "OnLoadingScreenEnd")
+    self:StartHelloHeartbeat()
     self:BroadcastHello()
+end
+
+--- Start the periodic HELLO heartbeat so peers don't expire while we're online.
+-- Cancels any existing heartbeat first (guards against double-init).
+function GBL:StartHelloHeartbeat()
+    if syncState.helloHeartbeat then
+        syncState.helloHeartbeat:Cancel()
+    end
+    syncState.helloHeartbeat = C_Timer.NewTicker(HELLO_HEARTBEAT_INTERVAL, function()
+        if GBL.db.profile.sync.enabled then
+            GBL:BroadcastHello()
+        end
+    end)
 end
 
 --- Disable sync at runtime (from UI toggle).
@@ -142,6 +159,10 @@ function GBL:DisableSync()
     if syncState.zoneCooldownTimer then
         syncState.zoneCooldownTimer:Cancel()
         syncState.zoneCooldownTimer = nil
+    end
+    if syncState.helloHeartbeat then
+        syncState.helloHeartbeat:Cancel()
+        syncState.helloHeartbeat = nil
     end
     self:StopFpsMonitor()
 end
@@ -1181,6 +1202,10 @@ function GBL:ResetSyncState()
     syncState.peers = {}
     syncState.auditTrail = {}
     syncState.lastHelloTime = 0
+    if syncState.helloHeartbeat then
+        syncState.helloHeartbeat:Cancel()
+        syncState.helloHeartbeat = nil
+    end
     syncState.zonePaused = false
     syncState.zoneCooldownTimer = nil
     syncState.currentDelay = INTER_CHUNK_DELAY_NORMAL
