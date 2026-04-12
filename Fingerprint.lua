@@ -94,12 +94,36 @@ end
 ------------------------------------------------------------------------
 
 local BUCKET_SECONDS = 21600  -- 6 hours
+local BUCKET_HOURS = 6        -- hours per bucket (21600 / 3600)
 GBL.BUCKET_SECONDS = BUCKET_SECONDS
 
+--- Extract the 6-hour bucket key from a record's ID.
+-- Uses the timeSlot embedded in the ID (format: prefix|timeSlot:occ) so
+-- that bucket placement is consistent across peers after ID normalization.
+-- Falls back to tx.timestamp when the ID can't be parsed (legacy records).
+-- @param tx table Transaction record with .id and .timestamp
+-- @return number Bucket key
+local function bucketKeyForRecord(tx)
+    if tx.id then
+        -- ID format: "type|player|...|timeSlot:occurrence"
+        local timeSlot = tx.id:match("|(%d+):%d+$")
+        if timeSlot then
+            return math.floor(tonumber(timeSlot) / BUCKET_HOURS)
+        end
+    end
+    -- Fallback for records without parseable IDs
+    return math.floor((tx.timestamp or 0) / BUCKET_SECONDS)
+end
+
+--- Exposed for use by Sync.lua bucket filtering.
+function GBL:BucketKeyForRecord(tx)
+    return bucketKeyForRecord(tx)
+end
+
 --- Compute per-bucket fingerprints for delta sync.
--- Groups records by 6-hour window (math.floor(timestamp / 21600)) and
--- XORs their id hashes within each bucket. Used in SYNC_REQUEST so the
--- sender can identify which buckets differ and skip matching ones.
+-- Groups records by 6-hour window derived from the timeSlot in their ID
+-- (not tx.timestamp) so that bucket placement is consistent across peers
+-- even when timestamps differ for the same normalized record.
 -- @param guildData table Guild data from AceDB
 -- @return table Map of bucketKey (number) → bucket hash (number)
 function GBL:ComputeBucketHashes(guildData)
@@ -107,13 +131,13 @@ function GBL:ComputeBucketHashes(guildData)
     local buckets = {}
     for _, tx in ipairs(guildData.transactions) do
         if tx.id then
-            local key = math.floor((tx.timestamp or 0) / BUCKET_SECONDS)
+            local key = bucketKeyForRecord(tx)
             buckets[key] = xor32(buckets[key] or 0, self:HashString(tx.id))
         end
     end
     for _, tx in ipairs(guildData.moneyTransactions) do
         if tx.id then
-            local key = math.floor((tx.timestamp or 0) / BUCKET_SECONDS)
+            local key = bucketKeyForRecord(tx)
             buckets[key] = xor32(buckets[key] or 0, self:HashString(tx.id))
         end
     end

@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] — 2026-04-12
+
+### Fixed
+- **Bucket hashes still mismatching after ID normalization** — `ComputeBucketHashes` grouped records by `tx.timestamp`, but two peers with the same record (same ID) could have different timestamps from scanning at different times. The record landed in different 6-hour buckets on each side, causing 4 buckets to re-sync 627 records endlessly (all duped, 0 normalized). Bucket keys are now derived from the timeSlot embedded in the record ID (which is normalized), ensuring consistent bucket placement across peers regardless of timestamp differences.
+
 ## [0.11.1] — 2026-04-12
 
 ### Fixed

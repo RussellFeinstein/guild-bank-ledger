@@ -594,24 +594,24 @@ function GBL:HandleSyncRequest(sender, data)
         end
 
         -- Build human-readable date list for differing buckets
-        local bucketSec = GBL.BUCKET_SECONDS or 21600
         local diffCount = 0
         local diffDateList = {}
         for dayKey in pairs(diffDays) do
             diffCount = diffCount + 1
-            local ts = dayKey * bucketSec
+            -- Bucket key = floor(timeSlot / 6), so timestamp = key * 6 * 3600
+            local ts = dayKey * 6 * 3600
             diffDateList[#diffDateList + 1] = date("%Y-%m-%d %H:00", ts)
         end
         table.sort(diffDateList)
 
         for _, tx in ipairs(guildData.transactions) do
-            local dayKey = math.floor((tx.timestamp or 0) / bucketSec)
+            local dayKey = self:BucketKeyForRecord(tx)
             if diffDays[dayKey] then
                 txToSend[#txToSend + 1] = stripForSync(tx)
             end
         end
         for _, tx in ipairs(guildData.moneyTransactions) do
-            local dayKey = math.floor((tx.timestamp or 0) / bucketSec)
+            local dayKey = self:BucketKeyForRecord(tx)
             if diffDays[dayKey] then
                 moneyToSend[#moneyToSend + 1] = stripForSync(tx)
             end
