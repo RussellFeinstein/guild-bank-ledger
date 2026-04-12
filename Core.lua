@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.9.3"
+local VERSION = "0.9.4"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -362,6 +362,8 @@ function GBL:HandleSlashCommand(input)
         self:PrintHelp()
     elseif command == "syncdiag" then
         self:PrintSyncDiag()
+    elseif command == "synclog" then
+        self:ShowSyncLog()
     else
         self:Print("Unknown command: " .. command .. ". Type /gbl help for usage.")
     end
@@ -421,6 +423,38 @@ function GBL:PrintSyncDiag()
     if not hasPeers then
         self:Print("  No peers discovered yet")
     end
+end
+
+--- Show the sync audit trail in a copy-pastable editbox.
+function GBL:ShowSyncLog()
+    local trail = self:GetAuditTrail()
+    if #trail == 0 then
+        self:Print("No sync log entries yet.")
+        return
+    end
+
+    local lines = {}
+    for i = 1, #trail do
+        local entry = trail[i]
+        local ts = date("%H:%M:%S", entry.timestamp)
+        lines[#lines + 1] = "[" .. ts .. "] " .. entry.message
+    end
+    local text = table.concat(lines, "\n")
+
+    local AceGUI = LibStub("AceGUI-3.0")
+    local frame = AceGUI:Create("Frame")
+    frame:SetTitle("GBL Sync Log")
+    frame:SetWidth(600)
+    frame:SetHeight(400)
+    frame:SetLayout("Fill")
+
+    local editBox = AceGUI:Create("MultiLineEditBox")
+    editBox:SetLabel("")
+    editBox:DisableButton(true)
+    editBox:SetFullWidth(true)
+    editBox:SetFullHeight(true)
+    editBox:SetText(text)
+    frame:AddChild(editBox)
 end
 
 function GBL:ManualScan()
