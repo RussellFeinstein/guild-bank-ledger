@@ -379,6 +379,14 @@ function MockAce.install()
     LDBIcon.Hide = function() end
     libs["LibDBIcon-1.0"] = LDBIcon
     MockAce.ldbIcon = LDBIcon
+
+    -- LibDeflate mock (identity transform for testing)
+    libs["LibDeflate"] = {
+        CompressDeflate = function(_, data) return data end,
+        DecompressDeflate = function(_, data) return data end,
+        EncodeForWoWAddonChannel = function(_, data) return data end,
+        DecodeForWoWAddonChannel = function(_, data) return data end,
+    }
 end
 
 --- Fire an event on the addon object (simulates WoW event dispatch).

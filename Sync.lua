@@ -8,9 +8,9 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 
 -- Protocol constants
 local PREFIX = "GBLSync"
-local PROTOCOL_VERSION = 1
-local MAX_RECORDS_PER_CHUNK = 5
-local CHUNK_BYTE_BUDGET = 600
+local PROTOCOL_VERSION = 2
+local MAX_RECORDS_PER_CHUNK = 15
+local CHUNK_BYTE_BUDGET = 1600
 local MAX_RETRIES = 3
 local ACK_TIMEOUT = 15
 local RECEIVE_CHUNK_TIMEOUT = 20
@@ -34,6 +34,33 @@ GBL.SYNC_PREFIX = PREFIX
 GBL.SYNC_MAX_RETRIES = MAX_RETRIES
 GBL.SYNC_MAX_NACK_RETRIES = MAX_NACK_RETRIES
 GBL.SYNC_PEER_STALE_SECONDS = PEER_STALE_SECONDS
+
+------------------------------------------------------------------------
+-- Compression (LibDeflate)
+------------------------------------------------------------------------
+
+--- Compress a serialized string for addon channel transmission.
+-- @param serialized string AceSerializer output
+-- @return string Compressed and encoded string
+local function compressMessage(serialized)
+    local LibDeflate = LibStub("LibDeflate")
+    local compressed = LibDeflate:CompressDeflate(serialized)
+    return LibDeflate:EncodeForWoWAddonChannel(compressed)
+end
+
+--- Decompress a received addon channel string.
+-- @param encoded string Compressed+encoded message
+-- @return string|nil Decompressed serialized string, or nil on failure
+local function decompressMessage(encoded)
+    local LibDeflate = LibStub("LibDeflate")
+    local compressed = LibDeflate:DecodeForWoWAddonChannel(encoded)
+    if not compressed then return nil end
+    return LibDeflate:DecompressDeflate(compressed)
+end
+
+-- Expose for testing
+GBL._compressMessage = compressMessage
+GBL._decompressMessage = decompressMessage
 
 -- Module state (session-only, not persisted)
 local syncState = {
@@ -149,6 +176,7 @@ function GBL:BroadcastHello(force)
         dataHash = dataHash,
         lastScanTime = self.lastScanTime or 0,
     })
+    msg = compressMessage(msg)
 
     self:SendCommMessage(PREFIX, msg, "GUILD")
     self:AddAuditEntry("Sent HELLO (tx: " .. txCount
@@ -178,6 +206,7 @@ function GBL:SendHelloReply(target)
         lastScanTime = self.lastScanTime or 0,
         isReply = true,
     })
+    msg = compressMessage(msg)
 
     self:SendCommMessage(PREFIX, msg, "WHISPER", target)
     self:AddAuditEntry("Sent HELLO reply to " .. target
@@ -200,7 +229,9 @@ function GBL:OnSyncMessage(_prefix, message, distribution, sender)
     local myName = UnitName("player")
     if Ambiguate(sender, "none") == myName then return end
 
-    local success, data = self:Deserialize(message)
+    local decompressed = decompressMessage(message)
+    if not decompressed then return end
+    local success, data = self:Deserialize(decompressed)
     if not success or type(data) ~= "table" then return end
 
     local msgType = data.type
@@ -466,6 +497,7 @@ function GBL:RequestSync(target, sinceTimestamp)
         protocolVersion = PROTOCOL_VERSION,
         guild = self:GetGuildName(),
     })
+    msg = compressMessage(msg)
 
     local bucketCount = 0
     if bucketHashes then
@@ -607,6 +639,7 @@ function GBL:HandleSyncRequest(sender, data)
             protocolVersion = PROTOCOL_VERSION,
             guild = self:GetGuildName(),
         })
+        msg = compressMessage(msg)
         self:SendCommMessage(PREFIX, msg, "WHISPER", sender)
         self:AddAuditEntry("Sent empty sync to " .. sender)
         return
@@ -712,7 +745,7 @@ function GBL:SendNextChunk()
         return
     end
 
-    local msg = self:Serialize({
+    local serialized = self:Serialize({
         type = "SYNC_DATA",
         chunk = idx,
         totalChunks = #syncState.sendChunks,
@@ -721,18 +754,20 @@ function GBL:SendNextChunk()
         protocolVersion = PROTOCOL_VERSION,
         guild = self:GetGuildName(),
     })
+    local msg = compressMessage(serialized)
 
+    local rawLen = #serialized
     local msgLen = #msg
     local chunkRecords = #chunk.transactions + #chunk.moneyTransactions
     local total = #syncState.sendChunks
     self:Print("Sync: sending chunk " .. idx .. "/" .. total
         .. " to " .. (syncState.sendTarget or "?")
-        .. " (" .. chunkRecords .. " records, " .. msgLen .. "b)")
+        .. " (" .. chunkRecords .. " records, " .. rawLen .. "b→" .. msgLen .. "b)")
     -- Only audit-log every 10th chunk and the last one to avoid flooding the trail
     if idx == 1 or idx == total or idx % 10 == 0 then
         self:AddAuditEntry("Sending chunk " .. idx .. "/" .. total
             .. " to " .. (syncState.sendTarget or "?")
-            .. " (" .. chunkRecords .. " records, " .. msgLen .. " bytes)")
+            .. " (" .. chunkRecords .. " records, " .. rawLen .. "→" .. msgLen .. " bytes)")
     end
 
     if msgLen > WHISPER_SAFE_BYTES then
@@ -910,6 +945,7 @@ function GBL:HandleSyncData(sender, data)
         protocolVersion = PROTOCOL_VERSION,
         guild = self:GetGuildName(),
     })
+    ackMsg = compressMessage(ackMsg)
     self:SendCommMessage(PREFIX, ackMsg, "WHISPER", sender)
 
     self:Print("Sync: chunk " .. (data.chunk or "?") .. "/"
@@ -1167,6 +1203,7 @@ function GBL:SendNack(target, chunkIndex)
         protocolVersion = PROTOCOL_VERSION,
         guild = self:GetGuildName(),
     })
+    msg = compressMessage(msg)
     self:SendCommMessage(PREFIX, msg, "WHISPER", target)
     self:Print("Sync: requesting re-send of chunk " .. chunkIndex
         .. " from " .. target .. " (attempt " .. syncState.receiveNackCount

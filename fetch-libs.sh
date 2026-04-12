@@ -102,6 +102,7 @@ echo "Installing standalone libraries..."
 install_standalone "LibStub"            "lua-wow/LibStub"
 install_standalone "LibDBIcon-1.0"      "zerosnake0/LibDBIcon-1.0"
 install_standalone "LibDataBroker-1.1"  "tekkub/libdatabroker-1-1"
+install_standalone "LibDeflate"         "SafeteeWoW/LibDeflate"
 
 echo ""
 echo "Done. All libraries installed to $LIBS_DIR/"

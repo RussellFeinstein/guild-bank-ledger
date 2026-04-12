@@ -5,6 +5,14 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] — 2026-04-11
+
+### Added
+- **LibDeflate compression** — all sync messages are now compressed with LibDeflate before transmission, significantly reducing wire size. Chunk capacity increased from 5 to 15 records (budget from 600 to 1600 bytes pre-serialized). Audit trail shows pre/post compression sizes for SYNC_DATA chunks.
+
+### Changed
+- **Sync protocol version bumped to 2** — v0.10.0 clients are incompatible with older versions. Both sync peers must upgrade together.
+
 ## [0.9.7] — 2026-04-11
 
 ### Fixed

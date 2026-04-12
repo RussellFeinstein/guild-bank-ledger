@@ -1223,8 +1223,8 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
 
     describe("ACK timer callback", function()
-        it("MAX_RECORDS_PER_CHUNK constant is 5", function()
-            assert.equals(5, GBL.SYNC_CHUNK_SIZE)
+        it("MAX_RECORDS_PER_CHUNK constant is 15", function()
+            assert.equals(15, GBL.SYNC_CHUNK_SIZE)
         end)
 
         it("ACK timer starts after send callback, not immediately", function()
@@ -2702,6 +2702,63 @@ describe("Sync", function()
             MockWoW.serverTime = 100000 + GBL.SYNC_PEER_STALE_SECONDS + 1
             assert.is_nil(GBL:GetSyncPeers()["OfficerB"])
             assert.is_not_nil(GBL:GetAllPeers()["OfficerB"])
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Compression
+    ---------------------------------------------------------------------------
+
+    describe("compression", function()
+        it("protocol version is 2", function()
+            assert.equals(2, GBL.SYNC_PROTOCOL_VERSION)
+        end)
+
+        it("compress/decompress round-trips correctly", function()
+            local original = GBL:Serialize({
+                type = "SYNC_DATA", chunk = 1, totalChunks = 1,
+                transactions = {{ id = "test:0", player = "A", itemID = 100 }},
+                moneyTransactions = {},
+            })
+            local compressed = GBL._compressMessage(original)
+            local decompressed = GBL._decompressMessage(compressed)
+            assert.equals(original, decompressed)
+        end)
+
+        it("sent HELLO messages pass through compression", function()
+            GBL:ResetSyncState()
+            GBL.db.profile.sync.enabled = true
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            MockAce.sentCommMessages = {}
+
+            GBL:BroadcastHello(true)
+
+            assert.is_true(#MockAce.sentCommMessages >= 1)
+            -- With identity mock, compressed = serialized, so Deserialize still works
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok)
+            assert.equals("HELLO", data.type)
+        end)
+
+        it("received messages are decompressed before deserialization", function()
+            GBL:ResetSyncState()
+            GBL.db.profile.sync.enabled = true
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            MockWoW.player.name = "TestPlayer"
+
+            -- Simulate a compressed HELLO from another player
+            local serialized = GBL:Serialize({
+                type = "HELLO", version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 3, dataHash = 12345,
+            })
+            local compressed = GBL._compressMessage(serialized)
+
+            GBL:OnSyncMessage("GBLSync", compressed, "GUILD", "OfficerX")
+
+            local peers = GBL:GetSyncPeers()
+            assert.is_not_nil(peers["OfficerX"])
+            assert.equals(3, peers["OfficerX"].txCount)
         end)
     end)
 end)
