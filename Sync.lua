@@ -498,6 +498,14 @@ local function reconstructSyncRecord(record, sender)
     record.scanTime = GetServerTime()
     record.scannedBy = "sync:" .. (sender or "unknown")
     -- tabName/destTabName intentionally left nil — BackfillTabNames fills them
+
+    -- 6. Validate required fields — reject corrupted records
+    --    AceSerializer can mangle field boundaries during transit, producing
+    --    garbage keys like "typyer" (type+player merged). Reject anything
+    --    missing the two fields every record must have.
+    if not record.type or record.type == "" then return false end
+    if not record.player or record.player == "" then return false end
+    return true
 end
 
 ------------------------------------------------------------------------
@@ -974,48 +982,53 @@ function GBL:HandleSyncData(sender, data)
     local chunkTotal = #(data.transactions or {}) + #(data.moneyTransactions or {})
 
     for _, tx in ipairs(data.transactions or {}) do
-        reconstructSyncRecord(tx, sender)
-        local isDup, matchedKey = self:IsDuplicate(tx, guildData)
-        if isDup then
-            if matchedKey and matchedKey ~= tx.id then
-                if self:NormalizeRecordId(tx, matchedKey, guildData, idIndex) then
-                    normalized = normalized + 1
-                    -- Update idIndex: sender-wins, so incoming ID is the new key
-                    local rec = idIndex[matchedKey]
-                    if rec then
-                        idIndex[tx.id] = rec
-                        idIndex[matchedKey] = nil
-                    end
-                end
-            end
+        if not reconstructSyncRecord(tx, sender) then
             itemDuped = itemDuped + 1
         else
-            if self:StoreTx(tx, guildData) then
-                itemStored = itemStored + 1
-                idIndex[tx.id] = tx
+            local isDup, matchedKey = self:IsDuplicate(tx, guildData)
+            if isDup then
+                if matchedKey and matchedKey ~= tx.id then
+                    if self:NormalizeRecordId(tx, matchedKey, guildData, idIndex) then
+                        normalized = normalized + 1
+                        local rec = idIndex[matchedKey]
+                        if rec then
+                            idIndex[tx.id] = rec
+                            idIndex[matchedKey] = nil
+                        end
+                    end
+                end
+                itemDuped = itemDuped + 1
+            else
+                if self:StoreTx(tx, guildData) then
+                    itemStored = itemStored + 1
+                    idIndex[tx.id] = tx
+                end
             end
         end
     end
 
     for _, tx in ipairs(data.moneyTransactions or {}) do
-        reconstructSyncRecord(tx, sender)
-        local isDup, matchedKey = self:IsDuplicate(tx, guildData)
-        if isDup then
-            if matchedKey and matchedKey ~= tx.id then
-                if self:NormalizeRecordId(tx, matchedKey, guildData, idIndex) then
-                    normalized = normalized + 1
-                    local rec = idIndex[matchedKey]
-                    if rec then
-                        idIndex[tx.id] = rec
-                        idIndex[matchedKey] = nil
-                    end
-                end
-            end
+        if not reconstructSyncRecord(tx, sender) then
             moneyDuped = moneyDuped + 1
         else
-            if self:StoreMoneyTx(tx, guildData) then
-                moneyStored = moneyStored + 1
-                idIndex[tx.id] = tx
+            local isDup, matchedKey = self:IsDuplicate(tx, guildData)
+            if isDup then
+                if matchedKey and matchedKey ~= tx.id then
+                    if self:NormalizeRecordId(tx, matchedKey, guildData, idIndex) then
+                        normalized = normalized + 1
+                        local rec = idIndex[matchedKey]
+                        if rec then
+                            idIndex[tx.id] = rec
+                            idIndex[matchedKey] = nil
+                        end
+                    end
+                end
+                moneyDuped = moneyDuped + 1
+            else
+                if self:StoreMoneyTx(tx, guildData) then
+                    moneyStored = moneyStored + 1
+                    idIndex[tx.id] = tx
+                end
             end
         end
     end

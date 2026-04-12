@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.2] — 2026-04-12
+
+### Fixed
+- **Corrupted sync records** — AceSerializer field boundary corruption during sync could produce records with mangled keys (`typyer`, `typelassID`, etc.), losing type and player fields. `reconstructSyncRecord` now validates required fields and rejects corrupted records. Migration cleanup removes 6 existing corrupted records from SavedVariables.
+
 ## [0.12.1] — 2026-04-12
 
 ### Added

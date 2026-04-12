@@ -115,7 +115,7 @@ describe("Core", function()
         it("status prints version and guild info", function()
             MockWoW.guild.name = "Test Guild"
             GBL:HandleSlashCommand("status")
-            assert.is_true(Helpers.printContains("0.12.1"))
+            assert.is_true(Helpers.printContains("0.12.2"))
             assert.is_true(Helpers.printContains("Test Guild"))
         end)
 
@@ -279,6 +279,45 @@ describe("Core", function()
             assert.equals("Consumable", rec.category)
             assert.equals(10000, rec.scanTime)
             assert.equals("OfficerA", rec.scannedBy)
+        end)
+
+        it("removes corrupted records during migration", function()
+            guildData.schemaVersion = 1
+
+            -- Valid record
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 100,
+                id = "withdraw|Thrall|12345|5|1|100:0", _occurrence = 0,
+            })
+            -- Corrupted: "typyer" key (type+player merged)
+            table.insert(guildData.transactions, {
+                typyer = "Yoshpet", itemID = 244018,
+                scannedBy = "sync:Deemle", subclassID = 2,
+                timestamp = 3600 * 200, _occurrence = 0,
+                id = "||244018|0|0|200:0",
+            })
+            -- Corrupted: "typelassID" key
+            table.insert(guildData.transactions, {
+                typelassID = 8, player = "Someone",
+                itemID = 243987, scannedBy = "sync:Aeglos",
+                timestamp = 3600 * 300, _occurrence = 0,
+                id = "|Someone|243987|0|0|300:0",
+            })
+            guildData.seenTxHashes["withdraw|Thrall|12345|5|1|100:0"] = 3600 * 100
+            guildData.seenTxHashes["||244018|0|0|200:0"] = 3600 * 200
+            guildData.seenTxHashes["|Someone|243987|0|0|300:0"] = 3600 * 300
+
+            GBL:MigrateOccurrenceScheme(guildData)
+
+            -- Only the valid record survives
+            assert.equals(1, #guildData.transactions)
+            assert.equals("Thrall", guildData.transactions[1].player)
+            assert.equals(2, guildData.schemaVersion)
+            -- Corrupted keys cleaned from seenTxHashes (rebuilt from surviving records)
+            assert.is_not_nil(guildData.seenTxHashes["withdraw|Thrall|12345|5|1|100:0"])
+            assert.is_nil(guildData.seenTxHashes["||244018|0|0|200:0"])
+            assert.is_nil(guildData.seenTxHashes["|Someone|243987|0|0|300:0"])
         end)
     end)
 

@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.12.1"
+local VERSION = "0.12.2"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -112,6 +112,27 @@ end
 -- @param guildData table Guild data from AceDB
 function GBL:MigrateOccurrenceScheme(guildData)
     if not guildData or guildData.schemaVersion >= 2 then return end
+
+    -- Remove corrupted records (AceSerializer field boundary corruption)
+    local function isCorrupted(record)
+        if not record.type or record.type == "" then return true end
+        if not record.player or record.player == "" then return true end
+        for key in pairs(record) do
+            if type(key) == "string" and key ~= "type" and key:match("^typ") then
+                return true
+            end
+        end
+        return false
+    end
+    local function removeCorrupted(arr)
+        for i = #arr, 1, -1 do
+            if isCorrupted(arr[i]) then
+                table.remove(arr, i)
+            end
+        end
+    end
+    removeCorrupted(guildData.transactions)
+    removeCorrupted(guildData.moneyTransactions)
 
     -- Collect all records
     local allRecords = {}

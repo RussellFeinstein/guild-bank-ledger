@@ -3936,4 +3936,51 @@ describe("Sync", function()
             end
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- Corrupted record rejection (v0.12.2)
+    ---------------------------------------------------------------------------
+
+    describe("corrupted record rejection", function()
+        it("rejects record with missing type from sync", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        -- Missing type field (AceSerializer corruption)
+                        player = "Thrall",
+                        itemID = 12345, classID = 0, subclassID = 5,
+                        count = 5, tab = 1,
+                        timestamp = 3600 * 100,
+                        id = "|Thrall|12345|5|1|100:0",
+                    },
+                    {
+                        -- Valid record
+                        type = "deposit", player = "Jaina",
+                        itemID = 99999, classID = 0, subclassID = 1,
+                        count = 10, tab = 2,
+                        timestamp = 3600 * 200,
+                        id = "deposit|Jaina|99999|10|2|200:0",
+                    },
+                },
+                moneyTransactions = {
+                    {
+                        -- Missing player field
+                        type = "repair",
+                        amount = 50000,
+                        timestamp = 3600 * 300,
+                        id = "repair||50000|300:0",
+                    },
+                },
+            })
+
+            -- Only the valid record should be stored
+            assert.equals(1, #guildData.transactions)
+            assert.equals("Jaina", guildData.transactions[1].player)
+            assert.equals(0, #guildData.moneyTransactions)
+        end)
+    end)
 end)
