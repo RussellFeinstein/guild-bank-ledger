@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] — 2026-04-12
+
+### Added
+- **Chat Log toggle** on Sync tab — checkbox controls whether sync progress messages are printed to chat. Defaults to off. Warnings (e.g., oversized chunks) always print regardless of this setting. All sync chat output now routed through `SyncLog()` helper.
+
 ## [0.12.0] — 2026-04-12
 
 ### Fixed

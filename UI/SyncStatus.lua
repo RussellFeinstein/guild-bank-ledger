@@ -52,6 +52,16 @@ function GBL:BuildSyncTab(container)
     end)
     controlRow:AddChild(autoCB)
 
+    -- Chat log checkbox
+    local chatCB = AceGUI:Create("CheckBox")
+    chatCB:SetLabel("Chat Log")
+    chatCB:SetWidth(120)
+    chatCB:SetValue(self.db.profile.sync.chatLog)
+    chatCB:SetCallback("OnValueChanged", function(_widget, _event, value)
+        self.db.profile.sync.chatLog = value
+    end)
+    controlRow:AddChild(chatCB)
+
     -- Broadcast Hello button
     local helloBtn = AceGUI:Create("Button")
     helloBtn:SetText("Broadcast Hello")

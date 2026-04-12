@@ -101,6 +101,18 @@ local syncState = {
 }
 
 ------------------------------------------------------------------------
+-- Chat logging
+------------------------------------------------------------------------
+
+--- Print a sync message to chat if chatLog is enabled.
+-- @param ... Arguments passed to self:Print()
+function GBL:SyncLog(...)
+    if self.db and self.db.profile.sync.chatLog then
+        self:Print(...)
+    end
+end
+
+------------------------------------------------------------------------
 -- Initialization
 ------------------------------------------------------------------------
 
@@ -528,7 +540,7 @@ function GBL:RequestSync(target, sinceTimestamp)
 
     local msgBytes = #msg
     self:SendCommMessage(PREFIX, msg, "WHISPER", target)
-    self:Print("Sync: requesting data from " .. target .. "...")
+    self:SyncLog("Sync: requesting data from " .. target .. "...")
     self:AddAuditEntry("Requesting sync from " .. target
         .. " (since " .. sinceTimestamp
         .. ", " .. bucketCount .. " bucket days"
@@ -544,7 +556,7 @@ function GBL:RequestSync(target, sinceTimestamp)
         if not syncState.receiving then return end
         if syncState.receiveGot == 0 then
             if syncState.receiveNackCount >= MAX_NACK_RETRIES then
-                self:Print("Sync: no response from " .. target
+                self:SyncLog("Sync: no response from " .. target
                     .. " after " .. MAX_NACK_RETRIES .. " retries — aborting")
                 self:AddAuditEntry("Request timeout — no data from "
                     .. target .. " after " .. MAX_NACK_RETRIES .. " retries")
@@ -561,7 +573,7 @@ end
 -- @param data table Deserialized request payload
 function GBL:HandleSyncRequest(sender, data)
     if syncState.sending then
-        self:Print("Sync: declined request from " .. sender
+        self:SyncLog("Sync: declined request from " .. sender
             .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
         self:AddAuditEntry("Declined sync from " .. sender
             .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
@@ -676,7 +688,7 @@ function GBL:HandleSyncRequest(sender, data)
     self:StartFpsMonitor()
 
     local totalTx = #txToSend + #moneyToSend
-    self:Print("Sync: sending " .. totalTx .. " records to " .. sender
+    self:SyncLog("Sync: sending " .. totalTx .. " records to " .. sender
         .. " in " .. #chunks .. " chunk(s)")
     self:AddAuditEntry("Sending " .. totalTx
         .. " tx to " .. sender .. " in " .. #chunks .. " chunk(s)")
@@ -782,7 +794,7 @@ function GBL:SendNextChunk()
     local msgLen = #msg
     local chunkRecords = #chunk.transactions + #chunk.moneyTransactions
     local total = #syncState.sendChunks
-    self:Print("Sync: sending chunk " .. idx .. "/" .. total
+    self:SyncLog("Sync: sending chunk " .. idx .. "/" .. total
         .. " to " .. (syncState.sendTarget or "?")
         .. " (" .. chunkRecords .. " records, " .. rawLen .. "b→" .. msgLen .. "b)")
     -- Only audit-log every 10th chunk and the last one to avoid flooding the trail
@@ -808,7 +820,7 @@ function GBL:SendNextChunk()
     end
     syncState.sendHardTimer = C_Timer.NewTicker(120, function()
         if syncState.sending then
-            self:Print("Sync: hard timeout (120s) — AceComm never finished transmitting, aborting")
+            self:SyncLog("Sync: hard timeout (120s) — AceComm never finished transmitting, aborting")
             self:AddAuditEntry("Send hard timeout — aborting")
             self:FinishSending()
         end
@@ -829,7 +841,7 @@ function GBL:SendNextChunk()
                     syncState.sendRetryCount = syncState.sendRetryCount + 1
                     syncState.sendChunkIndex = syncState.sendChunkIndex - 1
                     local retryChunk = syncState.sendChunkIndex + 1
-                    self:Print("Sync: ACK timeout, retrying chunk " .. retryChunk
+                    self:SyncLog("Sync: ACK timeout, retrying chunk " .. retryChunk
                         .. " (attempt " .. (syncState.sendRetryCount + 1)
                         .. "/" .. (MAX_RETRIES + 1) .. ")")
                     self:AddAuditEntry("Retrying chunk " .. retryChunk
@@ -837,7 +849,7 @@ function GBL:SendNextChunk()
                         .. (MAX_RETRIES + 1) .. ")")
                     self:SendNextChunk()
                 else
-                    self:Print("Sync: ACK timeout from "
+                    self:SyncLog("Sync: ACK timeout from "
                         .. (syncState.sendTarget or "?")
                         .. " after " .. (MAX_RETRIES + 1) .. " attempts — aborting")
                     self:AddAuditEntry("ACK timeout from "
@@ -856,7 +868,7 @@ function GBL:FinishSending()
     local total = #syncState.sendChunks
     local elapsed = GetServerTime() - syncState.sendStartTime
 
-    self:Print("Sync: send complete to " .. target
+    self:SyncLog("Sync: send complete to " .. target
         .. " (" .. sent .. "/" .. total .. " chunks, " .. elapsed .. "s)")
     self:AddAuditEntry("Send complete to " .. target
         .. " — " .. sent .. "/" .. total .. " chunks"
@@ -1028,7 +1040,7 @@ function GBL:HandleSyncData(sender, data)
         syncState.receiveTimer = C_Timer.NewTicker(RECEIVE_CHUNK_TIMEOUT, function()
             if not syncState.receiving then return end
             if syncState.receiveNackCount >= MAX_NACK_RETRIES then
-                self:Print("Sync: chunk " .. (syncState.receiveGot + 1) .. "/"
+                self:SyncLog("Sync: chunk " .. (syncState.receiveGot + 1) .. "/"
                     .. syncState.receiveExpected .. " failed after "
                     .. MAX_NACK_RETRIES .. " retries — aborting")
                 self:AddAuditEntry("NACK limit reached for chunk "
@@ -1052,7 +1064,7 @@ function GBL:HandleSyncData(sender, data)
     ackMsg = compressMessage(ackMsg)
     self:SendCommMessage(PREFIX, ackMsg, "WHISPER", sender)
 
-    self:Print("Sync: chunk " .. (data.chunk or "?") .. "/"
+    self:SyncLog("Sync: chunk " .. (data.chunk or "?") .. "/"
         .. (data.totalChunks or "?") .. " from " .. sender
         .. " — " .. stored .. " new, " .. duped .. " duped"
         .. " (total so far: " .. syncState.receiveStored .. " new)")
@@ -1136,7 +1148,7 @@ function GBL:FinishReceiving(sender)
 
     local normalizedMsg = totalNormalized > 0
         and (", " .. totalNormalized .. " IDs converged") or ""
-    self:Print("Sync complete from " .. (sender or "?") .. ": "
+    self:SyncLog("Sync complete from " .. (sender or "?") .. ": "
         .. totalStored .. " new, " .. totalDuped .. " duped"
         .. normalizedMsg
         .. " (" .. chunksGot .. " chunks, " .. elapsed .. "s)")
@@ -1327,7 +1339,7 @@ function GBL:SendNack(target, chunkIndex)
     })
     msg = compressMessage(msg)
     self:SendCommMessage(PREFIX, msg, "WHISPER", target)
-    self:Print("Sync: requesting re-send of chunk " .. chunkIndex
+    self:SyncLog("Sync: requesting re-send of chunk " .. chunkIndex
         .. " from " .. target .. " (attempt " .. syncState.receiveNackCount
         .. "/" .. MAX_NACK_RETRIES .. ")")
     self:AddAuditEntry("Sent NACK for chunk " .. chunkIndex

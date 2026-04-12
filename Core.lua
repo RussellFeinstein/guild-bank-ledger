@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.12.0"
+local VERSION = "0.12.1"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -61,7 +61,7 @@ local defaults = {
         },
         alerts = { enabled = true, chatNotify = true, soundNotify = true },
         export = { delimiter = ",", includeHeaders = true, dateFormat = "%Y-%m-%d %H:%M" },
-        sync = { enabled = true, autoSync = true },
+        sync = { enabled = true, autoSync = true, chatLog = false },
         filters = { defaultDays = 7, defaultCategory = "ALL" },
     },
 }
