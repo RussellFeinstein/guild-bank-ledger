@@ -115,7 +115,7 @@ describe("Core", function()
         it("status prints version and guild info", function()
             MockWoW.guild.name = "Test Guild"
             GBL:HandleSlashCommand("status")
-            assert.is_true(Helpers.printContains("0.11.3"))
+            assert.is_true(Helpers.printContains("0.12.0"))
             assert.is_true(Helpers.printContains("Test Guild"))
         end)
 
@@ -142,6 +142,143 @@ describe("Core", function()
             GBL:HandleSlashCommand("show")
             GBL.ToggleMainFrame = origToggle
             assert.is_true(called)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- MigrateOccurrenceScheme (v0.12.0)
+    ---------------------------------------------------------------------------
+
+    describe("MigrateOccurrenceScheme", function()
+        local guildData
+
+        before_each(function()
+            GBL:OnInitialize()
+            MockWoW.guild.name = "Test Guild"
+            guildData = GBL:GetGuildData()
+        end)
+
+        it("reassigns occurrences by prefix across hour slots", function()
+            -- Two records with same prefix, different hours — old scheme both :0
+            guildData.schemaVersion = 1
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 100,
+                id = "withdraw|Thrall|12345|5|1|100:0", _occurrence = 0,
+            })
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 101,
+                id = "withdraw|Thrall|12345|5|1|101:0", _occurrence = 0,
+            })
+            guildData.seenTxHashes["withdraw|Thrall|12345|5|1|100:0"] = 3600 * 100
+            guildData.seenTxHashes["withdraw|Thrall|12345|5|1|101:0"] = 3600 * 101
+
+            GBL:MigrateOccurrenceScheme(guildData)
+
+            -- First record (earlier timestamp) keeps :0, second gets :1
+            assert.equals("withdraw|Thrall|12345|5|1|100:0", guildData.transactions[1].id)
+            assert.equals(0, guildData.transactions[1]._occurrence)
+            assert.equals("withdraw|Thrall|12345|5|1|101:1", guildData.transactions[2].id)
+            assert.equals(1, guildData.transactions[2]._occurrence)
+            assert.equals(2, guildData.schemaVersion)
+        end)
+
+        it("rebuilds seenTxHashes with new keys", function()
+            guildData.schemaVersion = 1
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 100,
+                id = "withdraw|Thrall|12345|5|1|100:0", _occurrence = 0,
+            })
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 101,
+                id = "withdraw|Thrall|12345|5|1|101:0", _occurrence = 0,
+            })
+            guildData.seenTxHashes["withdraw|Thrall|12345|5|1|100:0"] = 3600 * 100
+            guildData.seenTxHashes["withdraw|Thrall|12345|5|1|101:0"] = 3600 * 101
+
+            GBL:MigrateOccurrenceScheme(guildData)
+
+            -- Old :0 key for second record is gone, new :1 key present
+            assert.is_not_nil(guildData.seenTxHashes["withdraw|Thrall|12345|5|1|100:0"])
+            assert.is_not_nil(guildData.seenTxHashes["withdraw|Thrall|12345|5|1|101:1"])
+            assert.is_nil(guildData.seenTxHashes["withdraw|Thrall|12345|5|1|101:0"])
+
+            -- Timestamps preserved
+            assert.equals(3600 * 100, guildData.seenTxHashes["withdraw|Thrall|12345|5|1|100:0"])
+            assert.equals(3600 * 101, guildData.seenTxHashes["withdraw|Thrall|12345|5|1|101:1"])
+        end)
+
+        it("is idempotent — skips on schemaVersion 2", function()
+            guildData.schemaVersion = 2
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 100,
+                id = "withdraw|Thrall|12345|5|1|100:0", _occurrence = 0,
+            })
+            guildData.seenTxHashes["withdraw|Thrall|12345|5|1|100:0"] = 3600 * 100
+
+            GBL:MigrateOccurrenceScheme(guildData)
+
+            -- Nothing changed
+            assert.equals("withdraw|Thrall|12345|5|1|100:0", guildData.transactions[1].id)
+            assert.is_not_nil(guildData.seenTxHashes["withdraw|Thrall|12345|5|1|100:0"])
+        end)
+
+        it("handles records without occurrence suffix", function()
+            guildData.schemaVersion = 1
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 100,
+                id = "withdraw|Thrall|12345|5|1|100", _occurrence = nil,  -- no :N suffix
+            })
+            guildData.seenTxHashes["withdraw|Thrall|12345|5|1|100"] = 3600 * 100
+
+            GBL:MigrateOccurrenceScheme(guildData)
+
+            assert.equals("withdraw|Thrall|12345|5|1|100:0", guildData.transactions[1].id)
+            assert.equals(0, guildData.transactions[1]._occurrence)
+            assert.is_not_nil(guildData.seenTxHashes["withdraw|Thrall|12345|5|1|100:0"])
+            assert.is_nil(guildData.seenTxHashes["withdraw|Thrall|12345|5|1|100"])
+        end)
+
+        it("preserves non-ID fields", function()
+            guildData.schemaVersion = 1
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 100,
+                id = "withdraw|Thrall|12345|5|1|100:0", _occurrence = 0,
+                classID = 2, subclassID = 3, category = "Consumable",
+                scanTime = 9999, scannedBy = "OfficerA",
+            })
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 101,
+                id = "withdraw|Thrall|12345|5|1|101:0", _occurrence = 0,
+                classID = 2, subclassID = 3, category = "Consumable",
+                scanTime = 10000, scannedBy = "OfficerA",
+            })
+            guildData.seenTxHashes["withdraw|Thrall|12345|5|1|100:0"] = 3600 * 100
+            guildData.seenTxHashes["withdraw|Thrall|12345|5|1|101:0"] = 3600 * 101
+
+            GBL:MigrateOccurrenceScheme(guildData)
+
+            -- ID changed for second record, but all other fields preserved
+            local rec = guildData.transactions[2]
+            assert.equals("withdraw|Thrall|12345|5|1|101:1", rec.id)
+            assert.equals("withdraw", rec.type)
+            assert.equals("Thrall", rec.player)
+            assert.equals(12345, rec.itemID)
+            assert.equals(5, rec.count)
+            assert.equals(1, rec.tab)
+            assert.equals(3600 * 101, rec.timestamp)
+            assert.equals(2, rec.classID)
+            assert.equals(3, rec.subclassID)
+            assert.equals("Consumable", rec.category)
+            assert.equals(10000, rec.scanTime)
+            assert.equals("OfficerA", rec.scannedBy)
         end)
     end)
 

@@ -116,11 +116,11 @@ end
 function GBL:AssignOccurrenceIndices(records)
     local counts = {}
     for _, record in ipairs(records) do
-        local baseHash = record.id
-        local occ = counts[baseHash] or 0
-        counts[baseHash] = occ + 1
+        local prefix = buildPrefix(record)
+        local occ = counts[prefix] or 0
+        counts[prefix] = occ + 1
         record._occurrence = occ
-        record.id = baseHash .. ":" .. occ
+        record.id = record.id .. ":" .. occ
     end
 end
 

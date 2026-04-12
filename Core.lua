@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.11.3"
+local VERSION = "0.12.0"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -40,7 +40,7 @@ local defaults = {
                 stockAlerts = {},
                 seenTxHashes = {},
                 syncState = { lastSyncTimestamp = 0, syncVersion = 0, peers = {} },
-                schemaVersion = 1,
+                schemaVersion = 2,
             },
         },
     },
@@ -94,8 +94,94 @@ function GBL:OnEnable()
     self:RegisterEvent("GUILD_ROSTER_UPDATE")
     self:InstallBankCloseHook()
 
+    -- Migrate occurrence scheme before sync starts (v0.12.0)
+    self:MigrateAllGuilds()
+
     -- Initialize sync system (M5)
     self:InitSync()
+end
+
+------------------------------------------------------------------------
+-- Data migration
+------------------------------------------------------------------------
+
+--- Migrate occurrence indices from per-baseHash to per-prefix counting.
+-- Old scheme: two events with the same prefix but different timeSlots both
+-- got occurrence :0, causing cross-client false positives on exact match.
+-- New scheme: occurrences are sequential per-prefix regardless of timeSlot.
+-- @param guildData table Guild data from AceDB
+function GBL:MigrateOccurrenceScheme(guildData)
+    if not guildData or guildData.schemaVersion >= 2 then return end
+
+    -- Collect all records
+    local allRecords = {}
+    for _, tx in ipairs(guildData.transactions) do
+        allRecords[#allRecords + 1] = tx
+    end
+    for _, tx in ipairs(guildData.moneyTransactions) do
+        allRecords[#allRecords + 1] = tx
+    end
+
+    if #allRecords == 0 then
+        guildData.schemaVersion = 2
+        return
+    end
+
+    -- Group records by prefix
+    local groups = {}
+    for _, record in ipairs(allRecords) do
+        local prefix = self:BuildTxPrefix(record)
+        if not groups[prefix] then
+            groups[prefix] = {}
+        end
+        groups[prefix][#groups[prefix] + 1] = record
+    end
+
+    -- Sort each group by timestamp (tiebreak on old ID for determinism)
+    for _, group in pairs(groups) do
+        table.sort(group, function(a, b)
+            if (a.timestamp or 0) == (b.timestamp or 0) then
+                return (a.id or "") < (b.id or "")
+            end
+            return (a.timestamp or 0) < (b.timestamp or 0)
+        end)
+
+        -- Reassign occurrence indices
+        for i, record in ipairs(group) do
+            local occ = i - 1
+            -- Strip old :N suffix, recompute
+            local baseHash = record.id and record.id:gsub(":%d+$", "") or ""
+            record.id = baseHash .. ":" .. occ
+            record._occurrence = occ
+        end
+    end
+
+    -- Rebuild seenTxHashes from scratch
+    local newHashes = {}
+    for _, record in ipairs(allRecords) do
+        if record.id then
+            newHashes[record.id] = record.timestamp or 0
+        end
+    end
+
+    -- Clear and replace (preserve table reference for AceDB)
+    for k in pairs(guildData.seenTxHashes) do
+        guildData.seenTxHashes[k] = nil
+    end
+    for k, v in pairs(newHashes) do
+        guildData.seenTxHashes[k] = v
+    end
+
+    guildData.schemaVersion = 2
+    self:ResetHashCache()
+end
+
+--- Run migration for all guild data namespaces.
+function GBL:MigrateAllGuilds()
+    if not self.db or not self.db.global or not self.db.global.guilds then return end
+    for _, guildData in pairs(self.db.global.guilds) do
+        self:MigrateOccurrenceScheme(guildData)
+    end
 end
 
 function GBL:OnDisable()

@@ -5,6 +5,15 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] — 2026-04-12
+
+### Fixed
+- **Cross-client false positives (~50%) for same-prefix adjacent-hour events** — `AssignOccurrenceIndices` counted per-baseHash (which includes timeSlot), so two genuinely different events with the same prefix in adjacent hours both got occurrence `:0`. When a second client's timeSlot shifted by +1 hour, the incoming record's ID exactly matched a different event on the receiver, bypassing fuzzy matching entirely. Now counts by prefix (without timeSlot) so events get sequential occurrences `:0`, `:1`, `:2` regardless of hour slot.
+
+### Added
+- One-time data migration (`MigrateOccurrenceScheme`) reassigns all existing record occurrence indices to the new prefix-based scheme and rebuilds `seenTxHashes`. Guarded by `schemaVersion` bump (1 → 2). Deterministic sort (timestamp + old ID tiebreaker) ensures identical results across clients.
+- 8 new tests: prefix-based occurrence counting (3 dedup tests) + migration correctness (5 core tests). 433 total tests.
+
 ## [0.11.3] — 2026-04-12
 
 ### Added

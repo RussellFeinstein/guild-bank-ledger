@@ -348,6 +348,61 @@ describe("Dedup", function()
         end)
     end)
 
+    ---------------------------------------------------------------------------
+    -- Prefix-based occurrence counting (v0.12.0)
+    ---------------------------------------------------------------------------
+
+    describe("prefix-based occurrence counting", function()
+        it("counts by prefix across hour slots", function()
+            -- Two records with same prefix but different timeSlots
+            local rec1 = itemRecord({ timestamp = 3600 * 100 })
+            local rec2 = itemRecord({ timestamp = 3600 * 101 })
+
+            GBL:AssignOccurrenceIndices({ rec1, rec2 })
+
+            -- Should get :0 and :1 (same prefix counter), not both :0
+            assert.is_truthy(rec1.id:find(":0$"))
+            assert.is_truthy(rec2.id:find(":1$"))
+            assert.equals(0, rec1._occurrence)
+            assert.equals(1, rec2._occurrence)
+        end)
+
+        it("prevents false-positive dedup for adjacent-hour same-prefix events", function()
+            -- Two genuinely different events, same prefix, adjacent hours
+            local rec1 = itemRecord({ timestamp = 3600 * 100 })
+            local rec2 = itemRecord({ timestamp = 3600 * 101 })
+            GBL:AssignOccurrenceIndices({ rec1, rec2 })
+
+            -- Store first
+            GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
+
+            -- Second event should NOT be a duplicate (different occurrence)
+            assert.is_false(GBL:IsDuplicate(rec2, guildData))
+        end)
+
+        it("same-hour duplicates still dedup correctly", function()
+            -- Two identical records in the same hour still get :0 and :1
+            local rec1 = itemRecord({ timestamp = 3600 * 100 })
+            local rec2 = itemRecord({ timestamp = 3600 * 100 })
+
+            GBL:AssignOccurrenceIndices({ rec1, rec2 })
+
+            assert.is_truthy(rec1.id:find(":0$"))
+            assert.is_truthy(rec2.id:find(":1$"))
+
+            -- Store both, then re-scan — both should dedup
+            GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
+            GBL:MarkSeen(rec2.id, rec2.timestamp, guildData)
+
+            local rescan1 = itemRecord({ timestamp = 3600 * 100 })
+            local rescan2 = itemRecord({ timestamp = 3600 * 100 })
+            GBL:AssignOccurrenceIndices({ rescan1, rescan2 })
+
+            assert.is_true(GBL:IsDuplicate(rescan1, guildData))
+            assert.is_true(GBL:IsDuplicate(rescan2, guildData))
+        end)
+    end)
+
     describe("PruneSeenHashes", function()
         it("removes old entries and preserves recent", function()
             local now = Helpers.MockWoW.serverTime
