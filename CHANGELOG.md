@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.7] — 2026-04-11
+
+### Fixed
+- **Stale peers in Online list** — peers now expire from the "Online peers" tab after 5 minutes without contact. Previously, peers accumulated for the entire session even after logging off. `GetAllPeers()` still available for diagnostics.
+
 ## [0.9.6] — 2026-04-11
 
 ### Changed

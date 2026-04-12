@@ -25,6 +25,7 @@ local FPS_THRESHOLD_RECOVER = 25
 local FPS_SAMPLE_INTERVAL = 1.0
 local CTL_BANDWIDTH_MIN = 400
 local CTL_BACKOFF_DELAY = 1.0
+local PEER_STALE_SECONDS = 300
 
 -- Expose constants for testing and UI
 GBL.SYNC_PROTOCOL_VERSION = PROTOCOL_VERSION
@@ -32,6 +33,7 @@ GBL.SYNC_CHUNK_SIZE = MAX_RECORDS_PER_CHUNK
 GBL.SYNC_PREFIX = PREFIX
 GBL.SYNC_MAX_RETRIES = MAX_RETRIES
 GBL.SYNC_MAX_NACK_RETRIES = MAX_NACK_RETRIES
+GBL.SYNC_PEER_STALE_SECONDS = PEER_STALE_SECONDS
 
 -- Module state (session-only, not persisted)
 local syncState = {
@@ -1075,9 +1077,22 @@ function GBL:GetSyncStatus()
     }
 end
 
---- Return the session peer list.
+--- Return active peers (seen within PEER_STALE_SECONDS).
 -- @return table Map of name → { version, txCount, lastScanTime, lastSeen }
 function GBL:GetSyncPeers()
+    local now = GetServerTime()
+    local active = {}
+    for name, info in pairs(syncState.peers) do
+        if now - (info.lastSeen or 0) <= PEER_STALE_SECONDS then
+            active[name] = info
+        end
+    end
+    return active
+end
+
+--- Return all peers seen this session, including stale ones (for diagnostics).
+-- @return table Map of name → { version, txCount, lastScanTime, lastSeen }
+function GBL:GetAllPeers()
     return syncState.peers
 end
 

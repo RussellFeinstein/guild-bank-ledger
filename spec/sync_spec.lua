@@ -2639,4 +2639,69 @@ describe("Sync", function()
             _G.ChatThrottleLib = nil
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- Peer staleness
+    ---------------------------------------------------------------------------
+
+    describe("peer staleness", function()
+        before_each(function()
+            GBL:ResetSyncState()
+            GBL.db.profile.sync.enabled = true
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+        end)
+
+        it("GetSyncPeers returns peers seen recently", function()
+            MockWoW.serverTime = 100000
+            GBL:UpdatePeer("OfficerB", {
+                version = GBL.version, txCount = 5, lastScanTime = 99999,
+            })
+
+            -- Still within staleness window
+            MockWoW.serverTime = 100000 + GBL.SYNC_PEER_STALE_SECONDS - 1
+            local peers = GBL:GetSyncPeers()
+            assert.is_not_nil(peers["OfficerB"])
+        end)
+
+        it("GetSyncPeers filters out stale peers", function()
+            MockWoW.serverTime = 100000
+            GBL:UpdatePeer("OfficerB", {
+                version = GBL.version, txCount = 5, lastScanTime = 99999,
+            })
+
+            -- Past staleness window
+            MockWoW.serverTime = 100000 + GBL.SYNC_PEER_STALE_SECONDS + 1
+            local peers = GBL:GetSyncPeers()
+            assert.is_nil(peers["OfficerB"])
+        end)
+
+        it("stale peer reappears after new message", function()
+            MockWoW.serverTime = 100000
+            GBL:UpdatePeer("OfficerB", {
+                version = GBL.version, txCount = 5, lastScanTime = 99999,
+            })
+
+            -- Goes stale
+            MockWoW.serverTime = 100000 + GBL.SYNC_PEER_STALE_SECONDS + 100
+            assert.is_nil(GBL:GetSyncPeers()["OfficerB"])
+
+            -- New HELLO re-registers
+            GBL:UpdatePeer("OfficerB", {
+                version = GBL.version, txCount = 10, lastScanTime = MockWoW.serverTime,
+            })
+            assert.is_not_nil(GBL:GetSyncPeers()["OfficerB"])
+            assert.equals(10, GBL:GetSyncPeers()["OfficerB"].txCount)
+        end)
+
+        it("GetAllPeers returns stale peers too", function()
+            MockWoW.serverTime = 100000
+            GBL:UpdatePeer("OfficerB", {
+                version = GBL.version, txCount = 5, lastScanTime = 99999,
+            })
+
+            MockWoW.serverTime = 100000 + GBL.SYNC_PEER_STALE_SECONDS + 1
+            assert.is_nil(GBL:GetSyncPeers()["OfficerB"])
+            assert.is_not_nil(GBL:GetAllPeers()["OfficerB"])
+        end)
+    end)
 end)

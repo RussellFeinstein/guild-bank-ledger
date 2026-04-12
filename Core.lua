@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.9.6"
+local VERSION = "0.9.7"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -412,7 +412,7 @@ end
 function GBL:PrintSyncDiag()
     self:Print("|cffffcc00Sync Diagnostics:|r")
     self:Print("Local version: [" .. tostring(self.version) .. "] type=" .. type(self.version))
-    local peers = self:GetSyncPeers()
+    local peers = self:GetAllPeers()
     local hasPeers = false
     for name, info in pairs(peers) do
         hasPeers = true
