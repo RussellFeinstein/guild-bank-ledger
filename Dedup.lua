@@ -42,6 +42,12 @@ end
 ------------------------------------------------------------------------
 
 --- Check if a transaction is a duplicate by probing 3 adjacent hour slots.
+-- Uses timestamp proximity (< 3600s) to avoid false positives: genuinely
+-- different events with the same prefix in adjacent hours (e.g. same player
+-- repairs for the same amount two hours in a row) are NOT treated as dups.
+-- Same event scanned by different clients always has |diff| <= 3599 due to
+-- WoW API's hour-level granularity; different events from the same scan
+-- always have |diff| == 3600. Strict < 3600 cleanly separates them.
 -- @param record table Transaction record
 -- @param guildData table Guild data table containing seenTxHashes
 -- @return boolean True if duplicate
@@ -59,11 +65,23 @@ function GBL:IsDuplicate(record, guildData)
     local _, timeSlot = self:ComputeTxHash(record)
     local prefix = buildPrefix(record)
     local occ = record._occurrence or 0
+    local incomingTs = record.timestamp or 0
 
     for slot = timeSlot - 1, timeSlot + 1 do
         local key = prefix .. slot .. ":" .. occ
-        if guildData.seenTxHashes[key] then
-            return true
+        local storedEntry = guildData.seenTxHashes[key]
+        if storedEntry then
+            -- Extract stored timestamp (handles number and legacy table formats)
+            local storedTs = type(storedEntry) == "table"
+                and (storedEntry.timestamp or 0) or storedEntry
+            -- Legacy entries (storedTs == 0) or non-numeric: fall back to match
+            if type(storedTs) ~= "number" or storedTs == 0 then
+                return true
+            end
+            -- Same event: |diff| <= 3599; different event same-scan: |diff| == 3600
+            if math.abs(incomingTs - storedTs) < 3600 then
+                return true
+            end
         end
     end
 

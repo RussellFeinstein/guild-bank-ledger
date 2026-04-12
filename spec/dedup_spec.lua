@@ -162,6 +162,84 @@ describe("Dedup", function()
 
             assert.is_false(GBL:IsDuplicate(rec2, guildData))
         end)
+
+        it("adjacent hour with timestamps >= 3600 apart is NOT duplicate", function()
+            -- Genuinely different events: same player, same item, same count,
+            -- but in consecutive hours scanned by the same client (diff = exactly 3600)
+            local rec1 = itemRecord({ timestamp = 3600 * 100 })
+            rec1._occurrence = 0
+            rec1.id = rec1.id .. ":0"
+            GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
+
+            local rec2 = itemRecord({ timestamp = 3600 * 101 })
+            rec2._occurrence = 0
+            rec2.id = rec2.id .. ":0"
+
+            assert.is_false(GBL:IsDuplicate(rec2, guildData))
+        end)
+
+        it("adjacent hour with timestamps < 3600 apart IS duplicate", function()
+            -- Same event scanned across hour boundary by different clients
+            local rec1 = itemRecord({ timestamp = 3600 * 100 + 2700 })  -- hour 100, min 45
+            rec1._occurrence = 0
+            rec1.id = rec1.id .. ":0"
+            GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
+
+            local rec2 = itemRecord({ timestamp = 3600 * 101 + 900 })   -- hour 101, min 15
+            rec2._occurrence = 0
+            rec2.id = rec2.id .. ":0"
+            -- diff = 1800 < 3600 → same event
+
+            assert.is_true(GBL:IsDuplicate(rec2, guildData))
+        end)
+
+        it("prevents money record false positive in adjacent hours", function()
+            -- Same player repairs for the same amount in consecutive hours
+            local rec1 = moneyRecord({ type = "repair", amount = 500000, timestamp = 3600 * 100 })
+            rec1._occurrence = 0
+            rec1.id = rec1.id .. ":0"
+            GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
+
+            local rec2 = moneyRecord({ type = "repair", amount = 500000, timestamp = 3600 * 101 })
+            rec2._occurrence = 0
+            rec2.id = rec2.id .. ":0"
+            -- diff = 3600, NOT < 3600 → genuinely different repair
+
+            assert.is_false(GBL:IsDuplicate(rec2, guildData))
+        end)
+
+        it("legacy storedTs=0 falls back to match (backward compat)", function()
+            -- Old records stored with timestamp 0 should still be treated as dups
+            local rec = itemRecord({ timestamp = 3600 * 100 })
+            rec._occurrence = 0
+            local key = "withdraw|Thrall|12345|5|1|100:0"
+            guildData.seenTxHashes[key] = 0  -- legacy: no timestamp stored
+
+            local rec2 = itemRecord({ timestamp = 3600 * 101 })
+            rec2._occurrence = 0
+            rec2.id = rec2.id .. ":0"
+
+            assert.is_true(GBL:IsDuplicate(rec2, guildData))
+        end)
+
+        it("table-format stored entry uses embedded timestamp", function()
+            -- Old table format: { count = N, timestamp = T }
+            local rec1Ts = 3600 * 100 + 2700
+            local key = "withdraw|Thrall|12345|5|1|100:0"
+            guildData.seenTxHashes[key] = { count = 1, timestamp = rec1Ts }
+
+            -- Close enough → duplicate
+            local rec2 = itemRecord({ timestamp = 3600 * 101 + 900 })
+            rec2._occurrence = 0
+            rec2.id = rec2.id .. ":0"
+            assert.is_true(GBL:IsDuplicate(rec2, guildData))
+
+            -- Too far → not duplicate
+            local rec3 = itemRecord({ timestamp = 3600 * 101 + 2700 })
+            rec3._occurrence = 0
+            rec3.id = rec3.id .. ":0"
+            assert.is_false(GBL:IsDuplicate(rec3, guildData))
+        end)
     end)
 
     describe("MarkSeen", function()

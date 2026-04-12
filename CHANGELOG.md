@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.2] — 2026-04-12
+
+### Fixed
+- **Sync dedup false positives** — genuinely new transactions were incorrectly rejected as duplicates when the same player performed the same action (e.g. guild repair for the same amount) in consecutive hours. The fuzzy ±1 hour dedup now checks timestamp proximity (< 3600s) to distinguish same-event re-scans from genuinely different events. Recovers missing records during sync that were previously lost to false-positive matching.
+
 ## [0.10.1] — 2026-04-12
 
 ### Fixed
