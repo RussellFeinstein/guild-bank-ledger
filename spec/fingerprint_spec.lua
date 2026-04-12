@@ -296,6 +296,69 @@ describe("Fingerprint", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Bucket key after normalization (v0.11.2 regression)
+    ---------------------------------------------------------------------------
+
+    describe("bucket key after normalization", function()
+        it("bucket key follows normalized ID, not timestamp", function()
+            -- Record starts with timeSlot=107 (bucket = floor(107/6) = 17)
+            local record = {
+                id = "deposit|A|100|1|1|107:0",
+                timestamp = 3600 * 107,
+            }
+            table.insert(guildData.transactions, record)
+
+            local bucketsBefore = GBL:ComputeBucketHashes(guildData)
+            assert.is_not_nil(bucketsBefore[17])  -- floor(107/6) = 17
+
+            -- Simulate normalization: change ID to timeSlot=100 (bucket = floor(100/6) = 16)
+            record.id = "deposit|A|100|1|1|100:0"
+            record.timestamp = 3600 * 100
+            GBL:ResetHashCache()
+
+            local bucketsAfter = GBL:ComputeBucketHashes(guildData)
+            assert.is_not_nil(bucketsAfter[16])  -- floor(100/6) = 16
+            assert.is_nil(bucketsAfter[17])       -- old bucket gone
+        end)
+
+        it("bucket key uses ID timeSlot not timestamp when they disagree", function()
+            -- ID has timeSlot=100 (bucket 16), but timestamp points to slot 108 (bucket 18)
+            local record = {
+                id = "deposit|A|100|1|1|100:0",
+                timestamp = 3600 * 108,  -- would give bucket 18 via fallback
+            }
+
+            -- BucketKeyForRecord should use ID's timeSlot, not timestamp
+            assert.equals(math.floor(100 / 6), GBL:BucketKeyForRecord(record))
+
+            table.insert(guildData.transactions, record)
+            local buckets = GBL:ComputeBucketHashes(guildData)
+            assert.is_not_nil(buckets[math.floor(100 / 6)])
+            assert.is_nil(buckets[math.floor(108 / 6)])
+        end)
+
+        it("ComputeBucketHashes reflects record in new bucket after cross-bucket normalization", function()
+            -- Record starts in bucket 17 (timeSlot=107)
+            local oldId = "deposit|A|100|1|1|107:0"
+            local newId = "deposit|A|100|1|1|100:0"
+            local record = { id = oldId, timestamp = 3600 * 107 }
+            table.insert(guildData.transactions, record)
+
+            local bucketsBefore = GBL:ComputeBucketHashes(guildData)
+            assert.equals(GBL:HashString(oldId), bucketsBefore[17])
+
+            -- Normalize to bucket 16 (timeSlot=100)
+            record.id = newId
+            record.timestamp = 3600 * 100
+            GBL:ResetHashCache()
+
+            local bucketsAfter = GBL:ComputeBucketHashes(guildData)
+            assert.is_nil(bucketsAfter[17])
+            assert.equals(GBL:HashString(newId), bucketsAfter[16])
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- GetDataHash (cached)
     ---------------------------------------------------------------------------
 

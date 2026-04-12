@@ -3087,4 +3087,853 @@ describe("Sync", function()
             assert.equals(3, peers["OfficerX"].txCount)
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- NormalizeRecordId edge cases (J15-J18, G10)
+    ---------------------------------------------------------------------------
+
+    describe("NormalizeRecordId edge cases", function()
+        it("returns false when incoming id is nil", function()
+            local localTx = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 101,
+                id = "deposit|Thrall|12345|5|1|101:0", _occurrence = 0,
+            }
+            table.insert(guildData.transactions, localTx)
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"] = 3600 * 101
+
+            local idIndex = { ["deposit|Thrall|12345|5|1|101:0"] = localTx }
+
+            local incoming = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 100,
+                id = nil, _occurrence = 0,
+            }
+
+            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|101:0", guildData, idIndex)
+            assert.is_false(result)
+            -- Local record unchanged
+            assert.equals("deposit|Thrall|12345|5|1|101:0", localTx.id)
+            assert.is_not_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"])
+        end)
+
+        it("returns false when incoming id equals matched key", function()
+            local localTx = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 100,
+                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+            }
+            table.insert(guildData.transactions, localTx)
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|100:0"] = 3600 * 100
+
+            local idIndex = { ["deposit|Thrall|12345|5|1|100:0"] = localTx }
+
+            local incoming = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 100,
+                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+            }
+
+            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|100:0", guildData, idIndex)
+            assert.is_false(result)
+            -- Nothing changed
+            assert.equals(3600 * 100, localTx.timestamp)
+        end)
+
+        it("sets timestamp to 0 when incoming timestamp is nil", function()
+            local localTx = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 101,
+                id = "deposit|Thrall|12345|5|1|101:0", _occurrence = 0,
+            }
+            table.insert(guildData.transactions, localTx)
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"] = 3600 * 101
+
+            local idIndex = { ["deposit|Thrall|12345|5|1|101:0"] = localTx }
+
+            local incoming = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = nil,
+                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+            }
+
+            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|101:0", guildData, idIndex)
+            assert.is_true(result)
+            assert.equals(0, localTx.timestamp)
+            assert.equals(0, guildData.seenTxHashes["deposit|Thrall|12345|5|1|100:0"])
+        end)
+
+        it("updates seenTxHashes even when idIndex is nil", function()
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"] = 3600 * 101
+
+            local incoming = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 100,
+                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+            }
+
+            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|101:0", guildData, nil)
+            assert.is_true(result)
+            assert.is_not_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|100:0"])
+            assert.is_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"])
+        end)
+
+        it("normalizes record with matching _occurrence=0", function()
+            local localTx = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 101,
+                id = "deposit|Thrall|12345|5|1|101:0", _occurrence = 0,
+            }
+            table.insert(guildData.transactions, localTx)
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"] = 3600 * 101
+
+            local idIndex = { ["deposit|Thrall|12345|5|1|101:0"] = localTx }
+
+            local incoming = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 100,
+                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+            }
+
+            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|101:0", guildData, idIndex)
+            assert.is_true(result)
+            assert.equals(0, localTx._occurrence)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- seenTxHashes atomic update (K19)
+    ---------------------------------------------------------------------------
+
+    describe("seenTxHashes atomic update", function()
+        it("seenTxHashes has only new key after normalization (old key removed)", function()
+            local oldKey = "deposit|Thrall|12345|5|1|101:0"
+            local newKey = "deposit|Thrall|12345|5|1|100:0"
+            guildData.seenTxHashes[oldKey] = 3600 * 101
+
+            -- Count keys before
+            local countBefore = 0
+            for _ in pairs(guildData.seenTxHashes) do countBefore = countBefore + 1 end
+            assert.equals(1, countBefore)
+
+            local localTx = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 101,
+                id = oldKey, _occurrence = 0,
+            }
+            table.insert(guildData.transactions, localTx)
+            local idIndex = { [oldKey] = localTx }
+
+            local incoming = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 100,
+                id = newKey, _occurrence = 0,
+            }
+
+            GBL:NormalizeRecordId(incoming, oldKey, guildData, idIndex)
+
+            -- Count keys after
+            local countAfter = 0
+            for _ in pairs(guildData.seenTxHashes) do countAfter = countAfter + 1 end
+            assert.equals(1, countAfter)
+
+            assert.equals(3600 * 100, guildData.seenTxHashes[newKey])
+            assert.is_nil(guildData.seenTxHashes[oldKey])
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Multi-record normalization in same chunk (B3, B4)
+    ---------------------------------------------------------------------------
+
+    describe("multi-record normalization", function()
+        it("normalizes two records in same chunk with correct idIndex updates", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local localTx1 = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                classID = 0, subclassID = 5,
+                count = 5, tab = 1, timestamp = 3600 * 101 + 1800,
+                id = "deposit|Thrall|12345|5|1|101:0", _occurrence = 0,
+            }
+            local localTx2 = {
+                type = "withdraw", player = "Jaina", itemID = 99999,
+                classID = 0, subclassID = 1,
+                count = 10, tab = 2, timestamp = 3600 * 201 + 1800,
+                id = "withdraw|Jaina|99999|10|2|201:0", _occurrence = 0,
+            }
+            table.insert(guildData.transactions, localTx1)
+            table.insert(guildData.transactions, localTx2)
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"] = 3600 * 101 + 1800
+            guildData.seenTxHashes["withdraw|Jaina|99999|10|2|201:0"] = 3600 * 201 + 1800
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        type = "deposit", player = "Thrall",
+                        itemID = 12345, classID = 0, subclassID = 5,
+                        count = 5, tab = 1,
+                        timestamp = 3600 * 100 + 2400,
+                        id = "deposit|Thrall|12345|5|1|100:0",
+                        _occurrence = 0,
+                    },
+                    {
+                        type = "withdraw", player = "Jaina",
+                        itemID = 99999, classID = 0, subclassID = 1,
+                        count = 10, tab = 2,
+                        timestamp = 3600 * 200 + 2400,
+                        id = "withdraw|Jaina|99999|10|2|200:0",
+                        _occurrence = 0,
+                    },
+                },
+                moneyTransactions = {},
+            })
+
+            -- Both records normalized
+            assert.equals("deposit|Thrall|12345|5|1|100:0", localTx1.id)
+            assert.equals("withdraw|Jaina|99999|10|2|200:0", localTx2.id)
+            -- No new records stored
+            assert.equals(2, #guildData.transactions)
+            -- seenTxHashes updated
+            assert.is_not_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|100:0"])
+            assert.is_not_nil(guildData.seenTxHashes["withdraw|Jaina|99999|10|2|200:0"])
+            assert.is_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"])
+            assert.is_nil(guildData.seenTxHashes["withdraw|Jaina|99999|10|2|201:0"])
+        end)
+
+        it("handles mix of normalization and new record in same chunk", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local localTx = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                classID = 0, subclassID = 5,
+                count = 5, tab = 1, timestamp = 3600 * 101 + 1800,
+                id = "deposit|Thrall|12345|5|1|101:0", _occurrence = 0,
+            }
+            table.insert(guildData.transactions, localTx)
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"] = 3600 * 101 + 1800
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        type = "deposit", player = "Thrall",
+                        itemID = 12345, classID = 0, subclassID = 5,
+                        count = 5, tab = 1,
+                        timestamp = 3600 * 100 + 2400,
+                        id = "deposit|Thrall|12345|5|1|100:0",
+                        _occurrence = 0,
+                    },
+                    {
+                        type = "deposit", player = "Arthas",
+                        itemID = 55555, classID = 0, subclassID = 1,
+                        count = 3, tab = 2,
+                        timestamp = 3600 * 300,
+                        id = "deposit|Arthas|55555|3|2|300:0",
+                        _occurrence = 0,
+                    },
+                },
+                moneyTransactions = {},
+            })
+
+            assert.equals("deposit|Thrall|12345|5|1|100:0", localTx.id)
+            assert.equals(2, #guildData.transactions)
+            assert.is_not_nil(guildData.seenTxHashes["deposit|Arthas|55555|3|2|300:0"])
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Hash cache invalidation after normalization (D6, D7)
+    ---------------------------------------------------------------------------
+
+    describe("hash cache invalidation after normalization", function()
+        it("resets hash cache after normalization so GetDataHash recomputes", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local localTx = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                classID = 0, subclassID = 5,
+                count = 5, tab = 1, timestamp = 3600 * 101 + 1800,
+                id = "deposit|Thrall|12345|5|1|101:0", _occurrence = 0,
+            }
+            table.insert(guildData.transactions, localTx)
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"] = 3600 * 101 + 1800
+
+            -- Populate cache
+            local hashBefore = GBL:GetDataHash(guildData)
+            assert.is_not.equals(0, hashBefore)
+
+            -- Normalize via HandleSyncData (single chunk triggers FinishReceiving)
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        type = "deposit", player = "Thrall",
+                        itemID = 12345, classID = 0, subclassID = 5,
+                        count = 5, tab = 1,
+                        timestamp = 3600 * 100 + 2400,
+                        id = "deposit|Thrall|12345|5|1|100:0",
+                        _occurrence = 0,
+                    },
+                },
+                moneyTransactions = {},
+            })
+
+            -- Hash should be different (cache was invalidated and recomputed)
+            local hashAfter = GBL:GetDataHash(guildData)
+            assert.are_not.equals(hashBefore, hashAfter)
+            -- Should match the hash of the normalized ID
+            assert.equals(GBL:HashString("deposit|Thrall|12345|5|1|100:0"), hashAfter)
+        end)
+
+        it("does NOT reset hash cache when no normalization occurred", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local localTx = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                classID = 0, subclassID = 5,
+                count = 5, tab = 1, timestamp = 3600 * 100,
+                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+            }
+            table.insert(guildData.transactions, localTx)
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|100:0"] = 3600 * 100
+
+            -- Spy on ResetHashCache
+            local originalReset = GBL.ResetHashCache
+            local resetCalled = false
+            GBL.ResetHashCache = function(self)
+                resetCalled = true
+                return originalReset(self)
+            end
+
+            -- Send exact duplicate (no normalization)
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        type = "deposit", player = "Thrall",
+                        itemID = 12345, classID = 0, subclassID = 5,
+                        count = 5, tab = 1,
+                        timestamp = 3600 * 100,
+                        id = "deposit|Thrall|12345|5|1|100:0",
+                        _occurrence = 0,
+                    },
+                },
+                moneyTransactions = {},
+            })
+
+            GBL.ResetHashCache = originalReset
+            assert.is_false(resetCalled)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Bidirectional convergence (E8, F9)
+    ---------------------------------------------------------------------------
+
+    describe("bidirectional convergence", function()
+        it("sender-wins ensures convergence: B adopts A ID, then A sees exact match", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- === Step 1: Operate as Peer B, receiving from Peer A ===
+            local bRecord = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                classID = 0, subclassID = 5,
+                count = 5, tab = 1, timestamp = 3600 * 101 + 1800,
+                id = "deposit|Thrall|12345|5|1|101:0", _occurrence = 0,
+            }
+            table.insert(guildData.transactions, bRecord)
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"] = 3600 * 101 + 1800
+
+            local aTimestamp = 3600 * 100 + 2400
+            local aId = "deposit|Thrall|12345|5|1|100:0"
+
+            GBL:HandleSyncData("PeerA", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        type = "deposit", player = "Thrall",
+                        itemID = 12345, classID = 0, subclassID = 5,
+                        count = 5, tab = 1,
+                        timestamp = aTimestamp,
+                        id = aId, _occurrence = 0,
+                    },
+                },
+                moneyTransactions = {},
+            })
+
+            -- B now has A's ID
+            assert.equals(aId, bRecord.id)
+            local bHash = GBL:ComputeDataHash(guildData)
+            local expectedHash = GBL:HashString(aId)
+            assert.equals(expectedHash, bHash)
+
+            -- === Step 2: Operate as Peer A, receiving from Peer B ===
+            -- Snapshot B's converged record
+            local bConvergedId = bRecord.id
+            local bConvergedTs = bRecord.timestamp
+
+            -- Reset for Peer A's perspective
+            GBL:ResetSyncState()
+            guildData.transactions = {}
+            guildData.moneyTransactions = {}
+            guildData.seenTxHashes = {}
+
+            local aRecord = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                classID = 0, subclassID = 5,
+                count = 5, tab = 1, timestamp = aTimestamp,
+                id = aId, _occurrence = 0,
+            }
+            table.insert(guildData.transactions, aRecord)
+            guildData.seenTxHashes[aId] = aTimestamp
+            GBL:ResetHashCache()
+
+            GBL:HandleSyncData("PeerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        type = "deposit", player = "Thrall",
+                        itemID = 12345, classID = 0, subclassID = 5,
+                        count = 5, tab = 1,
+                        timestamp = bConvergedTs,
+                        id = bConvergedId, _occurrence = 0,
+                    },
+                },
+                moneyTransactions = {},
+            })
+
+            -- Exact match — no normalization, no new records
+            assert.equals(1, #guildData.transactions)
+            assert.equals(aId, aRecord.id)  -- unchanged
+
+            local aHash = GBL:ComputeDataHash(guildData)
+            assert.equals(bHash, aHash)
+        end)
+
+        it("no normalization or data transfer on third sync cycle after convergence", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Both peers already have identical records
+            local sharedId = "deposit|Thrall|12345|5|1|100:0"
+            local sharedTs = 3600 * 100 + 2400
+
+            local localTx = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                classID = 0, subclassID = 5,
+                count = 5, tab = 1, timestamp = sharedTs,
+                id = sharedId, _occurrence = 0,
+            }
+            table.insert(guildData.transactions, localTx)
+            guildData.seenTxHashes[sharedId] = sharedTs
+
+            local hashBefore = GBL:ComputeDataHash(guildData)
+
+            GBL:HandleSyncData("PeerA", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        type = "deposit", player = "Thrall",
+                        itemID = 12345, classID = 0, subclassID = 5,
+                        count = 5, tab = 1,
+                        timestamp = sharedTs,
+                        id = sharedId, _occurrence = 0,
+                    },
+                },
+                moneyTransactions = {},
+            })
+
+            -- Zero new, zero normalized
+            assert.equals(1, #guildData.transactions)
+            assert.equals(sharedId, localTx.id)
+            assert.equals(hashBefore, GBL:ComputeDataHash(guildData))
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Occurrence index during sync (G11)
+    ---------------------------------------------------------------------------
+
+    describe("occurrence index during sync", function()
+        it("different occurrence in sync chunk treated as new record, not normalized", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Local has :0 occurrence
+            local localTx = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                classID = 0, subclassID = 5,
+                count = 5, tab = 1, timestamp = 3600 * 100,
+                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+            }
+            table.insert(guildData.transactions, localTx)
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|100:0"] = 3600 * 100
+
+            -- Incoming has :1 occurrence (second identical tx in same hour)
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        type = "deposit", player = "Thrall",
+                        itemID = 12345, classID = 0, subclassID = 5,
+                        count = 5, tab = 1,
+                        timestamp = 3600 * 100,
+                        id = "deposit|Thrall|12345|5|1|100:1",
+                        _occurrence = 1,
+                    },
+                },
+                moneyTransactions = {},
+            })
+
+            -- Should be stored as a new record, not normalized
+            assert.equals(2, #guildData.transactions)
+            assert.equals("deposit|Thrall|12345|5|1|100:0", localTx.id)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- reconstructSyncRecord pipeline (H12, H13)
+    ---------------------------------------------------------------------------
+
+    describe("reconstructSyncRecord pipeline", function()
+        it("reconstructs record without timestamp or id and stores it", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        type = "deposit", player = "Thrall",
+                        itemID = 12345, classID = 0, subclassID = 5,
+                        count = 5, tab = 1,
+                        -- No id, no timestamp
+                    },
+                },
+                moneyTransactions = {},
+            })
+
+            assert.equals(1, #guildData.transactions)
+            local stored = guildData.transactions[1]
+            assert.is_not_nil(stored.id)
+            assert.is_truthy(stored.id:find(":0$"))
+            assert.equals(MockWoW.serverTime, stored.timestamp)
+            assert.is_truthy(stored.scannedBy:find("^sync:"))
+        end)
+
+        it("recovers timestamp from ID timeSlot when timestamp is missing", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        type = "deposit", player = "Thrall",
+                        itemID = 12345, classID = 0, subclassID = 5,
+                        count = 5, tab = 1,
+                        id = "deposit|Thrall|12345|5|1|500:0",
+                        -- No timestamp — should recover from ID
+                    },
+                },
+                moneyTransactions = {},
+            })
+
+            assert.equals(1, #guildData.transactions)
+            local stored = guildData.transactions[1]
+            assert.equals(500 * 3600, stored.timestamp)
+            assert.equals("deposit|Thrall|12345|5|1|500:0", stored.id)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Mixed outcomes in same bucket (I14)
+    ---------------------------------------------------------------------------
+
+    describe("mixed outcomes in same bucket", function()
+        it("handles normalize + exact dup + new in same bucket correctly", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- All in bucket = floor(480001/6) = 80000
+            local localTx1 = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                classID = 0, subclassID = 5,
+                count = 5, tab = 1, timestamp = 3600 * 480001 + 1800,
+                id = "deposit|Thrall|12345|5|1|480001:0", _occurrence = 0,
+            }
+            local localTx2 = {
+                type = "deposit", player = "Jaina", itemID = 99999,
+                classID = 0, subclassID = 1,
+                count = 10, tab = 2, timestamp = 3600 * 480002,
+                id = "deposit|Jaina|99999|10|2|480002:0", _occurrence = 0,
+            }
+            table.insert(guildData.transactions, localTx1)
+            table.insert(guildData.transactions, localTx2)
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|480001:0"] = 3600 * 480001 + 1800
+            guildData.seenTxHashes["deposit|Jaina|99999|10|2|480002:0"] = 3600 * 480002
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    -- 1. Fuzzy match for localTx1 (normalizes)
+                    {
+                        type = "deposit", player = "Thrall",
+                        itemID = 12345, classID = 0, subclassID = 5,
+                        count = 5, tab = 1,
+                        timestamp = 3600 * 480000 + 2400,
+                        id = "deposit|Thrall|12345|5|1|480000:0",
+                        _occurrence = 0,
+                    },
+                    -- 2. Exact match for localTx2 (deduped)
+                    {
+                        type = "deposit", player = "Jaina",
+                        itemID = 99999, classID = 0, subclassID = 1,
+                        count = 10, tab = 2,
+                        timestamp = 3600 * 480002,
+                        id = "deposit|Jaina|99999|10|2|480002:0",
+                        _occurrence = 0,
+                    },
+                    -- 3. New record
+                    {
+                        type = "withdraw", player = "Arthas",
+                        itemID = 55555, classID = 0, subclassID = 1,
+                        count = 3, tab = 2,
+                        timestamp = 3600 * 480003,
+                        id = "withdraw|Arthas|55555|3|2|480003:0",
+                        _occurrence = 0,
+                    },
+                },
+                moneyTransactions = {},
+            })
+
+            -- localTx1 normalized, localTx2 unchanged, new record added
+            assert.equals("deposit|Thrall|12345|5|1|480000:0", localTx1.id)
+            assert.equals("deposit|Jaina|99999|10|2|480002:0", localTx2.id)
+            assert.equals(3, #guildData.transactions)
+
+            -- Verify bucket hash = XOR of all three final record IDs
+            GBL:ResetHashCache()
+            local buckets = GBL:ComputeBucketHashes(guildData)
+            local expected = GBL:XOR32(
+                GBL:XOR32(
+                    GBL:HashString("deposit|Thrall|12345|5|1|480000:0"),
+                    GBL:HashString("deposit|Jaina|99999|10|2|480002:0")
+                ),
+                GBL:HashString("withdraw|Arthas|55555|3|2|480003:0")
+            )
+            assert.equals(expected, buckets[80000])
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- End-to-end sync convergence (L20)
+    ---------------------------------------------------------------------------
+
+    describe("end-to-end sync convergence", function()
+        it("two peers with divergent records converge after full sync cycle", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Record definitions (shared events scanned at different hours)
+            local shared1_A = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                classID = 0, subclassID = 5,
+                count = 5, tab = 1, timestamp = 3600 * 100 + 2400,
+                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+            }
+            local shared1_B = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                classID = 0, subclassID = 5,
+                count = 5, tab = 1, timestamp = 3600 * 101 + 1800,
+                id = "deposit|Thrall|12345|5|1|101:0", _occurrence = 0,
+            }
+            local shared2_A = {
+                type = "withdraw", player = "Jaina", itemID = 99999,
+                classID = 0, subclassID = 1,
+                count = 10, tab = 2, timestamp = 3600 * 200 + 2400,
+                id = "withdraw|Jaina|99999|10|2|200:0", _occurrence = 0,
+            }
+            local shared2_B = {
+                type = "withdraw", player = "Jaina", itemID = 99999,
+                classID = 0, subclassID = 1,
+                count = 10, tab = 2, timestamp = 3600 * 201 + 1800,
+                id = "withdraw|Jaina|99999|10|2|201:0", _occurrence = 0,
+            }
+            local aOnly = {
+                type = "deposit", player = "Arthas", itemID = 55555,
+                classID = 0, subclassID = 1,
+                count = 3, tab = 2, timestamp = 3600 * 300,
+                id = "deposit|Arthas|55555|3|2|300:0", _occurrence = 0,
+            }
+            local bOnly = {
+                type = "deposit", player = "Varian", itemID = 77777,
+                classID = 0, subclassID = 1,
+                count = 1, tab = 1, timestamp = 3600 * 400,
+                id = "deposit|Varian|77777|1|1|400:0", _occurrence = 0,
+            }
+
+            -- === Step 1: A sends to B ===
+            -- Set up as Peer B (has shared1_B, shared2_B, bOnly)
+            table.insert(guildData.transactions, {
+                type = shared1_B.type, player = shared1_B.player,
+                itemID = shared1_B.itemID, classID = shared1_B.classID,
+                subclassID = shared1_B.subclassID,
+                count = shared1_B.count, tab = shared1_B.tab,
+                timestamp = shared1_B.timestamp,
+                id = shared1_B.id, _occurrence = shared1_B._occurrence,
+            })
+            table.insert(guildData.transactions, {
+                type = shared2_B.type, player = shared2_B.player,
+                itemID = shared2_B.itemID, classID = shared2_B.classID,
+                subclassID = shared2_B.subclassID,
+                count = shared2_B.count, tab = shared2_B.tab,
+                timestamp = shared2_B.timestamp,
+                id = shared2_B.id, _occurrence = shared2_B._occurrence,
+            })
+            table.insert(guildData.transactions, {
+                type = bOnly.type, player = bOnly.player,
+                itemID = bOnly.itemID, classID = bOnly.classID,
+                subclassID = bOnly.subclassID,
+                count = bOnly.count, tab = bOnly.tab,
+                timestamp = bOnly.timestamp,
+                id = bOnly.id, _occurrence = bOnly._occurrence,
+            })
+            guildData.seenTxHashes[shared1_B.id] = shared1_B.timestamp
+            guildData.seenTxHashes[shared2_B.id] = shared2_B.timestamp
+            guildData.seenTxHashes[bOnly.id] = bOnly.timestamp
+
+            -- A sends its 3 records (shared1_A, shared2_A, aOnly)
+            GBL:HandleSyncData("PeerA", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        type = shared1_A.type, player = shared1_A.player,
+                        itemID = shared1_A.itemID, classID = shared1_A.classID,
+                        subclassID = shared1_A.subclassID,
+                        count = shared1_A.count, tab = shared1_A.tab,
+                        timestamp = shared1_A.timestamp,
+                        id = shared1_A.id, _occurrence = shared1_A._occurrence,
+                    },
+                    {
+                        type = shared2_A.type, player = shared2_A.player,
+                        itemID = shared2_A.itemID, classID = shared2_A.classID,
+                        subclassID = shared2_A.subclassID,
+                        count = shared2_A.count, tab = shared2_A.tab,
+                        timestamp = shared2_A.timestamp,
+                        id = shared2_A.id, _occurrence = shared2_A._occurrence,
+                    },
+                    {
+                        type = aOnly.type, player = aOnly.player,
+                        itemID = aOnly.itemID, classID = aOnly.classID,
+                        subclassID = aOnly.subclassID,
+                        count = aOnly.count, tab = aOnly.tab,
+                        timestamp = aOnly.timestamp,
+                        id = aOnly.id, _occurrence = aOnly._occurrence,
+                    },
+                },
+                moneyTransactions = {},
+            })
+
+            -- B should now have 4 records: shared1(A's ID), shared2(A's ID), bOnly, aOnly
+            assert.equals(4, #guildData.transactions)
+
+            -- Snapshot B's final state
+            local bFinalHash = GBL:ComputeDataHash(guildData)
+            local bFinalBuckets = GBL:ComputeBucketHashes(guildData)
+            local bFinalIds = {}
+            for _, tx in ipairs(guildData.transactions) do
+                bFinalIds[#bFinalIds + 1] = { id = tx.id, ts = tx.timestamp }
+            end
+
+            -- === Step 2: B sends to A ===
+            GBL:ResetSyncState()
+            guildData.transactions = {}
+            guildData.moneyTransactions = {}
+            guildData.seenTxHashes = {}
+            GBL:ResetHashCache()
+
+            -- Set up as Peer A (has shared1_A, shared2_A, aOnly)
+            table.insert(guildData.transactions, {
+                type = shared1_A.type, player = shared1_A.player,
+                itemID = shared1_A.itemID, classID = shared1_A.classID,
+                subclassID = shared1_A.subclassID,
+                count = shared1_A.count, tab = shared1_A.tab,
+                timestamp = shared1_A.timestamp,
+                id = shared1_A.id, _occurrence = shared1_A._occurrence,
+            })
+            table.insert(guildData.transactions, {
+                type = shared2_A.type, player = shared2_A.player,
+                itemID = shared2_A.itemID, classID = shared2_A.classID,
+                subclassID = shared2_A.subclassID,
+                count = shared2_A.count, tab = shared2_A.tab,
+                timestamp = shared2_A.timestamp,
+                id = shared2_A.id, _occurrence = shared2_A._occurrence,
+            })
+            table.insert(guildData.transactions, {
+                type = aOnly.type, player = aOnly.player,
+                itemID = aOnly.itemID, classID = aOnly.classID,
+                subclassID = aOnly.subclassID,
+                count = aOnly.count, tab = aOnly.tab,
+                timestamp = aOnly.timestamp,
+                id = aOnly.id, _occurrence = aOnly._occurrence,
+            })
+            guildData.seenTxHashes[shared1_A.id] = shared1_A.timestamp
+            guildData.seenTxHashes[shared2_A.id] = shared2_A.timestamp
+            guildData.seenTxHashes[aOnly.id] = aOnly.timestamp
+
+            -- B sends all 4 records to A
+            local bPayload = {}
+            for _, rec in ipairs(bFinalIds) do
+                -- Find the full record definition
+                local fullRec
+                if rec.id == shared1_A.id then fullRec = shared1_A
+                elseif rec.id == shared2_A.id then fullRec = shared2_A
+                elseif rec.id == aOnly.id then fullRec = aOnly
+                elseif rec.id == bOnly.id then fullRec = bOnly
+                end
+                bPayload[#bPayload + 1] = {
+                    type = fullRec.type, player = fullRec.player,
+                    itemID = fullRec.itemID, classID = fullRec.classID,
+                    subclassID = fullRec.subclassID,
+                    count = fullRec.count, tab = fullRec.tab,
+                    timestamp = rec.ts, id = rec.id,
+                    _occurrence = fullRec._occurrence,
+                }
+            end
+
+            GBL:HandleSyncData("PeerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = bPayload,
+                moneyTransactions = {},
+            })
+
+            -- A should now have 4 records: shared1(A), shared2(A), aOnly, bOnly
+            assert.equals(4, #guildData.transactions)
+
+            -- Both peers' hashes must match
+            local aFinalHash = GBL:ComputeDataHash(guildData)
+            assert.equals(bFinalHash, aFinalHash)
+
+            -- Bucket hashes must match too
+            local aFinalBuckets = GBL:ComputeBucketHashes(guildData)
+            for key, bHash in pairs(bFinalBuckets) do
+                assert.equals(bHash, aFinalBuckets[key],
+                    "bucket " .. key .. " hash mismatch")
+            end
+            for key, aHash in pairs(aFinalBuckets) do
+                assert.equals(aHash, bFinalBuckets[key],
+                    "bucket " .. key .. " hash mismatch (A-only key)")
+            end
+        end)
+    end)
 end)
