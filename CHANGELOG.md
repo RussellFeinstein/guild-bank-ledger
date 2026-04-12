@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5] — 2026-04-11
+
+### Fixed
+- **Audit trail flooding** — per-chunk log entries (send, transmit, ACK check, ACK) were evicting the handshake/bucket-filter entries needed for diagnostics. Chunk progress now logs every 10th chunk instead of every chunk. RECV entries suppressed for ACK/NACK/SYNC_DATA. Audit trail cap raised from 50 to 200.
+
 ## [0.9.4] — 2026-04-11
 
 ### Added

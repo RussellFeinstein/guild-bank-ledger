@@ -198,11 +198,16 @@ function GBL:OnSyncMessage(_prefix, message, distribution, sender)
     local myName = UnitName("player")
     if Ambiguate(sender, "none") == myName then return end
 
-    -- Diagnostic: log channel + raw sender for cross-realm debugging
-    self:AddAuditEntry("RECV " .. tostring(distribution) .. " from " .. tostring(sender))
-
     local success, data = self:Deserialize(message)
     if not success or type(data) ~= "table" then return end
+
+    local msgType = data.type
+
+    -- Only log non-chunk messages to avoid flooding the audit trail
+    if msgType ~= "ACK" and msgType ~= "NACK" and msgType ~= "SYNC_DATA" then
+        self:AddAuditEntry("RECV " .. tostring(distribution) .. " from "
+            .. tostring(sender) .. " (" .. tostring(msgType) .. ")")
+    end
 
     -- Protocol version gate (only on typed messages that carry the field)
     if data.protocolVersion and data.protocolVersion ~= PROTOCOL_VERSION then
@@ -218,8 +223,6 @@ function GBL:OnSyncMessage(_prefix, message, distribution, sender)
             return
         end
     end
-
-    local msgType = data.type
     if msgType == "HELLO" then
         self:HandleHello(sender, data)
     elseif msgType == "SYNC_REQUEST" then
@@ -677,7 +680,6 @@ function GBL:SendNextChunk()
 
     -- ChatThrottleLib awareness — defer if other addons are using bandwidth
     if not self:HasSyncBandwidth() then
-        self:AddAuditEntry("SendNextChunk deferred — CTL bandwidth low")
         C_Timer.After(CTL_BACKOFF_DELAY, function()
             self:SendNextChunk()
         end)
@@ -705,12 +707,16 @@ function GBL:SendNextChunk()
 
     local msgLen = #msg
     local chunkRecords = #chunk.transactions + #chunk.moneyTransactions
-    self:Print("Sync: sending chunk " .. idx .. "/" .. #syncState.sendChunks
+    local total = #syncState.sendChunks
+    self:Print("Sync: sending chunk " .. idx .. "/" .. total
         .. " to " .. (syncState.sendTarget or "?")
         .. " (" .. chunkRecords .. " records, " .. msgLen .. "b)")
-    self:AddAuditEntry("Sending chunk " .. idx .. "/" .. #syncState.sendChunks
-        .. " to " .. (syncState.sendTarget or "?")
-        .. " (" .. chunkRecords .. " records, " .. msgLen .. " bytes)")
+    -- Only audit-log every 10th chunk and the last one to avoid flooding the trail
+    if idx == 1 or idx == total or idx % 10 == 0 then
+        self:AddAuditEntry("Sending chunk " .. idx .. "/" .. total
+            .. " to " .. (syncState.sendTarget or "?")
+            .. " (" .. chunkRecords .. " records, " .. msgLen .. " bytes)")
+    end
 
     if msgLen > WHISPER_SAFE_BYTES then
         self:Print("|cffff0000Sync WARNING:|r chunk " .. idx .. " is " .. msgLen
@@ -740,8 +746,6 @@ function GBL:SendNextChunk()
         function(_cbArg, sent, total)
             if sent < total then return end
             -- Message fully transmitted — now start ACK timer
-            self:AddAuditEntry("Chunk " .. idx .. " transmitted ("
-                .. total .. " bytes) — waiting for ACK")
             if syncState.sendTimer then
                 syncState.sendTimer:Cancel()
             end
@@ -916,10 +920,6 @@ end
 -- @param sender string Sender name
 -- @param data table Deserialized ACK payload
 function GBL:HandleAck(sender, data)
-    -- Diagnostic: log raw names for cross-realm debugging
-    self:AddAuditEntry("ACK check: sender=" .. tostring(sender)
-        .. " target=" .. tostring(syncState.sendTarget))
-
     if not syncState.sending or baseName(sender) ~= baseName(syncState.sendTarget) then return end
 
     if syncState.sendTimer then
@@ -928,8 +928,12 @@ function GBL:HandleAck(sender, data)
     end
 
     local ackedChunk = data and data.chunk or syncState.sendChunkIndex
-    self:AddAuditEntry("ACK from " .. sender .. " for chunk " .. ackedChunk
-        .. "/" .. #syncState.sendChunks)
+    local total = #syncState.sendChunks
+    -- Only audit-log every 10th ACK and the last one
+    if ackedChunk == 1 or ackedChunk == total or ackedChunk % 10 == 0 then
+        self:AddAuditEntry("ACK from " .. sender .. " for chunk " .. ackedChunk
+            .. "/" .. total)
+    end
 
     syncState.sendRetryCount = 0
 
@@ -1025,14 +1029,14 @@ function GBL:MajorVersion(versionStr)
     return tonumber(versionStr:match("^(%d+)")) or 0
 end
 
---- Append an entry to the session audit trail (capped at 50).
+--- Append an entry to the session audit trail (capped at 200).
 -- @param message string Human-readable log entry
 function GBL:AddAuditEntry(message)
     table.insert(syncState.auditTrail, 1, {
         timestamp = GetServerTime(),
         message = message,
     })
-    while #syncState.auditTrail > 50 do
+    while #syncState.auditTrail > 200 do
         table.remove(syncState.auditTrail)
     end
 end

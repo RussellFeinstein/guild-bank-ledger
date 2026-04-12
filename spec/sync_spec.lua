@@ -823,14 +823,14 @@ describe("Sync", function()
             assert.equals("Test event 1", trail[2].message)
         end)
 
-        it("caps at 50 entries", function()
-            for i = 1, 60 do
+        it("caps at 200 entries", function()
+            for i = 1, 210 do
                 GBL:AddAuditEntry("Event " .. i)
             end
 
             local trail = GBL:GetAuditTrail()
-            assert.equals(50, #trail)
-            assert.equals("Event 60", trail[1].message)
+            assert.equals(200, #trail)
+            assert.equals("Event 210", trail[1].message)
         end)
     end)
 
@@ -2572,18 +2572,16 @@ describe("Sync", function()
             })
             GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
             -- HandleSyncRequest calls SendNextChunk which should defer
-            -- The first message sent is the SYNC_DATA which got deferred
-            -- So we check that the audit trail mentions CTL
-            local trail = GBL:GetAuditTrail()
-            local ctlDeferred = false
-            for _, entry in ipairs(trail) do
-                if entry.message:find("CTL bandwidth low") then
-                    ctlDeferred = true
-                    break
+            -- No SYNC_DATA sent immediately because CTL bandwidth is low
+            local foundSyncData = false
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "SYNC_DATA" then
+                    foundSyncData = true
                 end
             end
-            assert.is_true(ctlDeferred,
-                "should log CTL bandwidth deferral")
+            assert.is_false(foundSyncData,
+                "should defer SYNC_DATA when CTL bandwidth is low")
 
             _G.ChatThrottleLib = nil
         end)
