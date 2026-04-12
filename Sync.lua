@@ -884,11 +884,12 @@ end
 -- Receiving
 ------------------------------------------------------------------------
 
---- Normalize a local record's ID to converge with an incoming record.
--- Uses a deterministic tiebreaker (lexicographically smaller ID wins)
--- so that both peers converge to the same ID regardless of sync direction.
--- This prevents perpetual sync loops caused by different scan times
--- producing different timeSlots for the same event.
+--- Normalize a local record's ID and timestamp to match an incoming record.
+-- Always adopts the sender's ID and timestamp (sender-wins) so that the
+-- receiver fully converges with the sender in a single sync cycle.
+-- Also normalizes timestamp to ensure consistent bucket hash placement
+-- (bucket hashes group by timestamp; divergent timestamps cause the same
+-- record to land in different buckets, triggering perpetual re-syncs).
 -- @param incomingRecord table Received record with its ID
 -- @param matchedKey string The local seenTxHashes key that fuzzy-matched
 -- @param guildData table Guild data from AceDB
@@ -898,33 +899,31 @@ function GBL:NormalizeRecordId(incomingRecord, matchedKey, guildData, idIndex)
     local incomingId = incomingRecord.id
     if not incomingId or incomingId == matchedKey then return false end
 
-    -- Deterministic tiebreaker: keep lexicographically smaller ID
-    local winnerId = (incomingId < matchedKey) and incomingId or matchedKey
-    if winnerId == matchedKey then return false end  -- local already wins
-
-    -- Read timestamp from seenTxHashes (handles number and legacy table formats)
-    local storedEntry = guildData.seenTxHashes[matchedKey]
-    local oldTs = (type(storedEntry) == "table")
-        and (storedEntry.timestamp or 0) or (storedEntry or 0)
+    -- Sender-wins: always adopt the incoming ID so the receiver fully
+    -- converges with the sender in one cycle. The sync protocol serializes
+    -- direction (one side sends per cycle), preventing oscillation.
+    local newTs = incomingRecord.timestamp or 0
 
     -- Find local record via pre-built index
     local localRecord = idIndex and idIndex[matchedKey] or nil
     if localRecord then
-        localRecord.id = winnerId
+        localRecord.id = incomingId
         localRecord._occurrence = incomingRecord._occurrence
+        -- Normalize timestamp for consistent bucket hash placement
+        localRecord.timestamp = newTs
     end
     -- If record compacted/pruned: only seenTxHashes updated (harmless)
 
     -- Atomic seenTxHashes update: add new FIRST, then remove old
-    guildData.seenTxHashes[winnerId] = oldTs
+    guildData.seenTxHashes[incomingId] = newTs
     guildData.seenTxHashes[matchedKey] = nil
 
     return true
 end
 
 --- Process an incoming SYNC_DATA chunk — dedup, normalize IDs, and store.
--- When a fuzzy duplicate is detected, converges record IDs using a
--- deterministic tiebreaker (smaller ID wins) to prevent sync loops.
+-- When a fuzzy duplicate is detected, adopts the sender's ID and timestamp
+-- (sender-wins) so the receiver fully converges in a single sync cycle.
 -- Sends an ACK back to the sender after processing.
 -- @param sender string Sender name
 -- @param data table Deserialized chunk payload
@@ -969,12 +968,11 @@ function GBL:HandleSyncData(sender, data)
             if matchedKey and matchedKey ~= tx.id then
                 if self:NormalizeRecordId(tx, matchedKey, guildData, idIndex) then
                     normalized = normalized + 1
-                    -- Keep idIndex consistent with the winner ID
-                    local winnerId = (tx.id < matchedKey) and tx.id or matchedKey
+                    -- Update idIndex: sender-wins, so incoming ID is the new key
                     local rec = idIndex[matchedKey]
                     if rec then
-                        idIndex[winnerId] = rec
-                        if winnerId ~= matchedKey then idIndex[matchedKey] = nil end
+                        idIndex[tx.id] = rec
+                        idIndex[matchedKey] = nil
                     end
                 end
             end
@@ -994,11 +992,10 @@ function GBL:HandleSyncData(sender, data)
             if matchedKey and matchedKey ~= tx.id then
                 if self:NormalizeRecordId(tx, matchedKey, guildData, idIndex) then
                     normalized = normalized + 1
-                    local winnerId = (tx.id < matchedKey) and tx.id or matchedKey
                     local rec = idIndex[matchedKey]
                     if rec then
-                        idIndex[winnerId] = rec
-                        if winnerId ~= matchedKey then idIndex[matchedKey] = nil end
+                        idIndex[tx.id] = rec
+                        idIndex[matchedKey] = nil
                     end
                 end
             end

@@ -777,7 +777,7 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
 
     describe("NormalizeRecordId", function()
-        it("updates local ID when incoming is lexicographically smaller", function()
+        it("always adopts sender ID (sender-wins)", function()
             -- Local record stored with hour-101 ID
             local localTx = {
                 type = "deposit", player = "Thrall", itemID = 12345,
@@ -789,7 +789,7 @@ describe("Sync", function()
 
             local idIndex = { ["deposit|Thrall|12345|5|1|101:0"] = localTx }
 
-            -- Incoming record with hour-100 ID (smaller, wins tiebreaker)
+            -- Incoming record with hour-100 ID (sender's ID adopted regardless)
             local incoming = {
                 type = "deposit", player = "Thrall", itemID = 12345,
                 count = 5, tab = 1, timestamp = 3600 * 100,
@@ -803,8 +803,8 @@ describe("Sync", function()
             assert.is_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"])
         end)
 
-        it("keeps local ID when local is lexicographically smaller", function()
-            -- Local record stored with hour-100 ID (smaller, wins tiebreaker)
+        it("adopts sender ID even when local ID is smaller", function()
+            -- Local has smaller ID (hour-100), but sender-wins still adopts incoming
             local localTx = {
                 type = "deposit", player = "Thrall", itemID = 12345,
                 count = 5, tab = 1, timestamp = 3600 * 100,
@@ -815,7 +815,7 @@ describe("Sync", function()
 
             local idIndex = { ["deposit|Thrall|12345|5|1|100:0"] = localTx }
 
-            -- Incoming with hour-101 ID (larger, loses tiebreaker)
+            -- Incoming with hour-101 (larger, but sender-wins)
             local incoming = {
                 type = "deposit", player = "Thrall", itemID = 12345,
                 count = 5, tab = 1, timestamp = 3600 * 101,
@@ -823,13 +823,12 @@ describe("Sync", function()
             }
 
             local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|100:0", guildData, idIndex)
-            assert.is_false(result)
-            -- Local unchanged
-            assert.equals("deposit|Thrall|12345|5|1|100:0", localTx.id)
-            assert.is_not_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|100:0"])
+            assert.is_true(result)
+            assert.equals("deposit|Thrall|12345|5|1|101:0", localTx.id)
+            assert.equals(3600 * 101, localTx.timestamp)
         end)
 
-        it("handles money transactions", function()
+        it("handles money transactions and normalizes timestamp", function()
             local localTx = {
                 type = "repair", player = "Thrall", amount = 50000,
                 timestamp = 3600 * 101,
@@ -849,6 +848,7 @@ describe("Sync", function()
             local result = GBL:NormalizeRecordId(incoming, "repair|Thrall|50000|101:0", guildData, idIndex)
             assert.is_true(result)
             assert.equals("repair|Thrall|50000|100:0", localTx.id)
+            assert.equals(3600 * 100, localTx.timestamp)
         end)
 
         it("handles compacted record (not in transactions)", function()
