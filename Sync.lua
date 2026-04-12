@@ -816,8 +816,8 @@ function GBL:SendNextChunk()
     -- ACK timer deferred until message fully transmitted via AceComm callback.
     -- AceComm calls callbackFn(callbackArg, bytesSent, totalLen) per CTL piece.
     self:SendCommMessage(PREFIX, msg, "WHISPER", syncState.sendTarget, "NORMAL",
-        function(_cbArg, sent, total)
-            if sent < total then return end
+        function(_cbArg, sent, totalBytes)
+            if sent < totalBytes then return end
             -- Message fully transmitted — now start ACK timer
             if syncState.sendTimer then
                 syncState.sendTimer:Cancel()

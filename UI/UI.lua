@@ -424,9 +424,7 @@ function GBL:RenderGoldLog(container, moneyTransactions, filters)
             hdr.label:SetWordWrap(false)
             hdr:SetText("|cffffcc00" .. line.label .. "|r")
             rowGroup:AddChild(hdr)
-        elseif line.label == "" and line.value == "" then
-            -- spacer line — no widgets needed
-        else
+        elseif not (line.label == "" and line.value == "") then
             local lbl = AceGUI:Create("Label")
             lbl:SetWidth(SUMMARY_LABEL_W)
             lbl.label:SetWordWrap(false)
