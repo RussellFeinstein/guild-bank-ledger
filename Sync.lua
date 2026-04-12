@@ -15,7 +15,6 @@ local MAX_RETRIES = 3
 local ACK_TIMEOUT = 15
 local RECEIVE_CHUNK_TIMEOUT = 20
 local MAX_NACK_RETRIES = 3
-local HELLO_DELAY = 5
 local HELLO_COOLDOWN = 60
 local WHISPER_SAFE_BYTES = 2000
 local ZONE_COOLDOWN = 5
@@ -59,7 +58,6 @@ local syncState = {
     peers = {},
     auditTrail = {},
     lastHelloTime = 0,
-    pendingHelloReply = false,
 
     -- Zone change protection
     zonePaused = false,
@@ -76,15 +74,13 @@ local syncState = {
 ------------------------------------------------------------------------
 
 --- Initialize sync system. Called from Core:OnEnable().
--- Registers AceComm prefix and schedules first HELLO broadcast.
+-- Registers AceComm prefix. Initial HELLO is deferred until
+-- GUILD_ROSTER_UPDATE confirms guild data is available (see Core.lua).
 function GBL:InitSync()
     if not self.db.profile.sync.enabled then return end
     self:RegisterComm(PREFIX, "OnSyncMessage")
     self:RegisterEvent("LOADING_SCREEN_ENABLED", "OnLoadingScreenStart")
     self:RegisterEvent("LOADING_SCREEN_DISABLED", "OnLoadingScreenEnd")
-    C_Timer.After(HELLO_DELAY, function()
-        self:BroadcastHello()
-    end)
 end
 
 --- Enable sync at runtime (from UI toggle).
@@ -157,6 +153,35 @@ function GBL:BroadcastHello(force)
         .. ", hash: " .. dataHash .. ")")
 end
 
+--- Send a targeted HELLO reply to a specific peer via WHISPER.
+-- Used when we receive a broadcast HELLO so the sender discovers us.
+-- NOT subject to HELLO_COOLDOWN — targeted replies cannot cascade.
+-- @param target string Character name to reply to
+function GBL:SendHelloReply(target)
+    if not self.db.profile.sync.enabled then return end
+
+    local guildData = self:GetGuildData()
+    if not guildData then return end
+
+    local txCount = #guildData.transactions + #guildData.moneyTransactions
+    local dataHash = self:GetDataHash(guildData)
+
+    local msg = self:Serialize({
+        type = "HELLO",
+        version = self.version,
+        protocolVersion = PROTOCOL_VERSION,
+        guild = self:GetGuildName(),
+        txCount = txCount,
+        dataHash = dataHash,
+        lastScanTime = self.lastScanTime or 0,
+        isReply = true,
+    })
+
+    self:SendCommMessage(PREFIX, msg, "WHISPER", target)
+    self:AddAuditEntry("Sent HELLO reply to " .. target
+        .. " (tx: " .. txCount .. ", hash: " .. dataHash .. ")")
+end
+
 ------------------------------------------------------------------------
 -- Message dispatch
 ------------------------------------------------------------------------
@@ -218,22 +243,19 @@ end
 -- @param sender string Sender name
 -- @param data table Deserialized HELLO payload
 function GBL:HandleHello(sender, data)
-    local isNewPeer = not syncState.peers[sender]
     self:UpdatePeer(sender, data)
 
     self:AddAuditEntry("Received HELLO from " .. sender
         .. " (tx: " .. (data.txCount or 0)
         .. ", hash: " .. tostring(data.dataHash or "none")
-        .. ", v" .. tostring(data.version or "?") .. ")")
+        .. ", v" .. tostring(data.version or "?")
+        .. ", reply=" .. tostring(data.isReply or false) .. ")")
 
-    -- Debounce: coalesce multiple new-peer discoveries into one reply.
-    -- Without this, N online peers would trigger N force-replies on login/reload.
-    if isNewPeer and not syncState.pendingHelloReply then
-        syncState.pendingHelloReply = true
-        C_Timer.After(2, function()
-            syncState.pendingHelloReply = false
-            self:BroadcastHello(true)
-        end)
+    -- Reply to broadcast HELLOs so the sender discovers us.
+    -- Uses WHISPER (targeted) — each peer replies individually.
+    -- Do NOT reply to reply HELLOs (prevents infinite ping-pong).
+    if not data.isReply then
+        self:SendHelloReply(sender)
     end
 
     -- Major version mismatch — warn and refuse sync
@@ -251,8 +273,14 @@ function GBL:HandleHello(sender, data)
 
     local localDataHash = data.dataHash and self:GetDataHash(guildData) or nil
 
+    -- Surface bucket info so we can verify binning is working
+    local buckets = self:ComputeBucketHashes(guildData)
+    local bucketCount = 0
+    for _ in pairs(buckets) do bucketCount = bucketCount + 1 end
+
     self:AddAuditEntry("Hash compare: local=" .. tostring(localDataHash or "none")
-        .. " (" .. localCount .. " tx), remote=" .. tostring(data.dataHash or "none")
+        .. " (" .. localCount .. " tx, " .. bucketCount .. " day-buckets)"
+        .. ", remote=" .. tostring(data.dataHash or "none")
         .. " (" .. remoteCount .. " tx)")
 
     -- Fast path: skip when datasets are identical (hash + count match)
@@ -425,11 +453,13 @@ function GBL:RequestSync(target, sinceTimestamp)
         for _ in pairs(bucketHashes) do bucketCount = bucketCount + 1 end
     end
 
+    local msgBytes = #msg
     self:SendCommMessage(PREFIX, msg, "WHISPER", target)
     self:Print("Sync: requesting data from " .. target .. "...")
     self:AddAuditEntry("Requesting sync from " .. target
         .. " (since " .. sinceTimestamp
-        .. ", " .. bucketCount .. " bucket days sent)")
+        .. ", " .. bucketCount .. " bucket days"
+        .. ", " .. msgBytes .. " bytes)")
     self:SendMessage("GBL_SYNC_STARTED", target)
 
     -- Request timeout — if no SYNC_DATA arrives, NACK for chunk 1 instead of aborting
@@ -522,8 +552,11 @@ function GBL:HandleSyncRequest(sender, data)
         self:AddAuditEntry("Sending " .. #txToSend .. " item tx + "
             .. #moneyToSend .. " money tx from differing days")
     else
-        -- Fallback: old-style sinceTimestamp filtering (backward compat)
+        -- Fallback: old-style sinceTimestamp filtering (no bucket hashes from requester)
         local sinceTimestamp = data.sinceTimestamp or 0
+        local totalLocal = #guildData.transactions + #guildData.moneyTransactions
+        self:AddAuditEntry("No bucket hashes in request — falling back to sinceTimestamp="
+            .. sinceTimestamp .. " (local has " .. totalLocal .. " total tx)")
         for _, tx in ipairs(guildData.transactions) do
             local when = tx.scanTime or tx.timestamp or 0
             if when > sinceTimestamp then
@@ -536,6 +569,8 @@ function GBL:HandleSyncRequest(sender, data)
                 moneyToSend[#moneyToSend + 1] = stripForSync(tx)
             end
         end
+        self:AddAuditEntry("sinceTimestamp filter: sending " .. #txToSend
+            .. " item tx + " .. #moneyToSend .. " money tx")
     end
 
     -- Prepare and send chunks
@@ -1076,7 +1111,6 @@ function GBL:ResetSyncState()
     syncState.peers = {}
     syncState.auditTrail = {}
     syncState.lastHelloTime = 0
-    syncState.pendingHelloReply = false
     syncState.zonePaused = false
     syncState.zoneCooldownTimer = nil
     syncState.currentDelay = INTER_CHUNK_DELAY_NORMAL

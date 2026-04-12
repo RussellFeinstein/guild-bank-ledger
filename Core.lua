@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.9.2"
+local VERSION = "0.9.3"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -124,7 +124,15 @@ function GBL:PLAYER_INTERACTION_MANAGER_FRAME_HIDE(_event, interactionType)
 end
 
 function GBL:GUILD_ROSTER_UPDATE()
-    -- Placeholder for future roster-change handling
+    -- On the first roster update after login, guild data becomes available.
+    -- Broadcast HELLO now so other addon users discover us immediately.
+    if not self._sentPostLoginHello and self.db.profile.sync.enabled then
+        local guildName = GetGuildInfo("player")
+        if guildName then
+            self._sentPostLoginHello = true
+            self:BroadcastHello(true) -- force past cooldown
+        end
+    end
 end
 
 ------------------------------------------------------------------------

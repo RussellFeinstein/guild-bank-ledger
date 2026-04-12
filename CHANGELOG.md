@@ -5,6 +5,19 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] — 2026-04-11
+
+### Fixed
+- **Peer discovery after reload** — guild members are now discoverable immediately after login/reload without opening the guild bank. Previously, the initial HELLO fired 5 seconds after login when guild data was not yet available, silently aborting. Now deferred to GUILD_ROSTER_UPDATE when data is guaranteed ready
+- **Known-peer reply gate** — peers that were already known (from before a reload) would not reply to new HELLOs, making the reloading player invisible. Removed the `isNewPeer` gate; all broadcast HELLOs now receive a reply
+- **Broadcast debounce swallowing peers** — when multiple peers heard a HELLO, the debounce coalesced all replies into one broadcast, so the sender only discovered one peer. Replies are now sent individually via WHISPER to each sender
+
+### Changed
+- HELLO replies use targeted WHISPER instead of guild-wide broadcast, with an `isReply` flag to prevent ping-pong loops
+- Hash comparison audit trail now includes day-bucket count for fingerprint diagnostics
+- SYNC_REQUEST audit trail now includes serialized byte size for diagnosing WHISPER size issues
+- sinceTimestamp fallback path (no bucket hashes) now logs explicitly instead of being silent
+
 ## [0.9.2] — 2026-04-11
 
 ### Changed

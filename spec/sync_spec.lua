@@ -132,15 +132,20 @@ describe("Sync", function()
                 lastScanTime = 1000,
             })
 
-            -- SYNC_REQUEST sent immediately; HELLO reply is debounced (fires after timer)
-            assert.is_true(#MockAce.sentCommMessages >= 1)
-            local sent = MockAce.sentCommMessages[1]
-            assert.equals("WHISPER", sent.distribution)
-            assert.equals("OfficerB", sent.target)
+            -- HELLO reply + SYNC_REQUEST both sent immediately
+            assert.is_true(#MockAce.sentCommMessages >= 2)
 
-            local ok, data = GBL:Deserialize(sent.text)
-            assert.is_true(ok)
-            assert.equals("SYNC_REQUEST", data.type)
+            -- Find the SYNC_REQUEST among sent messages
+            local foundRequest = false
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                if ok and data.type == "SYNC_REQUEST" then
+                    assert.equals("WHISPER", sent.distribution)
+                    assert.equals("OfficerB", sent.target)
+                    foundRequest = true
+                end
+            end
+            assert.is_true(foundRequest)
         end)
 
         it("does NOT trigger sync when counts are equal", function()
@@ -178,7 +183,7 @@ describe("Sync", function()
             end
         end)
 
-        it("schedules debounced HELLO reply for new peers", function()
+        it("sends WHISPER reply to broadcast HELLO sender", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
             GBL:HandleHello("OfficerB", {
                 version = GBL.version,
@@ -186,23 +191,21 @@ describe("Sync", function()
                 lastScanTime = 1000,
             })
 
-            -- HELLO reply is debounced — not sent immediately
-            assert.equals(0, #MockAce.sentCommMessages)
-
-            -- Fire the 2s debounce timer
-            MockWoW.fireTimers()
-
-            -- Now the forced HELLO reply is sent
+            -- HELLO reply sent immediately via WHISPER
             assert.equals(1, #MockAce.sentCommMessages)
-            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            local sent = MockAce.sentCommMessages[1]
+            assert.equals("WHISPER", sent.distribution)
+            assert.equals("OfficerB", sent.target)
+
+            local ok, data = GBL:Deserialize(sent.text)
             assert.is_true(ok)
             assert.equals("HELLO", data.type)
+            assert.is_true(data.isReply)
         end)
 
-        it("coalesces multiple new peers into one HELLO reply", function()
+        it("sends individual WHISPER replies to multiple broadcast HELLOs", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Three new peers arrive before timer fires
             GBL:HandleHello("OfficerB", { version = GBL.version, txCount = 0, lastScanTime = 100 })
             GBL:HandleHello("OfficerC", { version = GBL.version, txCount = 0, lastScanTime = 200 })
             GBL:HandleHello("OfficerD", { version = GBL.version, txCount = 0, lastScanTime = 300 })
@@ -213,12 +216,78 @@ describe("Sync", function()
             assert.is_not_nil(peers["OfficerC"])
             assert.is_not_nil(peers["OfficerD"])
 
-            -- No messages yet (debounced)
-            assert.equals(0, #MockAce.sentCommMessages)
+            -- Each peer gets their own WHISPER reply (3 total)
+            assert.equals(3, #MockAce.sentCommMessages)
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                assert.equals("WHISPER", sent.distribution)
+                local ok, data = GBL:Deserialize(sent.text)
+                assert.is_true(ok)
+                assert.equals("HELLO", data.type)
+                assert.is_true(data.isReply)
+            end
+        end)
 
-            -- Fire timer — only 1 HELLO sent (not 3)
-            MockWoW.fireTimers()
+        it("does NOT reply to a HELLO with isReply=true", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version,
+                txCount = 0,
+                lastScanTime = 1000,
+                isReply = true,
+            })
+
+            -- Peer is registered
+            local peers = GBL:GetSyncPeers()
+            assert.is_not_nil(peers["OfficerB"])
+
+            -- No reply sent (isReply prevents ping-pong)
+            assert.equals(0, #MockAce.sentCommMessages)
+        end)
+
+        it("replies to broadcast HELLO even from already-known peer", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- First HELLO from OfficerB (now known)
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version, txCount = 0, lastScanTime = 1000,
+            })
             assert.equals(1, #MockAce.sentCommMessages)
+            MockAce.sentCommMessages = {}
+
+            -- Second broadcast HELLO from same peer (simulates their reload)
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version, txCount = 0, lastScanTime = 2000,
+            })
+
+            -- Should still reply (no isNewPeer gate)
+            assert.is_true(#MockAce.sentCommMessages >= 1)
+            -- Find the HELLO reply
+            local foundReply = false
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                if ok and data.type == "HELLO" and data.isReply then
+                    assert.equals("WHISPER", sent.distribution)
+                    foundReply = true
+                end
+            end
+            assert.is_true(foundReply)
+        end)
+
+        it("SendHelloReply payload includes isReply=true", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:SendHelloReply("OfficerB")
+
+            assert.equals(1, #MockAce.sentCommMessages)
+            local sent = MockAce.sentCommMessages[1]
+            assert.equals("WHISPER", sent.distribution)
+            assert.equals("OfficerB", sent.target)
+
+            local ok, data = GBL:Deserialize(sent.text)
+            assert.is_true(ok)
+            assert.equals("HELLO", data.type)
+            assert.is_true(data.isReply)
+            assert.equals(GBL.version, data.version)
+            assert.equals(GBL.SYNC_PROTOCOL_VERSION, data.protocolVersion)
         end)
 
         it("warns on major version mismatch and refuses sync", function()
