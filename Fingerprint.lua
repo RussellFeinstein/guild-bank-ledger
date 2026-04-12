@@ -90,28 +90,31 @@ function GBL:GetDataHash(guildData)
 end
 
 ------------------------------------------------------------------------
--- Bucket fingerprints (per-day)
+-- Bucket fingerprints (6-hour windows)
 ------------------------------------------------------------------------
 
---- Compute per-day bucket fingerprints for delta sync.
--- Groups records by day (math.floor(timestamp / 86400)) and XORs
--- their id hashes within each bucket. Used in SYNC_REQUEST so the
--- sender can identify which days differ and skip matching ones.
+local BUCKET_SECONDS = 21600  -- 6 hours
+GBL.BUCKET_SECONDS = BUCKET_SECONDS
+
+--- Compute per-bucket fingerprints for delta sync.
+-- Groups records by 6-hour window (math.floor(timestamp / 21600)) and
+-- XORs their id hashes within each bucket. Used in SYNC_REQUEST so the
+-- sender can identify which buckets differ and skip matching ones.
 -- @param guildData table Guild data from AceDB
--- @return table Map of dayKey (number) → bucket hash (number)
+-- @return table Map of bucketKey (number) → bucket hash (number)
 function GBL:ComputeBucketHashes(guildData)
     if not guildData then return {} end
     local buckets = {}
     for _, tx in ipairs(guildData.transactions) do
         if tx.id then
-            local day = math.floor((tx.timestamp or 0) / 86400)
-            buckets[day] = xor32(buckets[day] or 0, self:HashString(tx.id))
+            local key = math.floor((tx.timestamp or 0) / BUCKET_SECONDS)
+            buckets[key] = xor32(buckets[key] or 0, self:HashString(tx.id))
         end
     end
     for _, tx in ipairs(guildData.moneyTransactions) do
         if tx.id then
-            local day = math.floor((tx.timestamp or 0) / 86400)
-            buckets[day] = xor32(buckets[day] or 0, self:HashString(tx.id))
+            local key = math.floor((tx.timestamp or 0) / BUCKET_SECONDS)
+            buckets[key] = xor32(buckets[key] or 0, self:HashString(tx.id))
         end
     end
     return buckets

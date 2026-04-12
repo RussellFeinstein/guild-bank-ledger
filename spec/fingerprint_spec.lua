@@ -203,10 +203,13 @@ describe("Fingerprint", function()
             assert.equals(0, count)
         end)
 
-        it("groups records by day key", function()
-            -- Day 20000 = timestamp 20000 * 86400
+        it("groups records by 6-hour bucket key", function()
+            -- Bucket key = math.floor(timestamp / 21600)
+            -- Day 20000 (ts=1728000000) → bucket 80000; Day 20001 → bucket 80004
             local day1Ts = 20000 * 86400 + 3600
             local day2Ts = 20001 * 86400 + 3600
+            local bucket1 = math.floor(day1Ts / GBL.BUCKET_SECONDS)
+            local bucket2 = math.floor(day2Ts / GBL.BUCKET_SECONDS)
 
             table.insert(guildData.transactions, {
                 id = "deposit|A|100|1|1|100:0", timestamp = day1Ts,
@@ -216,50 +219,77 @@ describe("Fingerprint", function()
             })
 
             local buckets = GBL:ComputeBucketHashes(guildData)
-            assert.is_not_nil(buckets[20000])
-            assert.is_not_nil(buckets[20001])
-            assert.are_not.equals(buckets[20000], buckets[20001])
+            assert.is_not_nil(buckets[bucket1])
+            assert.is_not_nil(buckets[bucket2])
+            assert.are_not.equals(buckets[bucket1], buckets[bucket2])
         end)
 
-        it("records on same day contribute to same bucket", function()
-            local dayTs1 = 20000 * 86400 + 100
-            local dayTs2 = 20000 * 86400 + 50000
+        it("records within same 6-hour window share a bucket", function()
+            -- Two timestamps 5 hours apart — same 6h bucket
+            local baseTs = 20000 * 86400  -- start of day
+            local ts1 = baseTs + 100       -- 0h:01m
+            local ts2 = baseTs + 18000     -- 5h:00m (still in first 6h window)
+            local bucketKey = math.floor(ts1 / GBL.BUCKET_SECONDS)
 
             table.insert(guildData.transactions, {
-                id = "deposit|A|100|1|1|100:0", timestamp = dayTs1,
+                id = "deposit|A|100|1|1|100:0", timestamp = ts1,
             })
             local buckets1 = GBL:ComputeBucketHashes(guildData)
 
             table.insert(guildData.transactions, {
-                id = "deposit|B|200|1|1|200:0", timestamp = dayTs2,
+                id = "deposit|B|200|1|1|200:0", timestamp = ts2,
             })
             local buckets2 = GBL:ComputeBucketHashes(guildData)
 
-            -- Same day key, but hash should change with the second record
-            assert.are_not.equals(buckets1[20000], buckets2[20000])
+            -- Same bucket key, but hash should change with the second record
+            assert.equals(math.floor(ts2 / GBL.BUCKET_SECONDS), bucketKey)
+            assert.are_not.equals(buckets1[bucketKey], buckets2[bucketKey])
+        end)
+
+        it("records 7 hours apart fall in different buckets", function()
+            local baseTs = 20000 * 86400
+            local ts1 = baseTs + 100           -- 0h:01m
+            local ts2 = baseTs + 7 * 3600      -- 7h:00m (second 6h window)
+            local bucket1 = math.floor(ts1 / GBL.BUCKET_SECONDS)
+            local bucket2 = math.floor(ts2 / GBL.BUCKET_SECONDS)
+
+            assert.are_not.equals(bucket1, bucket2)
+
+            table.insert(guildData.transactions, {
+                id = "deposit|A|100|1|1|100:0", timestamp = ts1,
+            })
+            table.insert(guildData.transactions, {
+                id = "deposit|B|200|1|1|200:0", timestamp = ts2,
+            })
+
+            local buckets = GBL:ComputeBucketHashes(guildData)
+            assert.is_not_nil(buckets[bucket1])
+            assert.is_not_nil(buckets[bucket2])
         end)
 
         it("includes money transactions", function()
             local dayTs = 20000 * 86400 + 3600
+            local bucketKey = math.floor(dayTs / GBL.BUCKET_SECONDS)
 
             table.insert(guildData.moneyTransactions, {
                 id = "repair|A|5000|100:0", timestamp = dayTs,
             })
 
             local buckets = GBL:ComputeBucketHashes(guildData)
-            assert.is_not_nil(buckets[20000])
-            assert.is_true(buckets[20000] > 0)
+            assert.is_not_nil(buckets[bucketKey])
+            assert.is_true(buckets[bucketKey] > 0)
         end)
 
         it("skips records with nil id", function()
             local dayTs = 20000 * 86400 + 3600
+            local bucketKey = math.floor(dayTs / GBL.BUCKET_SECONDS)
 
             table.insert(guildData.transactions, {
                 timestamp = dayTs, -- no id
             })
 
             local buckets = GBL:ComputeBucketHashes(guildData)
-            assert.is_nil(buckets[20000])
+            assert.is_nil(buckets[bucketKey])
         end)
     end)
 

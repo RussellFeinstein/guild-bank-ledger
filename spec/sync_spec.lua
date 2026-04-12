@@ -1741,7 +1741,7 @@ describe("Sync", function()
             GBL:OnSyncMessage("GBLSync", msg, "GUILD", "OfficerB-Stormrage")
 
             local peers = GBL:GetSyncPeers()
-            assert.is_not_nil(peers["OfficerB-Stormrage"])
+            assert.is_not_nil(peers["OfficerB"])
         end)
     end)
 
@@ -1954,9 +1954,11 @@ describe("Sync", function()
         it("SYNC_REQUEST includes bucketHashes", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
+            local ts = 86400 * 20000
+            local bucketKey = math.floor(ts / GBL.BUCKET_SECONDS)
             table.insert(guildData.transactions, {
-                type = "deposit", player = "P", timestamp = 86400 * 20000,
-                scanTime = 86400 * 20000, id = "h1:0",
+                type = "deposit", player = "P", timestamp = ts,
+                scanTime = ts, id = "h1:0",
             })
 
             GBL:RequestSync("OfficerB", 0)
@@ -1966,48 +1968,53 @@ describe("Sync", function()
             assert.is_true(ok)
             assert.equals("SYNC_REQUEST", data.type)
             assert.is_table(data.bucketHashes)
-            assert.is_not_nil(data.bucketHashes[20000])
+            assert.is_not_nil(data.bucketHashes[bucketKey])
         end)
 
-        it("HandleSyncRequest filters by differing days when bucketHashes present", function()
+        it("HandleSyncRequest filters by differing buckets when bucketHashes present", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Local has records on day 20000 and day 20001
+            local ts1 = 86400 * 20000 + 100
+            local ts2 = 86400 * 20001 + 100
+            local bucket1 = math.floor(ts1 / GBL.BUCKET_SECONDS)
+            local bucket2 = math.floor(ts2 / GBL.BUCKET_SECONDS)
+
+            -- Local has records in two different buckets
             table.insert(guildData.transactions, {
-                type = "deposit", player = "A", timestamp = 86400 * 20000 + 100,
-                scanTime = 86400 * 20000 + 100, id = "day0_rec:0",
+                type = "deposit", player = "A", timestamp = ts1,
+                scanTime = ts1, id = "bucket0_rec:0",
                 itemID = 100, count = 1, tab = 1,
             })
             table.insert(guildData.transactions, {
-                type = "deposit", player = "B", timestamp = 86400 * 20001 + 100,
-                scanTime = 86400 * 20001 + 100, id = "day1_rec:0",
+                type = "deposit", player = "B", timestamp = ts2,
+                scanTime = ts2, id = "bucket1_rec:0",
                 itemID = 200, count = 1, tab = 1,
             })
 
-            -- Requester already has day 20000 (matching hash) but not day 20001
+            -- Requester already has bucket1 (matching hash) but not bucket2
             local localBuckets = GBL:ComputeBucketHashes(guildData)
 
             GBL:HandleSyncRequest("OfficerB", {
                 sinceTimestamp = 0,
-                bucketHashes = { [20000] = localBuckets[20000] },  -- day 20000 matches, 20001 absent
+                bucketHashes = { [bucket1] = localBuckets[bucket1] },  -- bucket1 matches, bucket2 absent
             })
 
-            -- Should only send records from day 20001 (the differing day)
+            -- Should only send records from bucket2 (the differing bucket)
             assert.is_true(#MockAce.sentCommMessages >= 1)
             local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
             assert.is_true(ok)
             assert.equals("SYNC_DATA", data.type)
-            -- Only the day 20001 record should be sent
             assert.equals(1, #data.transactions)
-            assert.equals("day1_rec:0", data.transactions[1].id)
+            assert.equals("bucket1_rec:0", data.transactions[1].id)
         end)
 
         it("HandleSyncRequest sends nothing when all bucket hashes match", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
+            local ts = 86400 * 20000 + 100
             table.insert(guildData.transactions, {
-                type = "deposit", player = "A", timestamp = 86400 * 20000 + 100,
-                scanTime = 86400 * 20000 + 100, id = "rec1:0",
+                type = "deposit", player = "A", timestamp = ts,
+                scanTime = ts, id = "rec1:0",
                 itemID = 100, count = 1, tab = 1,
             })
 

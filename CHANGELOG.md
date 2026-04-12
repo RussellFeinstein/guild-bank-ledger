@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.6] — 2026-04-11
+
+### Changed
+- **Bucket hash granularity** — sync fingerprint buckets now use 6-hour windows instead of daily bins, reducing the blast radius when a single new record triggers a hash mismatch. Fewer records re-sent per delta sync.
+
 ## [0.9.5] — 2026-04-11
 
 ### Fixed
@@ -24,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - HELLO replies use targeted WHISPER instead of guild-wide broadcast, with an `isReply` flag to prevent ping-pong loops
-- Hash comparison audit trail now includes day-bucket count for fingerprint diagnostics
+- Hash comparison audit trail now includes bucket count for fingerprint diagnostics
 - SYNC_REQUEST audit trail now includes serialized byte size for diagnosing WHISPER size issues
 - sinceTimestamp fallback path (no bucket hashes) now logs explicitly instead of being silent
 

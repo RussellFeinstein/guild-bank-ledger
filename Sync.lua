@@ -223,6 +223,20 @@ function GBL:OnSyncMessage(_prefix, message, distribution, sender)
             return
         end
     end
+
+    -- Track peer liveness from ANY valid message, not just HELLO.
+    -- Ensures peers appear in the online list even if their HELLO was missed.
+    local cleanSender = Ambiguate(sender, "none")
+    if syncState.peers[cleanSender] then
+        syncState.peers[cleanSender].lastSeen = GetServerTime()
+    elseif msgType ~= "HELLO" then
+        -- Minimal peer entry — HELLO handler will overwrite with full data
+        syncState.peers[cleanSender] = {
+            lastSeen = GetServerTime(),
+            txCount = 0,
+        }
+    end
+
     if msgType == "HELLO" then
         self:HandleHello(sender, data)
     elseif msgType == "SYNC_REQUEST" then
@@ -282,7 +296,7 @@ function GBL:HandleHello(sender, data)
     for _ in pairs(buckets) do bucketCount = bucketCount + 1 end
 
     self:AddAuditEntry("Hash compare: local=" .. tostring(localDataHash or "none")
-        .. " (" .. localCount .. " tx, " .. bucketCount .. " day-buckets)"
+        .. " (" .. localCount .. " tx, " .. bucketCount .. " buckets)"
         .. ", remote=" .. tostring(data.dataHash or "none")
         .. " (" .. remoteCount .. " tx)")
 
@@ -523,31 +537,32 @@ function GBL:HandleSyncRequest(sender, data)
             end
         end
 
-        -- Build human-readable date list for differing days
+        -- Build human-readable date list for differing buckets
+        local bucketSec = GBL.BUCKET_SECONDS or 21600
         local diffCount = 0
         local diffDateList = {}
         for dayKey in pairs(diffDays) do
             diffCount = diffCount + 1
-            local ts = dayKey * 86400
-            diffDateList[#diffDateList + 1] = date("%Y-%m-%d", ts)
+            local ts = dayKey * bucketSec
+            diffDateList[#diffDateList + 1] = date("%Y-%m-%d %H:00", ts)
         end
         table.sort(diffDateList)
 
         for _, tx in ipairs(guildData.transactions) do
-            local dayKey = math.floor((tx.timestamp or 0) / 86400)
+            local dayKey = math.floor((tx.timestamp or 0) / bucketSec)
             if diffDays[dayKey] then
                 txToSend[#txToSend + 1] = stripForSync(tx)
             end
         end
         for _, tx in ipairs(guildData.moneyTransactions) do
-            local dayKey = math.floor((tx.timestamp or 0) / 86400)
+            local dayKey = math.floor((tx.timestamp or 0) / bucketSec)
             if diffDays[dayKey] then
                 moneyToSend[#moneyToSend + 1] = stripForSync(tx)
             end
         end
 
-        self:AddAuditEntry("Bucket filter: " .. totalLocalDays .. " local day(s), "
-            .. totalRemoteDays .. " remote day(s), "
+        self:AddAuditEntry("Bucket filter: " .. totalLocalDays .. " local bucket(s), "
+            .. totalRemoteDays .. " remote bucket(s), "
             .. matchingDays .. " matching, " .. diffCount .. " differing")
         if diffCount > 0 then
             self:AddAuditEntry("Differing dates: " .. table.concat(diffDateList, ", "))
@@ -955,7 +970,7 @@ function GBL:FinishReceiving(sender)
         -- everything on the next sync after a partial failure.
         guildData.syncState.lastSyncTimestamp = GetServerTime()
 
-        guildData.syncState.peers[sender] = {
+        guildData.syncState.peers[Ambiguate(sender, "none")] = {
             lastSync = GetServerTime(),
             stored = totalStored,
         }
@@ -1008,7 +1023,7 @@ end
 -- @param sender string Peer name
 -- @param data table HELLO payload
 function GBL:UpdatePeer(sender, data)
-    syncState.peers[sender] = {
+    syncState.peers[Ambiguate(sender, "none")] = {
         version = data.version,
         txCount = data.txCount or 0,
         dataHash = data.dataHash,
