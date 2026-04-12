@@ -202,6 +202,7 @@ end
 function GBL:RunCompaction(guildData)
     if not guildData then return end
     if self.scanInProgress then return end
+    if self._syncReceiving then return end
 
     self:CompactToDailySummaries(guildData)
     self:CompactToWeeklySummaries(guildData)

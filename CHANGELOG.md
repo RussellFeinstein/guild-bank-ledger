@@ -5,6 +5,17 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] — 2026-04-12
+
+### Added
+- **Sync ID normalization** — when two peers have the same transaction recorded under different IDs (due to different scan times producing different timeSlots), the receiver now converges the IDs using a deterministic tiebreaker (lexicographically smaller ID wins). This eliminates the perpetual sync loop where peers with identical data but different record IDs kept triggering syncs on every HELLO, sending hundreds of duplicate records per cycle.
+- `NormalizeRecordId` method in Sync.lua with pre-built ID lookup table for O(1) record access
+- `BuildTxPrefix` exposed on Dedup module for external use
+- `IsDuplicate` now returns a second value (the matched seenTxHashes key) on fuzzy matches, enabling callers to detect and resolve ID divergence
+- Compaction now guards against running during sync receive (`_syncReceiving` flag)
+- Sync completion audit trail now reports number of IDs converged per session
+- 12 new tests (405 total) covering normalization tiebreaker, edge cases, and hash convergence
+
 ## [0.10.2] — 2026-04-12
 
 ### Fixed

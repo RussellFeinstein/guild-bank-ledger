@@ -37,6 +37,13 @@ function GBL:ComputeTxHash(record)
     return prefix .. timeSlot, timeSlot
 end
 
+--- Expose the prefix builder for external use (e.g. migration).
+-- @param record table Transaction record
+-- @return string Prefix string (everything before the time slot)
+function GBL:BuildTxPrefix(record)
+    return buildPrefix(record)
+end
+
 ------------------------------------------------------------------------
 -- Duplicate detection
 ------------------------------------------------------------------------
@@ -51,14 +58,15 @@ end
 -- @param record table Transaction record
 -- @param guildData table Guild data table containing seenTxHashes
 -- @return boolean True if duplicate
+-- @return string|nil Matched seenTxHashes key on fuzzy match (nil on exact or no match)
 function GBL:IsDuplicate(record, guildData)
     if not guildData or not guildData.seenTxHashes then
-        return false
+        return false, nil
     end
 
     local hash = record.id
     if hash and guildData.seenTxHashes[hash] then
-        return true
+        return true, nil  -- exact match, IDs already converged
     end
 
     -- Also check adjacent hour slots for drift tolerance (cross-member sync)
@@ -76,16 +84,16 @@ function GBL:IsDuplicate(record, guildData)
                 and (storedEntry.timestamp or 0) or storedEntry
             -- Legacy entries (storedTs == 0) or non-numeric: fall back to match
             if type(storedTs) ~= "number" or storedTs == 0 then
-                return true
+                return true, key
             end
             -- Same event: |diff| <= 3599; different event same-scan: |diff| == 3600
             if math.abs(incomingTs - storedTs) < 3600 then
-                return true
+                return true, key
             end
         end
     end
 
-    return false
+    return false, nil
 end
 
 --- Mark a transaction hash as seen.

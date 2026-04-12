@@ -503,6 +503,7 @@ function GBL:RequestSync(target, sinceTimestamp)
     syncState.receiveGot = 0
     syncState.receiveStored = 0
     syncState.receiveDuped = 0
+    syncState.receiveNormalized = 0
     syncState.receiveExpected = 0
     syncState.receiveStartTime = GetServerTime()
 
@@ -883,7 +884,47 @@ end
 -- Receiving
 ------------------------------------------------------------------------
 
---- Process an incoming SYNC_DATA chunk — dedup and store transactions.
+--- Normalize a local record's ID to converge with an incoming record.
+-- Uses a deterministic tiebreaker (lexicographically smaller ID wins)
+-- so that both peers converge to the same ID regardless of sync direction.
+-- This prevents perpetual sync loops caused by different scan times
+-- producing different timeSlots for the same event.
+-- @param incomingRecord table Received record with its ID
+-- @param matchedKey string The local seenTxHashes key that fuzzy-matched
+-- @param guildData table Guild data from AceDB
+-- @param idIndex table Pre-built lookup of record.id → record reference
+-- @return boolean True if normalization happened
+function GBL:NormalizeRecordId(incomingRecord, matchedKey, guildData, idIndex)
+    local incomingId = incomingRecord.id
+    if not incomingId or incomingId == matchedKey then return false end
+
+    -- Deterministic tiebreaker: keep lexicographically smaller ID
+    local winnerId = (incomingId < matchedKey) and incomingId or matchedKey
+    if winnerId == matchedKey then return false end  -- local already wins
+
+    -- Read timestamp from seenTxHashes (handles number and legacy table formats)
+    local storedEntry = guildData.seenTxHashes[matchedKey]
+    local oldTs = (type(storedEntry) == "table")
+        and (storedEntry.timestamp or 0) or (storedEntry or 0)
+
+    -- Find local record via pre-built index
+    local localRecord = idIndex and idIndex[matchedKey] or nil
+    if localRecord then
+        localRecord.id = winnerId
+        localRecord._occurrence = incomingRecord._occurrence
+    end
+    -- If record compacted/pruned: only seenTxHashes updated (harmless)
+
+    -- Atomic seenTxHashes update: add new FIRST, then remove old
+    guildData.seenTxHashes[winnerId] = oldTs
+    guildData.seenTxHashes[matchedKey] = nil
+
+    return true
+end
+
+--- Process an incoming SYNC_DATA chunk — dedup, normalize IDs, and store.
+-- When a fuzzy duplicate is detected, converges record IDs using a
+-- deterministic tiebreaker (smaller ID wins) to prevent sync loops.
 -- Sends an ACK back to the sender after processing.
 -- @param sender string Sender name
 -- @param data table Deserialized chunk payload
@@ -902,30 +943,75 @@ function GBL:HandleSyncData(sender, data)
         return
     end
 
+    self._syncReceiving = true
+
     local guildData = self:GetGuildData()
     if not guildData then return end
 
+    -- Build ID lookup table for O(1) record access during normalization
+    local idIndex = {}
+    for _, tx in ipairs(guildData.transactions) do
+        if tx.id then idIndex[tx.id] = tx end
+    end
+    for _, tx in ipairs(guildData.moneyTransactions) do
+        if tx.id then idIndex[tx.id] = tx end
+    end
+
     local itemStored, itemDuped = 0, 0
     local moneyStored, moneyDuped = 0, 0
+    local normalized = 0
     local chunkTotal = #(data.transactions or {}) + #(data.moneyTransactions or {})
 
     for _, tx in ipairs(data.transactions or {}) do
         reconstructSyncRecord(tx, sender)
-        if self:StoreTx(tx, guildData) then
-            itemStored = itemStored + 1
-        else
+        local isDup, matchedKey = self:IsDuplicate(tx, guildData)
+        if isDup then
+            if matchedKey and matchedKey ~= tx.id then
+                if self:NormalizeRecordId(tx, matchedKey, guildData, idIndex) then
+                    normalized = normalized + 1
+                    -- Keep idIndex consistent with the winner ID
+                    local winnerId = (tx.id < matchedKey) and tx.id or matchedKey
+                    local rec = idIndex[matchedKey]
+                    if rec then
+                        idIndex[winnerId] = rec
+                        if winnerId ~= matchedKey then idIndex[matchedKey] = nil end
+                    end
+                end
+            end
             itemDuped = itemDuped + 1
+        else
+            if self:StoreTx(tx, guildData) then
+                itemStored = itemStored + 1
+                idIndex[tx.id] = tx
+            end
         end
     end
 
     for _, tx in ipairs(data.moneyTransactions or {}) do
         reconstructSyncRecord(tx, sender)
-        if self:StoreMoneyTx(tx, guildData) then
-            moneyStored = moneyStored + 1
-        else
+        local isDup, matchedKey = self:IsDuplicate(tx, guildData)
+        if isDup then
+            if matchedKey and matchedKey ~= tx.id then
+                if self:NormalizeRecordId(tx, matchedKey, guildData, idIndex) then
+                    normalized = normalized + 1
+                    local winnerId = (tx.id < matchedKey) and tx.id or matchedKey
+                    local rec = idIndex[matchedKey]
+                    if rec then
+                        idIndex[winnerId] = rec
+                        if winnerId ~= matchedKey then idIndex[matchedKey] = nil end
+                    end
+                end
+            end
             moneyDuped = moneyDuped + 1
+        else
+            if self:StoreMoneyTx(tx, guildData) then
+                moneyStored = moneyStored + 1
+                idIndex[tx.id] = tx
+            end
         end
     end
+
+    syncState.receiveNormalized = (syncState.receiveNormalized or 0) + normalized
 
     local stored = itemStored + moneyStored
     local duped = itemDuped + moneyDuped
@@ -1036,18 +1122,30 @@ function GBL:FinishReceiving(sender)
     end
 
     local totalDuped = syncState.receiveDuped
+    local totalNormalized = syncState.receiveNormalized or 0
     local elapsed = GetServerTime() - syncState.receiveStartTime
     local chunksGot = syncState.receiveGot
+
+    -- CRITICAL: If any IDs were normalized in-place, the hash cache is stale
+    -- (keyed by txCount which didn't change). Must reset before GetDataHash
+    -- or the next HELLO sends a stale hash → infinite sync loop.
+    if totalNormalized > 0 then
+        self:ResetHashCache()
+    end
 
     local totalTxAfter = guildData
         and (#guildData.transactions + #guildData.moneyTransactions) or 0
     local newHash = guildData and self:GetDataHash(guildData) or 0
 
+    local normalizedMsg = totalNormalized > 0
+        and (", " .. totalNormalized .. " IDs converged") or ""
     self:Print("Sync complete from " .. (sender or "?") .. ": "
         .. totalStored .. " new, " .. totalDuped .. " duped"
+        .. normalizedMsg
         .. " (" .. chunksGot .. " chunks, " .. elapsed .. "s)")
     self:AddAuditEntry("Sync complete from " .. (sender or "unknown")
         .. " — " .. totalStored .. " new, " .. totalDuped .. " duped"
+        .. ", " .. totalNormalized .. " normalized"
         .. ", " .. chunksGot .. " chunks, " .. elapsed .. "s"
         .. " | total tx now: " .. totalTxAfter .. ", hash: " .. newHash)
 
@@ -1062,8 +1160,10 @@ function GBL:FinishReceiving(sender)
     syncState.receiveGot = 0
     syncState.receiveStored = 0
     syncState.receiveDuped = 0
+    syncState.receiveNormalized = 0
     syncState.receiveStartTime = 0
     syncState.receiveNackCount = 0
+    self._syncReceiving = false
 
     self:SendMessage("GBL_SYNC_COMPLETE", sender, totalStored)
 

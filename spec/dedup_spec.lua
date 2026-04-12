@@ -240,6 +240,67 @@ describe("Dedup", function()
             rec3.id = rec3.id .. ":0"
             assert.is_false(GBL:IsDuplicate(rec3, guildData))
         end)
+
+        -- Return value tests for ID normalization support
+        it("returns matched key on fuzzy match", function()
+            local baseTime = 3600 * 100
+            local rec1 = itemRecord({ timestamp = baseTime + 3000 })
+            rec1._occurrence = 0
+            rec1.id = rec1.id .. ":0"
+            GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
+
+            local rec2 = itemRecord({ timestamp = baseTime + 4500 })
+            rec2._occurrence = 0
+            rec2.id = rec2.id .. ":0"
+
+            local isDup, matchedKey = GBL:IsDuplicate(rec2, guildData)
+            assert.is_true(isDup)
+            assert.is_not_nil(matchedKey)
+            assert.equals(rec1.id, matchedKey)
+        end)
+
+        it("returns nil key on exact match", function()
+            local rec = itemRecord({})
+            rec.id = rec.id .. ":0"
+            rec._occurrence = 0
+            GBL:MarkSeen(rec.id, rec.timestamp, guildData)
+
+            local isDup, matchedKey = GBL:IsDuplicate(rec, guildData)
+            assert.is_true(isDup)
+            assert.is_nil(matchedKey)
+        end)
+
+        it("returns false and nil on no match", function()
+            local rec1 = itemRecord({ player = "Thrall" })
+            rec1._occurrence = 0
+            rec1.id = rec1.id .. ":0"
+            GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
+
+            local rec2 = itemRecord({ player = "Jaina", timestamp = 3600 * 200 })
+            rec2._occurrence = 0
+            rec2.id = rec2.id .. ":0"
+
+            local isDup, matchedKey = GBL:IsDuplicate(rec2, guildData)
+            assert.is_false(isDup)
+            assert.is_nil(matchedKey)
+        end)
+
+        it("returns matched key with legacy table-format entry", function()
+            local baseTime = 3600 * 100
+            local rec1 = itemRecord({ timestamp = baseTime + 3000 })
+            rec1._occurrence = 0
+            rec1.id = rec1.id .. ":0"
+            -- Store as legacy table format
+            guildData.seenTxHashes[rec1.id] = { timestamp = rec1.timestamp, count = 1 }
+
+            local rec2 = itemRecord({ timestamp = baseTime + 4500 })
+            rec2._occurrence = 0
+            rec2.id = rec2.id .. ":0"
+
+            local isDup, matchedKey = GBL:IsDuplicate(rec2, guildData)
+            assert.is_true(isDup)
+            assert.equals(rec1.id, matchedKey)
+        end)
     end)
 
     describe("MarkSeen", function()
