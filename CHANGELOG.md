@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] — 2026-04-13
+
+### Fixed
+- **Outdated peers now visible in Online Peers** — peers with mismatched protocol or addon versions are tracked in the peer list instead of silently dropped. Displayed as "outdated — no sync" in red to indicate they are visible but will not participate in sync.
+
 ## [0.13.0] — 2026-04-13
 
 ### Added

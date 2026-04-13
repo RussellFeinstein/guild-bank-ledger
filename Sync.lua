@@ -276,7 +276,20 @@ function GBL:OnSyncMessage(_prefix, message, distribution, sender)
     end
 
     -- Protocol version gate (only on typed messages that carry the field)
+    -- Track outdated peers in the peer list before rejecting their messages,
+    -- so they appear in the Online Peers UI as "outdated (no sync)".
     if data.protocolVersion and data.protocolVersion ~= PROTOCOL_VERSION then
+        if msgType == "HELLO" then
+            local cleanSender = Ambiguate(sender, "none")
+            syncState.peers[cleanSender] = {
+                version = data.version or "?",
+                txCount = data.txCount or 0,
+                dataHash = data.dataHash,
+                lastScanTime = data.lastScanTime or 0,
+                lastSeen = GetServerTime(),
+                outdated = true,
+            }
+        end
         self:AddAuditEntry("Ignored message from " .. sender
             .. " (protocol v" .. tostring(data.protocolVersion) .. ")")
         return
@@ -343,6 +356,10 @@ function GBL:HandleHello(sender, data)
 
     -- Exact version match — refuse sync on any version difference
     if data.version and data.version ~= self.version then
+        local cleanSender = Ambiguate(sender, "none")
+        if syncState.peers[cleanSender] then
+            syncState.peers[cleanSender].outdated = true
+        end
         self:AddAuditEntry("WARNING: " .. sender .. " on v"
             .. tostring(data.version) .. " (version mismatch, need v" .. self.version .. ")")
         return

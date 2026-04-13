@@ -2041,6 +2041,26 @@ describe("Sync", function()
         it("protocol version gate rejects old protocol messages", function()
             assert.equals(3, GBL.SYNC_PROTOCOL_VERSION)
         end)
+
+        it("tracks outdated peers from protocol-mismatched HELLO", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Simulate a HELLO with old protocol version
+            local msg = GBL:Serialize({
+                type = "HELLO",
+                version = "0.12.2",
+                protocolVersion = 2,
+                guild = "TestGuild",
+                txCount = 50,
+                dataHash = 999,
+            })
+            GBL:OnSyncMessage(GBL.SYNC_PREFIX, msg, "GUILD", "OutdatedPeer")
+
+            local peers = GBL:GetSyncPeers()
+            assert.is_not_nil(peers["OutdatedPeer"])
+            assert.equals("0.12.2", peers["OutdatedPeer"].version)
+            assert.is_true(peers["OutdatedPeer"].outdated)
+        end)
     end)
 
     ---------------------------------------------------------------------------

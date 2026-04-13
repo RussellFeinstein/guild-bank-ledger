@@ -163,7 +163,9 @@ function GBL:RenderPeerList(container)
         -- Version status indicator
         local peerVersion = info.version or "?"
         local versionTag = ""
-        if peerVersion ~= self.version then
+        if info.outdated then
+            versionTag = " |cffff4400(outdated — no sync)|r"
+        elseif peerVersion ~= self.version then
             versionTag = " |cffff6600(outdated)|r"
         end
 
