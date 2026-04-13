@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] — 2026-04-13
+
+### Fixed
+- **Player name consolidation failure** — v0.13.0 migration ran before guild roster loaded, so `ResolvePlayerName` couldn't look up cross-realm players' actual realms (e.g., Katorri got assigned to local realm instead of Stormrage). Root cause: `GetGuildData()` returns nil during `OnEnable` because `GetGuildInfo("player")` isn't ready yet. Fix: migration now passes `playerRealms` directly instead of calling `GetGuildData()`, and `ResolvePlayerName` searches all guilds' caches as a fallback. Added `RepairPlayerNames()` which runs once after `GUILD_ROSTER_UPDATE` to fix records that were incorrectly resolved, rebuilds hashes, and merges duplicate playerStats.
+
 ## [0.13.1] — 2026-04-13
 
 ### Fixed
