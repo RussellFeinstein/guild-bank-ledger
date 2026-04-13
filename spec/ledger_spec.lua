@@ -287,6 +287,113 @@ describe("Ledger", function()
         end)
     end)
 
+    describe("ReadTabTransactions — rescan dedup", function()
+        it("rescan with same batch produces 0 new records", function()
+            local guildData = GBL:GetGuildData()
+            local link = Helpers.makeItemLink(111, "Flask", 3)
+
+            MockWoW.addTab("Supplies", "icon", true)
+            Helpers.addTabTransactions(1, {
+                Helpers.makeTransaction("deposit", "Thrall", link, 5, 1, nil, 1),
+            })
+
+            -- Initial scan
+            local stored1 = GBL:ReadTabTransactions(1, guildData)
+            assert.equals(1, stored1)
+
+            -- Rescan with same batch
+            local stored2 = GBL:ReadTabTransactions(1, guildData)
+            assert.equals(0, stored2)
+            assert.equals(1, #guildData.transactions)
+        end)
+
+        it("rescan detects new same-slot record (the v0.14 bug)", function()
+            local guildData = GBL:GetGuildData()
+            local link = Helpers.makeItemLink(111, "Flask", 3)
+
+            MockWoW.addTab("Supplies", "icon", true)
+            -- Same player, same item, same count, same tab, same hour offset
+            Helpers.addTabTransactions(1, {
+                Helpers.makeTransaction("withdraw", "Jaina", link, 20, 1, nil, 0),
+            })
+
+            -- Initial scan: 1 record
+            local stored1 = GBL:ReadTabTransactions(1, guildData)
+            assert.equals(1, stored1)
+
+            -- New identical transaction appears (WoW API prepends newest first)
+            Helpers.addTabTransactions(1, {
+                Helpers.makeTransaction("withdraw", "Jaina", link, 20, 1, nil, 0),
+                Helpers.makeTransaction("withdraw", "Jaina", link, 20, 1, nil, 0),
+            })
+
+            -- Rescan: should detect exactly 1 new record, not create duplicates
+            local stored2 = GBL:ReadTabTransactions(1, guildData)
+            assert.equals(1, stored2)
+            assert.equals(2, #guildData.transactions)
+        end)
+
+        it("bank close resets cache so next bank open starts fresh", function()
+            local guildData = GBL:GetGuildData()
+            local link = Helpers.makeItemLink(111, "Flask", 3)
+
+            MockWoW.addTab("Supplies", "icon", true)
+            Helpers.addTabTransactions(1, {
+                Helpers.makeTransaction("deposit", "Thrall", link, 5, 1, nil, 1),
+            })
+
+            -- Initial scan
+            GBL:ReadTabTransactions(1, guildData)
+
+            -- Simulate bank close
+            GBL._lastTabBatchCounts = {}
+            GBL._lastMoneyBatchCounts = nil
+
+            -- Re-open: initial scan again, should dedup against seenTxHashes
+            local stored = GBL:ReadTabTransactions(1, guildData)
+            assert.equals(0, stored)
+            assert.equals(1, #guildData.transactions)
+        end)
+    end)
+
+    describe("ReadMoneyTransactions — rescan dedup", function()
+        it("rescan with same batch produces 0 new records", function()
+            local guildData = GBL:GetGuildData()
+
+            Helpers.addMoneyTransactions({
+                Helpers.makeMoneyTransaction("deposit", "Alice", 500000, 1),
+            })
+
+            local stored1 = GBL:ReadMoneyTransactions(guildData)
+            assert.equals(1, stored1)
+
+            local stored2 = GBL:ReadMoneyTransactions(guildData)
+            assert.equals(0, stored2)
+            assert.equals(1, #guildData.moneyTransactions)
+        end)
+
+        it("rescan detects new same-slot money record", function()
+            local guildData = GBL:GetGuildData()
+
+            Helpers.addMoneyTransactions({
+                Helpers.makeMoneyTransaction("repair", "Bob", 75000, 0),
+            })
+
+            local stored1 = GBL:ReadMoneyTransactions(guildData)
+            assert.equals(1, stored1)
+
+            -- New identical repair appears
+            Helpers.addMoneyTransactions({
+                Helpers.makeMoneyTransaction("repair", "Bob", 75000, 0),
+                Helpers.makeMoneyTransaction("repair", "Bob", 75000, 0),
+            })
+
+            local stored2 = GBL:ReadMoneyTransactions(guildData)
+            assert.equals(1, stored2)
+            assert.equals(2, #guildData.moneyTransactions)
+        end)
+    end)
+
     describe("ReadAllTransactions — end-to-end with money", function()
         it("reads both item and money transactions", function()
             local guildData = GBL:GetGuildData()

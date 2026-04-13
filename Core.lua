@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.14.0"
+local VERSION = "0.14.1"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -845,6 +845,9 @@ function GBL:OnBankClosed()
     self.scanInProgress = false
     self._initialScanComplete = false
     self:StopPeriodicRescan()
+    -- Clear session-local batch caches so next bank open starts fresh
+    self._lastTabBatchCounts = {}
+    self._lastMoneyBatchCounts = nil
     self:SendMessage("GBL_BANK_CLOSED")
 
     if wasScanning then

@@ -12,11 +12,32 @@ describe("Dedup", function()
         GBL = Helpers.loadAddon()
         GBL:OnInitialize()
 
+        -- Mimic AceDB wildcard metatable for playerStats auto-vivification
+        local statsDefaults = {
+            withdrawals = {},
+            deposits = {},
+            totalWithdrawCount = 0,
+            totalDepositCount = 0,
+            moneyWithdrawn = 0,
+            moneyDeposited = 0,
+            firstSeen = 0,
+            lastSeen = 0,
+        }
+        local playerStatsMT = {
+            __index = function(t, k)
+                local new = {}
+                for dk, dv in pairs(statsDefaults) do
+                    new[dk] = type(dv) == "table" and {} or dv
+                end
+                t[k] = new
+                return new
+            end,
+        }
         guildData = {
             seenTxHashes = {},
             transactions = {},
             moneyTransactions = {},
-            playerStats = {},
+            playerStats = setmetatable({}, playerStatsMT),
         }
     end)
 
@@ -499,6 +520,263 @@ describe("Dedup", function()
 
             -- diff = 600 < 3600 → same event → duplicate
             assert.is_true(GBL:IsDuplicate(rec2, guildData))
+        end)
+    end)
+
+    describe("SplitBaseHash", function()
+        it("extracts prefix and slot from item baseHash", function()
+            local prefix, slot = GBL:SplitBaseHash("withdraw|Thrall|12345|5|1|100")
+            assert.equals("withdraw|Thrall|12345|5|1|", prefix)
+            assert.equals(100, slot)
+        end)
+
+        it("extracts prefix and slot from money baseHash", function()
+            local prefix, slot = GBL:SplitBaseHash("deposit|Thrall|50000|100")
+            assert.equals("deposit|Thrall|50000|", prefix)
+            assert.equals(100, slot)
+        end)
+
+        it("returns nil for nil input", function()
+            local prefix, slot = GBL:SplitBaseHash(nil)
+            assert.is_nil(prefix)
+            assert.is_nil(slot)
+        end)
+    end)
+
+    describe("CountStoredAtSlot", function()
+        it("counts sequential occurrences", function()
+            guildData.seenTxHashes["BH:0"] = 100
+            guildData.seenTxHashes["BH:1"] = 100
+            guildData.seenTxHashes["BH:2"] = 100
+            assert.equals(3, GBL:CountStoredAtSlot("BH", guildData))
+        end)
+
+        it("returns 0 for no stored entries", function()
+            assert.equals(0, GBL:CountStoredAtSlot("BH", guildData))
+        end)
+
+        it("stops at gaps", function()
+            guildData.seenTxHashes["BH:0"] = 100
+            guildData.seenTxHashes["BH:2"] = 100  -- gap at :1
+            assert.equals(1, GBL:CountStoredAtSlot("BH", guildData))
+        end)
+    end)
+
+    describe("CountStoredForHash", function()
+        it("finds exact-slot matches first", function()
+            local baseHash = "withdraw|Thrall|12345|5|1|100"
+            guildData.seenTxHashes[baseHash .. ":0"] = 3600 * 100
+            guildData.seenTxHashes[baseHash .. ":1"] = 3600 * 100
+            assert.equals(2, GBL:CountStoredForHash(baseHash, 3600 * 100, guildData))
+        end)
+
+        it("finds adjacent-slot matches with timestamp proximity", function()
+            -- Stored at slot 100, querying for slot 101 (hour boundary drift)
+            local storedHash = "withdraw|Thrall|12345|5|1|100"
+            local queryHash = "withdraw|Thrall|12345|5|1|101"
+            guildData.seenTxHashes[storedHash .. ":0"] = 3600 * 100 + 3000
+            -- diff = |3600*101 - (3600*100 + 3000)| = |600| < 3600
+            assert.equals(1, GBL:CountStoredForHash(queryHash, 3600 * 101, guildData))
+        end)
+
+        it("rejects adjacent-slot matches with distant timestamps", function()
+            -- Stored at slot 99, querying for slot 100 with distant timestamp
+            local storedHash = "withdraw|Thrall|12345|5|1|99"
+            local queryHash = "withdraw|Thrall|12345|5|1|100"
+            guildData.seenTxHashes[storedHash .. ":0"] = 3600 * 99
+            -- diff = |3600*100 + 1800 - 3600*99| = 5400 >= 3600
+            assert.equals(0, GBL:CountStoredForHash(queryHash, 3600 * 100 + 1800, guildData))
+        end)
+    end)
+
+    describe("FindDriftedCount", function()
+        it("finds count at adjacent slot", function()
+            local prevCounts = { ["withdraw|Thrall|12345|5|1|100"] = 3 }
+            assert.equals(3, GBL:FindDriftedCount("withdraw|Thrall|12345|5|1|101", prevCounts))
+        end)
+
+        it("returns 0 when no adjacent match", function()
+            local prevCounts = { ["withdraw|Thrall|12345|5|1|100"] = 3 }
+            assert.equals(0, GBL:FindDriftedCount("withdraw|Thrall|12345|5|1|103", prevCounts))
+        end)
+    end)
+
+    describe("StoreBatchRecords", function()
+        it("stores all records on initial scan (no prevCounts)", function()
+            local r1 = itemRecord({ timestamp = 3600 * 100, player = "Thrall" })
+            local r2 = itemRecord({ timestamp = 3600 * 100, player = "Jaina" })
+            local batch = { r1, r2 }
+
+            local stored, counts = GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
+
+            assert.equals(2, stored)
+            assert.equals(2, #guildData.transactions)
+        end)
+
+        it("deduplicates on initial scan against seenTxHashes", function()
+            -- Pre-populate seenTxHashes (from a previous session)
+            local rec = itemRecord({ timestamp = 3600 * 100 })
+            local baseHash = rec.id
+            guildData.seenTxHashes[baseHash .. ":0"] = 3600 * 100
+
+            -- Batch with 1 record matching the stored one
+            local batch = { itemRecord({ timestamp = 3600 * 100 }) }
+
+            local stored = GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
+            assert.equals(0, stored)
+        end)
+
+        it("rescan with same batch produces 0 new records", function()
+            -- Initial scan
+            local batch1 = {
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 101, player = "Jaina" }),
+            }
+            local stored1, prevCounts = GBL:StoreBatchRecords(
+                batch1, guildData, "transactions", nil)
+            assert.equals(2, stored1)
+
+            -- Rescan with identical batch
+            local batch2 = {
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 101, player = "Jaina" }),
+            }
+            local stored2 = GBL:StoreBatchRecords(
+                batch2, guildData, "transactions", prevCounts)
+            assert.equals(0, stored2)
+        end)
+
+        -- CORE REGRESSION TEST: the bug v0.14.0 failed to fix
+        it("rescan with new same-SLOT record does not create duplicates", function()
+            -- Scan 1: 1 record at slot 100
+            local batch1 = { itemRecord({ timestamp = 3600 * 100 }) }
+            local stored1, prevCounts = GBL:StoreBatchRecords(
+                batch1, guildData, "transactions", nil)
+            assert.equals(1, stored1)
+            assert.equals(1, #guildData.transactions)
+
+            -- Rescan: 2 records at slot 100 (new one prepended by WoW API)
+            -- Both have identical baseHashes — indistinguishable except by count
+            local batch2 = {
+                itemRecord({ timestamp = 3600 * 100 }),  -- new (WoW puts newest first)
+                itemRecord({ timestamp = 3600 * 100 }),  -- old
+            }
+            local stored2, prevCounts2 = GBL:StoreBatchRecords(
+                batch2, guildData, "transactions", prevCounts)
+
+            -- Should store exactly 1 new record (2 in batch - 1 previously known)
+            assert.equals(1, stored2)
+            assert.equals(2, #guildData.transactions)
+
+            -- Verify occurrence indices are sequential
+            assert.is_truthy(guildData.transactions[1].id:find(":0$"))
+            assert.is_truthy(guildData.transactions[2].id:find(":1$"))
+
+            -- Third rescan with same 2 records: 0 new
+            local batch3 = {
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 100 }),
+            }
+            local stored3 = GBL:StoreBatchRecords(
+                batch3, guildData, "transactions", prevCounts2)
+            assert.equals(0, stored3)
+            assert.equals(2, #guildData.transactions)
+        end)
+
+        it("multiple rescans accumulate correctly", function()
+            -- Scan 1: 1 record
+            local batch1 = { itemRecord({ timestamp = 3600 * 100 }) }
+            local _, prev1 = GBL:StoreBatchRecords(
+                batch1, guildData, "transactions", nil)
+
+            -- Rescan 2: 2 records (1 new)
+            local batch2 = {
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 100 }),
+            }
+            local stored2, prev2 = GBL:StoreBatchRecords(
+                batch2, guildData, "transactions", prev1)
+            assert.equals(1, stored2)
+
+            -- Rescan 3: 3 records (1 more new)
+            local batch3 = {
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 100 }),
+            }
+            local stored3 = GBL:StoreBatchRecords(
+                batch3, guildData, "transactions", prev2)
+            assert.equals(1, stored3)
+
+            assert.equals(3, #guildData.transactions)
+        end)
+
+        it("handles hour-boundary drift during rescan", function()
+            -- Scan 1: record at slot 100
+            local batch1 = { itemRecord({ timestamp = 3600 * 100 + 3500 }) }
+            local _, prev = GBL:StoreBatchRecords(
+                batch1, guildData, "transactions", nil)
+
+            -- Rescan: hour rolled over, same record now computes to slot 101
+            local batch2 = { itemRecord({ timestamp = 3600 * 101 + 100 }) }
+            -- prevCounts has slot 100, current batch has slot 101
+            -- FindDriftedCount should match via adjacent slot
+            local stored = GBL:StoreBatchRecords(
+                batch2, guildData, "transactions", prev)
+            assert.equals(0, stored)
+            assert.equals(1, #guildData.transactions)
+        end)
+
+        it("handles mixed baseHashes in one batch", function()
+            -- 2 different items in same batch
+            local batch = {
+                itemRecord({ timestamp = 3600 * 100, itemID = 111 }),
+                itemRecord({ timestamp = 3600 * 100, itemID = 222 }),
+                itemRecord({ timestamp = 3600 * 100, itemID = 111 }),  -- second of same item
+            }
+            local stored, prev = GBL:StoreBatchRecords(
+                batch, guildData, "transactions", nil)
+            assert.equals(3, stored)
+
+            -- Rescan: 1 more of item 111
+            local batch2 = {
+                itemRecord({ timestamp = 3600 * 100, itemID = 111 }),
+                itemRecord({ timestamp = 3600 * 100, itemID = 222 }),
+                itemRecord({ timestamp = 3600 * 100, itemID = 111 }),
+                itemRecord({ timestamp = 3600 * 100, itemID = 111 }),  -- new
+            }
+            local stored2 = GBL:StoreBatchRecords(
+                batch2, guildData, "transactions", prev)
+            assert.equals(1, stored2)
+            assert.equals(4, #guildData.transactions)
+        end)
+
+        it("works with money transactions", function()
+            local r1 = moneyRecord({ timestamp = 3600 * 100 })
+            local batch = { r1 }
+            local stored, prev = GBL:StoreBatchRecords(
+                batch, guildData, "moneyTransactions", nil)
+            assert.equals(1, stored)
+            assert.equals(1, #guildData.moneyTransactions)
+
+            -- Rescan with new money record prepended
+            local batch2 = {
+                moneyRecord({ timestamp = 3600 * 100 }),
+                moneyRecord({ timestamp = 3600 * 100 }),
+            }
+            local stored2 = GBL:StoreBatchRecords(
+                batch2, guildData, "moneyTransactions", prev)
+            assert.equals(1, stored2)
+            assert.equals(2, #guildData.moneyTransactions)
+        end)
+
+        it("validates records before storing", function()
+            local bad = { type = "", player = "", timestamp = 3600 * 100, itemID = 1, count = 1, tab = 1 }
+            bad.id = GBL:ComputeTxHash(bad)
+            local batch = { bad }
+
+            local stored = GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
+            assert.equals(0, stored)
         end)
     end)
 

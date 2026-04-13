@@ -113,8 +113,9 @@ end
 -- Two withdrawals of 20 potions in the same hour get :0 and :1 suffixes,
 -- making their record.id unique for dedup.
 -- Counts per baseHash (prefix + timeSlot) so records in different hour slots
--- have independent counters. This prevents occurrence index shift when new
--- same-prefix transactions in different slots are added between rescans.
+-- have independent counters.
+-- NOTE: Only used for sync records and migrations. Local batch storage uses
+-- count-based dedup (StoreBatchRecords) which is immune to index shift.
 -- @param records table Array of records (each must have .id from ComputeTxHash)
 function GBL:AssignOccurrenceIndices(records)
     local counts = {}
@@ -125,6 +126,171 @@ function GBL:AssignOccurrenceIndices(records)
         record._occurrence = occ
         record.id = baseHash .. ":" .. occ
     end
+end
+
+------------------------------------------------------------------------
+-- Count-based batch dedup
+------------------------------------------------------------------------
+
+--- Split a baseHash into its prefix and time slot number.
+-- baseHash format: "type|player|...|timeSlot"
+-- The prefix always ends with "|", followed by the numeric slot.
+-- @param baseHash string Base hash from ComputeTxHash
+-- @return string prefix, number slot
+function GBL:SplitBaseHash(baseHash)
+    if not baseHash then return nil, nil end
+    local prefix, slotStr = baseHash:match("^(.-)(%d+)$")
+    return prefix, tonumber(slotStr)
+end
+
+--- Count sequential occurrence entries at an exact slot in seenTxHashes.
+-- Scans :0, :1, :2, ... and stops at the first gap.
+-- @param baseHash string Base hash (prefix + timeSlot)
+-- @param guildData table Guild data table
+-- @return number Count of stored occurrences
+function GBL:CountStoredAtSlot(baseHash, guildData)
+    if not guildData or not guildData.seenTxHashes then return 0 end
+    local count = 0
+    for occ = 0, 999 do
+        if guildData.seenTxHashes[baseHash .. ":" .. occ] then
+            count = count + 1
+        else
+            break
+        end
+    end
+    return count
+end
+
+--- Count stored occurrences for a baseHash, including adjacent-slot drift.
+-- Used for initial scan dedup (no session cache). Checks the exact slot
+-- first; if 0 found, probes adjacent slots with timestamp proximity.
+-- @param baseHash string Base hash (prefix + timeSlot)
+-- @param batchTimestamp number Timestamp of the batch records
+-- @param guildData table Guild data with seenTxHashes
+-- @return number Count of stored records matching this hash
+function GBL:CountStoredForHash(baseHash, batchTimestamp, guildData)
+    if not guildData or not guildData.seenTxHashes then return 0 end
+
+    -- Try exact slot first
+    local exactCount = self:CountStoredAtSlot(baseHash, guildData)
+    if exactCount > 0 then return exactCount end
+
+    -- Check adjacent slots for hour-boundary drift
+    local prefix, slot = self:SplitBaseHash(baseHash)
+    if not slot then return 0 end
+
+    for _, adjSlot in ipairs({ slot - 1, slot + 1 }) do
+        local adjHash = prefix .. adjSlot
+        local adjCount = 0
+        for occ = 0, 999 do
+            local key = adjHash .. ":" .. occ
+            local storedEntry = guildData.seenTxHashes[key]
+            if storedEntry then
+                local storedTs = type(storedEntry) == "table"
+                    and (storedEntry.timestamp or 0) or storedEntry
+                if type(storedTs) ~= "number" or storedTs == 0
+                    or math.abs(batchTimestamp - storedTs) < 3600 then
+                    adjCount = adjCount + 1
+                end
+            else
+                break
+            end
+        end
+        if adjCount > 0 then return adjCount end
+    end
+
+    return 0
+end
+
+--- Check adjacent slots in a session-local prevCounts table for drift.
+-- Used during rescan when hour boundary shifts all baseHashes.
+-- @param baseHash string Current baseHash
+-- @param prevCounts table Previous batch counts {[baseHash] = count}
+-- @return number Count from adjacent slot, or 0
+function GBL:FindDriftedCount(baseHash, prevCounts)
+    if not prevCounts then return 0 end
+    local prefix, slot = self:SplitBaseHash(baseHash)
+    if not slot then return 0 end
+
+    for _, adjSlot in ipairs({ slot - 1, slot + 1 }) do
+        local adjHash = prefix .. adjSlot
+        if prevCounts[adjHash] then
+            return prevCounts[adjHash]
+        end
+    end
+    return 0
+end
+
+--- Store a batch of records using count-based dedup.
+-- Groups records by baseHash, compares counts against previously-known
+-- state (session cache or seenTxHashes), and stores only the excess.
+-- Immune to occurrence index shift because it compares counts, not positions.
+-- @param batch table Array of records (each with .id = baseHash from ComputeTxHash)
+-- @param guildData table Guild data from AceDB
+-- @param storageKey string "transactions" or "moneyTransactions"
+-- @param prevCounts table|nil Session-local previous batch counts (nil for initial scan)
+-- @return number stored Count of newly stored records
+-- @return table currentCounts The batch counts for session cache update
+function GBL:StoreBatchRecords(batch, guildData, storageKey, prevCounts)
+    if not guildData then return 0, {} end
+
+    -- Group by baseHash (preserve first-seen order for deterministic storage)
+    local groups = {}
+    local order = {}
+    local currentCounts = {}
+    for _, record in ipairs(batch) do
+        local baseHash = record.id
+        if not groups[baseHash] then
+            groups[baseHash] = {}
+            order[#order + 1] = baseHash
+        end
+        groups[baseHash][#groups[baseHash] + 1] = record
+        currentCounts[baseHash] = (currentCounts[baseHash] or 0) + 1
+    end
+
+    local stored = 0
+    for _, baseHash in ipairs(order) do
+        local group = groups[baseHash]
+        local batchCount = #group
+        local alreadyKnown
+
+        if prevCounts then
+            -- Rescan: compare with previous batch (immune to seenTxHashes inflation)
+            alreadyKnown = prevCounts[baseHash] or 0
+            if alreadyKnown == 0 then
+                alreadyKnown = self:FindDriftedCount(baseHash, prevCounts)
+            end
+        else
+            -- Initial scan: count from seenTxHashes (with adjacent-slot drift)
+            alreadyKnown = self:CountStoredForHash(
+                baseHash, group[1].timestamp or 0, guildData)
+        end
+
+        local newCount = math.max(0, batchCount - alreadyKnown)
+
+        if newCount > 0 then
+            -- Find next available occurrence index at this slot
+            local nextOcc = self:CountStoredAtSlot(baseHash, guildData)
+
+            -- Validate records and store
+            for i = 1, newCount do
+                local record = group[i]
+                if record.type and record.type ~= ""
+                    and record.player and record.player ~= "" then
+                    record._occurrence = nextOcc
+                    record.id = baseHash .. ":" .. nextOcc
+                    nextOcc = nextOcc + 1
+
+                    self:MarkSeen(record.id, record.timestamp, guildData)
+                    guildData[storageKey][#guildData[storageKey] + 1] = record
+                    self:UpdatePlayerStats(record, guildData)
+                    stored = stored + 1
+                end
+            end
+        end
+    end
+
+    return stored, currentCounts
 end
 
 ------------------------------------------------------------------------

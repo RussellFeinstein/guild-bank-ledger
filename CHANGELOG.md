@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] — 2026-04-13
+
+### Fixed
+- **Within-slot duplicate records on rescan** — v0.14.0 fixed cross-slot occurrence index shift but left the within-slot case broken: when a new identical transaction appeared in the same hour (same player, item, count, tab), WoW API's newest-first ordering caused it to steal occurrence `:0` from the existing record, creating a duplicate on every rescan. Root cause: `AssignOccurrenceIndices` assigns indices by batch position, which shifts when new records are prepended. Fix: replaced position-dependent occurrence indexing with count-based batch dedup (`StoreBatchRecords`). Compares "how many records exist per baseHash" against a session-local cache (rescans) or `seenTxHashes` (initial scan), storing only the difference. Immune to API ordering changes. Also handles hour-boundary drift via adjacent-slot probing.
+
 ## [0.14.0] — 2026-04-13
 
 ### Fixed

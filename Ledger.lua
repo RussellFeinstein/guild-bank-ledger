@@ -238,8 +238,9 @@ end
 ------------------------------------------------------------------------
 
 --- Read all item transactions from a single guild bank tab.
--- Reads the batch, assigns occurrence indices to distinguish identical
--- transactions, then stores non-duplicates.
+-- Uses count-based batch dedup: compares how many records exist per
+-- baseHash against the session cache (rescan) or seenTxHashes (initial).
+-- Immune to occurrence index shift from WoW API ordering changes.
 -- @param tab number Tab index
 -- @param guildData table Guild data from AceDB
 -- @return number Count of newly stored (non-duplicate) records
@@ -258,26 +259,23 @@ function GBL:ReadTabTransactions(tab, guildData)
                 txType, name, itemLink, count, tab1, tab2,
                 year, month, day, hour
             )
-            table.insert(batch, record)
+            batch[#batch + 1] = record
         end
     end
 
-    -- Assign occurrence indices so identical transactions get unique hashes
-    self:AssignOccurrenceIndices(batch)
+    -- Session-local cache: nil on first scan, populated on subsequent rescans
+    if not self._lastTabBatchCounts then self._lastTabBatchCounts = {} end
+    local prevCounts = self._lastTabBatchCounts[tab]
 
-    local stored = 0
-    for _, record in ipairs(batch) do
-        if self:StoreTx(record, guildData) then
-            stored = stored + 1
-        end
-    end
+    local stored, currentCounts = self:StoreBatchRecords(
+        batch, guildData, "transactions", prevCounts)
 
+    self._lastTabBatchCounts[tab] = currentCounts
     return stored
 end
 
 --- Read all money transactions from the guild bank money log.
--- Reads the batch, assigns occurrence indices to distinguish identical
--- transactions, then stores non-duplicates.
+-- Uses count-based batch dedup (same approach as ReadTabTransactions).
 -- @param guildData table Guild data from AceDB
 -- @return number Count of newly stored (non-duplicate) records
 function GBL:ReadMoneyTransactions(guildData)
@@ -295,20 +293,16 @@ function GBL:ReadMoneyTransactions(guildData)
                 txType, name, amount,
                 year, month, day, hour
             )
-            table.insert(batch, record)
+            batch[#batch + 1] = record
         end
     end
 
-    -- Assign occurrence indices so identical transactions get unique hashes
-    self:AssignOccurrenceIndices(batch)
+    local prevCounts = self._lastMoneyBatchCounts
 
-    local stored = 0
-    for _, record in ipairs(batch) do
-        if self:StoreMoneyTx(record, guildData) then
-            stored = stored + 1
-        end
-    end
+    local stored, currentCounts = self:StoreBatchRecords(
+        batch, guildData, "moneyTransactions", prevCounts)
 
+    self._lastMoneyBatchCounts = currentCounts
     return stored
 end
 
