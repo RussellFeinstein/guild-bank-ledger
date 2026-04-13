@@ -5,6 +5,23 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] — 2026-04-13
+
+### Added
+- **Item name resolution for synced records** — new `ItemCache.lua` module lazily resolves item names from IDs using `GetItemInfo` + `GET_ITEM_INFO_RECEIVED`. Synced records that previously showed "Item #XXXXX" or blank item columns now display actual item names after a brief async load.
+- **Guild roster cache** — persistent `playerRealms` mapping in SavedVariables tracks which realm each guild member belongs to. Updated on every `GUILD_ROSTER_UPDATE`. Survives guild departures.
+- **StoreTx/StoreMoneyTx validation** — defense-in-depth: records with empty `type` or `player` are rejected at storage time, preventing corrupted records from entering the database.
+
+### Changed
+- **Player names always stored as Name-Realm** — all transaction records, playerStats keys, and summary player sets now use realm-qualified names (e.g., "Alice-Tichondrius" instead of "Alice"). Cross-realm and cross-faction guilds no longer fragment player data.
+- **Sync restricted to exact version match** — peers on different addon versions are refused sync with an audit trail warning. Prevents data corruption when data formats change between versions. Protocol version bumped to 3.
+- **Schema migration v2→v3** — on first load, all existing bare player names are resolved to Name-Realm format, corrupted records are removed, record IDs and seenTxHashes are rebuilt, playerStats entries are merged on collision, and daily/weekly summary player sets are normalized.
+
+### Fixed
+- **Sync chunk count off-by-one** — "send complete" log previously reported x+1/x chunks (e.g., "6/5 chunks"). The counter was incremented past the last chunk before `FinishSending()` read it. Now reports the correct count.
+- **Consumption view player fragmentation** — players appearing as both "Alice" and "Alice-Realm" in the consumption view are now correctly merged into a single entry.
+- **Player filter with realm names** — filter comparison now uses `StripRealm()` on both sides, so filtering works whether the user types a bare name or Name-Realm format.
+
 ## [0.12.2] — 2026-04-12
 
 ### Fixed

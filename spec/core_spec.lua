@@ -115,7 +115,7 @@ describe("Core", function()
         it("status prints version and guild info", function()
             MockWoW.guild.name = "Test Guild"
             GBL:HandleSlashCommand("status")
-            assert.is_true(Helpers.printContains("0.12.2"))
+            assert.is_true(Helpers.printContains("0.13.0"))
             assert.is_true(Helpers.printContains("Test Guild"))
         end)
 

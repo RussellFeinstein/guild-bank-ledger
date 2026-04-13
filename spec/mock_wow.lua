@@ -68,6 +68,9 @@ function MockWoW.reset()
     MockWoW.player = { name = "TestOfficer", realm = "TestRealm" }
     MockWoW.inRaid = false
     MockWoW.itemInfo = {}
+    MockWoW.itemNames = {}
+    MockWoW.itemInfoRequested = {}
+    MockWoW.guildRoster = {}
     MockWoW.serverTime = 1711700000
     MockWoW.pendingTimers = {}
     MockWoW.frames = {}
@@ -285,6 +288,39 @@ function MockWoW.install()
         return nil
     end
 
+    -- Realm info
+    _G.GetNormalizedRealmName = function()
+        return MockWoW.player.realm
+    end
+
+    _G.GetRealmName = function()
+        return MockWoW.player.realm
+    end
+
+    -- Guild roster
+    _G.GetNumGuildMembers = function()
+        return #MockWoW.guildRoster
+    end
+
+    _G.GetGuildRosterInfo = function(index)
+        local m = MockWoW.guildRoster[index]
+        if not m then return nil end
+        return m.name, m.rank or "Member", m.rankIndex or 1,
+               m.level or 70, m.classDisplayName or "Warrior",
+               m.zone or "", m.publicNote or "", m.officerNote or "",
+               m.isOnline ~= false, m.status or 0, m.classFileName or "WARRIOR",
+               m.achievementPoints or 0, m.achievementRank or 0
+    end
+
+    -- Item info (name/link lookup for ItemCache)
+    _G.GetItemInfo = function(itemID)
+        local info = MockWoW.itemNames[itemID]
+        if info then
+            return info.name, info.link
+        end
+        return nil
+    end
+
     -- C_Item (configurable per itemID via MockWoW.itemInfo)
     _G.C_Item = {
         GetItemInfoInstant = function(itemID)
@@ -293,6 +329,9 @@ function MockWoW.install()
             local classID = info and info.classID or 0
             local subclassID = info and info.subclassID or 0
             return itemID, "", "", "", "", classID, subclassID
+        end,
+        RequestLoadItemData = function(itemID)
+            MockWoW.itemInfoRequested[itemID] = true
         end,
     }
 

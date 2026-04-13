@@ -8,7 +8,7 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 
 -- Protocol constants
 local PREFIX = "GBLSync"
-local PROTOCOL_VERSION = 2
+local PROTOCOL_VERSION = 3
 local MAX_RECORDS_PER_CHUNK = 15
 local CHUNK_BYTE_BUDGET = 1600
 local MAX_RETRIES = 3
@@ -341,10 +341,10 @@ function GBL:HandleHello(sender, data)
         self:SendHelloReply(sender)
     end
 
-    -- Major version mismatch — warn and refuse sync
-    if data.version and self:MajorVersion(data.version) ~= self:MajorVersion(self.version) then
+    -- Exact version match — refuse sync on any version difference
+    if data.version and data.version ~= self.version then
         self:AddAuditEntry("WARNING: " .. sender .. " on v"
-            .. tostring(data.version) .. " (major version mismatch)")
+            .. tostring(data.version) .. " (version mismatch, need v" .. self.version .. ")")
         return
     end
 
@@ -413,16 +413,7 @@ end
 -- Payload helpers
 ------------------------------------------------------------------------
 
---- Strip realm suffix from a character name for comparison.
--- Within a guild, character names are unique, so base name is sufficient.
--- Unlike Ambiguate, this produces identical results on every client regardless
--- of the local player's realm — critical for cross-realm guild sync.
--- @param name string Character name, possibly realm-qualified ("Name-Realm")
--- @return string Base name without realm suffix
-local function baseName(name)
-    if not name then return "" end
-    return name:match("^([^%-]+)") or name
-end
+-- baseName is now GBL:StripRealm() in Core.lua — used at call sites below
 
 --- Strip reconstructable fields from a transaction record for sync.
 -- Removes itemLink (large, reconstructable from itemID) to reduce payload.
@@ -496,7 +487,7 @@ local function reconstructSyncRecord(record, sender)
 
     -- 5. Set scanTime to receipt time; mark sync origin
     record.scanTime = GetServerTime()
-    record.scannedBy = "sync:" .. (sender or "unknown")
+    record.scannedBy = "sync:" .. GBL:ResolvePlayerName(sender or "unknown")
     -- tabName/destTabName intentionally left nil — BackfillTabNames fills them
 
     -- 6. Validate required fields — reject corrupted records
@@ -505,6 +496,9 @@ local function reconstructSyncRecord(record, sender)
     --    missing the two fields every record must have.
     if not record.type or record.type == "" then return false end
     if not record.player or record.player == "" then return false end
+
+    -- 7. Ensure player name is realm-qualified
+    record.player = GBL:ResolvePlayerName(record.player)
     return true
 end
 
@@ -783,6 +777,7 @@ function GBL:SendNextChunk()
     local chunk = syncState.sendChunks[idx]
 
     if not chunk then
+        syncState.sendChunkIndex = syncState.sendChunkIndex - 1
         self:FinishSending()
         return
     end
@@ -955,7 +950,7 @@ function GBL:HandleSyncData(sender, data)
         syncState.receiveSource = sender
         syncState.receiveGot = 0
         syncState.receiveStored = 0
-    elseif baseName(sender) ~= baseName(syncState.receiveSource) then
+    elseif self:StripRealm(sender) ~= self:StripRealm(syncState.receiveSource) then
         -- Reject data from a different sender during active receive
         self:AddAuditEntry("Ignored SYNC_DATA from " .. sender
             .. " (receiving from " .. (syncState.receiveSource or "?") .. ")")
@@ -1102,7 +1097,7 @@ end
 -- @param sender string Sender name
 -- @param data table Deserialized ACK payload
 function GBL:HandleAck(sender, data)
-    if not syncState.sending or baseName(sender) ~= baseName(syncState.sendTarget) then return end
+    if not syncState.sending or self:StripRealm(sender) ~= self:StripRealm(syncState.sendTarget) then return end
 
     if syncState.sendTimer then
         syncState.sendTimer:Cancel()
@@ -1216,14 +1211,6 @@ end
 ------------------------------------------------------------------------
 -- Helpers
 ------------------------------------------------------------------------
-
---- Extract the major version number from a version string.
--- @param versionStr string e.g. "0.5.0"
--- @return number Major version (0 if unparseable)
-function GBL:MajorVersion(versionStr)
-    if not versionStr then return 0 end
-    return tonumber(versionStr:match("^(%d+)")) or 0
-end
 
 --- Append an entry to the session audit trail (capped at 200).
 -- @param message string Human-readable log entry
@@ -1363,7 +1350,7 @@ end
 -- @param sender string Sender name
 -- @param data table Deserialized NACK payload
 function GBL:HandleNack(sender, data)
-    if not syncState.sending or baseName(sender) ~= baseName(syncState.sendTarget) then
+    if not syncState.sending or self:StripRealm(sender) ~= self:StripRealm(syncState.sendTarget) then
         return
     end
 

@@ -89,7 +89,7 @@ function GBL:CreateTxRecord(txType, name, itemLink, count, tab, destTab, year, m
     local category = self:CategorizeItem(classID, subclassID)
     local timestamp = self:ComputeAbsoluteTimestamp(year, month, day, hour)
     local scanTime = GetServerTime()
-    local scannedBy = UnitName("player") or "Unknown"
+    local scannedBy = self:ResolvePlayerName(UnitName("player") or "Unknown")
 
     -- Resolve tab names (available while bank is open)
     local tabName = self:GetTabName(tab)
@@ -97,7 +97,7 @@ function GBL:CreateTxRecord(txType, name, itemLink, count, tab, destTab, year, m
 
     local record = {
         type = txType,
-        player = name,
+        player = self:ResolvePlayerName(name),
         itemLink = itemLink,
         itemID = itemID,
         count = count or 0,
@@ -134,11 +134,11 @@ function GBL:CreateMoneyTxRecord(txType, name, amount, year, month, day, hour)
 
     local timestamp = self:ComputeAbsoluteTimestamp(year, month, day, hour)
     local scanTime = GetServerTime()
-    local scannedBy = UnitName("player") or "Unknown"
+    local scannedBy = self:ResolvePlayerName(UnitName("player") or "Unknown")
 
     local record = {
         type = txType,
-        player = name,
+        player = self:ResolvePlayerName(name),
         amount = amount or 0,
         timestamp = timestamp,
         scanTime = scanTime,
@@ -159,6 +159,8 @@ end
 -- @return boolean True if stored (not duplicate)
 function GBL:StoreTx(record, guildData)
     if not guildData then return false end
+    if not record.type or record.type == "" then return false end
+    if not record.player or record.player == "" then return false end
 
     if self:IsDuplicate(record, guildData) then
         return false
@@ -176,6 +178,8 @@ end
 -- @return boolean True if stored (not duplicate)
 function GBL:StoreMoneyTx(record, guildData)
     if not guildData then return false end
+    if not record.type or record.type == "" then return false end
+    if not record.player or record.player == "" then return false end
 
     if self:IsDuplicate(record, guildData) then
         return false

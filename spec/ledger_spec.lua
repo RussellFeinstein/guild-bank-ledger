@@ -54,7 +54,7 @@ describe("Ledger", function()
             local rec = GBL:CreateTxRecord("withdraw", "Thrall", link, 5, 1, nil, 0, 0, 0, 1)
 
             assert.equals("withdraw", rec.type)
-            assert.equals("Thrall", rec.player)
+            assert.equals("Thrall-TestRealm", rec.player)
             assert.equals(54321, rec.itemID)
             assert.equals(5, rec.count)
             assert.equals(1, rec.tab)
@@ -64,7 +64,7 @@ describe("Ledger", function()
             assert.equals("consumable", rec.category)
             assert.equals(MockWoW.serverTime - 3600, rec.timestamp)
             assert.equals(MockWoW.serverTime, rec.scanTime)
-            assert.equals("TestOfficer", rec.scannedBy)
+            assert.equals("TestOfficer-TestRealm", rec.scannedBy)
             assert.is_string(rec.id)
         end)
 
@@ -82,11 +82,11 @@ describe("Ledger", function()
             local rec = GBL:CreateMoneyTxRecord("deposit", "Thrall", 500000, 0, 0, 0, 2)
 
             assert.equals("deposit", rec.type)
-            assert.equals("Thrall", rec.player)
+            assert.equals("Thrall-TestRealm", rec.player)
             assert.equals(500000, rec.amount)
             assert.equals(MockWoW.serverTime - 7200, rec.timestamp)
             assert.equals(MockWoW.serverTime, rec.scanTime)
-            assert.equals("TestOfficer", rec.scannedBy)
+            assert.equals("TestOfficer-TestRealm", rec.scannedBy)
             assert.is_string(rec.id)
         end)
     end)
@@ -239,7 +239,7 @@ describe("Ledger", function()
             assert.equals(3, #guildData.moneyTransactions)
             assert.equals("deposit", guildData.moneyTransactions[1].type)
             assert.equals(500000, guildData.moneyTransactions[1].amount)
-            assert.equals("Alice", guildData.moneyTransactions[1].player)
+            assert.equals("Alice-TestRealm", guildData.moneyTransactions[1].player)
             assert.equals("repair", guildData.moneyTransactions[2].type)
             -- "withdrawal" from API is normalized to "withdraw" in storage
             assert.equals("withdraw", guildData.moneyTransactions[3].type)
@@ -257,7 +257,7 @@ describe("Ledger", function()
 
             GBL:ReadMoneyTransactions(guildData)
 
-            local stats = guildData.playerStats["Alice"]
+            local stats = guildData.playerStats["Alice-TestRealm"]
             assert.equals(500000, stats.moneyDeposited)
             assert.equals(75000, stats.moneyWithdrawn)
         end)
@@ -337,8 +337,8 @@ describe("Ledger", function()
             -- Find Alice and Bob
             local alice, bob
             for _, s in ipairs(summaries) do
-                if s.player == "Alice" then alice = s end
-                if s.player == "Bob" then bob = s end
+                if s.player == "Alice-TestRealm" then alice = s end
+                if s.player == "Bob-TestRealm" then bob = s end
             end
 
             assert.is_not_nil(alice)

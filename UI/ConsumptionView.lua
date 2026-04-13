@@ -277,6 +277,8 @@ function GBL:ExtractItemName(itemLink, itemID)
         end
     end
     if itemID then
+        local cachedName = self:GetCachedItemInfo(itemID)
+        if cachedName then return cachedName end
         return "Item #" .. tostring(itemID)
     end
     return "Unknown Item"

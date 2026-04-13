@@ -189,7 +189,12 @@ function GBL:CreateLedgerView(container, transactions, filters)
         elseif col.key == "type" then
             return self:GetTxTypeDisplay(tx.type).label
         elseif col.key == "itemLink" then
-            return tx.itemLink or ""
+            if tx.itemLink then return tx.itemLink end
+            if tx.itemID then
+                local _name, link = self:GetCachedItemInfo(tx.itemID)
+                return link or ("[Item #" .. tx.itemID .. "]")
+            end
+            return ""
         elseif col.key == "count" then
             return tostring(tx.count or 0)
         elseif col.key == "category" then

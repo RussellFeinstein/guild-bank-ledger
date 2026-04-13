@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.12.2"
+local VERSION = "0.13.0"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -39,8 +39,9 @@ local defaults = {
                 altLinks = {},
                 stockAlerts = {},
                 seenTxHashes = {},
+                playerRealms = {},
                 syncState = { lastSyncTimestamp = 0, syncVersion = 0, peers = {} },
-                schemaVersion = 2,
+                schemaVersion = 3,
             },
         },
     },
@@ -92,6 +93,7 @@ function GBL:OnEnable()
     end
 
     self:RegisterEvent("GUILD_ROSTER_UPDATE")
+    self:RegisterEvent("GET_ITEM_INFO_RECEIVED", "OnItemInfoReceived")
     self:InstallBankCloseHook()
 
     -- Migrate occurrence scheme before sync starts (v0.12.0)
@@ -197,11 +199,283 @@ function GBL:MigrateOccurrenceScheme(guildData)
     self:ResetHashCache()
 end
 
+------------------------------------------------------------------------
+-- Player name helpers
+------------------------------------------------------------------------
+
+--- Resolve a bare player name to Name-Realm format.
+-- Priority: already-qualified → roster cache → local realm fallback.
+-- @param name string Bare or already-qualified name
+-- @return string Name-Realm format
+function GBL:ResolvePlayerName(name)
+    if not name or name == "" then return name end
+    -- Already has realm suffix
+    if name:find("%-") then return name end
+    -- Check persistent roster cache
+    local guildData = self:GetGuildData()
+    if guildData and guildData.playerRealms and guildData.playerRealms[name] then
+        return name .. "-" .. guildData.playerRealms[name]
+    end
+    -- Fallback: append local realm
+    local realm = GetNormalizedRealmName()
+        or (GetRealmName and GetRealmName() and GetRealmName():gsub("%s", ""))
+        or "UnknownRealm"
+    return name .. "-" .. realm
+end
+
+--- Strip realm suffix from a character name.
+-- For peer matching and filter comparison only — records should always
+-- store the full Name-Realm format.
+-- @param name string Character name, possibly realm-qualified
+-- @return string Base name without realm suffix
+function GBL:StripRealm(name)
+    if not name then return "" end
+    return name:match("^([^%-]+)") or name
+end
+
+--- Build/update the persistent guild roster cache.
+-- Maps bare player names to their realm, persisted in SavedVariables.
+-- Called on GUILD_ROSTER_UPDATE so the mapping survives guild departures.
+function GBL:BuildRosterCache()
+    if not self.db then return end
+    local numMembers = GetNumGuildMembers()
+    local guildData = self:GetGuildData()
+    if not guildData or not numMembers or numMembers == 0 then return end
+    if not guildData.playerRealms then guildData.playerRealms = {} end
+    local localRealm = GetNormalizedRealmName()
+        or (GetRealmName and GetRealmName() and GetRealmName():gsub("%s", ""))
+    for i = 1, numMembers do
+        local fullName = GetGuildRosterInfo(i)
+        if fullName then
+            local base, realm = fullName:match("^([^%-]+)%-(.+)$")
+            if base and realm then
+                guildData.playerRealms[base] = realm
+            elseif localRealm then
+                guildData.playerRealms[fullName] = localRealm
+            end
+        end
+    end
+end
+
+------------------------------------------------------------------------
+-- Schema migration v2 → v3: Name-Realm normalization
+------------------------------------------------------------------------
+
+--- Migrate player names from bare to Name-Realm format.
+-- Also removes corrupted records and merges duplicate playerStats entries.
+-- @param guildData table Guild data from AceDB
+function GBL:MigrateSchemaV2ToV3(guildData)
+    if not guildData or (guildData.schemaVersion or 0) >= 3 then return end
+
+    if not guildData.playerRealms then guildData.playerRealms = {} end
+
+    -- Step 1: Harvest realm hints from existing records
+    -- Synced records may already have realm-qualified player names
+    local allRecords = {}
+    for _, tx in ipairs(guildData.transactions or {}) do
+        allRecords[#allRecords + 1] = tx
+    end
+    for _, tx in ipairs(guildData.moneyTransactions or {}) do
+        allRecords[#allRecords + 1] = tx
+    end
+
+    for _, record in ipairs(allRecords) do
+        if record.player then
+            local base, realm = record.player:match("^([^%-]+)%-(.+)$")
+            if base and realm then
+                guildData.playerRealms[base] = realm
+            end
+        end
+        if record.scannedBy then
+            local senderPart = record.scannedBy:match("^sync:(.+)$")
+            if senderPart then
+                local base, realm = senderPart:match("^([^%-]+)%-(.+)$")
+                if base and realm then
+                    guildData.playerRealms[base] = realm
+                end
+            end
+        end
+    end
+
+    -- Step 2: Remove corrupted records
+    local function isCorrupted(record)
+        if not record.type or record.type == "" then return true end
+        if not record.player or record.player == "" then return true end
+        for key in pairs(record) do
+            if type(key) == "string" and key ~= "type" and key:match("^typ") then
+                return true
+            end
+        end
+        return false
+    end
+    local function removeCorrupted(arr)
+        for i = #arr, 1, -1 do
+            if isCorrupted(arr[i]) then
+                table.remove(arr, i)
+            end
+        end
+    end
+    removeCorrupted(guildData.transactions)
+    removeCorrupted(guildData.moneyTransactions)
+
+    -- Step 3: Normalize player names in all records
+    for _, record in ipairs(guildData.transactions) do
+        record.player = self:ResolvePlayerName(record.player)
+        if record.scannedBy then
+            local senderPart = record.scannedBy:match("^sync:(.+)$")
+            if senderPart then
+                record.scannedBy = "sync:" .. self:ResolvePlayerName(senderPart)
+            else
+                record.scannedBy = self:ResolvePlayerName(record.scannedBy)
+            end
+        end
+    end
+    for _, record in ipairs(guildData.moneyTransactions) do
+        record.player = self:ResolvePlayerName(record.player)
+        if record.scannedBy then
+            local senderPart = record.scannedBy:match("^sync:(.+)$")
+            if senderPart then
+                record.scannedBy = "sync:" .. self:ResolvePlayerName(senderPart)
+            else
+                record.scannedBy = self:ResolvePlayerName(record.scannedBy)
+            end
+        end
+    end
+
+    -- Step 4: Normalize daily/weekly summary player sets
+    for _, summary in pairs(guildData.dailySummaries or {}) do
+        if summary.players then
+            local newPlayers = {}
+            for name in pairs(summary.players) do
+                newPlayers[self:ResolvePlayerName(name)] = true
+            end
+            summary.players = newPlayers
+        end
+    end
+    for _, summary in pairs(guildData.weeklySummaries or {}) do
+        if summary.players then
+            local newPlayers = {}
+            for name in pairs(summary.players) do
+                newPlayers[self:ResolvePlayerName(name)] = true
+            end
+            summary.players = newPlayers
+        end
+    end
+
+    -- Step 5: Recompute all record IDs (player name is in the hash prefix)
+    local newAllRecords = {}
+    for _, tx in ipairs(guildData.transactions) do
+        newAllRecords[#newAllRecords + 1] = tx
+    end
+    for _, tx in ipairs(guildData.moneyTransactions) do
+        newAllRecords[#newAllRecords + 1] = tx
+    end
+
+    if #newAllRecords > 0 then
+        local groups = {}
+        for _, record in ipairs(newAllRecords) do
+            local prefix = self:BuildTxPrefix(record)
+            if not groups[prefix] then groups[prefix] = {} end
+            groups[prefix][#groups[prefix] + 1] = record
+        end
+
+        for _, group in pairs(groups) do
+            table.sort(group, function(a, b)
+                if (a.timestamp or 0) == (b.timestamp or 0) then
+                    return (a.id or "") < (b.id or "")
+                end
+                return (a.timestamp or 0) < (b.timestamp or 0)
+            end)
+            for i, record in ipairs(group) do
+                local occ = i - 1
+                local baseHash = self:ComputeTxHash(record)
+                record.id = baseHash .. ":" .. occ
+                record._occurrence = occ
+            end
+        end
+    end
+
+    -- Step 6: Rebuild seenTxHashes from scratch
+    for k in pairs(guildData.seenTxHashes) do
+        guildData.seenTxHashes[k] = nil
+    end
+    for _, record in ipairs(newAllRecords) do
+        if record.id then
+            guildData.seenTxHashes[record.id] = record.timestamp or 0
+        end
+    end
+
+    -- Step 7: Merge playerStats
+    local newStats = {}
+    for name, stats in pairs(guildData.playerStats) do
+        local resolved = self:ResolvePlayerName(name)
+        if newStats[resolved] then
+            -- Merge: sum counts, min firstSeen, max lastSeen
+            local existing = newStats[resolved]
+            existing.totalWithdrawCount = (existing.totalWithdrawCount or 0)
+                + (stats.totalWithdrawCount or 0)
+            existing.totalDepositCount = (existing.totalDepositCount or 0)
+                + (stats.totalDepositCount or 0)
+            existing.moneyWithdrawn = (existing.moneyWithdrawn or 0)
+                + (stats.moneyWithdrawn or 0)
+            existing.moneyDeposited = (existing.moneyDeposited or 0)
+                + (stats.moneyDeposited or 0)
+            if (stats.firstSeen or 0) > 0 then
+                if existing.firstSeen == 0 then
+                    existing.firstSeen = stats.firstSeen
+                else
+                    existing.firstSeen = math.min(existing.firstSeen, stats.firstSeen)
+                end
+            end
+            if (stats.lastSeen or 0) > 0 then
+                existing.lastSeen = math.max(existing.lastSeen or 0, stats.lastSeen)
+            end
+            -- Merge withdrawal/deposit category breakdowns
+            for cat, count in pairs(stats.withdrawals or {}) do
+                existing.withdrawals[cat] = (existing.withdrawals[cat] or 0) + count
+            end
+            for cat, count in pairs(stats.deposits or {}) do
+                existing.deposits[cat] = (existing.deposits[cat] or 0) + count
+            end
+        else
+            -- Copy stats entry (shallow copy for tables)
+            newStats[resolved] = {
+                withdrawals = {},
+                deposits = {},
+                totalWithdrawCount = stats.totalWithdrawCount or 0,
+                totalDepositCount = stats.totalDepositCount or 0,
+                moneyWithdrawn = stats.moneyWithdrawn or 0,
+                moneyDeposited = stats.moneyDeposited or 0,
+                firstSeen = stats.firstSeen or 0,
+                lastSeen = stats.lastSeen or 0,
+            }
+            for cat, count in pairs(stats.withdrawals or {}) do
+                newStats[resolved].withdrawals[cat] = count
+            end
+            for cat, count in pairs(stats.deposits or {}) do
+                newStats[resolved].deposits[cat] = count
+            end
+        end
+    end
+
+    -- Replace playerStats (clear and repopulate to preserve AceDB table ref)
+    for k in pairs(guildData.playerStats) do
+        guildData.playerStats[k] = nil
+    end
+    for k, v in pairs(newStats) do
+        guildData.playerStats[k] = v
+    end
+
+    guildData.schemaVersion = 3
+    self:ResetHashCache()
+end
+
 --- Run migration for all guild data namespaces.
 function GBL:MigrateAllGuilds()
     if not self.db or not self.db.global or not self.db.global.guilds then return end
     for _, guildData in pairs(self.db.global.guilds) do
         self:MigrateOccurrenceScheme(guildData)
+        self:MigrateSchemaV2ToV3(guildData)
     end
 end
 
@@ -231,6 +505,9 @@ function GBL:PLAYER_INTERACTION_MANAGER_FRAME_HIDE(_event, interactionType)
 end
 
 function GBL:GUILD_ROSTER_UPDATE()
+    -- Update the persistent player→realm mapping
+    self:BuildRosterCache()
+
     -- On the first roster update after login, guild data becomes available.
     -- Broadcast HELLO now so other addon users discover us immediately.
     if not self._sentPostLoginHello and self.db.profile.sync.enabled then

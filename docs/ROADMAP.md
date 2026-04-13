@@ -14,7 +14,7 @@
 - **Patches (v0.4.1)** — Gold transaction recording fixes, Gold Log tab
 - **M5 (v0.5.0)** — Multi-officer sync via AceComm (HELLO/SYNC_REQUEST/SYNC_DATA/ACK protocol, peer tracking, audit trail, Sync tab)
 
-**Current state:** 435 tests, 14 production files, luacheck clean. (v0.12.2 — sync record validation + corrupted record cleanup)
+**Current state:** 472 tests, 15 production files, luacheck clean. (v0.13.0 — data integrity: Name-Realm normalization, item cache, exact version sync gate)
 
 ---
 

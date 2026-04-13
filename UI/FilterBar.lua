@@ -109,7 +109,7 @@ function GBL:MatchesFilters(record, filters)
 
     -- Player
     if filters.player and filters.player ~= "ALL" then
-        if record.player ~= filters.player then
+        if self:StripRealm(record.player) ~= self:StripRealm(filters.player) then
             return false
         end
     end

@@ -13,6 +13,7 @@ WoW addon that persistently logs guild bank transactions. Lua 5.1 + Ace3 stack. 
 - **Ledger.lua** — Transaction recording from GetGuildBankTransaction API
 - **Storage.lua** — Tiered storage, compaction (30d daily, 90d weekly), pruning
 - **Fingerprint.lua** — Dataset fingerprinting (djb2 hash, XOR aggregation, per-day bucket hashes)
+- **ItemCache.lua** — Lazy async item info cache (GetItemInfo + GET_ITEM_INFO_RECEIVED for synced records)
 - **Sync.lua** — Guild-wide sync via AceComm (HELLO/SYNC_REQUEST/SYNC_DATA/ACK protocol, fingerprint-based delta sync)
 - **UI/Accessibility.lua** — Colorblind-safe palettes, font scaling, keyboard nav, triple encoding
 - **UI/FilterBar.lua** — Transaction filter logic and AceGUI filter widgets
@@ -59,4 +60,4 @@ luacheck .                 # lint production code
 
 ## Version
 
-Current: 0.12.2 (see `VERSION` file)
+Current: 0.13.0 (see `VERSION` file)
