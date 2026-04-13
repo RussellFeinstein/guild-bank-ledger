@@ -349,34 +349,44 @@ describe("Dedup", function()
     end)
 
     ---------------------------------------------------------------------------
-    -- Prefix-based occurrence counting (v0.12.0)
+    -- Per-slot occurrence counting (v0.14.0)
+    -- Counter scope: per baseHash (prefix + timeSlot), not per prefix alone.
+    -- Records in different hour slots have independent counters, preventing
+    -- occurrence index shift when new same-prefix records appear between rescans.
     ---------------------------------------------------------------------------
 
-    describe("prefix-based occurrence counting", function()
-        it("counts by prefix across hour slots", function()
+    describe("per-slot occurrence counting", function()
+        it("counts independently per hour slot", function()
             -- Two records with same prefix but different timeSlots
+            -- Each slot has its own counter — both get :0
             local rec1 = itemRecord({ timestamp = 3600 * 100 })
             local rec2 = itemRecord({ timestamp = 3600 * 101 })
 
             GBL:AssignOccurrenceIndices({ rec1, rec2 })
 
-            -- Should get :0 and :1 (same prefix counter), not both :0
             assert.is_truthy(rec1.id:find(":0$"))
-            assert.is_truthy(rec2.id:find(":1$"))
+            assert.is_truthy(rec2.id:find(":0$"))
             assert.equals(0, rec1._occurrence)
-            assert.equals(1, rec2._occurrence)
+            assert.equals(0, rec2._occurrence)
         end)
 
         it("prevents false-positive dedup for adjacent-hour same-prefix events", function()
-            -- Two genuinely different events, same prefix, adjacent hours
+            -- Two genuinely different events, same prefix, adjacent hours.
+            -- Both get :0 (per-slot counting), but IsDuplicate's < 3600
+            -- timestamp check correctly separates them (diff == exactly 3600).
             local rec1 = itemRecord({ timestamp = 3600 * 100 })
             local rec2 = itemRecord({ timestamp = 3600 * 101 })
             GBL:AssignOccurrenceIndices({ rec1, rec2 })
+
+            -- Both should get :0 (independent per-slot counters)
+            assert.is_truthy(rec1.id:find(":0$"))
+            assert.is_truthy(rec2.id:find(":0$"))
 
             -- Store first
             GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
 
-            -- Second event should NOT be a duplicate (different occurrence)
+            -- Second event should NOT be a duplicate
+            -- (same occurrence :0, adjacent slot probed, but |diff| == 3600 >= 3600)
             assert.is_false(GBL:IsDuplicate(rec2, guildData))
         end)
 
@@ -400,6 +410,95 @@ describe("Dedup", function()
 
             assert.is_true(GBL:IsDuplicate(rescan1, guildData))
             assert.is_true(GBL:IsDuplicate(rescan2, guildData))
+        end)
+
+        it("rescan with new same-prefix record does not shift old occurrence", function()
+            -- Core regression test: adding a new same-prefix record in a
+            -- different slot must NOT shift the old record's occurrence index.
+            -- This was the bug that caused duplicate breastplate entries.
+
+            -- Scan 1: one breastplate withdrawal in slot 100
+            local batch1 = { itemRecord({ timestamp = 3600 * 100 }) }
+            GBL:AssignOccurrenceIndices(batch1)
+            GBL:MarkSeen(batch1[1].id, batch1[1].timestamp, guildData)
+            -- Stored as prefix|100:0
+
+            -- Scan 2: new breastplate in slot 102, old one still present
+            -- (API returns newest first)
+            local newTx = itemRecord({ timestamp = 3600 * 102 })
+            local oldTx = itemRecord({ timestamp = 3600 * 100 })
+            local batch2 = { newTx, oldTx }
+            GBL:AssignOccurrenceIndices(batch2)
+
+            -- Per-slot: each slot has its own counter, both get :0
+            assert.is_truthy(newTx.id:find(":0$"))
+            assert.is_truthy(oldTx.id:find(":0$"))
+
+            -- Old tx should dedup (same ID as stored)
+            assert.is_true(GBL:IsDuplicate(oldTx, guildData))
+            -- New tx should NOT dedup
+            assert.is_false(GBL:IsDuplicate(newTx, guildData))
+        end)
+
+        it("batch growth with adjacent-hour record preserves old dedup", function()
+            -- Two same-slot records stored, then a new different-slot record
+            -- appears — old records must still dedup.
+            local batch1 = {
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 100 }),
+            }
+            GBL:AssignOccurrenceIndices(batch1)
+            for _, r in ipairs(batch1) do
+                GBL:MarkSeen(r.id, r.timestamp, guildData)
+            end
+            -- Stored: prefix|100:0, prefix|100:1
+
+            -- Rescan with new record in slot 101 prepended
+            local newTx = itemRecord({ timestamp = 3600 * 101 })
+            local old1 = itemRecord({ timestamp = 3600 * 100 })
+            local old2 = itemRecord({ timestamp = 3600 * 100 })
+            local batch2 = { newTx, old1, old2 }
+            GBL:AssignOccurrenceIndices(batch2)
+
+            -- Old records keep :0 and :1 (same slot, same counter)
+            assert.is_true(GBL:IsDuplicate(old1, guildData))
+            assert.is_true(GBL:IsDuplicate(old2, guildData))
+            -- New record is genuinely new
+            assert.is_false(GBL:IsDuplicate(newTx, guildData))
+        end)
+
+        it("adjacent-hour events both get :0 but IsDuplicate separates via timestamp", function()
+            -- Explicitly verifies the < 3600 timestamp guard prevents
+            -- false dedup when both records have occurrence :0
+            local rec1 = itemRecord({ timestamp = 3600 * 100 })
+            local rec2 = itemRecord({ timestamp = 3600 * 101 })
+            GBL:AssignOccurrenceIndices({ rec1, rec2 })
+
+            assert.equals(0, rec1._occurrence)
+            assert.equals(0, rec2._occurrence)
+
+            GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
+
+            -- rec2 has same :0 occurrence and adjacent slot — will be found in probe
+            -- but diff = 3600 (NOT < 3600), so NOT a duplicate
+            assert.is_false(GBL:IsDuplicate(rec2, guildData))
+        end)
+
+        it("same event near hour boundary deduped by timestamp proximity", function()
+            -- Same event scanned at different times: minute 50 of hour 100
+            -- and minute 10 of hour 101 (diff = 1200s < 3600 → same event)
+            local rec1 = itemRecord({ timestamp = 3600 * 100 + 3000 })
+            GBL:AssignOccurrenceIndices({ rec1 })
+            GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
+
+            local rec2 = itemRecord({ timestamp = 3600 * 101 + 600 })
+            GBL:AssignOccurrenceIndices({ rec2 })  -- separate batch (different scan)
+
+            assert.equals(0, rec1._occurrence)
+            assert.equals(0, rec2._occurrence)
+
+            -- diff = 600 < 3600 → same event → duplicate
+            assert.is_true(GBL:IsDuplicate(rec2, guildData))
         end)
     end)
 

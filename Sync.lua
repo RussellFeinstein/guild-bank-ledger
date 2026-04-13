@@ -8,7 +8,7 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 
 -- Protocol constants
 local PREFIX = "GBLSync"
-local PROTOCOL_VERSION = 3
+local PROTOCOL_VERSION = 4
 local MAX_RECORDS_PER_CHUNK = 15
 local CHUNK_BYTE_BUDGET = 1600
 local MAX_RETRIES = 3

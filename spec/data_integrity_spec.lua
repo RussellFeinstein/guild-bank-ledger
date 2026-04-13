@@ -273,6 +273,144 @@ describe("Data integrity", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Schema migration v3 → v4 (per-slot occurrence counting)
+    ---------------------------------------------------------------------------
+
+    describe("MigrateOccurrenceToPerSlot", function()
+        before_each(function()
+            guildData.schemaVersion = 3
+        end)
+
+        it("reindexes cross-slot occurrences to per-slot", function()
+            -- Old cross-slot counting: two records with same prefix but different
+            -- slots got sequential :0, :1 from a shared counter.
+            -- After migration they should each get :0 (independent per-slot).
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Katorri-TestRealm",
+                itemID = 99999, count = 1, tab = 1,
+                timestamp = 3600 * 100, id = "withdraw|Katorri-TestRealm|99999|1|1|100:0",
+                _occurrence = 0,
+            })
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Katorri-TestRealm",
+                itemID = 99999, count = 1, tab = 1,
+                timestamp = 3600 * 102, id = "withdraw|Katorri-TestRealm|99999|1|1|102:1",
+                _occurrence = 1,
+            })
+            guildData.seenTxHashes["withdraw|Katorri-TestRealm|99999|1|1|100:0"] = 3600 * 100
+            guildData.seenTxHashes["withdraw|Katorri-TestRealm|99999|1|1|102:1"] = 3600 * 102
+
+            GBL:MigrateOccurrenceToPerSlot(guildData)
+
+            -- Both should now be :0 in their respective slots
+            assert.equals("withdraw|Katorri-TestRealm|99999|1|1|100:0", guildData.transactions[1].id)
+            assert.equals(0, guildData.transactions[1]._occurrence)
+            assert.equals("withdraw|Katorri-TestRealm|99999|1|1|102:0", guildData.transactions[2].id)
+            assert.equals(0, guildData.transactions[2]._occurrence)
+        end)
+
+        it("rebuilds seenTxHashes with per-slot keys", function()
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall-TestRealm",
+                itemID = 12345, count = 5, tab = 1,
+                timestamp = 3600 * 100, id = "withdraw|Thrall-TestRealm|12345|5|1|100:0",
+                _occurrence = 0,
+            })
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall-TestRealm",
+                itemID = 12345, count = 5, tab = 1,
+                timestamp = 3600 * 102, id = "withdraw|Thrall-TestRealm|12345|5|1|102:1",
+                _occurrence = 1,
+            })
+            guildData.seenTxHashes["withdraw|Thrall-TestRealm|12345|5|1|100:0"] = 3600 * 100
+            guildData.seenTxHashes["withdraw|Thrall-TestRealm|12345|5|1|102:1"] = 3600 * 102
+
+            GBL:MigrateOccurrenceToPerSlot(guildData)
+
+            -- Old :1 key gone, new :0 key present
+            assert.is_nil(guildData.seenTxHashes["withdraw|Thrall-TestRealm|12345|5|1|102:1"])
+            assert.is_not_nil(guildData.seenTxHashes["withdraw|Thrall-TestRealm|12345|5|1|102:0"])
+            -- Slot 100 key unchanged
+            assert.is_not_nil(guildData.seenTxHashes["withdraw|Thrall-TestRealm|12345|5|1|100:0"])
+        end)
+
+        it("preserves genuinely different same-hour events", function()
+            -- Two real withdrawals in the same hour slot (different timestamps
+            -- within the hour would be rounded to same value by WoW API)
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Alice-TestRealm",
+                itemID = 55555, count = 1, tab = 1,
+                timestamp = 3600 * 100, id = "withdraw|Alice-TestRealm|55555|1|1|100:0",
+                _occurrence = 0,
+            })
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Alice-TestRealm",
+                itemID = 55555, count = 1, tab = 1,
+                timestamp = 3600 * 100, id = "withdraw|Alice-TestRealm|55555|1|1|100:1",
+                _occurrence = 1,
+            })
+            guildData.seenTxHashes["withdraw|Alice-TestRealm|55555|1|1|100:0"] = 3600 * 100
+            guildData.seenTxHashes["withdraw|Alice-TestRealm|55555|1|1|100:1"] = 3600 * 100
+
+            GBL:MigrateOccurrenceToPerSlot(guildData)
+
+            -- Both preserved with :0 and :1 (same baseHash, two records)
+            assert.equals(2, #guildData.transactions)
+            assert.is_truthy(guildData.transactions[1].id:find(":0$"))
+            assert.is_truthy(guildData.transactions[2].id:find(":1$"))
+        end)
+
+        it("sets schemaVersion to 4", function()
+            GBL:MigrateOccurrenceToPerSlot(guildData)
+            assert.equals(4, guildData.schemaVersion)
+        end)
+
+        it("skips if already at schema version 4", function()
+            guildData.schemaVersion = 4
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "Bob-TestRealm",
+                timestamp = 1000, id = "deposit|Bob-TestRealm|12345|5|1|0:0",
+                _occurrence = 0, itemID = 12345, count = 5, tab = 1,
+            })
+
+            GBL:MigrateOccurrenceToPerSlot(guildData)
+
+            -- Should not have been modified
+            assert.equals("deposit|Bob-TestRealm|12345|5|1|0:0", guildData.transactions[1].id)
+        end)
+
+        it("handles empty data gracefully", function()
+            GBL:MigrateOccurrenceToPerSlot(guildData)
+
+            assert.equals(4, guildData.schemaVersion)
+            assert.equals(0, #guildData.transactions)
+        end)
+
+        it("handles money transactions", function()
+            table.insert(guildData.moneyTransactions, {
+                type = "repair", player = "Tank-TestRealm",
+                amount = 50000,
+                timestamp = 3600 * 100, id = "repair|Tank-TestRealm|50000|100:0",
+                _occurrence = 0,
+            })
+            table.insert(guildData.moneyTransactions, {
+                type = "repair", player = "Tank-TestRealm",
+                amount = 50000,
+                timestamp = 3600 * 102, id = "repair|Tank-TestRealm|50000|102:1",
+                _occurrence = 1,
+            })
+            guildData.seenTxHashes["repair|Tank-TestRealm|50000|100:0"] = 3600 * 100
+            guildData.seenTxHashes["repair|Tank-TestRealm|50000|102:1"] = 3600 * 102
+
+            GBL:MigrateOccurrenceToPerSlot(guildData)
+
+            -- Second record reindexed from :1 to :0 (independent slot counter)
+            assert.equals("repair|Tank-TestRealm|50000|102:0", guildData.moneyTransactions[2].id)
+            assert.equals(0, guildData.moneyTransactions[2]._occurrence)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- StoreTx / StoreMoneyTx validation
     ---------------------------------------------------------------------------
 

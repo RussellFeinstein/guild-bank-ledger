@@ -112,15 +112,18 @@ end
 --- Assign unique occurrence indices to records with identical base hashes.
 -- Two withdrawals of 20 potions in the same hour get :0 and :1 suffixes,
 -- making their record.id unique for dedup.
+-- Counts per baseHash (prefix + timeSlot) so records in different hour slots
+-- have independent counters. This prevents occurrence index shift when new
+-- same-prefix transactions in different slots are added between rescans.
 -- @param records table Array of records (each must have .id from ComputeTxHash)
 function GBL:AssignOccurrenceIndices(records)
     local counts = {}
     for _, record in ipairs(records) do
-        local prefix = buildPrefix(record)
-        local occ = counts[prefix] or 0
-        counts[prefix] = occ + 1
+        local baseHash = record.id  -- prefix .. timeSlot (from ComputeTxHash)
+        local occ = counts[baseHash] or 0
+        counts[baseHash] = occ + 1
         record._occurrence = occ
-        record.id = record.id .. ":" .. occ
+        record.id = baseHash .. ":" .. occ
     end
 end
 

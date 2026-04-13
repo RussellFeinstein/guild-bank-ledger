@@ -5,6 +5,15 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] — 2026-04-13
+
+### Fixed
+- **Duplicate records from occurrence index shift** — withdrawing the same item at different times caused each new withdrawal to shift the occurrence indices of all previously-stored same-prefix records, making them fail dedup on the next rescan. Example: 3 real breastplate withdrawals scanned incrementally could produce 6 records. Root cause: `AssignOccurrenceIndices` counted by prefix (without timeslot), so records in different hour slots shared a single counter. Fix: counter scope changed to per-baseHash (prefix + timeSlot), making each hour slot's counter independent. The `< 3600` timestamp check in `IsDuplicate` already prevents false-positive dedup between genuinely different events in adjacent slots.
+
+### Changed
+- **Schema migration v3→v4** — on first load, existing records are reindexed from cross-slot to per-slot occurrence indices and `seenTxHashes` is rebuilt. Existing duplicate records are preserved (indistinguishable from genuine same-hour events); future rescans will not create new duplicates.
+- **Sync protocol version bumped to 4** — prevents cross-version sync between clients with old (cross-slot) and new (per-slot) occurrence schemes.
+
 ## [0.13.2] — 2026-04-13
 
 ### Fixed

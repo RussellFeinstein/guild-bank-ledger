@@ -2039,7 +2039,7 @@ describe("Sync", function()
         end)
 
         it("protocol version gate rejects old protocol messages", function()
-            assert.equals(3, GBL.SYNC_PROTOCOL_VERSION)
+            assert.equals(4, GBL.SYNC_PROTOCOL_VERSION)
         end)
 
         it("tracks outdated peers from protocol-mismatched HELLO", function()
@@ -3128,8 +3128,8 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
 
     describe("compression", function()
-        it("protocol version is 3", function()
-            assert.equals(3, GBL.SYNC_PROTOCOL_VERSION)
+        it("protocol version is 4", function()
+            assert.equals(4, GBL.SYNC_PROTOCOL_VERSION)
         end)
 
         it("compress/decompress round-trips correctly", function()

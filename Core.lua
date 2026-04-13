@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.13.2"
+local VERSION = "0.14.0"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -41,7 +41,7 @@ local defaults = {
                 seenTxHashes = {},
                 playerRealms = {},
                 syncState = { lastSyncTimestamp = 0, syncVersion = 0, peers = {} },
-                schemaVersion = 3,
+                schemaVersion = 4,
             },
         },
     },
@@ -489,12 +489,80 @@ function GBL:MigrateSchemaV2ToV3(guildData)
     self:ResetHashCache()
 end
 
+--- Migrate occurrence indices from cross-slot prefix counting to per-slot counting.
+-- v0.12.0 introduced cross-slot prefix counting to prevent false-positive dedup,
+-- but this causes occurrence index shift when new same-prefix records appear
+-- between rescans (e.g. withdrawing the same item at different times). Per-slot
+-- counting is safe because the < 3600 timestamp check in IsDuplicate correctly
+-- distinguishes genuinely different events from the same event seen in adjacent
+-- hour slots.
+-- Does NOT remove records — bug duplicates and genuine same-hour duplicates are
+-- indistinguishable (both share the same baseHash and near-identical timestamps).
+-- @param guildData table Guild data from AceDB
+function GBL:MigrateOccurrenceToPerSlot(guildData)
+    if not guildData or (guildData.schemaVersion or 0) >= 4 then return end
+
+    -- Collect all records
+    local allRecords = {}
+    for _, tx in ipairs(guildData.transactions or {}) do
+        allRecords[#allRecords + 1] = tx
+    end
+    for _, tx in ipairs(guildData.moneyTransactions or {}) do
+        allRecords[#allRecords + 1] = tx
+    end
+
+    if #allRecords == 0 then
+        guildData.schemaVersion = 4
+        return
+    end
+
+    -- Group records by baseHash (prefix + timeSlot, strip old :N suffix)
+    local groups = {}
+    for _, record in ipairs(allRecords) do
+        local baseHash = record.id and record.id:gsub(":%d+$", "") or ""
+        if not groups[baseHash] then groups[baseHash] = {} end
+        groups[baseHash][#groups[baseHash] + 1] = record
+    end
+
+    -- Sort each group by timestamp (tiebreak on old ID for determinism)
+    -- and reassign sequential per-slot occurrence indices
+    for _, group in pairs(groups) do
+        table.sort(group, function(a, b)
+            if (a.timestamp or 0) == (b.timestamp or 0) then
+                return (a.id or "") < (b.id or "")
+            end
+            return (a.timestamp or 0) < (b.timestamp or 0)
+        end)
+
+        for i, record in ipairs(group) do
+            local occ = i - 1
+            local baseHash = record.id and record.id:gsub(":%d+$", "") or ""
+            record.id = baseHash .. ":" .. occ
+            record._occurrence = occ
+        end
+    end
+
+    -- Rebuild seenTxHashes from scratch
+    for k in pairs(guildData.seenTxHashes) do
+        guildData.seenTxHashes[k] = nil
+    end
+    for _, record in ipairs(allRecords) do
+        if record.id then
+            guildData.seenTxHashes[record.id] = record.timestamp or 0
+        end
+    end
+
+    guildData.schemaVersion = 4
+    self:ResetHashCache()
+end
+
 --- Run migration for all guild data namespaces.
 function GBL:MigrateAllGuilds()
     if not self.db or not self.db.global or not self.db.global.guilds then return end
     for _, guildData in pairs(self.db.global.guilds) do
         self:MigrateOccurrenceScheme(guildData)
         self:MigrateSchemaV2ToV3(guildData)
+        self:MigrateOccurrenceToPerSlot(guildData)
     end
 end
 
