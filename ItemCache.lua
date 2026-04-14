@@ -37,7 +37,7 @@ function GBL:GetCachedItemInfo(itemID)
 
     -- Not cached by WoW client — request async load
     cache[itemID] = { loaded = false }
-    C_Item.RequestLoadItemData(itemID)
+    C_Item.RequestLoadItemDataByID(itemID)
     return nil, nil
 end
 

@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1] — 2026-04-13
+
+### Fixed
+- **ItemCache error on uncached items** — `C_Item.RequestLoadItemData` expects an `ItemLocation` struct, not a numeric itemID. Replaced with `C_Item.RequestLoadItemDataByID(itemID)` which accepts a plain item ID. Caused a Lua error when opening the ledger UI with items not yet cached by the WoW client.
+
 ## [0.15.0] — 2026-04-13
 
 ### Added

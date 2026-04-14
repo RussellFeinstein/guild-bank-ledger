@@ -342,7 +342,7 @@ function MockWoW.install()
             local subclassID = info and info.subclassID or 0
             return itemID, "", "", "", "", classID, subclassID
         end,
-        RequestLoadItemData = function(itemID)
+        RequestLoadItemDataByID = function(itemID)
             MockWoW.itemInfoRequested[itemID] = true
         end,
     }
