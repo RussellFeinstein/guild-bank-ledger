@@ -589,6 +589,115 @@ describe("Dedup", function()
         end)
     end)
 
+    describe("MaxOccurrenceAtSlot", function()
+        it("returns 0 for empty seenTxHashes", function()
+            assert.equals(0, GBL:MaxOccurrenceAtSlot("BH", guildData))
+        end)
+
+        it("returns next index for sequential entries", function()
+            guildData.seenTxHashes["BH:0"] = 100
+            guildData.seenTxHashes["BH:1"] = 100
+            assert.equals(2, GBL:MaxOccurrenceAtSlot("BH", guildData))
+        end)
+
+        it("scans past gaps to find true max", function()
+            guildData.seenTxHashes["BH:0"] = 100
+            -- gap at :1
+            guildData.seenTxHashes["BH:2"] = 100
+            assert.equals(3, GBL:MaxOccurrenceAtSlot("BH", guildData))
+        end)
+
+        it("handles large gap after normalization", function()
+            guildData.seenTxHashes["BH:0"] = 100
+            guildData.seenTxHashes["BH:5"] = 100
+            assert.equals(6, GBL:MaxOccurrenceAtSlot("BH", guildData))
+        end)
+    end)
+
+    describe("BuildStoredRecordIndex", function()
+        it("indexes records by prefix and slot", function()
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall",
+                itemID = 12345, count = 5, tab = 1,
+                timestamp = 3600 * 100,
+            })
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall",
+                itemID = 12345, count = 5, tab = 1,
+                timestamp = 3600 * 100 + 1000,  -- same slot
+            })
+            local index = GBL:BuildStoredRecordIndex(guildData, "transactions")
+            assert.equals(2, index["withdraw|Thrall|12345|5|1|"][100])
+        end)
+
+        it("tracks different slots independently", function()
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall",
+                itemID = 12345, count = 5, tab = 1,
+                timestamp = 3600 * 100,
+            })
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall",
+                itemID = 12345, count = 5, tab = 1,
+                timestamp = 3600 * 102,  -- different slot
+            })
+            local index = GBL:BuildStoredRecordIndex(guildData, "transactions")
+            assert.equals(1, index["withdraw|Thrall|12345|5|1|"][100])
+            assert.equals(1, index["withdraw|Thrall|12345|5|1|"][102])
+        end)
+
+        it("indexes nil timestamp at slot 0", function()
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall",
+                itemID = 12345, count = 5, tab = 1,
+                timestamp = nil,
+            })
+            local index = GBL:BuildStoredRecordIndex(guildData, "transactions")
+            assert.equals(1, index["withdraw|Thrall|12345|5|1|"][0])
+        end)
+
+        it("indexes zero timestamp at slot 0", function()
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall",
+                itemID = 12345, count = 5, tab = 1,
+                timestamp = 0,
+            })
+            local index = GBL:BuildStoredRecordIndex(guildData, "transactions")
+            assert.equals(1, index["withdraw|Thrall|12345|5|1|"][0])
+        end)
+    end)
+
+    describe("CountFromRecordIndex", function()
+        it("sums exact and both adjacent slots", function()
+            local index = {
+                ["withdraw|Thrall|12345|5|1|"] = {
+                    [99] = 1,
+                    [101] = 1,
+                },
+            }
+            -- Querying slot 100: should find slot 99 (1) + slot 101 (1) = 2
+            assert.equals(2, GBL:CountFromRecordIndex(
+                index, "withdraw|Thrall|12345|5|1|100"))
+        end)
+
+        it("includes exact slot in sum", function()
+            local index = {
+                ["withdraw|Thrall|12345|5|1|"] = {
+                    [100] = 2,
+                    [101] = 1,
+                },
+            }
+            assert.equals(3, GBL:CountFromRecordIndex(
+                index, "withdraw|Thrall|12345|5|1|100"))
+        end)
+
+        it("returns 0 for unknown prefix", function()
+            local index = {}
+            assert.equals(0, GBL:CountFromRecordIndex(
+                index, "withdraw|Thrall|12345|5|1|100"))
+        end)
+    end)
+
     describe("FindDriftedCount", function()
         it("finds count at adjacent slot", function()
             local prevCounts = { ["withdraw|Thrall|12345|5|1|100"] = 3 }
@@ -598,6 +707,14 @@ describe("Dedup", function()
         it("returns 0 when no adjacent match", function()
             local prevCounts = { ["withdraw|Thrall|12345|5|1|100"] = 3 }
             assert.equals(0, GBL:FindDriftedCount("withdraw|Thrall|12345|5|1|103", prevCounts))
+        end)
+
+        it("sums both adjacent slots", function()
+            local prevCounts = {
+                ["withdraw|Thrall|12345|5|1|99"] = 2,
+                ["withdraw|Thrall|12345|5|1|101"] = 1,
+            }
+            assert.equals(3, GBL:FindDriftedCount("withdraw|Thrall|12345|5|1|100", prevCounts))
         end)
     end)
 
@@ -613,11 +730,14 @@ describe("Dedup", function()
             assert.equals(2, #guildData.transactions)
         end)
 
-        it("deduplicates on initial scan against seenTxHashes", function()
-            -- Pre-populate seenTxHashes (from a previous session)
+        it("deduplicates on initial scan against stored records", function()
+            -- Pre-populate records array and seenTxHashes (from a previous session)
             local rec = itemRecord({ timestamp = 3600 * 100 })
             local baseHash = rec.id
-            guildData.seenTxHashes[baseHash .. ":0"] = 3600 * 100
+            rec._occurrence = 0
+            rec.id = baseHash .. ":0"
+            table.insert(guildData.transactions, rec)
+            guildData.seenTxHashes[rec.id] = 3600 * 100
 
             -- Batch with 1 record matching the stored one
             local batch = { itemRecord({ timestamp = 3600 * 100 }) }
@@ -777,6 +897,191 @@ describe("Dedup", function()
 
             local stored = GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
             assert.equals(0, stored)
+        end)
+
+        -- REGRESSION (money): sync normalization gap
+        it("does not duplicate money records when seenTxHashes has gaps", function()
+            local baseHash = "deposit|Thrall|50000|100"
+            for occ = 0, 2 do
+                local rec = moneyRecord({ timestamp = 3600 * 100 })
+                rec._occurrence = occ
+                rec.id = baseHash .. ":" .. occ
+                table.insert(guildData.moneyTransactions, rec)
+                guildData.seenTxHashes[rec.id] = rec.timestamp
+            end
+            -- Gap: normalization removed :1, added slot 101
+            guildData.seenTxHashes[baseHash .. ":1"] = nil
+            guildData.seenTxHashes["deposit|Thrall|50000|101:0"] = 3600 * 101
+
+            local batch = {
+                moneyRecord({ timestamp = 3600 * 100 }),
+                moneyRecord({ timestamp = 3600 * 100 }),
+                moneyRecord({ timestamp = 3600 * 100 }),
+            }
+            local stored = GBL:StoreBatchRecords(batch, guildData, "moneyTransactions", nil)
+            assert.equals(0, stored)
+            assert.equals(3, #guildData.moneyTransactions)
+        end)
+
+        -- REGRESSION (money): records split across adjacent slots
+        it("does not duplicate money records split across adjacent slots", function()
+            local rec99 = moneyRecord({ timestamp = 3600 * 99 + 3500 })
+            rec99._occurrence = 0
+            rec99.id = "deposit|Thrall|50000|99:0"
+            table.insert(guildData.moneyTransactions, rec99)
+            guildData.seenTxHashes[rec99.id] = rec99.timestamp
+
+            local rec101 = moneyRecord({ timestamp = 3600 * 101 + 100 })
+            rec101._occurrence = 0
+            rec101.id = "deposit|Thrall|50000|101:0"
+            table.insert(guildData.moneyTransactions, rec101)
+            guildData.seenTxHashes[rec101.id] = rec101.timestamp
+
+            local batch = {
+                moneyRecord({ timestamp = 3600 * 100 + 500 }),
+                moneyRecord({ timestamp = 3600 * 100 + 500 }),
+            }
+            local stored = GBL:StoreBatchRecords(batch, guildData, "moneyTransactions", nil)
+            assert.equals(0, stored)
+            assert.equals(2, #guildData.moneyTransactions)
+        end)
+
+        -- REGRESSION (money): occurrence assignment past gaps
+        it("assigns money occurrence past gaps", function()
+            local baseHash = "deposit|Thrall|50000|100"
+            for _, occ in ipairs({0, 2}) do
+                local rec = moneyRecord({ timestamp = 3600 * 100 })
+                rec._occurrence = occ
+                rec.id = baseHash .. ":" .. occ
+                table.insert(guildData.moneyTransactions, rec)
+                guildData.seenTxHashes[rec.id] = rec.timestamp
+            end
+
+            local batch = {
+                moneyRecord({ timestamp = 3600 * 100 }),
+                moneyRecord({ timestamp = 3600 * 100 }),
+                moneyRecord({ timestamp = 3600 * 100 }),
+            }
+            local stored = GBL:StoreBatchRecords(batch, guildData, "moneyTransactions", nil)
+            assert.equals(1, stored)
+            assert.equals(3, #guildData.moneyTransactions)
+            assert.is_truthy(guildData.moneyTransactions[3].id:find(":3$"))
+        end)
+
+        -- REGRESSION: sync normalization creates gaps in seenTxHashes
+        it("does not duplicate when seenTxHashes has gaps from normalization", function()
+            -- Simulate: 3 records stored at slot 100 with sequential indices
+            local baseHash = "withdraw|Thrall|12345|5|1|100"
+            for occ = 0, 2 do
+                local rec = itemRecord({ timestamp = 3600 * 100 })
+                rec._occurrence = occ
+                rec.id = baseHash .. ":" .. occ
+                table.insert(guildData.transactions, rec)
+                guildData.seenTxHashes[rec.id] = rec.timestamp
+            end
+            assert.equals(3, #guildData.transactions)
+
+            -- Simulate sync normalization: :1 moved to different slot, creating gap
+            guildData.seenTxHashes[baseHash .. ":1"] = nil
+            guildData.seenTxHashes["withdraw|Thrall|12345|5|1|101:0"] = 3600 * 101
+
+            -- Bank reopen: initial scan with 3 records (same events)
+            local batch = {
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 100 }),
+            }
+            local stored = GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
+
+            -- Must not create duplicates: records array already has 3
+            assert.equals(0, stored)
+            assert.equals(3, #guildData.transactions)
+        end)
+
+        -- Verifies WHY the gap fix works: BuildStoredRecordIndex counts from
+        -- the records array (ground truth) rather than seenTxHashes (has gaps).
+        it("BuildStoredRecordIndex counts correctly despite seenTxHashes gaps", function()
+            local baseHash = "withdraw|Thrall|12345|5|1|100"
+            for occ = 0, 2 do
+                local rec = itemRecord({ timestamp = 3600 * 100 })
+                rec._occurrence = occ
+                rec.id = baseHash .. ":" .. occ
+                table.insert(guildData.transactions, rec)
+                guildData.seenTxHashes[rec.id] = rec.timestamp
+            end
+
+            -- Create gap in seenTxHashes (simulating sync normalization)
+            guildData.seenTxHashes[baseHash .. ":1"] = nil
+
+            -- seenTxHashes would undercount (CountStoredAtSlot stops at gap)
+            assert.equals(1, GBL:CountStoredAtSlot(baseHash, guildData))
+
+            -- But BuildStoredRecordIndex counts from records array: 3
+            local index = GBL:BuildStoredRecordIndex(guildData, "transactions")
+            assert.equals(3, GBL:CountFromRecordIndex(index, baseHash))
+
+            -- Therefore StoreBatchRecords stores 0 new (not 2 like the old code)
+            local batch = {
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 100 }),
+            }
+            local stored = GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
+            assert.equals(0, stored)
+        end)
+
+        -- REGRESSION: records split across both adjacent slots
+        it("does not duplicate when records are split across adjacent slots", function()
+            -- Simulate: 1 record at slot 99, 1 at slot 101 (from normalization)
+            local rec99 = itemRecord({ timestamp = 3600 * 99 + 3500 })
+            rec99._occurrence = 0
+            rec99.id = "withdraw|Thrall|12345|5|1|99:0"
+            table.insert(guildData.transactions, rec99)
+            guildData.seenTxHashes[rec99.id] = rec99.timestamp
+
+            local rec101 = itemRecord({ timestamp = 3600 * 101 + 100 })
+            rec101._occurrence = 0
+            rec101.id = "withdraw|Thrall|12345|5|1|101:0"
+            table.insert(guildData.transactions, rec101)
+            guildData.seenTxHashes[rec101.id] = rec101.timestamp
+
+            -- Bank reopen: both events now map to slot 100
+            local batch = {
+                itemRecord({ timestamp = 3600 * 100 + 500 }),
+                itemRecord({ timestamp = 3600 * 100 + 500 }),
+            }
+            local stored = GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
+
+            -- Records array already has 2 → 0 new
+            assert.equals(0, stored)
+            assert.equals(2, #guildData.transactions)
+        end)
+
+        -- REGRESSION: occurrence assignment must not collide with existing IDs
+        it("assigns occurrence past gaps when storing new records", function()
+            -- Stored: :0 and :2 exist (gap at :1 from normalization)
+            local baseHash = "withdraw|Thrall|12345|5|1|100"
+            for _, occ in ipairs({0, 2}) do
+                local rec = itemRecord({ timestamp = 3600 * 100 })
+                rec._occurrence = occ
+                rec.id = baseHash .. ":" .. occ
+                table.insert(guildData.transactions, rec)
+                guildData.seenTxHashes[rec.id] = rec.timestamp
+            end
+
+            -- New batch with 3 records (1 new beyond the 2 stored)
+            local batch = {
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 100 }),
+            }
+            local stored = GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
+
+            assert.equals(1, stored)
+            assert.equals(3, #guildData.transactions)
+            -- New record should get :3 (past the gap), not :1 (which would be wrong)
+            -- or :2 (which would collide)
+            assert.is_truthy(guildData.transactions[3].id:find(":3$"))
         end)
     end)
 

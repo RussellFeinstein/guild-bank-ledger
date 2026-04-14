@@ -145,6 +145,10 @@ end
 
 --- Count sequential occurrence entries at an exact slot in seenTxHashes.
 -- Scans :0, :1, :2, ... and stops at the first gap.
+-- NOTE: Dead code in production after v0.14.3 refactor — only called by
+-- CountStoredForHash (also dead) and tests. Retained for test coverage of
+-- the seenTxHashes data structure. StoreBatchRecords now uses
+-- BuildStoredRecordIndex (immune to gaps) and MaxOccurrenceAtSlot.
 -- @param baseHash string Base hash (prefix + timeSlot)
 -- @param guildData table Guild data table
 -- @return number Count of stored occurrences
@@ -161,9 +165,71 @@ function GBL:CountStoredAtSlot(baseHash, guildData)
     return count
 end
 
+--- Find the next available occurrence index at a slot in seenTxHashes.
+-- Unlike CountStoredAtSlot, this scans past gaps so that new records
+-- never collide with existing entries (gaps can appear after sync
+-- normalization moves a record to a different slot).
+-- @param baseHash string Base hash (prefix + timeSlot)
+-- @param guildData table Guild data table
+-- @return number Next available occurrence index
+function GBL:MaxOccurrenceAtSlot(baseHash, guildData)
+    if not guildData or not guildData.seenTxHashes then return 0 end
+    local maxOcc = -1
+    for occ = 0, 999 do
+        if guildData.seenTxHashes[baseHash .. ":" .. occ] then
+            maxOcc = occ
+        elseif occ > maxOcc + 50 then
+            break  -- safety bound: stop scanning after 50 consecutive misses
+        end
+    end
+    return maxOcc + 1
+end
+
+--- Build an index of stored records by prefix → slot → count.
+-- Scans the actual records array (ground truth), not seenTxHashes.
+-- This avoids undercounting caused by gaps in seenTxHashes occurrence
+-- sequences (which sync normalization can create).
+-- @param guildData table Guild data from AceDB
+-- @param storageKey string "transactions" or "moneyTransactions"
+-- @return table Index: {[prefix] = {[slot] = count}}
+function GBL:BuildStoredRecordIndex(guildData, storageKey)
+    local index = {}
+    for _, record in ipairs(guildData[storageKey] or {}) do
+        local prefix = buildPrefix(record)
+        local slot = math.floor((record.timestamp or 0) / 3600)
+        if not index[prefix] then index[prefix] = {} end
+        index[prefix][slot] = (index[prefix][slot] or 0) + 1
+    end
+    return index
+end
+
+--- Count stored records matching a baseHash from a pre-built record index.
+-- Sums counts at the exact slot AND both adjacent slots (±1).
+-- Unlike the old CountStoredForHash (which returned at the first adjacent
+-- match), this correctly handles records split across multiple slots by
+-- sync normalization.
+-- @param storedIndex table Index from BuildStoredRecordIndex
+-- @param baseHash string Base hash (prefix + timeSlot)
+-- @return number Count of stored records matching this prefix ±1 slot
+function GBL:CountFromRecordIndex(storedIndex, baseHash)
+    local prefix, slot = self:SplitBaseHash(baseHash)
+    if not prefix or not slot then return 0 end
+    local bySlot = storedIndex[prefix]
+    if not bySlot then return 0 end
+    local count = 0
+    for s = slot - 1, slot + 1 do
+        count = count + (bySlot[s] or 0)
+    end
+    return count
+end
+
 --- Count stored occurrences for a baseHash, including adjacent-slot drift.
--- Used for initial scan dedup (no session cache). Checks the exact slot
--- first; if 0 found, probes adjacent slots with timestamp proximity.
+-- Checks the exact slot first; if 0 found, probes adjacent slots with
+-- timestamp proximity.
+-- NOTE: Dead code in production after v0.14.3 refactor — no callers
+-- outside tests. Retained for test coverage. Has a known early-return
+-- limitation (returns at first adjacent match without checking the other
+-- side). StoreBatchRecords now uses BuildStoredRecordIndex + CountFromRecordIndex.
 -- @param baseHash string Base hash (prefix + timeSlot)
 -- @param batchTimestamp number Timestamp of the batch records
 -- @param guildData table Guild data with seenTxHashes
@@ -204,27 +270,37 @@ end
 
 --- Check adjacent slots in a session-local prevCounts table for drift.
 -- Used during rescan when hour boundary shifts all baseHashes.
+-- Sums counts from both adjacent slots to handle records split across
+-- slots (e.g. after sync normalization).
 -- @param baseHash string Current baseHash
 -- @param prevCounts table Previous batch counts {[baseHash] = count}
--- @return number Count from adjacent slot, or 0
+-- @return number Count from adjacent slots
 function GBL:FindDriftedCount(baseHash, prevCounts)
     if not prevCounts then return 0 end
     local prefix, slot = self:SplitBaseHash(baseHash)
     if not slot then return 0 end
 
+    local count = 0
     for _, adjSlot in ipairs({ slot - 1, slot + 1 }) do
         local adjHash = prefix .. adjSlot
         if prevCounts[adjHash] then
-            return prevCounts[adjHash]
+            count = count + prevCounts[adjHash]
         end
     end
-    return 0
+    return count
 end
 
 --- Store a batch of records using count-based dedup.
 -- Groups records by baseHash, compares counts against previously-known
--- state (session cache or seenTxHashes), and stores only the excess.
+-- state (session cache or actual records array), and stores only the excess.
 -- Immune to occurrence index shift because it compares counts, not positions.
+--
+-- For initial scan (prevCounts=nil): counts from the actual records array
+-- via BuildStoredRecordIndex. This is immune to gaps in seenTxHashes
+-- caused by sync normalization, and sums across all ±1 adjacent slots.
+--
+-- For rescan (prevCounts present): compares against the session-local cache
+-- which is always internally consistent.
 -- @param batch table Array of records (each with .id = baseHash from ComputeTxHash)
 -- @param guildData table Guild data from AceDB
 -- @param storageKey string "transactions" or "moneyTransactions"
@@ -248,6 +324,16 @@ function GBL:StoreBatchRecords(batch, guildData, storageKey, prevCounts)
         currentCounts[baseHash] = (currentCounts[baseHash] or 0) + 1
     end
 
+    -- For initial scan: build index from actual records (ground truth).
+    -- Built once and NOT updated as records are stored in the loop below.
+    -- This is safe because each group has a unique baseHash (same event
+    -- always maps to the same slot within a single scan), so newly stored
+    -- records from one group cannot affect another group's count.
+    local storedIndex
+    if not prevCounts then
+        storedIndex = self:BuildStoredRecordIndex(guildData, storageKey)
+    end
+
     local stored = 0
     for _, baseHash in ipairs(order) do
         local group = groups[baseHash]
@@ -261,16 +347,15 @@ function GBL:StoreBatchRecords(batch, guildData, storageKey, prevCounts)
                 alreadyKnown = self:FindDriftedCount(baseHash, prevCounts)
             end
         else
-            -- Initial scan: count from seenTxHashes (with adjacent-slot drift)
-            alreadyKnown = self:CountStoredForHash(
-                baseHash, group[1].timestamp or 0, guildData)
+            -- Initial scan: count from actual records array (±1 adjacent slots)
+            alreadyKnown = self:CountFromRecordIndex(storedIndex, baseHash)
         end
 
         local newCount = math.max(0, batchCount - alreadyKnown)
 
         if newCount > 0 then
-            -- Find next available occurrence index at this slot
-            local nextOcc = self:CountStoredAtSlot(baseHash, guildData)
+            -- Find next available occurrence index, scanning past gaps
+            local nextOcc = self:MaxOccurrenceAtSlot(baseHash, guildData)
 
             -- Validate records and store
             for i = 1, newCount do

@@ -754,4 +754,214 @@ describe("Data integrity", function()
             assert.equals(2, #guildData.transactions)  -- unchanged
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- MigrateCrossSlotDedup (schema v5→v6)
+    ---------------------------------------------------------------------------
+
+    describe("MigrateCrossSlotDedup", function()
+        -- Helper: create a record with explicit fields for dedup testing
+        local function makeRecord(opts)
+            local rec = {
+                type = opts.type or "withdraw",
+                player = opts.player or "Katorri-TestRealm",
+                itemID = opts.itemID or 99999,
+                count = opts.count or 1,
+                tab = opts.tab or 1,
+                timestamp = opts.timestamp or (3600 * 100),
+                scanTime = opts.scanTime or MockWoW.serverTime,
+                scannedBy = opts.scannedBy or "Katorri-TestRealm",
+            }
+            rec.id = GBL:ComputeTxHash(rec)
+            return rec
+        end
+
+        local function assignAndStore(records, gd, storageKey)
+            GBL:AssignOccurrenceIndices(records)
+            for _, rec in ipairs(records) do
+                table.insert(gd[storageKey], rec)
+                gd.seenTxHashes[rec.id] = rec.timestamp
+            end
+        end
+
+        it("removes cross-slot duplicates missed by v4→v5 migration", function()
+            guildData.schemaVersion = 5
+            -- Original record at slot 100
+            local r1 = makeRecord({ timestamp = 3600 * 100, scanTime = 1000 })
+            r1.id = GBL:ComputeTxHash(r1)
+            r1._occurrence = 0
+            r1.id = r1.id .. ":0"
+            table.insert(guildData.transactions, r1)
+            guildData.seenTxHashes[r1.id] = r1.timestamp
+
+            -- Cross-slot duplicate at slot 101 (created by counting bug).
+            -- ID and occurrence set manually (not via AssignOccurrenceIndices)
+            -- because cross-slot duplicates have different baseHashes — they
+            -- were independently scanned at different times, each getting :0.
+            local r2 = makeRecord({ timestamp = 3600 * 100 + 200, scanTime = 1005 })
+            r2.id = "withdraw|Katorri-TestRealm|99999|1|1|101:0"
+            r2._occurrence = 0
+            table.insert(guildData.transactions, r2)
+            guildData.seenTxHashes[r2.id] = r2.timestamp
+
+            local removed = GBL:MigrateCrossSlotDedup(guildData)
+
+            assert.equals(1, removed)
+            assert.equals(1, #guildData.transactions)
+            assert.equals(1000, guildData.transactions[1].scanTime)
+        end)
+
+        it("preserves genuinely different events in non-adjacent hours", function()
+            guildData.schemaVersion = 5
+            -- Event A at hour 100
+            local r1 = makeRecord({ timestamp = 3600 * 100, scanTime = 1000 })
+            assignAndStore({ r1 }, guildData, "transactions")
+            -- Event B at hour 105 (well separated, genuinely different)
+            local r2 = makeRecord({ timestamp = 3600 * 105, scanTime = 1000 })
+            assignAndStore({ r2 }, guildData, "transactions")
+
+            local removed = GBL:MigrateCrossSlotDedup(guildData)
+
+            assert.equals(0, removed)
+            assert.equals(2, #guildData.transactions)
+        end)
+
+        it("handles multiple clusters within same prefix", function()
+            guildData.schemaVersion = 5
+            -- Cluster A: hour 100 (1 genuine + 1 dup)
+            local a1 = makeRecord({ timestamp = 3600 * 100, scanTime = 1000 })
+            local a2 = makeRecord({ timestamp = 3600 * 100 + 100, scanTime = 1005 })
+            -- Cluster B: hour 200 (1 genuine, no dup)
+            local b1 = makeRecord({ timestamp = 3600 * 200, scanTime = 1000 })
+
+            assignAndStore({ a1, a2, b1 }, guildData, "transactions")
+
+            local removed = GBL:MigrateCrossSlotDedup(guildData)
+
+            assert.equals(1, removed)  -- only a2 removed
+            assert.equals(2, #guildData.transactions)
+        end)
+
+        it("rebuilds seenTxHashes and playerStats", function()
+            guildData.schemaVersion = 5
+            local r1 = makeRecord({ timestamp = 3600 * 100, scanTime = 1000, count = 5 })
+            local r2 = makeRecord({ timestamp = 3600 * 100 + 50, scanTime = 1003, count = 5 })
+            assignAndStore({ r1, r2 }, guildData, "transactions")
+
+            GBL:MigrateCrossSlotDedup(guildData)
+
+            -- Only 1 survives
+            local hashCount = 0
+            for _ in pairs(guildData.seenTxHashes) do hashCount = hashCount + 1 end
+            assert.equals(1, hashCount)
+
+            local stats = guildData.playerStats["Katorri-TestRealm"]
+            assert.equals(5, stats.totalWithdrawCount)  -- not 10
+        end)
+
+        it("sets schemaVersion to 6", function()
+            guildData.schemaVersion = 5
+            GBL:MigrateCrossSlotDedup(guildData)
+            assert.equals(6, guildData.schemaVersion)
+        end)
+
+        it("skips already-migrated data (schemaVersion >= 6)", function()
+            guildData.schemaVersion = 6
+            local r1 = makeRecord({ scanTime = 1000 })
+            local r2 = makeRecord({ scanTime = 1003 })
+            assignAndStore({ r1, r2 }, guildData, "transactions")
+
+            local removed = GBL:MigrateCrossSlotDedup(guildData)
+
+            assert.equals(0, removed)
+            assert.equals(2, #guildData.transactions)
+        end)
+
+        it("handles empty data gracefully", function()
+            guildData.schemaVersion = 5
+            local removed = GBL:MigrateCrossSlotDedup(guildData)
+            assert.equals(0, removed)
+            assert.equals(6, guildData.schemaVersion)
+        end)
+
+        it("removes cross-slot money duplicates", function()
+            guildData.schemaVersion = 5
+            local function makeMoneyRec(opts)
+                local rec = {
+                    type = opts.type or "deposit",
+                    player = opts.player or "Katorri-TestRealm",
+                    amount = opts.amount or 50000,
+                    timestamp = opts.timestamp or (3600 * 100),
+                    scanTime = opts.scanTime or MockWoW.serverTime,
+                    scannedBy = opts.scannedBy or "Katorri-TestRealm",
+                }
+                rec.id = GBL:ComputeTxHash(rec)
+                return rec
+            end
+
+            -- Original at slot 100
+            local m1 = makeMoneyRec({ scanTime = 1000 })
+            m1._occurrence = 0
+            m1.id = m1.id .. ":0"
+            table.insert(guildData.moneyTransactions, m1)
+            guildData.seenTxHashes[m1.id] = m1.timestamp
+
+            -- Cross-slot duplicate at slot 101
+            local m2 = makeMoneyRec({ timestamp = 3600 * 100 + 200, scanTime = 1005 })
+            m2.id = "deposit|Katorri-TestRealm|50000|101:0"
+            m2._occurrence = 0
+            table.insert(guildData.moneyTransactions, m2)
+            guildData.seenTxHashes[m2.id] = m2.timestamp
+
+            local removed = GBL:MigrateCrossSlotDedup(guildData)
+
+            assert.equals(1, removed)
+            assert.equals(1, #guildData.moneyTransactions)
+            assert.equals(1000, guildData.moneyTransactions[1].scanTime)
+        end)
+
+        it("handles mixed item and money cross-slot duplicates", function()
+            guildData.schemaVersion = 5
+
+            -- Item: original + cross-slot dup
+            local i1 = makeRecord({ scanTime = 1000 })
+            i1._occurrence = 0
+            i1.id = GBL:ComputeTxHash(i1) .. ":0"
+            table.insert(guildData.transactions, i1)
+            guildData.seenTxHashes[i1.id] = i1.timestamp
+
+            local i2 = makeRecord({ timestamp = 3600 * 100 + 100, scanTime = 1005 })
+            i2.id = "withdraw|Katorri-TestRealm|99999|1|1|101:0"
+            i2._occurrence = 0
+            table.insert(guildData.transactions, i2)
+            guildData.seenTxHashes[i2.id] = i2.timestamp
+
+            -- Money: original + cross-slot dup
+            local m1 = {
+                type = "deposit", player = "Katorri-TestRealm",
+                amount = 50000, timestamp = 3600 * 200,
+                scanTime = 1000, scannedBy = "Katorri-TestRealm",
+            }
+            m1.id = GBL:ComputeTxHash(m1) .. ":0"
+            m1._occurrence = 0
+            table.insert(guildData.moneyTransactions, m1)
+            guildData.seenTxHashes[m1.id] = m1.timestamp
+
+            local m2 = {
+                type = "deposit", player = "Katorri-TestRealm",
+                amount = 50000, timestamp = 3600 * 200 + 100,
+                scanTime = 1005, scannedBy = "Katorri-TestRealm",
+            }
+            m2.id = "deposit|Katorri-TestRealm|50000|201:0"
+            m2._occurrence = 0
+            table.insert(guildData.moneyTransactions, m2)
+            guildData.seenTxHashes[m2.id] = m2.timestamp
+
+            local removed = GBL:MigrateCrossSlotDedup(guildData)
+
+            assert.equals(2, removed)  -- 1 item + 1 money
+            assert.equals(1, #guildData.transactions)
+            assert.equals(1, #guildData.moneyTransactions)
+        end)
+    end)
 end)

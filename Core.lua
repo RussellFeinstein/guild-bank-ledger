@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.14.2"
+local VERSION = "0.14.3"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -41,7 +41,7 @@ local defaults = {
                 seenTxHashes = {},
                 playerRealms = {},
                 syncState = { lastSyncTimestamp = 0, syncVersion = 0, peers = {} },
-                schemaVersion = 5,
+                schemaVersion = 6,
             },
         },
     },
@@ -733,6 +733,197 @@ function GBL:MigrateDeduplicateRecords(guildData)
     return totalRemoved
 end
 
+--- Remove cross-slot duplicate records missed by v4→v5 migration.
+-- The v4→v5 migration grouped by baseHash (prefix + slot), so duplicates
+-- at different slots (created when sync normalization shifted occurrence
+-- indices) were invisible. This migration groups by PREFIX (slot-independent)
+-- and clusters by timestamp proximity to find all duplicates.
+-- @param guildData table Guild data from AceDB
+-- @return number Number of records removed
+function GBL:MigrateCrossSlotDedup(guildData)
+    if not guildData or (guildData.schemaVersion or 0) >= 6 then return 0 end
+
+    local totalRemoved = 0
+
+    for _, storageKey in ipairs({ "transactions", "moneyTransactions" }) do
+        local records = guildData[storageKey]
+        if records and #records > 0 then
+            -- Group by prefix (slot-independent)
+            local groups = {}
+            local groupOrder = {}
+            for _, record in ipairs(records) do
+                local prefix = self:BuildTxPrefix(record)
+                if not groups[prefix] then
+                    groups[prefix] = {}
+                    groupOrder[#groupOrder + 1] = prefix
+                end
+                groups[prefix][#groups[prefix] + 1] = record
+            end
+
+            local surviving = {}
+            for _, prefix in ipairs(groupOrder) do
+                local group = groups[prefix]
+                if #group <= 1 then
+                    surviving[#surviving + 1] = group[1]
+                else
+                    -- Sort by timestamp to identify event clusters
+                    table.sort(group, function(a, b)
+                        return (a.timestamp or 0) < (b.timestamp or 0)
+                    end)
+
+                    -- Cluster records by timestamp proximity (< 3600 = same event)
+                    local clusters = {}
+                    local currentCluster = { group[1] }
+                    for i = 2, #group do
+                        local diff = math.abs(
+                            (group[i].timestamp or 0) - (group[i-1].timestamp or 0))
+                        if diff < 3600 then
+                            currentCluster[#currentCluster + 1] = group[i]
+                        else
+                            clusters[#clusters + 1] = currentCluster
+                            currentCluster = { group[i] }
+                        end
+                    end
+                    clusters[#clusters + 1] = currentCluster
+
+                    -- Within each cluster, find anchor count from earliest local scan
+                    for _, cluster in ipairs(clusters) do
+                        if #cluster <= 1 then
+                            surviving[#surviving + 1] = cluster[1]
+                        else
+                            -- Sub-group by scanTime
+                            local byScanTime = {}
+                            local scanOrder = {}
+                            for _, rec in ipairs(cluster) do
+                                local st = rec.scanTime or 0
+                                if not byScanTime[st] then
+                                    byScanTime[st] = {}
+                                    scanOrder[#scanOrder + 1] = st
+                                end
+                                byScanTime[st][#byScanTime[st] + 1] = rec
+                            end
+                            table.sort(scanOrder)
+
+                            -- Anchor: earliest local scan
+                            local anchorCount, anchorScanTime
+                            for _, st in ipairs(scanOrder) do
+                                local subGroup = byScanTime[st]
+                                for _, rec in ipairs(subGroup) do
+                                    if not rec.scannedBy
+                                        or not rec.scannedBy:match("^sync:") then
+                                        anchorCount = #subGroup
+                                        anchorScanTime = st
+                                        break
+                                    end
+                                end
+                                if anchorCount then break end
+                            end
+
+                            -- Fallback: no local scans, use smallest sub-group
+                            if not anchorCount then
+                                local minCount = #cluster
+                                for _, st in ipairs(scanOrder) do
+                                    if #byScanTime[st] < minCount then
+                                        minCount = #byScanTime[st]
+                                        anchorScanTime = st
+                                    end
+                                end
+                                anchorCount = minCount
+                            end
+
+                            if #cluster > anchorCount then
+                                local anchorRecords = byScanTime[anchorScanTime]
+                                for _, rec in ipairs(anchorRecords) do
+                                    surviving[#surviving + 1] = rec
+                                end
+                                totalRemoved = totalRemoved + (#cluster - anchorCount)
+                            else
+                                for _, rec in ipairs(cluster) do
+                                    surviving[#surviving + 1] = rec
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+
+            -- Replace storage array (preserve AceDB table ref)
+            for i = #records, 1, -1 do records[i] = nil end
+            for i, rec in ipairs(surviving) do records[i] = rec end
+        end
+    end
+
+    if totalRemoved > 0 then
+        -- Rebuild occurrence indices, seenTxHashes, and playerStats
+        local allRecords = {}
+        for _, tx in ipairs(guildData.transactions or {}) do
+            allRecords[#allRecords + 1] = tx
+        end
+        for _, tx in ipairs(guildData.moneyTransactions or {}) do
+            allRecords[#allRecords + 1] = tx
+        end
+
+        -- Reassign occurrence indices per baseHash
+        local idGroups = {}
+        for _, record in ipairs(allRecords) do
+            local baseHash = self:ComputeTxHash(record)
+            if not idGroups[baseHash] then idGroups[baseHash] = {} end
+            idGroups[baseHash][#idGroups[baseHash] + 1] = record
+        end
+        for _, idGroup in pairs(idGroups) do
+            table.sort(idGroup, function(a, b)
+                if (a.timestamp or 0) == (b.timestamp or 0) then
+                    return (a.scanTime or 0) < (b.scanTime or 0)
+                end
+                return (a.timestamp or 0) < (b.timestamp or 0)
+            end)
+            for i, record in ipairs(idGroup) do
+                local occ = i - 1
+                record._occurrence = occ
+                record.id = self:ComputeTxHash(record) .. ":" .. occ
+            end
+        end
+
+        -- Rebuild seenTxHashes
+        for k in pairs(guildData.seenTxHashes) do
+            guildData.seenTxHashes[k] = nil
+        end
+        for _, record in ipairs(allRecords) do
+            if record.id then
+                guildData.seenTxHashes[record.id] = record.timestamp or 0
+            end
+        end
+
+        -- Rebuild playerStats
+        local statsDefaults = {
+            withdrawals = {}, deposits = {},
+            totalWithdrawCount = 0, totalDepositCount = 0,
+            moneyWithdrawn = 0, moneyDeposited = 0,
+            firstSeen = 0, lastSeen = 0,
+        }
+        for k in pairs(guildData.playerStats) do
+            guildData.playerStats[k] = nil
+        end
+        for _, record in ipairs(allRecords) do
+            if record.player then
+                if not guildData.playerStats[record.player]
+                    or not guildData.playerStats[record.player].totalWithdrawCount then
+                    guildData.playerStats[record.player] = {}
+                    for dk, dv in pairs(statsDefaults) do
+                        guildData.playerStats[record.player][dk] =
+                            type(dv) == "table" and {} or dv
+                    end
+                end
+                self:UpdatePlayerStats(record, guildData)
+            end
+        end
+    end
+
+    guildData.schemaVersion = 6
+    self:ResetHashCache()
+    return totalRemoved
+end
+
 --- Run migration for all guild data namespaces.
 function GBL:MigrateAllGuilds()
     if not self.db or not self.db.global or not self.db.global.guilds then return end
@@ -741,6 +932,7 @@ function GBL:MigrateAllGuilds()
         self:MigrateSchemaV2ToV3(guildData)
         self:MigrateOccurrenceToPerSlot(guildData)
         self:MigrateDeduplicateRecords(guildData)
+        self:MigrateCrossSlotDedup(guildData)
     end
 end
 
@@ -1220,7 +1412,7 @@ function GBL:PrintHelp()
 end
 
 --- Manually run the deduplication cleanup.
--- Same logic as the v4→v5 schema migration, but re-runnable.
+-- Runs both the v4→v5 (same-slot) and v5→v6 (cross-slot) dedup passes.
 function GBL:RunCleanup()
     local guildData = self:GetGuildData()
     if not guildData then
@@ -1228,13 +1420,19 @@ function GBL:RunCleanup()
         return
     end
 
-    -- Temporarily reset schema to allow migration to re-run
-    guildData.schemaVersion = 4
-    local removed = self:MigrateDeduplicateRecords(guildData)
+    local totalRemoved = 0
 
-    if removed > 0 then
+    -- Pass 1: same-slot dedup (v4→v5 logic)
+    guildData.schemaVersion = 4
+    totalRemoved = totalRemoved + self:MigrateDeduplicateRecords(guildData)
+
+    -- Pass 2: cross-slot dedup (v5→v6 logic)
+    guildData.schemaVersion = 5
+    totalRemoved = totalRemoved + self:MigrateCrossSlotDedup(guildData)
+
+    if totalRemoved > 0 then
         self:Print(format("Cleanup: removed %d duplicate record%s (%d item tx, %d money tx remain).",
-            removed, removed == 1 and "" or "s",
+            totalRemoved, totalRemoved == 1 and "" or "s",
             #guildData.transactions, #guildData.moneyTransactions))
     else
         self:Print("Cleanup: no duplicates found.")

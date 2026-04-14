@@ -5,6 +5,17 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.3] — 2026-04-13
+
+### Fixed
+- **Duplicate records from seenTxHashes gaps after sync** — sync normalization (`NormalizeRecordId`) could remove an occurrence entry (e.g. `:1`) from `seenTxHashes` while moving it to a different slot, creating a gap. `CountStoredAtSlot` stopped at the gap and returned 0, causing `StoreBatchRecords` to store all records as "new" on the next bank open. Fix: initial scan now counts from the actual records array (`BuildStoredRecordIndex`) instead of `seenTxHashes`. Ground truth cannot have gaps.
+- **Duplicate records from split adjacent slots** — `CountStoredForHash` returned at the first adjacent slot with matches, without checking the other side. Records split across slots 99 and 101 (from normalization) caused a query for slot 100 to only find one side, undercounting and creating duplicates. Fix: `CountFromRecordIndex` sums counts across all three slots (exact ± 1).
+- **Occurrence ID collision after normalization** — new records could be assigned `:1` when `:1` was removed by normalization but `:2` still existed, causing ID collisions. Fix: `MaxOccurrenceAtSlot` scans past gaps to find the true next available index.
+
+### Added
+- **Schema migration v5→v6** — `MigrateCrossSlotDedup` removes cross-slot duplicates missed by the v4→v5 migration (which grouped by baseHash including slot). Groups by prefix (slot-independent), clusters by timestamp proximity (< 3600s), and anchors on earliest local scan. Rebuilds indices and stats.
+- **`/gbl cleanup` enhanced** — now runs both same-slot (v4→v5) and cross-slot (v5→v6) dedup passes.
+
 ## [0.14.2] — 2026-04-13
 
 ### Fixed
