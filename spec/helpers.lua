@@ -116,6 +116,7 @@ function Helpers.loadAddon()
     safeDofile("UI/ConsumptionView.lua")
     safeDofile("UI/LedgerView.lua")
     safeDofile("UI/SyncStatus.lua")
+    safeDofile("UI/ChangelogView.lua")
     safeDofile("UI/UI.lua")
     return MockAce.addon
 end

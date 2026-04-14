@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.15.1"
+local VERSION = "0.16.0"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -103,6 +103,14 @@ function GBL:OnEnable()
 
     -- Migrate occurrence scheme before sync starts (v0.12.0)
     self:MigrateAllGuilds()
+
+    -- Deduplicate all guild data on every login/reload — catches duplicates
+    -- from sync, counting bugs, or any other source before sync starts.
+    if self.db and self.db.global and self.db.global.guilds then
+        for _, guildData in pairs(self.db.global.guilds) do
+            self:DeduplicateRecords(guildData)
+        end
+    end
 
     -- Rebuild UI tabs when access control settings change via sync
     self:RegisterMessage("GBL_ACCESS_CONTROL_CHANGED", "OnAccessControlChanged")
@@ -1472,8 +1480,23 @@ function GBL:PrintHelp()
     self:Print("  /gbl help    — Show this help message")
 end
 
---- Manually run the deduplication cleanup.
--- MigrateCrossSlotDedup runs both same-slot (pass 1) and cross-slot (pass 2).
+--- Run both dedup passes (same-slot + cross-slot) without schema guards.
+-- Called on every login/reload and after each sync receive to ensure
+-- dirty data from any source is cleaned up promptly.
+-- @param guildData table Guild data from AceDB
+-- @return number Number of duplicate records removed
+function GBL:DeduplicateRecords(guildData)
+    if not guildData then return 0 end
+
+    local savedSchema = guildData.schemaVersion
+    guildData.schemaVersion = 5
+    local removed = self:MigrateCrossSlotDedup(guildData)
+    -- MigrateCrossSlotDedup sets schemaVersion=6; restore if it was higher
+    if savedSchema > 6 then guildData.schemaVersion = savedSchema end
+    return removed
+end
+
+--- Manually run the deduplication cleanup with user feedback.
 function GBL:RunCleanup()
     local guildData = self:GetGuildData()
     if not guildData then
@@ -1481,9 +1504,7 @@ function GBL:RunCleanup()
         return
     end
 
-    -- Reset schema to allow full two-pass cleanup to re-run
-    guildData.schemaVersion = 5
-    local totalRemoved = self:MigrateCrossSlotDedup(guildData)
+    local totalRemoved = self:DeduplicateRecords(guildData)
 
     if totalRemoved > 0 then
         self:Print(format("Cleanup: removed %d duplicate record%s (%d item tx, %d money tx remain).",

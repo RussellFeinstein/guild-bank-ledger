@@ -5,6 +5,19 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] — 2026-04-14
+
+### Added
+- **Changelog tab** — new tab in the addon UI (next to Sync) displaying the full version history with color-coded sections. Available to all users including those in restricted access modes. Changelog data is embedded in `UI/ChangelogView.lua` and rendered via AceGUI ScrollFrame.
+
+## [0.15.2] — 2026-04-14
+
+### Fixed
+- **Sync re-introducing duplicates after cleanup** — after independent migrations reassign occurrence indices on each client, `IsDuplicate` fails to match records with diverged indices. Fix: `DeduplicateRecords` now runs on every login/reload (before sync starts), cleaning dirty data from any source before the session begins.
+
+### Added
+- **`DeduplicateRecords` function** — schema-independent two-pass dedup (same-slot + cross-slot) extracted from `RunCleanup`. Runs automatically on every startup; also used by `/gbl cleanup`.
+
 ## [0.15.1] — 2026-04-13
 
 ### Fixed

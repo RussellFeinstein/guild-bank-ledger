@@ -51,6 +51,7 @@ function GBL:RebuildTabs()
     if accessLevel == "sync_only" then
         tabs = {
             { value = "sync", text = "Sync" },
+            { value = "changelog", text = "Changelog" },
         }
     else
         tabs = {
@@ -58,6 +59,7 @@ function GBL:RebuildTabs()
             { value = "goldlog", text = "Gold Log" },
             { value = "consumption", text = "Consumption" },
             { value = "sync", text = "Sync" },
+            { value = "changelog", text = "Changelog" },
         }
     end
 
@@ -136,7 +138,7 @@ function GBL:SelectTab(tabName)
     if accessLevel == "own_transactions" then
         self:AddRestrictedBanner(self.tabGroup, "Showing your transactions only.")
     elseif accessLevel == "sync_only" then
-        self:AddRestrictedBanner(self.tabGroup, "Restricted view — only the Sync tab is available.")
+        self:AddRestrictedBanner(self.tabGroup, "Restricted view — limited tabs available.")
     end
 
     local guildData = self:GetGuildData()
@@ -162,6 +164,8 @@ function GBL:SelectTab(tabName)
         self:BuildConsumptionTab(self.tabGroup, allTx)
     elseif tabName == "sync" then
         self:BuildSyncTab(self.tabGroup)
+    elseif tabName == "changelog" then
+        self:BuildChangelogTab(self.tabGroup)
     end
 end
 

@@ -1,0 +1,420 @@
+------------------------------------------------------------------------
+-- GuildBankLedger — UI/ChangelogView.lua
+-- Changelog tab: embedded version history and in-game renderer.
+------------------------------------------------------------------------
+
+local ADDON_NAME = "GuildBankLedger"
+local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
+
+------------------------------------------------------------------------
+-- Section rendering order and colors
+------------------------------------------------------------------------
+
+local SECTION_ORDER = { "Added", "Changed", "Fixed", "Removed", "Deprecated", "Security" }
+
+local SECTION_COLORS = {
+    Added      = "|cff55ff55",
+    Changed    = "|cff55bbff",
+    Fixed      = "|cffffaa55",
+    Removed    = "|cffff5555",
+    Deprecated = "|cff999999",
+    Security   = "|cffcc66ff",
+}
+
+------------------------------------------------------------------------
+-- Changelog data — newest first, concise summaries only.
+-- Format: { version, date, { SectionType = { entries } }, milestone? }
+------------------------------------------------------------------------
+
+GBL.CHANGELOG_DATA = {
+    -- v0.16.0
+    {"0.16.0", "2026-04-14", {
+        Added = {"Changelog tab in addon UI — scrollable version history"},
+    }},
+    -- v0.15.x
+    {"0.15.2", "2026-04-14", {
+        Fixed = {"Sync re-introducing duplicates after cleanup"},
+        Added = {"DeduplicateRecords function for startup dedup"},
+    }},
+    {"0.15.1", "2026-04-13", {
+        Fixed = {"ItemCache error on uncached items (wrong API for numeric itemID)"},
+    }},
+    {"0.15.0", "2026-04-13", {
+        Added = {
+            "GM-configurable access control system",
+            "Access control sync via HELLO protocol",
+        },
+        Changed = {
+            "Settings visible to all full-access users",
+            "Tab list rebuilds dynamically on access changes",
+        },
+        Fixed = {"Migration now runs full dedup cleanup"},
+        Removed = {"IsOfficerRank() replaced by access control"},
+    }},
+    -- v0.14.x
+    {"0.14.3", "2026-04-13", {
+        Fixed = {
+            "Duplicate records from seenTxHashes gaps after sync",
+            "Duplicate records from split adjacent slots",
+            "Occurrence ID collision after normalization",
+        },
+    }},
+    {"0.14.2", "2026-04-13", {
+        Fixed = {"Existing duplicate records removed on upgrade"},
+        Added = {"/gbl cleanup command"},
+    }},
+    {"0.14.1", "2026-04-13", {
+        Fixed = {"Within-slot duplicate records on rescan"},
+    }},
+    {"0.14.0", "2026-04-13", {
+        Fixed = {"Duplicate records from occurrence index shift"},
+        Changed = {"Per-slot occurrence reindexing, sync protocol v4"},
+    }},
+    -- v0.13.x
+    {"0.13.2", "2026-04-13", {
+        Fixed = {"Player name consolidation failure at login"},
+    }},
+    {"0.13.1", "2026-04-13", {
+        Fixed = {"Outdated peers now visible in Online Peers"},
+    }},
+    {"0.13.0", "2026-04-13", {
+        Added = {
+            "Item name resolution for synced records",
+            "Guild roster cache for cross-realm tracking",
+        },
+        Changed = {
+            "Player names always stored as Name-Realm",
+            "Sync restricted to exact version match",
+        },
+        Fixed = {
+            "Sync chunk count off-by-one",
+            "Consumption view player fragmentation",
+        },
+    }},
+    -- v0.12.x
+    {"0.12.2", "2026-04-12", {
+        Fixed = {"Corrupted sync records from serialization"},
+    }},
+    {"0.12.1", "2026-04-12", {
+        Added = {"Chat Log toggle on Sync tab"},
+    }},
+    {"0.12.0", "2026-04-12", {
+        Fixed = {"Cross-client false positives for adjacent-hour events"},
+        Added = {"Occurrence scheme migration (v1 to v2)"},
+    }},
+    -- v0.11.x
+    {"0.11.3", "2026-04-12", {
+        Added = {"20 regression tests for sync convergence"},
+    }},
+    {"0.11.2", "2026-04-12", {
+        Fixed = {"Bucket hashes mismatching after ID normalization"},
+    }},
+    {"0.11.1", "2026-04-12", {
+        Fixed = {
+            "Sync looping after normalization (sender-wins)",
+            "Bucket hash mismatch from timestamp divergence",
+        },
+    }},
+    {"0.11.0", "2026-04-12", {
+        Added = {
+            "Sync ID normalization for convergence",
+            "Compaction guard during sync receive",
+        },
+    }},
+    -- v0.10.x
+    {"0.10.2", "2026-04-12", {
+        Fixed = {"Sync dedup false positives for consecutive-hour events"},
+    }},
+    {"0.10.1", "2026-04-12", {
+        Fixed = {"Stale peers wiped while still online (added heartbeat)"},
+    }},
+    {"0.10.0", "2026-04-11", {
+        Added = {"LibDeflate compression for sync messages"},
+        Changed = {"Sync protocol version bumped to 2"},
+    }},
+    -- v0.9.x
+    {"0.9.7", "2026-04-11", {
+        Fixed = {"Stale peers in Online list (5-minute expiry)"},
+    }},
+    {"0.9.6", "2026-04-11", {
+        Changed = {"Sync buckets use 6-hour windows instead of daily"},
+    }},
+    {"0.9.5", "2026-04-11", {
+        Fixed = {"Audit trail flooding from chunk logging"},
+    }},
+    {"0.9.4", "2026-04-11", {
+        Added = {"/gbl synclog command"},
+    }},
+    {"0.9.3", "2026-04-11", {
+        Fixed = {
+            "Peer discovery after reload",
+            "Known-peer reply gate blocking rediscovery",
+        },
+        Changed = {"HELLO replies use targeted WHISPER"},
+    }},
+    {"0.9.2", "2026-04-11", {
+        Changed = {"Verbose sync audit trail diagnostics"},
+    }},
+    {"0.9.1", "2026-04-11", {
+        Fixed = {"Hash-mismatch sync gap between peers"},
+        Changed = {"Hash comparison as primary sync trigger"},
+    }},
+    {"0.9.0", "2026-04-11", {
+        Added = {
+            "Receive-side NACK retry for sync",
+            "Zone change protection during sync",
+            "FPS-adaptive throttling",
+        },
+        Changed = {"Smaller sync chunks (15 to 5 records)"},
+    }},
+    -- v0.8.x
+    {"0.8.0", "2026-04-11", {
+        Added = {
+            "Fingerprint-based sync (hash comparison)",
+            "Bucket-filtered delta sync",
+        },
+    }},
+    -- v0.7.x
+    {"0.7.17", "2026-04-11", {
+        Changed = {"Reverted inter-chunk delay to 100ms"},
+    }},
+    {"0.7.15", "2026-04-11", {
+        Changed = {"Reduced chunk byte budget for reliability"},
+    }},
+    {"0.7.14", "2026-04-11", {
+        Fixed = {"Crash syncing records with missing fields"},
+    }},
+    {"0.7.13", "2026-04-10", {
+        Fixed = {"Cross-realm sync name format mismatch"},
+    }},
+    {"0.7.12", "2026-04-10", {
+        Fixed = {"Sync chunks exceeding WHISPER size limit"},
+    }},
+    {"0.7.11", "2026-04-10", {
+        Fixed = {"Sync request stalling permanently"},
+    }},
+    {"0.7.10", "2026-04-10", {
+        Added = {"Chat output for sync events"},
+    }},
+    {"0.7.9", "2026-04-10", {
+        Fixed = {"Crash syncing records without timestamp"},
+    }},
+    {"0.7.8", "2026-04-10", {
+        Changed = {
+            "Sync chunk size increased to 10",
+            "Sync strips reconstructable fields",
+        },
+    }},
+    {"0.7.7", "2026-04-10", {
+        Fixed = {
+            "Sync chunks too large for WHISPER",
+            "Single dropped chunk now retries",
+        },
+    }},
+    {"0.7.6", "2026-04-10", {
+        Fixed = {
+            "Sync timers never firing in WoW",
+            "Manual Hello button cooldown bypass",
+        },
+    }},
+    {"0.7.5", "2026-04-10", {
+        Fixed = {"Peer discovery failure from cooldown"},
+        Added = {"HELLO on guild bank open"},
+    }},
+    {"0.7.4", "2026-04-10", {
+        Added = {
+            "HELLO response for mutual peer discovery",
+            "Version indicator in peer list",
+        },
+    }},
+    {"0.7.3", "2026-04-10", {
+        Fixed = {"Sync data rejected from name format mismatch"},
+    }},
+    {"0.7.2", "2026-04-10", {
+        Fixed = {"Column text wrapping to new lines"},
+    }},
+    {"0.7.1", "2026-04-10", {
+        Fixed = {
+            "Sync ACK timeout starting too early",
+            "Self-message filtering in retail WoW",
+        },
+        Changed = {"Chunk size reduced, ACK timeout increased"},
+    }},
+    {"0.7.0", "2026-04-08", {
+        Added = {
+            "Gold summary panel on Gold Log tab",
+            "Date range filters (1h, 3h, 24h)",
+            "Pagination for Transactions tab",
+        },
+        Fixed = {"Re-scan no longer resets filters"},
+    }},
+    -- v0.6.x
+    {"0.6.2", "2026-04-07", {
+        Fixed = {"Re-scan not detecting new transactions"},
+    }},
+    {"0.6.1", "2026-04-07", {
+        Fixed = {"Periodic re-scan not functioning in-game"},
+    }},
+    {"0.6.0", "2026-04-07", {
+        Added = {
+            "Periodic re-scan while guild bank open",
+            "Auto re-scan toggle",
+        },
+    }},
+    -- v0.5.0
+    {"0.5.0", "2026-04-07", {
+        Added = {
+            "Multi-officer sync via AceComm",
+            "Sync tab with controls, peer list, audit trail",
+            "ACK timeout and receive timeout",
+            "HELLO broadcast on login and bank close",
+        },
+    }, "Milestone M5: Multi-Officer Sync"},
+    -- v0.4.x
+    {"0.4.1", "2026-04-07", {
+        Fixed = {
+            "Gold transactions in Transactions tab",
+            "Money tab queried at correct index",
+            "Type normalization (withdrawal to withdraw)",
+        },
+    }},
+    {"0.4.0", "2026-04-07", {
+        Added = {
+            "Click-to-expand player rows in consumption",
+            "Sortable consumption column headers",
+            "Category filter on consumption tab",
+        },
+        Fixed = {"Guild bank open stutter (deferred scanning)"},
+    }, "Milestone M4: Consumption Detail + UI Polish"},
+    -- v0.3.x
+    {"0.3.3", "2026-04-07", {
+        Fixed = {"Sort direction indicators (UTF-8 to text)"},
+    }},
+    {"0.3.2", "2026-04-07", {
+        Fixed = {
+            "UI rows overflowed frame (added ScrollFrame)",
+            "Interface version updated to 120001",
+        },
+    }},
+    {"0.3.1", "2026-04-07", {
+        Fixed = {"fetch-libs.sh repo URLs corrected"},
+    }},
+    {"0.3.0", "2026-04-07", {
+        Added = {
+            "Main UI window with tabs",
+            "Transaction ledger with sortable columns",
+            "Filter bar and consumption summary",
+            "Minimap button",
+            "Accessibility features (WCAG 2.1 AA)",
+            "Keyboard navigation",
+        },
+    }, "Milestone M3: UI"},
+    -- v0.2.x
+    {"0.2.6", "2026-04-07", {
+        Added = {"Keyboard navigation and focus handling"},
+    }},
+    {"0.2.5", "2026-04-07", {
+        Added = {"Main UI window, filter widgets, minimap button"},
+    }},
+    {"0.2.4", "2026-04-07", {
+        Added = {
+            "Per-player consumption aggregation",
+            "Money formatting utility",
+        },
+    }},
+    {"0.2.3", "2026-04-07", {
+        Added = {"Transaction filter logic"},
+    }},
+    {"0.2.2", "2026-04-06", {
+        Added = {
+            "Accessibility module (WCAG 2.1 AA)",
+            "Colorblind-safe palettes",
+            "Triple encoding for transaction types",
+        },
+    }},
+    {"0.2.1", "2026-04-06", {
+        Added = {"Library fetch script for development"},
+    }},
+    {"0.2.0", "2026-04-06", {
+        Added = {
+            "Transaction recording from guild bank logs",
+            "Item categorization by classID/subclassID",
+            "Hour-bucket deduplication",
+            "Money transaction tracking",
+            "Per-player statistics",
+            "Tiered storage compaction",
+        },
+    }, "Milestone M2: Ledger + Dedup + Categories + Storage"},
+    -- v0.1.0
+    {"0.1.0", "2026-04-06", {
+        Added = {
+            "AceAddon bootstrap with lifecycle",
+            "Guild bank open/close detection",
+            "Slot-level guild bank scanning",
+            "Slash commands and AceDB saved variables",
+        },
+    }, "Milestone M1: Scaffold + Scanner"},
+}
+
+------------------------------------------------------------------------
+-- Formatting
+------------------------------------------------------------------------
+
+--- Format a single changelog version entry into a WoW-colored string.
+-- @param entry table { version, date, sections, milestone? }
+-- @return string Formatted string with WoW color codes and newlines
+function GBL:FormatChangelogEntry(entry)
+    local version, date, sections, milestone = entry[1], entry[2], entry[3], entry[4]
+    local lines = {}
+
+    -- Version header
+    lines[#lines + 1] = string.format("|cffffcc00v%s|r  |cff999999(%s)|r", version, date)
+
+    -- Milestone label
+    if milestone then
+        lines[#lines + 1] = "  |cffffcc00" .. milestone .. "|r"
+    end
+
+    -- Section entries in standard order
+    for _, sType in ipairs(SECTION_ORDER) do
+        local entries = sections[sType]
+        if entries then
+            local color = SECTION_COLORS[sType] or "|cffcccccc"
+            lines[#lines + 1] = "  " .. color .. sType .. ":|r"
+            for _, text in ipairs(entries) do
+                lines[#lines + 1] = "    - " .. text
+            end
+        end
+    end
+
+    -- Trailing blank line for spacing
+    lines[#lines + 1] = ""
+
+    return table.concat(lines, "\n")
+end
+
+------------------------------------------------------------------------
+-- Tab builder
+------------------------------------------------------------------------
+
+--- Build the Changelog tab inside a container.
+-- @param container AceGUI container (the TabGroup content area)
+function GBL:BuildChangelogTab(container)
+    local AceGUI = LibStub("AceGUI-3.0")
+
+    -- Scrollable content
+    local scroll = AceGUI:Create("ScrollFrame")
+    scroll:SetFullWidth(true)
+    scroll:SetFullHeight(true)
+    scroll:SetLayout("List")
+    container:AddChild(scroll)
+
+    -- Render each version as one label
+    local data = self.CHANGELOG_DATA or {}
+    for _, entry in ipairs(data) do
+        local label = AceGUI:Create("Label")
+        label:SetFullWidth(true)
+        label:SetText(self:FormatChangelogEntry(entry))
+        scroll:AddChild(label)
+    end
+end

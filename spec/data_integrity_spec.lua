@@ -964,4 +964,112 @@ describe("Data integrity", function()
             assert.equals(1, #guildData.moneyTransactions)
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- DeduplicateRecords (schema-independent cleanup)
+    ---------------------------------------------------------------------------
+
+    describe("DeduplicateRecords", function()
+        local function makeRecord(opts)
+            local rec = {
+                type = opts.type or "withdraw",
+                player = opts.player or "Katorri-TestRealm",
+                itemID = opts.itemID or 99999,
+                count = opts.count or 1,
+                tab = opts.tab or 1,
+                timestamp = opts.timestamp or (3600 * 100),
+                scanTime = opts.scanTime or MockWoW.serverTime,
+                scannedBy = opts.scannedBy or "Katorri-TestRealm",
+            }
+            rec.id = GBL:ComputeTxHash(rec)
+            return rec
+        end
+
+        local function assignAndStore(records, gd, storageKey)
+            GBL:AssignOccurrenceIndices(records)
+            for _, rec in ipairs(records) do
+                table.insert(gd[storageKey], rec)
+                gd.seenTxHashes[rec.id] = rec.timestamp
+            end
+        end
+
+        it("runs without schema guard regardless of schemaVersion", function()
+            guildData.schemaVersion = 99
+            local r1 = makeRecord({ scanTime = 1000 })
+            local r2 = makeRecord({ scanTime = 1003 })
+            assignAndStore({ r1, r2 }, guildData, "transactions")
+
+            local removed = GBL:DeduplicateRecords(guildData)
+
+            assert.equals(1, removed)
+            assert.equals(1, #guildData.transactions)
+            -- Schema should be restored to original (99 > 6)
+            assert.equals(99, guildData.schemaVersion)
+        end)
+
+        it("removes duplicates from diverged sync occurrence indices", function()
+            guildData.schemaVersion = 6
+            -- Local: 1 genuine event, cleaned to :0
+            local local1 = makeRecord({ scanTime = 1000 })
+            local1._occurrence = 0
+            local1.id = GBL:ComputeTxHash(local1) .. ":0"
+            table.insert(guildData.transactions, local1)
+            guildData.seenTxHashes[local1.id] = local1.timestamp
+
+            -- Sync brought in: same event but peer had it as :1
+            -- (IsDuplicate didn't catch it because :1 != :0)
+            local synced = makeRecord({
+                timestamp = 3600 * 100 + 50,  -- same event, slight ts diff
+                scanTime = 2000,
+                scannedBy = "sync:Voxle-TestRealm",
+            })
+            synced._occurrence = 1
+            synced.id = GBL:ComputeTxHash(synced) .. ":1"
+            table.insert(guildData.transactions, synced)
+            guildData.seenTxHashes[synced.id] = synced.timestamp
+
+            local removed = GBL:DeduplicateRecords(guildData)
+
+            assert.equals(1, removed)
+            assert.equals(1, #guildData.transactions)
+            -- Earliest local scan (scanTime=1000) survives
+            assert.equals(1000, guildData.transactions[1].scanTime)
+        end)
+
+        it("preserves schema version when already >= 6", function()
+            guildData.schemaVersion = 7
+            local removed = GBL:DeduplicateRecords(guildData)
+            assert.equals(0, removed)
+            assert.equals(7, guildData.schemaVersion)
+        end)
+
+        -- CRITICAL: genuine synced records must survive cleanup
+        it("preserves genuine synced second event in same hour", function()
+            guildData.schemaVersion = 6
+            -- Local: 1 event scanned locally
+            local local1 = makeRecord({ scanTime = 1000 })
+            local1._occurrence = 0
+            local1.id = GBL:ComputeTxHash(local1) .. ":0"
+            table.insert(guildData.transactions, local1)
+            guildData.seenTxHashes[local1.id] = local1.timestamp
+
+            -- Sync: GENUINE second event from peer (different withdrawal
+            -- in same hour that local client hadn't scanned yet)
+            local synced = makeRecord({
+                timestamp = 3600 * 100 + 50,
+                scanTime = 2000,
+                scannedBy = "sync:Voxle-TestRealm",
+            })
+            synced._occurrence = 1
+            synced.id = GBL:ComputeTxHash(synced) .. ":1"
+            table.insert(guildData.transactions, synced)
+            guildData.seenTxHashes[synced.id] = synced.timestamp
+
+            local removed = GBL:DeduplicateRecords(guildData)
+
+            -- Both records must survive — the synced one is genuine
+            assert.equals(0, removed)
+            assert.equals(2, #guildData.transactions)
+        end)
+    end)
 end)
