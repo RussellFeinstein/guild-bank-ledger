@@ -72,10 +72,112 @@ function GBL:BuildSyncTab(container)
     end)
     controlRow:AddChild(helloBtn)
 
+    -- GM-only access control section
+    if self:IsGuildMaster() then
+        self:BuildAccessControlRow(container)
+    end
+
     container:AddChild(syncContent)
 
     self._syncContent = syncContent
     self:RenderSyncContent(syncContent)
+end
+
+------------------------------------------------------------------------
+-- Access control (GM only)
+------------------------------------------------------------------------
+
+--- Build the GM-only access control configuration row.
+-- @param container AceGUI container
+function GBL:BuildAccessControlRow(container)
+    local AceGUI = LibStub("AceGUI-3.0")
+
+    local row = AceGUI:Create("SimpleGroup")
+    row:SetFullWidth(true)
+    row:SetLayout("Flow")
+    container:AddChild(row)
+
+    -- Section label
+    local label = AceGUI:Create("Label")
+    label:SetWidth(120)
+    label:SetText("|cffffcc00Access Control|r")
+    row:AddChild(label)
+
+    -- Build rank name list for the dropdown
+    local rankList = { [0] = "Unrestricted" }
+    local rankOrder = { 0 }
+    local numRanks = GuildControlGetNumRanks and GuildControlGetNumRanks() or 0
+    for i = 1, numRanks do
+        local rankName = GuildControlGetRankName and GuildControlGetRankName(i) or ("Rank " .. i)
+        -- Dropdown value = rank index (1-based from API, but GetGuildInfo uses 0-based)
+        -- GuildControlGetRankName(1) = GM, GuildControlGetRankName(2) = next rank, etc.
+        -- GetGuildInfo rankIndex: 0 = GM, 1 = next rank, etc.
+        -- So GuildControlGetRankName(i) corresponds to rankIndex (i - 1)
+        local rankIndex = i - 1
+        rankList[i] = rankName .. " (rank " .. rankIndex .. ")"
+        rankOrder[#rankOrder + 1] = i
+    end
+
+    -- Current access control settings
+    local guildData = self:GetGuildData()
+    local ac = guildData and guildData.accessControl or {}
+    local currentThreshold = ac.rankThreshold
+    -- Map nil threshold to dropdown value 0 ("Unrestricted")
+    -- Map numeric threshold to dropdown value (threshold + 1) to align with GuildControlGetRankName index
+    local currentDropdownValue = currentThreshold and (currentThreshold + 1) or 0
+
+    -- Rank threshold dropdown
+    local rankDropdown = AceGUI:Create("Dropdown")
+    rankDropdown:SetLabel("Full access up to rank")
+    rankDropdown:SetWidth(200)
+    rankDropdown:SetList(rankList, rankOrder)
+    rankDropdown:SetValue(currentDropdownValue)
+    row:AddChild(rankDropdown)
+
+    -- Restricted mode dropdown
+    local modeList = {
+        sync_only = "Sync Only",
+        own_transactions = "Own Transactions Only",
+    }
+    local modeOrder = { "sync_only", "own_transactions" }
+    local modeDropdown = AceGUI:Create("Dropdown")
+    modeDropdown:SetLabel("Restricted mode")
+    modeDropdown:SetWidth(190)
+    modeDropdown:SetList(modeList, modeOrder)
+    modeDropdown:SetValue(ac.restrictedMode or "sync_only")
+    modeDropdown:SetDisabled(currentThreshold == nil)
+    row:AddChild(modeDropdown)
+
+    -- Enable/disable mode dropdown when threshold changes
+    rankDropdown:SetCallback("OnValueChanged", function(_widget, _event, value)
+        modeDropdown:SetDisabled(value == 0)
+    end)
+
+    -- Apply button
+    local applyBtn = AceGUI:Create("Button")
+    applyBtn:SetText("Apply")
+    applyBtn:SetWidth(80)
+    applyBtn:SetCallback("OnClick", function()
+        if not guildData then return end
+
+        local rankVal = rankDropdown:GetValue()
+        local threshold = (rankVal == 0) and nil or (rankVal - 1)
+        local mode = modeDropdown:GetValue()
+
+        local playerName = self:ResolvePlayerName(UnitName("player") or "Unknown")
+        guildData.accessControl = {
+            rankThreshold = threshold,
+            restrictedMode = threshold and mode or nil,
+            configuredBy = playerName,
+            configuredAt = GetServerTime(),
+        }
+
+        self:Print("Access control updated: "
+            .. (threshold and ("rank " .. threshold .. ", " .. mode) or "unrestricted"))
+        self:BroadcastHello(true)
+        self:SendMessage("GBL_ACCESS_CONTROL_CHANGED")
+    end)
+    row:AddChild(applyBtn)
 end
 
 ------------------------------------------------------------------------

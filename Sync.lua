@@ -208,6 +208,7 @@ function GBL:BroadcastHello(force)
         txCount = txCount,
         dataHash = dataHash,
         lastScanTime = self.lastScanTime or 0,
+        accessControl = guildData.accessControl,
     })
     msg = compressMessage(msg)
 
@@ -238,6 +239,7 @@ function GBL:SendHelloReply(target)
         dataHash = dataHash,
         lastScanTime = self.lastScanTime or 0,
         isReply = true,
+        accessControl = guildData.accessControl,
     })
     msg = compressMessage(msg)
 
@@ -346,6 +348,30 @@ function GBL:HandleHello(sender, data)
         .. ", hash: " .. tostring(data.dataHash or "none")
         .. ", v" .. tostring(data.version or "?")
         .. ", reply=" .. tostring(data.isReply or false) .. ")")
+
+    -- Accept access control settings if the remote copy is newer
+    if data.accessControl and type(data.accessControl) == "table"
+        and (data.accessControl.configuredAt or 0) > 0 then
+        local gd = self:GetGuildData()
+        if gd then
+            local localAC = gd.accessControl or {}
+            local localTS = localAC.configuredAt or 0
+            local remoteTS = data.accessControl.configuredAt or 0
+            if remoteTS > localTS then
+                gd.accessControl = {
+                    rankThreshold = data.accessControl.rankThreshold,
+                    restrictedMode = data.accessControl.restrictedMode,
+                    configuredBy = data.accessControl.configuredBy,
+                    configuredAt = remoteTS,
+                }
+                self:AddAuditEntry("Updated access control from "
+                    .. tostring(data.accessControl.configuredBy)
+                    .. " (threshold=" .. tostring(data.accessControl.rankThreshold)
+                    .. ", mode=" .. tostring(data.accessControl.restrictedMode) .. ")")
+                self:SendMessage("GBL_ACCESS_CONTROL_CHANGED")
+            end
+        end
+    end
 
     -- Reply to broadcast HELLOs so the sender discovers us.
     -- Uses WHISPER (targeted) — each peer replies individually.

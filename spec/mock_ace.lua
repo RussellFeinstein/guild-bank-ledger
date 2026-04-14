@@ -332,6 +332,10 @@ function MockAce.install()
         widget.SetAutoAdjustHeight = function() end
         widget.SetStatusTable = function() end
         widget.EnableResize = function() end
+        widget.SetTabs = function(self, tabs) self._tabs = tabs end
+        widget.SelectTab = function(self, tab) self._selectedTab = tab end
+        widget.SetFullHeight = function() end
+        widget.SetFontObject = function() end
         return widget
     end
 

@@ -4075,4 +4075,149 @@ describe("Sync", function()
             assert.equals(0, #guildData.moneyTransactions)
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- Access control propagation via HELLO
+    ---------------------------------------------------------------------------
+
+    describe("HELLO access control propagation", function()
+        it("includes accessControl in HELLO payload", function()
+            guildData.accessControl = {
+                rankThreshold = 2,
+                restrictedMode = "sync_only",
+                configuredBy = "GM-TestRealm",
+                configuredAt = 1000,
+            }
+
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:BroadcastHello()
+
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok)
+            assert.is_not_nil(data.accessControl)
+            assert.equals(2, data.accessControl.rankThreshold)
+            assert.equals("sync_only", data.accessControl.restrictedMode)
+            assert.equals("GM-TestRealm", data.accessControl.configuredBy)
+            assert.equals(1000, data.accessControl.configuredAt)
+        end)
+
+        it("updates local accessControl from newer remote HELLO", function()
+            guildData.accessControl = {
+                rankThreshold = nil,
+                restrictedMode = nil,
+                configuredBy = nil,
+                configuredAt = 0,
+            }
+
+            GBL:HandleHello("GMPlayer", {
+                version = GBL.version,
+                txCount = 0,
+                accessControl = {
+                    rankThreshold = 3,
+                    restrictedMode = "own_transactions",
+                    configuredBy = "GMPlayer-TestRealm",
+                    configuredAt = 5000,
+                },
+            })
+
+            assert.equals(3, guildData.accessControl.rankThreshold)
+            assert.equals("own_transactions", guildData.accessControl.restrictedMode)
+            assert.equals("GMPlayer-TestRealm", guildData.accessControl.configuredBy)
+            assert.equals(5000, guildData.accessControl.configuredAt)
+        end)
+
+        it("does not overwrite with older accessControl", function()
+            guildData.accessControl = {
+                rankThreshold = 2,
+                restrictedMode = "sync_only",
+                configuredBy = "GM-TestRealm",
+                configuredAt = 9000,
+            }
+
+            GBL:HandleHello("OtherPlayer", {
+                version = GBL.version,
+                txCount = 0,
+                accessControl = {
+                    rankThreshold = 5,
+                    restrictedMode = "own_transactions",
+                    configuredBy = "OtherGM-TestRealm",
+                    configuredAt = 1000,
+                },
+            })
+
+            -- Should not have changed
+            assert.equals(2, guildData.accessControl.rankThreshold)
+            assert.equals("sync_only", guildData.accessControl.restrictedMode)
+            assert.equals(9000, guildData.accessControl.configuredAt)
+        end)
+
+        it("ignores HELLO without accessControl field", function()
+            guildData.accessControl = {
+                rankThreshold = 2,
+                restrictedMode = "sync_only",
+                configuredBy = "GM-TestRealm",
+                configuredAt = 5000,
+            }
+
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version,
+                txCount = 0,
+            })
+
+            -- Should not have changed
+            assert.equals(2, guildData.accessControl.rankThreshold)
+            assert.equals("sync_only", guildData.accessControl.restrictedMode)
+        end)
+
+        it("ignores accessControl with zero configuredAt", function()
+            guildData.accessControl = {
+                rankThreshold = 2,
+                restrictedMode = "sync_only",
+                configuredBy = "GM-TestRealm",
+                configuredAt = 5000,
+            }
+
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version,
+                txCount = 0,
+                accessControl = {
+                    rankThreshold = nil,
+                    restrictedMode = nil,
+                    configuredBy = nil,
+                    configuredAt = 0,
+                },
+            })
+
+            -- Should not have changed (zero configuredAt is treated as unconfigured)
+            assert.equals(2, guildData.accessControl.rankThreshold)
+        end)
+
+        it("fires GBL_ACCESS_CONTROL_CHANGED on update", function()
+            guildData.accessControl = {
+                rankThreshold = nil,
+                configuredAt = 0,
+            }
+
+            GBL:HandleHello("GMPlayer", {
+                version = GBL.version,
+                txCount = 0,
+                accessControl = {
+                    rankThreshold = 1,
+                    restrictedMode = "sync_only",
+                    configuredBy = "GMPlayer-TestRealm",
+                    configuredAt = 1000,
+                },
+            })
+
+            -- Check that SendMessage was called with the change event
+            local found = false
+            for _, msg in ipairs(MockAce.sentMessages) do
+                if msg.message == "GBL_ACCESS_CONTROL_CHANGED" then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found, "Expected GBL_ACCESS_CONTROL_CHANGED message")
+        end)
+    end)
 end)

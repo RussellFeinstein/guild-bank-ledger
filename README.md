@@ -2,7 +2,7 @@
 
 Persistent guild bank transaction logging for World of Warcraft. WoW's built-in guild bank log only stores 25 entries per tab, which rolls over in minutes for active guilds. GuildBankLedger captures every transaction before it's lost.
 
-## Features (v0.9.5)
+## Features (v0.15.0)
 
 - **Persistent logging** — Transactions are saved to `SavedVariables` and survive log rollovers
 - **Automatic scanning** — Scans all guild bank tabs when you open the bank
@@ -22,6 +22,7 @@ Persistent guild bank transaction logging for World of Warcraft. WoW's built-in 
 - **Sync tab** — Enable/disable sync, view online peers with version and tx count, review sync audit log
 - **Auto re-scan** — While the bank is open, re-queries all transaction logs every 5 seconds to capture item movements and gold transactions before they roll off the 25-entry-per-tab limit
 - **Minimap button** — Left-click to toggle the ledger window
+- **Access control** — GM configures a rank threshold for full addon access. Players below the threshold are restricted to Sync Only or Own Transactions Only mode (GM's choice). Settings sync to all guild members via the HELLO protocol
 - **Accessibility** — Colorblind-safe palettes (auto-detected from WoW settings), high contrast mode, triple encoding (shape + color + text), keyboard navigation (Tab/Shift+Tab), font scaling (8-24pt)
 
 ### Planned Features

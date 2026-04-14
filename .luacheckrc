@@ -22,6 +22,8 @@ read_globals = {
     "UnitAffectingCombat",
     "Ambiguate",
     "GetFramerate",
+    "GuildControlGetNumRanks",
+    "GuildControlGetRankName",
     "UnitName",
 
     -- WoW constants and tables
@@ -37,6 +39,7 @@ read_globals = {
     "UIParent",
     "UISpecialFrames",
     "GameFontNormal",
+    "GameFontNormalSmall",
     "GameFontHighlight",
     "ChatFontNormal",
     "PlaySound",

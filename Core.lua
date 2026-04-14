@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.14.3"
+local VERSION = "0.15.0"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -41,7 +41,13 @@ local defaults = {
                 seenTxHashes = {},
                 playerRealms = {},
                 syncState = { lastSyncTimestamp = 0, syncVersion = 0, peers = {} },
-                schemaVersion = 6,
+                accessControl = {
+                    rankThreshold = nil,
+                    restrictedMode = nil,
+                    configuredBy = nil,
+                    configuredAt = 0,
+                },
+                schemaVersion = 7,
             },
         },
     },
@@ -52,7 +58,6 @@ local defaults = {
             font = "Fonts\\FRIZQT__.TTF", fontSize = 12,
             colorblindMode = false, highContrast = false, lockFrame = false,
             openOnBankOpen = true,
-            autoOpenMaxRank = 2,
         },
         scanning = {
             autoScan = true, scanDelay = 0.5, notifyOnScan = true,
@@ -99,8 +104,17 @@ function GBL:OnEnable()
     -- Migrate occurrence scheme before sync starts (v0.12.0)
     self:MigrateAllGuilds()
 
+    -- Rebuild UI tabs when access control settings change via sync
+    self:RegisterMessage("GBL_ACCESS_CONTROL_CHANGED", "OnAccessControlChanged")
+
     -- Initialize sync system (M5)
     self:InitSync()
+end
+
+function GBL:OnAccessControlChanged()
+    if self.tabGroup then
+        self:RebuildTabs()
+    end
 end
 
 ------------------------------------------------------------------------
@@ -733,15 +747,23 @@ function GBL:MigrateDeduplicateRecords(guildData)
     return totalRemoved
 end
 
---- Remove cross-slot duplicate records missed by v4→v5 migration.
--- The v4→v5 migration grouped by baseHash (prefix + slot), so duplicates
--- at different slots (created when sync normalization shifted occurrence
--- indices) were invisible. This migration groups by PREFIX (slot-independent)
--- and clusters by timestamp proximity to find all duplicates.
+--- Remove duplicate records via full two-pass cleanup.
+-- Pass 1: re-runs same-slot dedup (v4→v5 logic) to catch duplicates created
+-- by the counting bug between the v0.14.2 migration and this fix.
+-- Pass 2: cross-slot dedup via PREFIX grouping (slot-independent) with
+-- timestamp proximity clustering to catch duplicates the v4→v5 migration
+-- missed (it grouped by baseHash which includes the slot).
 -- @param guildData table Guild data from AceDB
 -- @return number Number of records removed
 function GBL:MigrateCrossSlotDedup(guildData)
     if not guildData or (guildData.schemaVersion or 0) >= 6 then return 0 end
+
+    -- Pass 1: re-run same-slot dedup — the counting bug continued creating
+    -- new duplicates between v0.14.2 (which ran this pass once) and now.
+    local savedSchema = guildData.schemaVersion
+    guildData.schemaVersion = 4
+    local pass1Removed = self:MigrateDeduplicateRecords(guildData)
+    -- MigrateDeduplicateRecords sets schemaVersion=5; continue to pass 2
 
     local totalRemoved = 0
 
@@ -921,7 +943,21 @@ function GBL:MigrateCrossSlotDedup(guildData)
 
     guildData.schemaVersion = 6
     self:ResetHashCache()
-    return totalRemoved
+    return totalRemoved + pass1Removed
+end
+
+--- Migrate v6 → v7: add accessControl field for GM-configurable rank gating.
+function GBL:MigrateAccessControl(guildData)
+    if not guildData or (guildData.schemaVersion or 0) >= 7 then return end
+    if not guildData.accessControl then
+        guildData.accessControl = {
+            rankThreshold = nil,
+            restrictedMode = nil,
+            configuredBy = nil,
+            configuredAt = 0,
+        }
+    end
+    guildData.schemaVersion = 7
 end
 
 --- Run migration for all guild data namespaces.
@@ -933,6 +969,7 @@ function GBL:MigrateAllGuilds()
         self:MigrateOccurrenceToPerSlot(guildData)
         self:MigrateDeduplicateRecords(guildData)
         self:MigrateCrossSlotDedup(guildData)
+        self:MigrateAccessControl(guildData)
     end
 end
 
@@ -1146,7 +1183,7 @@ function GBL:OnBankOpened()
         self:SendMessage("GBL_BANK_OPENED")
         self:BroadcastHello()
 
-        if self.db.profile.ui.openOnBankOpen and self:IsOfficerRank() then
+        if self.db.profile.ui.openOnBankOpen and self:GetAccessLevel() ~= "sync_only" then
             self:CreateMainFrame()
             local shown = self.mainFrame.frame and self.mainFrame.frame:IsShown()
             if not shown then
@@ -1306,15 +1343,39 @@ function GBL:GetGuildName()
     return self._cachedGuildName
 end
 
---- Check if the player's guild rank is at or above the officer threshold.
--- GetGuildInfo returns rankIndex (0 = GM, 1 = next rank, etc).
--- Lower index = higher rank.
--- @return boolean true if player rank <= autoOpenMaxRank
-function GBL:IsOfficerRank()
+--- Check if the player is the Guild Master (rank 0).
+-- @return boolean true if rank index is exactly 0
+function GBL:IsGuildMaster()
     local _, _, rankIndex = GetGuildInfo("player")
     if not rankIndex then return false end
-    local threshold = self.db.profile.ui.autoOpenMaxRank or 2
-    return rankIndex <= threshold
+    return rankIndex == 0
+end
+
+--- Determine the player's access level based on guild-wide accessControl settings.
+-- @return string "full", "own_transactions", or "sync_only"
+function GBL:GetAccessLevel()
+    if self:IsGuildMaster() then return "full" end
+
+    local guildData = self:GetGuildData()
+    if not guildData then return "full" end
+
+    local ac = guildData.accessControl
+    if not ac or not ac.rankThreshold then return "full" end
+
+    local _, _, rankIndex = GetGuildInfo("player")
+    if not rankIndex then return "full" end
+
+    if rankIndex <= ac.rankThreshold then
+        return "full"
+    end
+
+    return ac.restrictedMode or "sync_only"
+end
+
+--- Convenience check for full addon access.
+-- @return boolean true if the player has unrestricted access
+function GBL:HasFullAccess()
+    return self:GetAccessLevel() == "full"
 end
 
 function GBL:GetGuildData()
@@ -1412,7 +1473,7 @@ function GBL:PrintHelp()
 end
 
 --- Manually run the deduplication cleanup.
--- Runs both the v4→v5 (same-slot) and v5→v6 (cross-slot) dedup passes.
+-- MigrateCrossSlotDedup runs both same-slot (pass 1) and cross-slot (pass 2).
 function GBL:RunCleanup()
     local guildData = self:GetGuildData()
     if not guildData then
@@ -1420,15 +1481,9 @@ function GBL:RunCleanup()
         return
     end
 
-    local totalRemoved = 0
-
-    -- Pass 1: same-slot dedup (v4→v5 logic)
-    guildData.schemaVersion = 4
-    totalRemoved = totalRemoved + self:MigrateDeduplicateRecords(guildData)
-
-    -- Pass 2: cross-slot dedup (v5→v6 logic)
+    -- Reset schema to allow full two-pass cleanup to re-run
     guildData.schemaVersion = 5
-    totalRemoved = totalRemoved + self:MigrateCrossSlotDedup(guildData)
+    local totalRemoved = self:MigrateCrossSlotDedup(guildData)
 
     if totalRemoved > 0 then
         self:Print(format("Cleanup: removed %d duplicate record%s (%d item tx, %d money tx remain).",

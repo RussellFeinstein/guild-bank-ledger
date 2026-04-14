@@ -23,6 +23,7 @@ MockWoW.guild = {
     rankIndex = 1,
     faction = nil,
     realm = nil,
+    ranks = {},      -- array of rank names, 1-indexed (1 = GM, 2 = next rank, etc.)
 }
 
 -- Mock player state
@@ -62,8 +63,11 @@ function MockWoW.reset()
     }
     MockWoW.guild = {
         name = nil,
+        rankName = "Officer",
+        rankIndex = 1,
         faction = nil,
         realm = nil,
+        ranks = {},  -- array of rank names, 1-indexed (1 = GM, 2 = next rank, etc.)
     }
     MockWoW.player = { name = "TestOfficer", realm = "TestRealm" }
     MockWoW.inRaid = false
@@ -175,6 +179,14 @@ function MockWoW.install()
 
     _G.IsInGuild = function()
         return MockWoW.guild.name ~= nil
+    end
+
+    _G.GuildControlGetNumRanks = function()
+        return #MockWoW.guild.ranks
+    end
+
+    _G.GuildControlGetRankName = function(index)
+        return MockWoW.guild.ranks[index] or ("Rank " .. index)
     end
 
     _G.IsInRaid = function()

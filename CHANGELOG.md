@@ -5,6 +5,28 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] — 2026-04-13
+
+### Added
+- **Access control system** — GM (rank 0) can set a rank threshold that determines who gets full addon access. Players below the threshold are restricted to one of two modes, also configurable by the GM:
+  - **Sync Only** — restricted users see only the Sync tab
+  - **Own Transactions Only** — restricted users see all tabs but data is filtered to only their own transactions
+- **Access control configuration UI** — GM-only section on the Sync tab with rank threshold dropdown, restriction mode dropdown, and Apply button
+- **Access control sync** — settings propagate to guild members via the HELLO protocol; newer timestamps overwrite older ones
+- **Restricted mode banner** — yellow label shown to restricted users explaining their access level
+- **Schema migration v6→v7** — initializes the accessControl field on guild data
+
+### Changed
+- Settings row (Open with Guild Bank, Lock while scanning, Auto re-scan) now visible to all full-access users, not just a hardcoded officer rank
+- Auto-open on bank visit works for all users except those in Sync Only mode (previously gated to a hardcoded officer rank)
+- Tab list is now dynamic — rebuilds when access control settings change
+
+### Fixed
+- **Automatic migration now runs full dedup cleanup** — the v5→v6 migration skipped the same-slot dedup pass (v4→v5 logic) because `schemaVersion` was already 5 from v0.14.2. But the counting bug continued creating new same-slot duplicates between v0.14.2 and v0.14.3. The migration now re-runs both passes so duplicates are cleaned up on login without requiring `/gbl cleanup`.
+
+### Removed
+- `IsOfficerRank()` function and `autoOpenMaxRank` profile setting — replaced by the guild-wide access control system
+
 ## [0.14.3] — 2026-04-13
 
 ### Fixed

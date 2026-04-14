@@ -29,12 +29,6 @@ function GBL:CreateMainFrame()
     -- Tab group
     local tabGroup = AceGUI:Create("TabGroup")
     tabGroup:SetLayout("List")
-    tabGroup:SetTabs({
-        { value = "transactions", text = "Transactions" },
-        { value = "goldlog", text = "Gold Log" },
-        { value = "consumption", text = "Consumption" },
-        { value = "sync", text = "Sync" },
-    })
     tabGroup:SetCallback("OnGroupSelected", function(_widget, _event, group)
         self:SelectTab(group)
     end)
@@ -42,7 +36,43 @@ function GBL:CreateMainFrame()
 
     self.mainFrame = frame
     self.tabGroup = tabGroup
-    self.activeTab = "transactions"
+
+    -- Build tab list based on access level and select default tab
+    self:RebuildTabs()
+end
+
+--- Build the tab list based on the player's access level.
+-- Called on frame creation and when access control settings change.
+function GBL:RebuildTabs()
+    if not self.tabGroup then return end
+
+    local accessLevel = self:GetAccessLevel()
+    local tabs
+    if accessLevel == "sync_only" then
+        tabs = {
+            { value = "sync", text = "Sync" },
+        }
+    else
+        tabs = {
+            { value = "transactions", text = "Transactions" },
+            { value = "goldlog", text = "Gold Log" },
+            { value = "consumption", text = "Consumption" },
+            { value = "sync", text = "Sync" },
+        }
+    end
+
+    self.tabGroup:SetTabs(tabs)
+
+    -- Ensure activeTab is valid for the current tab set
+    local validTab = false
+    for _, t in ipairs(tabs) do
+        if t.value == self.activeTab then validTab = true; break end
+    end
+    if not validTab then
+        self.activeTab = tabs[1].value
+    end
+
+    self.tabGroup:SelectTab(self.activeTab)
 end
 
 --- Toggle the main frame visibility.
@@ -89,20 +119,36 @@ function GBL:RefreshUI()
 end
 
 --- Switch between tabs.
--- @param tabName string "transactions", "goldlog", or "consumption"
+-- @param tabName string "transactions", "goldlog", "consumption", or "sync"
 function GBL:SelectTab(tabName)
     if not self.tabGroup then return end
     self.activeTab = tabName
     self.tabGroup:ReleaseChildren()
 
-    -- Settings row (only visible to officers)
-    if self:IsOfficerRank() then
+    local accessLevel = self:GetAccessLevel()
+
+    -- Settings row (visible to full-access users only)
+    if accessLevel == "full" then
         self:AddSettingsRow(self.tabGroup)
+    end
+
+    -- Restricted mode banner
+    if accessLevel == "own_transactions" then
+        self:AddRestrictedBanner(self.tabGroup, "Showing your transactions only.")
+    elseif accessLevel == "sync_only" then
+        self:AddRestrictedBanner(self.tabGroup, "Restricted view — only the Sync tab is available.")
     end
 
     local guildData = self:GetGuildData()
     local transactions = guildData and guildData.transactions or {}
     local moneyTransactions = guildData and guildData.moneyTransactions or {}
+
+    -- Pre-filter to own transactions in restricted mode
+    if accessLevel == "own_transactions" then
+        local myName = UnitName("player") or ""
+        transactions = self:FilterByPlayer(transactions, myName)
+        moneyTransactions = self:FilterByPlayer(moneyTransactions, myName)
+    end
 
     if tabName == "transactions" then
         self:BuildTransactionsTab(self.tabGroup, transactions)
@@ -119,8 +165,34 @@ function GBL:SelectTab(tabName)
     end
 end
 
+--- Filter a records array to only records from the given player.
+-- @param records table Array of transaction records
+-- @param playerName string Player name (without realm)
+-- @return table Filtered array
+function GBL:FilterByPlayer(records, playerName)
+    local filtered = {}
+    for _, record in ipairs(records) do
+        if record.player and self:StripRealm(record.player) == playerName then
+            filtered[#filtered + 1] = record
+        end
+    end
+    return filtered
+end
+
+--- Show a yellow banner indicating restricted access mode.
+-- @param container AceGUI container to add the banner to
+-- @param text string Banner message
+function GBL:AddRestrictedBanner(container, text)
+    local AceGUI = LibStub("AceGUI-3.0")
+    local label = AceGUI:Create("Label")
+    label:SetFullWidth(true)
+    label:SetText("|cffffcc00" .. text .. "|r")
+    label:SetFontObject(GameFontNormalSmall)
+    container:AddChild(label)
+end
+
 ------------------------------------------------------------------------
--- Settings row (officer-only)
+-- Settings row (full-access users)
 ------------------------------------------------------------------------
 
 --- Add officer settings checkboxes to a container.
