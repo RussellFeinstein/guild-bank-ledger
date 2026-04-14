@@ -550,4 +550,208 @@ describe("Data integrity", function()
             assert.equals("Unknown Item", GBL:ExtractItemName(nil, nil))
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- MigrateDeduplicateRecords (schema v4→v5)
+    ---------------------------------------------------------------------------
+
+    describe("MigrateDeduplicateRecords", function()
+        -- Helper: create a record with explicit fields for dedup testing
+        local function makeRecord(opts)
+            local rec = {
+                type = opts.type or "withdraw",
+                player = opts.player or "Katorri-TestRealm",
+                itemID = opts.itemID or 99999,
+                count = opts.count or 1,
+                tab = opts.tab or 1,
+                timestamp = opts.timestamp or (3600 * 100),
+                scanTime = opts.scanTime or MockWoW.serverTime,
+                scannedBy = opts.scannedBy or "Katorri-TestRealm",
+            }
+            rec.id = GBL:ComputeTxHash(rec)
+            return rec
+        end
+
+        local function makeMoneyRecord(opts)
+            local rec = {
+                type = opts.type or "deposit",
+                player = opts.player or "Katorri-TestRealm",
+                amount = opts.amount or 50000,
+                timestamp = opts.timestamp or (3600 * 100),
+                scanTime = opts.scanTime or MockWoW.serverTime,
+                scannedBy = opts.scannedBy or "Katorri-TestRealm",
+            }
+            rec.id = GBL:ComputeTxHash(rec)
+            return rec
+        end
+
+        -- Assign occurrence indices to a set of records (simulates what the buggy code stored)
+        local function assignAndStore(records, gd, storageKey)
+            GBL:AssignOccurrenceIndices(records)
+            for _, rec in ipairs(records) do
+                table.insert(gd[storageKey], rec)
+                gd.seenTxHashes[rec.id] = rec.timestamp
+            end
+        end
+
+        it("removes bug duplicates with different scanTimes", function()
+            guildData.schemaVersion = 4
+            -- Original record from first scan
+            local r1 = makeRecord({ scanTime = 1000 })
+            -- Bug duplicates from later rescans
+            local r2 = makeRecord({ scanTime = 1003, timestamp = 3600 * 100 + 3 })
+            local r3 = makeRecord({ scanTime = 1006, timestamp = 3600 * 100 + 6 })
+            assignAndStore({ r1, r2, r3 }, guildData, "transactions")
+
+            local removed = GBL:MigrateDeduplicateRecords(guildData)
+
+            assert.equals(2, removed)
+            assert.equals(1, #guildData.transactions)
+            assert.equals(1000, guildData.transactions[1].scanTime)
+        end)
+
+        it("keeps genuine identical events from same scan", function()
+            guildData.schemaVersion = 4
+            -- Two genuine withdrawals in the same scan (same scanTime)
+            local r1 = makeRecord({ scanTime = 1000 })
+            local r2 = makeRecord({ scanTime = 1000 })
+            -- One bug duplicate from a rescan
+            local r3 = makeRecord({ scanTime = 1003 })
+            assignAndStore({ r1, r2, r3 }, guildData, "transactions")
+
+            local removed = GBL:MigrateDeduplicateRecords(guildData)
+
+            assert.equals(1, removed)
+            assert.equals(2, #guildData.transactions)
+        end)
+
+        it("handles all-synced records using smallest sub-group", function()
+            guildData.schemaVersion = 4
+            local r1 = makeRecord({ scanTime = 2000, scannedBy = "sync:PeerA-TestRealm" })
+            local r2 = makeRecord({ scanTime = 2001, scannedBy = "sync:PeerA-TestRealm" })
+            local r3 = makeRecord({ scanTime = 2002, scannedBy = "sync:PeerA-TestRealm" })
+            assignAndStore({ r1, r2, r3 }, guildData, "transactions")
+
+            local removed = GBL:MigrateDeduplicateRecords(guildData)
+
+            -- Each sub-group has 1 record; smallest = 1; keep 1
+            assert.equals(2, removed)
+            assert.equals(1, #guildData.transactions)
+        end)
+
+        it("prefers local anchor over synced records", function()
+            guildData.schemaVersion = 4
+            -- Synced records arrived first (earlier scanTime = receipt time)
+            local s1 = makeRecord({ scanTime = 500, scannedBy = "sync:PeerA-TestRealm" })
+            local s2 = makeRecord({ scanTime = 501, scannedBy = "sync:PeerA-TestRealm" })
+            -- Local scan later
+            local l1 = makeRecord({ scanTime = 1000 })
+            assignAndStore({ s1, s2, l1 }, guildData, "transactions")
+
+            local removed = GBL:MigrateDeduplicateRecords(guildData)
+
+            -- Local anchor has 1 record → keep 1
+            assert.equals(2, removed)
+            assert.equals(1, #guildData.transactions)
+            assert.equals(1000, guildData.transactions[1].scanTime)
+        end)
+
+        it("preserves records with different baseHashes", function()
+            guildData.schemaVersion = 4
+            -- Two different items
+            local a1 = makeRecord({ itemID = 111, scanTime = 1000 })
+            local a2 = makeRecord({ itemID = 111, scanTime = 1003 })  -- dup of a1
+            local b1 = makeRecord({ itemID = 222, scanTime = 1000 })
+
+            assignAndStore({ a1 }, guildData, "transactions")
+            -- Manually add a2 and b1 with correct IDs
+            local a2base = GBL:ComputeTxHash(a2)
+            a2._occurrence = 1
+            a2.id = a2base .. ":1"
+            table.insert(guildData.transactions, a2)
+            guildData.seenTxHashes[a2.id] = a2.timestamp
+
+            assignAndStore({ b1 }, guildData, "transactions")
+
+            local removed = GBL:MigrateDeduplicateRecords(guildData)
+
+            assert.equals(1, removed)  -- only a2 removed
+            assert.equals(2, #guildData.transactions)  -- a1 + b1 survive
+        end)
+
+        it("no-ops when no duplicates exist", function()
+            guildData.schemaVersion = 4
+            local r1 = makeRecord({ scanTime = 1000 })
+            assignAndStore({ r1 }, guildData, "transactions")
+
+            local removed = GBL:MigrateDeduplicateRecords(guildData)
+
+            assert.equals(0, removed)
+            assert.equals(1, #guildData.transactions)
+            assert.equals(5, guildData.schemaVersion)
+        end)
+
+        it("rebuilds seenTxHashes with correct indices", function()
+            guildData.schemaVersion = 4
+            local r1 = makeRecord({ scanTime = 1000 })
+            local r2 = makeRecord({ scanTime = 1003 })
+            local r3 = makeRecord({ scanTime = 1006 })
+            assignAndStore({ r1, r2, r3 }, guildData, "transactions")
+
+            GBL:MigrateDeduplicateRecords(guildData)
+
+            -- Only 1 record survives with :0 suffix
+            local count = 0
+            for _ in pairs(guildData.seenTxHashes) do count = count + 1 end
+            assert.equals(1, count)
+            assert.is_truthy(guildData.transactions[1].id:find(":0$"))
+            assert.is_not_nil(guildData.seenTxHashes[guildData.transactions[1].id])
+        end)
+
+        it("rebuilds playerStats from surviving records", function()
+            guildData.schemaVersion = 4
+            -- 3 records: 1 genuine, 2 bug duplicates
+            local r1 = makeRecord({ type = "withdraw", scanTime = 1000, count = 5 })
+            local r2 = makeRecord({ type = "withdraw", scanTime = 1003, count = 5 })
+            local r3 = makeRecord({ type = "withdraw", scanTime = 1006, count = 5 })
+            assignAndStore({ r1, r2, r3 }, guildData, "transactions")
+
+            GBL:MigrateDeduplicateRecords(guildData)
+
+            local stats = guildData.playerStats["Katorri-TestRealm"]
+            -- Only 1 record survives → totalWithdrawCount = 5 (not 15)
+            assert.equals(5, stats.totalWithdrawCount)
+        end)
+
+        it("handles empty transactions gracefully", function()
+            guildData.schemaVersion = 4
+            local removed = GBL:MigrateDeduplicateRecords(guildData)
+            assert.equals(0, removed)
+            assert.equals(5, guildData.schemaVersion)
+        end)
+
+        it("deduplicates money transactions", function()
+            guildData.schemaVersion = 4
+            local m1 = makeMoneyRecord({ scanTime = 1000 })
+            local m2 = makeMoneyRecord({ scanTime = 1003 })
+            assignAndStore({ m1, m2 }, guildData, "moneyTransactions")
+
+            local removed = GBL:MigrateDeduplicateRecords(guildData)
+
+            assert.equals(1, removed)
+            assert.equals(1, #guildData.moneyTransactions)
+        end)
+
+        it("skips already-migrated data (schemaVersion >= 5)", function()
+            guildData.schemaVersion = 5
+            local r1 = makeRecord({ scanTime = 1000 })
+            local r2 = makeRecord({ scanTime = 1003 })
+            assignAndStore({ r1, r2 }, guildData, "transactions")
+
+            local removed = GBL:MigrateDeduplicateRecords(guildData)
+
+            assert.equals(0, removed)
+            assert.equals(2, #guildData.transactions)  -- unchanged
+        end)
+    end)
 end)

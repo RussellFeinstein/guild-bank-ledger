@@ -5,6 +5,14 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.2] — 2026-04-13
+
+### Fixed
+- **Existing bug duplicates removed on upgrade** — one-time schema migration (v4→v5) identifies and removes duplicate records created by the occurrence index shift bug. Groups records by baseHash, anchors on the earliest local scan (which is always correct), and removes all excess copies. Rebuilds occurrence indices, `seenTxHashes`, and `playerStats` from surviving records. Prevents duplicate propagation via sync.
+
+### Added
+- **`/gbl cleanup` command** — manually re-runs the deduplication pass. Safety net for guild members who update late and receive stale duplicates via sync.
+
 ## [0.14.1] — 2026-04-13
 
 ### Fixed
