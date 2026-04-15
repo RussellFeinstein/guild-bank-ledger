@@ -5,6 +5,16 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] — 2026-04-15
+
+### Changed
+- Sync chunk budget doubled (1600→3200 bytes) and record cap raised (15→25) — halves chunk count for faster syncs.
+- ACK timeout reduced from 15s to 8s with more retries (3→5) — faster recovery from message loss.
+- ACK and NACK messages now sent with ALERT priority for faster delivery through ChatThrottleLib.
+
+### Fixed
+- Stale ACKs from retried chunks no longer orphan active timers, which could cause 120-second sync stalls.
+
 ## [0.22.4] — 2026-04-15
 
 ### Added

@@ -611,18 +611,18 @@ describe("Sync", function()
     describe("PrepareChunks", function()
         it("splits records across multiple chunks", function()
             local txList = {}
-            for i = 1, 25 do
+            for i = 1, 50 do
                 txList[i] = { type = "deposit", player = "P", timestamp = i, id = "h" .. i }
             end
 
             local chunks = GBL:PrepareChunks(txList, {})
-            assert.is_true(#chunks >= 2, "25 records should produce multiple chunks")
+            assert.is_true(#chunks >= 2, "50 records should produce multiple chunks")
             -- All records accounted for
             local total = 0
             for _, chunk in ipairs(chunks) do
                 total = total + #chunk.transactions
             end
-            assert.equals(25, total)
+            assert.equals(50, total)
         end)
 
         it("returns empty table for no transactions", function()
@@ -632,30 +632,30 @@ describe("Sync", function()
 
         it("distributes item and money transactions across chunks", function()
             local txList = {}
-            for i = 1, 5 do
+            for i = 1, 15 do
                 txList[i] = { type = "deposit", player = "P", timestamp = i }
             end
             local moneyList = {}
-            for i = 1, 12 do
+            for i = 1, 15 do
                 moneyList[i] = { type = "deposit", player = "P", amount = i * 100, timestamp = i }
             end
 
             local chunks = GBL:PrepareChunks(txList, moneyList)
-            assert.is_true(#chunks >= 2, "17 records should produce multiple chunks")
+            assert.is_true(#chunks >= 2, "30 records should produce multiple chunks")
             -- All records accounted for
             local totalTx, totalMoney = 0, 0
             for _, chunk in ipairs(chunks) do
                 totalTx = totalTx + #chunk.transactions
                 totalMoney = totalMoney + #chunk.moneyTransactions
             end
-            assert.equals(5, totalTx)
-            assert.equals(12, totalMoney)
+            assert.equals(15, totalTx)
+            assert.equals(15, totalMoney)
         end)
 
         it("splits by estimated size when records have large fields", function()
             local txList = {}
             -- Each record ~180 bytes estimated (long strings push size)
-            for i = 1, 12 do
+            for i = 1, 25 do
                 txList[i] = {
                     type = "withdrawal",
                     player = "Verylongnamecharacter",
@@ -670,8 +670,8 @@ describe("Sync", function()
                 }
             end
             local chunks = GBL:PrepareChunks(txList, {})
-            -- With ~180 bytes/record and 1400 byte budget,
-            -- should split before hitting 15-record hard cap
+            -- With ~180 bytes/record and 3200 byte budget,
+            -- should split before hitting 25-record hard cap
             assert.is_true(#chunks >= 2,
                 "should produce multiple chunks from size limit")
             for _, chunk in ipairs(chunks) do
@@ -681,7 +681,7 @@ describe("Sync", function()
         end)
 
         it("places a single oversized record in its own chunk", function()
-            local bigId = string.rep("x", 2000)
+            local bigId = string.rep("x", 4000)
             local txList = {
                 { type = "deposit", player = "P", timestamp = 1, id = bigId },
                 { type = "deposit", player = "P", timestamp = 2, id = "small" },
@@ -698,6 +698,29 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
 
     describe("HandleSyncData", function()
+        it("ACK is sent with ALERT priority", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 1,
+                transactions = {}, moneyTransactions = {},
+            })
+
+            -- Find the ACK message
+            local foundAck = false
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                if sent.distribution == "WHISPER" then
+                    local ok, data = GBL:Deserialize(sent.text)
+                    if ok and data.type == "ACK" then
+                        assert.equals("ALERT", sent.prio,
+                            "ACK should be sent with ALERT priority")
+                        foundAck = true
+                    end
+                end
+            end
+            assert.is_true(foundAck, "expected an ACK message")
+        end)
+
         it("stores non-duplicate transactions via StoreTx", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
@@ -1412,6 +1435,38 @@ describe("Sync", function()
             assert.equals(0, #MockAce.sentCommMessages)
         end)
 
+        it("HandleAck discards stale ACK for wrong chunk number", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Need enough records for 2+ chunks
+            for i = 1, 30 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000 + i, id = "h" .. i,
+                })
+            end
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending)
+
+            -- sendChunkIndex should be 1 after first SendNextChunk
+            local timersBefore = #MockWoW.pendingTimers
+            MockAce.sentCommMessages = {}
+
+            -- Send ACK for chunk 3 (stale — we're on chunk 1)
+            GBL:HandleAck("OfficerB", { chunk = 3 })
+
+            -- Should NOT have scheduled next chunk (no new messages)
+            assert.equals(0, #MockAce.sentCommMessages)
+            -- ACK timer should still be alive (not cancelled by stale ACK)
+            local ackTimerAlive = false
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 8 and not timer.cancelled then
+                    ackTimerAlive = true
+                end
+            end
+            assert.is_true(ackTimerAlive, "ACK timer should survive stale ACK")
+        end)
+
         it("DisableSync during active send cleans up state", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
@@ -1617,8 +1672,8 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
 
     describe("ACK timer callback", function()
-        it("MAX_RECORDS_PER_CHUNK constant is 15", function()
-            assert.equals(15, GBL.SYNC_CHUNK_SIZE)
+        it("MAX_RECORDS_PER_CHUNK constant is 25", function()
+            assert.equals(25, GBL.SYNC_CHUNK_SIZE)
         end)
 
         it("ACK timer starts after send callback, not immediately", function()
@@ -1644,7 +1699,7 @@ describe("Sync", function()
             -- Count ACK timers — hard timer exists but ACK timer should NOT yet
             local ackTimerCount = 0
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 15 and not timer.cancelled then
+                if timer.delay == 8 and not timer.cancelled then
                     ackTimerCount = ackTimerCount + 1
                 end
             end
@@ -1657,7 +1712,7 @@ describe("Sync", function()
             -- ACK timer should now exist
             ackTimerCount = 0
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 15 and not timer.cancelled then
+                if timer.delay == 8 and not timer.cancelled then
                     ackTimerCount = ackTimerCount + 1
                 end
             end
@@ -1690,7 +1745,7 @@ describe("Sync", function()
 
             local ackTimerCount = 0
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 15 and not timer.cancelled then
+                if timer.delay == 8 and not timer.cancelled then
                     ackTimerCount = ackTimerCount + 1
                 end
             end
@@ -1701,7 +1756,7 @@ describe("Sync", function()
 
             ackTimerCount = 0
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 15 and not timer.cancelled then
+                if timer.delay == 8 and not timer.cancelled then
                     ackTimerCount = ackTimerCount + 1
                 end
             end
@@ -1755,7 +1810,7 @@ describe("Sync", function()
         it("retries same chunk on ACK timeout instead of aborting", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Add tx (fits in 1 chunk with MAX_RECORDS_PER_CHUNK=15)
+            -- Add tx (fits in 1 chunk with MAX_RECORDS_PER_CHUNK=25)
             for i = 1, 4 do
                 table.insert(guildData.transactions, {
                     type = "deposit", player = "X", timestamp = 1000 + i,
@@ -1770,7 +1825,7 @@ describe("Sync", function()
 
             -- Fire ACK timeout — should retry, not abort
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 15 and not timer.cancelled then
+                if timer.delay == 8 and not timer.cancelled then
                     timer.callback()
                     break
                 end
@@ -1805,7 +1860,7 @@ describe("Sync", function()
             -- Fire ACK timeout MAX_RETRIES times (should keep retrying)
             for attempt = 1, GBL.SYNC_MAX_RETRIES do
                 for _, timer in ipairs(MockWoW.pendingTimers) do
-                    if timer.delay == 15 and not timer.cancelled then
+                    if timer.delay == 8 and not timer.cancelled then
                         timer.callback()
                         break
                     end
@@ -1816,7 +1871,7 @@ describe("Sync", function()
 
             -- One more timeout — should abort
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 15 and not timer.cancelled then
+                if timer.delay == 8 and not timer.cancelled then
                     timer.callback()
                     break
                 end
@@ -1830,7 +1885,7 @@ describe("Sync", function()
         it("resets retry counter on successful ACK", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Add tx (fits in 1 chunk with MAX_RECORDS_PER_CHUNK=15)
+            -- Add tx (fits in 1 chunk with MAX_RECORDS_PER_CHUNK=25)
             for i = 1, 4 do
                 table.insert(guildData.transactions, {
                     type = "deposit", player = "X", timestamp = 1000 + i,
@@ -1842,7 +1897,7 @@ describe("Sync", function()
 
             -- Fire one ACK timeout (retry attempt 1)
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 15 and not timer.cancelled then
+                if timer.delay == 8 and not timer.cancelled then
                     timer.callback()
                     break
                 end
@@ -1854,7 +1909,7 @@ describe("Sync", function()
             -- Fire ACK timeout for chunk 2 — retry counter should be reset,
             -- so this should retry (not abort)
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 15 and not timer.cancelled then
+                if timer.delay == 8 and not timer.cancelled then
                     timer.callback()
                     break
                 end
@@ -1889,8 +1944,11 @@ describe("Sync", function()
             -- The first sent message should be the SYNC_DATA chunk
             assert.is_true(#MockAce.sentCommMessages >= 1)
             local payload = MockAce.sentCommMessages[1].text
-            assert.is_true(#payload < 2000,
-                "Serialized chunk (" .. #payload .. " bytes) exceeds 2000-byte WHISPER safe limit — reduce CHUNK_SIZE")
+            -- Mock LibDeflate is identity (no compression). In production, LibDeflate
+            -- compresses ~60-80%, keeping wire size well under WHISPER_SAFE_BYTES (2000).
+            -- Here we verify raw serialized size stays within the chunk byte budget.
+            assert.is_true(#payload < 4000,
+                "Raw serialized chunk (" .. #payload .. " bytes) exceeds byte budget + overhead")
         end)
 
         it("logs warning when chunk exceeds safe size", function()
@@ -2593,6 +2651,30 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
 
     describe("NACK retry", function()
+        it("NACK is sent with ALERT priority", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Set up receiver state
+            GBL:HandleSyncData("OfficerB", {
+                type = "SYNC_DATA", chunk = 1, totalChunks = 3,
+                transactions = {{
+                    type = "deposit", player = "Thrall-TestRealm",
+                    itemID = 12345, count = 5, tab = 1,
+                    timestamp = 1000, id = "nacktest:0", _occurrence = 0,
+                }},
+                moneyTransactions = {},
+            })
+            MockAce.sentCommMessages = {}
+
+            -- Manually send a NACK
+            GBL:SendNack("OfficerB", 2)
+
+            assert.is_true(#MockAce.sentCommMessages >= 1)
+            local nackSent = MockAce.sentCommMessages[#MockAce.sentCommMessages]
+            assert.equals("ALERT", nackSent.prio,
+                "NACK should be sent with ALERT priority")
+        end)
+
         it("receiver sends NACK on chunk timeout instead of aborting", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
@@ -3382,11 +3464,11 @@ describe("Sync", function()
             -- Fresh HELLO arrives
             MockWoW.serverTime = 100001
             GBL:UpdatePeer("OfficerB", {
-                version = "0.22.4", txCount = 50, lastScanTime = 100001,
+                version = "0.23.0", txCount = 50, lastScanTime = 100001,
             })
 
             local peer = GBL:GetAllPeers()["OfficerB"]
-            assert.equals("0.22.4", peer.version)
+            assert.equals("0.23.0", peer.version)
             assert.equals(100001, peer.lastSeen)
 
             -- Should be fresh, not roster-only

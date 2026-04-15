@@ -29,6 +29,17 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.23.0
+    {"0.23.0", "2026-04-15", {
+        Changed = {
+            "Sync chunk budget doubled and record cap raised (15→25) — halves chunk count for faster syncs",
+            "ACK timeout reduced from 15s to 8s with more retries (3→5) — faster recovery from message loss",
+            "ACK and NACK messages now sent with ALERT priority for faster delivery",
+        },
+        Fixed = {
+            "Stale ACKs from retried chunks no longer orphan active timers (could cause 120s stalls)",
+        },
+    }},
     -- v0.22.4
     {"0.22.4", "2026-04-15", {
         Added = {

@@ -9,10 +9,10 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 -- Protocol constants
 local PREFIX = "GBLSync"
 local PROTOCOL_VERSION = 4
-local MAX_RECORDS_PER_CHUNK = 15
-local CHUNK_BYTE_BUDGET = 1600
-local MAX_RETRIES = 3
-local ACK_TIMEOUT = 15
+local MAX_RECORDS_PER_CHUNK = 25
+local CHUNK_BYTE_BUDGET = 3200
+local MAX_RETRIES = 5
+local ACK_TIMEOUT = 8
 local RECEIVE_CHUNK_TIMEOUT = 20
 local MAX_NACK_RETRIES = 3
 local HELLO_COOLDOWN = 60
@@ -1292,7 +1292,7 @@ function GBL:HandleSyncData(sender, data)
         guild = self:GetGuildName(),
     })
     ackMsg = compressMessage(ackMsg)
-    self:SendCommMessage(PREFIX, ackMsg, "WHISPER", sender)
+    self:SendCommMessage(PREFIX, ackMsg, "WHISPER", sender, "ALERT")
 
     self:SyncLog("Sync: chunk " .. (data.chunk or "?") .. "/"
         .. (data.totalChunks or "?") .. " from " .. sender
@@ -1321,12 +1321,19 @@ end
 function GBL:HandleAck(sender, data)
     if not syncState.sending or self:StripRealm(sender) ~= self:StripRealm(syncState.sendTarget) then return end
 
+    local ackedChunk = data and data.chunk or syncState.sendChunkIndex
+    -- Discard stale ACKs from retried chunks to prevent orphaning active timers
+    if ackedChunk ~= syncState.sendChunkIndex then
+        self:AddAuditEntry("Discarded stale ACK for chunk " .. ackedChunk
+            .. " (expected " .. syncState.sendChunkIndex .. ")")
+        return
+    end
+
     if syncState.sendTimer then
         syncState.sendTimer:Cancel()
         syncState.sendTimer = nil
     end
 
-    local ackedChunk = data and data.chunk or syncState.sendChunkIndex
     local total = #syncState.sendChunks
     -- Only audit-log every 10th ACK and the last one
     if ackedChunk == 1 or ackedChunk == total or ackedChunk % 10 == 0 then
@@ -1784,7 +1791,7 @@ function GBL:SendNack(target, chunkIndex)
         guild = self:GetGuildName(),
     })
     msg = compressMessage(msg)
-    self:SendCommMessage(PREFIX, msg, "WHISPER", target)
+    self:SendCommMessage(PREFIX, msg, "WHISPER", target, "ALERT")
     self:SyncLog("Sync: requesting re-send of chunk " .. chunkIndex
         .. " from " .. target .. " (attempt " .. syncState.receiveNackCount
         .. "/" .. MAX_NACK_RETRIES .. ")")
