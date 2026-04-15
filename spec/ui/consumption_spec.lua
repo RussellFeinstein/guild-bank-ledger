@@ -504,4 +504,254 @@ describe("ConsumptionView", function()
             assert.equals(2, #filtered)
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- BuildGuildTotals
+    ---------------------------------------------------------------------------
+
+    describe("BuildGuildTotals", function()
+        it("sums items and gold across multiple players", function()
+            local txns = {
+                makeTx({ player = "Alice", type = "withdraw", count = 5 }),
+                makeTx({ player = "Alice", type = "deposit", count = 3 }),
+                makeTx({ player = "Bob", type = "withdraw", count = 10 }),
+                makeTx({ player = "Bob", type = "deposit", count = 2 }),
+            }
+            local summaries = GBL:BuildConsumptionSummary(txns)
+            local totals = GBL:BuildGuildTotals(summaries)
+            assert.equals(2, totals.playerCount)
+            assert.equals(5, totals.itemsDeposited)    -- 3 + 2
+            assert.equals(15, totals.itemsWithdrawn)   -- 5 + 10
+            assert.equals(-10, totals.itemsNet)        -- 5 - 15
+        end)
+
+        it("sums gold across players", function()
+            local makeMoneyTx = function(overrides)
+                local rec = {
+                    id = "moneyhash", type = "deposit", player = "Alice",
+                    amount = 500000, timestamp = MockWoW.serverTime - 3600,
+                    scanTime = MockWoW.serverTime, scannedBy = "TestOfficer",
+                }
+                if overrides then for k, v in pairs(overrides) do rec[k] = v end end
+                return rec
+            end
+            local txns = {
+                makeMoneyTx({ player = "Alice", type = "deposit", amount = 800000 }),
+                makeMoneyTx({ player = "Alice", type = "repair", amount = 50000 }),
+                makeMoneyTx({ player = "Bob", type = "deposit", amount = 200000 }),
+            }
+            local summaries = GBL:BuildConsumptionSummary(txns)
+            local totals = GBL:BuildGuildTotals(summaries)
+            assert.equals(2, totals.playerCount)
+            assert.equals(1000000, totals.goldDeposited)  -- 800k + 200k
+            assert.equals(50000, totals.goldWithdrawn)     -- 50k repair
+            assert.equals(950000, totals.goldNet)          -- 1M - 50k
+        end)
+
+        it("returns zeros for empty summaries", function()
+            local totals = GBL:BuildGuildTotals({})
+            assert.equals(0, totals.playerCount)
+            assert.equals(0, totals.itemsDeposited)
+            assert.equals(0, totals.itemsWithdrawn)
+            assert.equals(0, totals.itemsNet)
+            assert.equals(0, totals.goldDeposited)
+            assert.equals(0, totals.goldWithdrawn)
+            assert.equals(0, totals.goldNet)
+        end)
+
+        it("returns zeros for nil summaries", function()
+            local totals = GBL:BuildGuildTotals(nil)
+            assert.equals(0, totals.playerCount)
+        end)
+
+        it("handles gold-only player (no items)", function()
+            local makeMoneyTx = function(overrides)
+                local rec = {
+                    id = "moneyhash", type = "deposit", player = "Banker",
+                    amount = 500000, timestamp = MockWoW.serverTime - 3600,
+                    scanTime = MockWoW.serverTime, scannedBy = "TestOfficer",
+                }
+                if overrides then for k, v in pairs(overrides) do rec[k] = v end end
+                return rec
+            end
+            local txns = {
+                makeMoneyTx({ player = "Banker", type = "deposit", amount = 1000000 }),
+            }
+            local summaries = GBL:BuildConsumptionSummary(txns)
+            local totals = GBL:BuildGuildTotals(summaries)
+            assert.equals(1, totals.playerCount)
+            assert.equals(0, totals.itemsDeposited)
+            assert.equals(0, totals.itemsWithdrawn)
+            assert.equals(1000000, totals.goldDeposited)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- BuildGuildItemSummary
+    ---------------------------------------------------------------------------
+
+    describe("BuildGuildItemSummary", function()
+        it("aggregates withdrawals across multiple players for same item", function()
+            local txns = {
+                makeTx({ player = "Alice", type = "withdraw", itemID = 100, count = 5 }),
+                makeTx({ player = "Bob", type = "withdraw", itemID = 100, count = 3 }),
+            }
+            local items = GBL:BuildGuildItemSummary(txns)
+            assert.equals(1, #items)
+            assert.equals(100, items[1].itemID)
+            assert.equals(8, items[1].usedAll)
+        end)
+
+        it("excludes deposit-only items", function()
+            local txns = {
+                makeTx({ player = "Alice", type = "deposit", itemID = 100, count = 10 }),
+                makeTx({ player = "Alice", type = "withdraw", itemID = 200, count = 5 }),
+            }
+            local items = GBL:BuildGuildItemSummary(txns)
+            assert.equals(1, #items)
+            assert.equals(200, items[1].itemID)
+        end)
+
+        it("buckets withdrawals into 7d / 30d / All correctly", function()
+            local now = MockWoW.serverTime
+            local txns = {
+                -- Within 7d
+                makeTx({ player = "Alice", type = "withdraw", itemID = 100, count = 2,
+                    timestamp = now - (3 * 24 * 3600) }),
+                -- Between 7d and 30d
+                makeTx({ player = "Alice", type = "withdraw", itemID = 100, count = 5,
+                    timestamp = now - (15 * 24 * 3600) }),
+                -- Older than 30d
+                makeTx({ player = "Alice", type = "withdraw", itemID = 100, count = 10,
+                    timestamp = now - (60 * 24 * 3600) }),
+            }
+            local items = GBL:BuildGuildItemSummary(txns)
+            assert.equals(1, #items)
+            assert.equals(2, items[1].used7d)     -- only the 3d-old tx
+            assert.equals(7, items[1].used30d)    -- 3d + 15d old
+            assert.equals(17, items[1].usedAll)   -- all three
+        end)
+
+        it("includes withdrawal at exactly 7d boundary", function()
+            local now = MockWoW.serverTime
+            local txns = {
+                makeTx({ player = "Alice", type = "withdraw", itemID = 100, count = 1,
+                    timestamp = now - (7 * 24 * 3600) }),
+            }
+            local items = GBL:BuildGuildItemSummary(txns)
+            assert.equals(1, #items)
+            assert.equals(1, items[1].used7d)   -- boundary: >= cutoff
+        end)
+
+        it("respects category filter", function()
+            local txns = {
+                makeTx({ player = "Alice", type = "withdraw", itemID = 100, count = 5, category = "flask" }),
+                makeTx({ player = "Alice", type = "withdraw", itemID = 200, count = 3, category = "herb" }),
+            }
+            local items = GBL:BuildGuildItemSummary(txns, "flask")
+            assert.equals(1, #items)
+            assert.equals(100, items[1].itemID)
+            assert.equals(5, items[1].usedAll)
+        end)
+
+        it("returns all items with category ALL", function()
+            local txns = {
+                makeTx({ player = "Alice", type = "withdraw", itemID = 100, count = 5, category = "flask" }),
+                makeTx({ player = "Alice", type = "withdraw", itemID = 200, count = 3, category = "herb" }),
+            }
+            local items = GBL:BuildGuildItemSummary(txns, "ALL")
+            assert.equals(2, #items)
+        end)
+
+        it("returns empty for nil transactions", function()
+            local items = GBL:BuildGuildItemSummary(nil)
+            assert.equals(0, #items)
+        end)
+
+        it("returns empty for empty transactions", function()
+            local items = GBL:BuildGuildItemSummary({})
+            assert.equals(0, #items)
+        end)
+
+        it("sorts by usedAll descending", function()
+            local txns = {
+                makeTx({ player = "Alice", type = "withdraw", itemID = 100, count = 3 }),
+                makeTx({ player = "Alice", type = "withdraw", itemID = 200, count = 10 }),
+                makeTx({ player = "Alice", type = "withdraw", itemID = 300, count = 7 }),
+            }
+            local items = GBL:BuildGuildItemSummary(txns)
+            assert.equals(3, #items)
+            assert.equals(200, items[1].itemID)  -- 10
+            assert.equals(300, items[2].itemID)  -- 7
+            assert.equals(100, items[3].itemID)  -- 3
+        end)
+
+        it("includes category and name fields", function()
+            Helpers.setItemInfo(100, 0, 3)  -- flask
+            local link = Helpers.makeItemLink(100, "Flask of Power", 3)
+            local txns = {
+                makeTx({ player = "Alice", type = "withdraw", itemID = 100, count = 5, itemLink = link }),
+            }
+            local items = GBL:BuildGuildItemSummary(txns)
+            assert.equals(1, #items)
+            assert.equals("Flask of Power", items[1].itemName)
+            assert.equals("flask", items[1].category)
+            assert.equals("Flask", items[1].categoryDisplay)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Column definitions and sort state
+    ---------------------------------------------------------------------------
+
+    describe("Consumer and item column definitions", function()
+        it("CONSUMER_COLUMNS has 6 columns", function()
+            assert.equals(6, #GBL.CONSUMER_COLUMNS)
+        end)
+
+        it("TOP_ITEM_COLUMNS has 5 columns", function()
+            assert.equals(5, #GBL.TOP_ITEM_COLUMNS)
+        end)
+
+        it("all CONSUMER_COLUMNS sort keys exist in SORT_KEYS", function()
+            for _, col in ipairs(GBL.CONSUMER_COLUMNS) do
+                if col.sortKey then
+                    -- SortConsumptionSummary uses SORT_KEYS internally
+                    -- Verify sorting doesn't error
+                    local summaries = { { player = "A", netConsumed = 0, netContributed = 0,
+                        moneyWithdrawn = 0, moneyDeposited = 0, moneyNet = 0, lastActive = 0 } }
+                    GBL:SortConsumptionSummary(summaries, col.sortKey, true)
+                end
+            end
+        end)
+    end)
+
+    describe("Item sort state", function()
+        it("toggles direction on same column", function()
+            GBL.itemSortColumn = "usedAll"
+            GBL.itemSortAscending = false
+            GBL:SetItemSort("usedAll")
+            assert.equals("usedAll", GBL.itemSortColumn)
+            assert.is_true(GBL.itemSortAscending)
+        end)
+
+        it("switches to ascending on new column", function()
+            GBL.itemSortColumn = "usedAll"
+            GBL.itemSortAscending = false
+            GBL:SetItemSort("used7d")
+            assert.equals("used7d", GBL.itemSortColumn)
+            assert.is_true(GBL.itemSortAscending)
+        end)
+
+        it("shows sort indicator for active column", function()
+            GBL.itemSortColumn = "used7d"
+            GBL.itemSortAscending = true
+            assert.equals("7d [asc]", GBL:GetItemSortIndicator("used7d", "7d"))
+        end)
+
+        it("shows plain label for inactive column", function()
+            GBL.itemSortColumn = "used7d"
+            assert.equals("All", GBL:GetItemSortIndicator("usedAll", "All"))
+        end)
+    end)
 end)

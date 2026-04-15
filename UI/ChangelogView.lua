@@ -27,6 +27,19 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.19.0
+    {"0.19.0", "2026-04-14", {
+        Changed = {
+            "Consumption tab redesigned as guild-wide overview dashboard",
+            "Three sections: Guild Totals, Top Consumers (top 10), Most Used Items (top 15)",
+            "Most Used Items shows withdrawal counts with 7d/30d/all-time trend columns",
+            "Top Consumers shows full gold in/out/net breakdown per player",
+            "Click player name in Top Consumers to jump to Transactions tab filtered by that player",
+        },
+        Removed = {
+            "Collapsible player rows replaced by flat ranked tables",
+        },
+    }},
     -- v0.18.1
     {"0.18.1", "2026-04-14", {
         Fixed = {

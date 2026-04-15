@@ -363,3 +363,104 @@ function GBL:GetPlayerItemBreakdown(transactions, playerName, filters)
 
     return breakdown
 end
+
+------------------------------------------------------------------------
+-- Guild-wide totals
+------------------------------------------------------------------------
+
+--- Compute guild-wide totals from player summaries.
+-- @param summaries table array of player summary records from BuildConsumptionSummary
+-- @return table { itemsDeposited, itemsWithdrawn, itemsNet, goldDeposited, goldWithdrawn, goldNet, playerCount }
+function GBL:BuildGuildTotals(summaries)
+    local totals = {
+        itemsDeposited = 0,
+        itemsWithdrawn = 0,
+        itemsNet = 0,
+        goldDeposited = 0,
+        goldWithdrawn = 0,
+        goldNet = 0,
+        playerCount = 0,
+    }
+    if not summaries then return totals end
+
+    totals.playerCount = #summaries
+    for i = 1, #summaries do
+        local p = summaries[i]
+        totals.itemsDeposited = totals.itemsDeposited + (p.totalDeposited or 0)
+        totals.itemsWithdrawn = totals.itemsWithdrawn + (p.totalWithdrawn or 0)
+        totals.goldDeposited = totals.goldDeposited + (p.moneyDeposited or 0)
+        totals.goldWithdrawn = totals.goldWithdrawn + (p.moneyWithdrawn or 0)
+    end
+    totals.itemsNet = totals.itemsDeposited - totals.itemsWithdrawn
+    totals.goldNet = totals.goldDeposited - totals.goldWithdrawn
+    return totals
+end
+
+------------------------------------------------------------------------
+-- Guild-wide item usage summary
+------------------------------------------------------------------------
+
+--- Build a guild-wide item usage summary with time-bucketed withdrawal counts.
+-- Only items with at least one withdrawal are included.
+-- 7d/30d buckets are computed relative to GetServerTime(), independent of date range filters.
+-- @param transactions table array of transaction records
+-- @param categoryFilter string|nil category to filter by, or "ALL"/nil for all
+-- @return table array of { itemID, itemName, itemLink, category, categoryDisplay, usedAll, used30d, used7d }
+function GBL:BuildGuildItemSummary(transactions, categoryFilter)
+    if not transactions then return {} end
+
+    local now = GetServerTime()
+    local cutoff7d = now - (7 * 24 * 3600)
+    local cutoff30d = now - (30 * 24 * 3600)
+
+    local byItem = {}
+    for i = 1, #transactions do
+        local tx = transactions[i]
+        -- Only count withdrawals with an itemID
+        if tx.itemID and tx.type == "withdraw" then
+            -- Apply category filter if specified
+            if not categoryFilter or categoryFilter == "ALL" or tx.category == categoryFilter then
+                local itemID = tx.itemID
+                if not byItem[itemID] then
+                    byItem[itemID] = {
+                        itemID = itemID,
+                        itemLink = tx.itemLink,
+                        usedAll = 0,
+                        used30d = 0,
+                        used7d = 0,
+                    }
+                end
+                local item = byItem[itemID]
+                local count = tx.count or 0
+                local ts = tx.timestamp or 0
+
+                item.usedAll = item.usedAll + count
+                if ts >= cutoff30d then
+                    item.used30d = item.used30d + count
+                end
+                if ts >= cutoff7d then
+                    item.used7d = item.used7d + count
+                end
+
+                -- Keep the most recent itemLink
+                if tx.itemLink then
+                    item.itemLink = tx.itemLink
+                end
+            end
+        end
+    end
+
+    -- Build result array
+    local result = {}
+    for _, item in pairs(byItem) do
+        item.itemName = self:ExtractItemName(item.itemLink, item.itemID)
+        item.category = self:GetItemCategory(item.itemID)
+        item.categoryDisplay = self:GetCategoryDisplayName(item.category)
+        result[#result + 1] = item
+    end
+
+    -- Sort by usedAll descending
+    table.sort(result, function(a, b) return a.usedAll > b.usedAll end)
+
+    return result
+end

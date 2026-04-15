@@ -5,6 +5,15 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] — 2026-04-14
+
+### Changed
+- **Consumption tab redesigned as guild-wide overview** — replaced collapsible per-player rows with a three-section dashboard: Guild Totals (items + gold in/out/net), Top Consumers (flat ranked table, top 10 players with full gold breakdown), and Most Used Items (top 15 items with 7d/30d/all-time withdrawal trend columns).
+- Click a player name in Top Consumers to jump to the Transactions tab filtered by that player.
+
+### Removed
+- Collapsible player expand/collapse rows in the Consumption tab (replaced by flat tables).
+
 ## [0.18.1] — 2026-04-14
 
 ### Fixed

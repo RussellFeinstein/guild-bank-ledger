@@ -285,6 +285,12 @@ function GBL:BuildTransactionsTab(container, transactions)
 
     local filters = self:CreateDefaultFilters()
 
+    -- Apply pending search text from consumption tab player click
+    if self._pendingSearchText then
+        filters.searchText = self._pendingSearchText
+        self._pendingSearchText = nil
+    end
+
     -- Create filter widgets (references ledgerGroup via closure)
     self:CreateFilterWidgets(filterGroup, filters, function()
         self._ledgerCurrentPage = 1  -- reset pagination on filter change
@@ -657,10 +663,10 @@ function GBL:RefreshGoldLog()
 end
 
 ------------------------------------------------------------------------
--- Consumption tab — sort & expand state
+-- Consumption tab — sort state
 ------------------------------------------------------------------------
 
--- Sort state (session-only, like ledger view)
+-- Consumer table sort state (session-only)
 GBL.consumptionSortColumn = "netConsumed"
 GBL.consumptionSortAscending = false
 
@@ -690,8 +696,35 @@ function GBL:GetConsumptionSortIndicator(column, label)
     end
 end
 
--- Expand state (session-only)
-GBL._expandedPlayers = {}
+-- Item table sort state (separate from consumer table)
+GBL.itemSortColumn = "usedAll"
+GBL.itemSortAscending = false
+
+--- Toggle sort on a top items column.
+-- @param column string sort column key
+function GBL:SetItemSort(column)
+    if self.itemSortColumn == column then
+        self.itemSortAscending = not self.itemSortAscending
+    else
+        self.itemSortColumn = column
+        self.itemSortAscending = true
+    end
+end
+
+--- Get the sort indicator text for an item column header.
+-- @param column string column key
+-- @param label string base label text
+-- @return string label with [asc]/[desc] or plain
+function GBL:GetItemSortIndicator(column, label)
+    if self.itemSortColumn ~= column then
+        return label
+    end
+    if self.itemSortAscending then
+        return label .. " [asc]"
+    else
+        return label .. " [desc]"
+    end
+end
 
 --- Build the top item display string from a player summary's topItems.
 -- Shows only the #1 most active item for readability.
@@ -705,29 +738,44 @@ function GBL:FormatTopItems(topItems)
 end
 
 ------------------------------------------------------------------------
--- Consumption tab — build & render
+-- Consumption tab — column definitions
 ------------------------------------------------------------------------
 
---- Consumption column definitions for sortable headers.
-GBL.CONSUMPTION_COLUMNS = {
-    { key = "player",         label = "Player",       width = 120, sortKey = "player" },
-    { key = "netConsumed",    label = "Withdrawn",    width = 95,  sortKey = "netConsumed" },
-    { key = "netContributed", label = "Deposited",    width = 95,  sortKey = "netContributed" },
-    { key = "moneyNet",       label = "Gold Net",     width = 105, sortKey = "moneyNet" },
-    { key = "topItems",       label = "Top Item",     width = 160, sortKey = nil },
-    { key = "lastActive",     label = "Last Active",  width = 140, sortKey = "lastActive" },
+--- Consumer table columns (top consumers section).
+GBL.CONSUMER_COLUMNS = {
+    { key = "player",         label = "Player",    width = 120, sortKey = "player" },
+    { key = "netConsumed",    label = "Items Out",  width = 80,  sortKey = "netConsumed" },
+    { key = "netContributed", label = "Items In",   width = 80,  sortKey = "netContributed" },
+    { key = "moneyWithdrawn", label = "Gold Out",  width = 100, sortKey = "moneyWithdrawn" },
+    { key = "moneyDeposited", label = "Gold In",   width = 100, sortKey = "moneyDeposited" },
+    { key = "moneyNet",       label = "Gold Net",  width = 100, sortKey = "moneyNet" },
 }
+
+--- Top items table columns (most used items section).
+GBL.TOP_ITEM_COLUMNS = {
+    { key = "itemName",  label = "Item",     width = 180, sortKey = nil },
+    { key = "category",  label = "Category", width = 100, sortKey = nil },
+    { key = "used7d",    label = "7d",       width = 65,  sortKey = "used7d" },
+    { key = "used30d",   label = "30d",      width = 65,  sortKey = "used30d" },
+    { key = "usedAll",   label = "All",      width = 65,  sortKey = "usedAll" },
+}
+
+--- Maximum rows in the top consumers table.
+GBL.MAX_CONSUMERS = 10
+
+--- Maximum rows in the top items table.
+GBL.MAX_TOP_ITEMS = 15
 
 function GBL:BuildConsumptionTab(container, transactions)
     local AceGUI = LibStub("AceGUI-3.0")
 
-    -- Filter bar for consumption
+    -- Filter bar
     local filterGroup = AceGUI:Create("SimpleGroup")
     filterGroup:SetFullWidth(true)
     filterGroup:SetLayout("Flow")
     container:AddChild(filterGroup)
 
-    -- Content area (ScrollFrame for scrollable consumption list)
+    -- Content area (ScrollFrame for scrollable dashboard)
     local contentGroup = AceGUI:Create("ScrollFrame")
 
     local filters = self:CreateDefaultFilters()
@@ -747,7 +795,7 @@ function GBL:BuildConsumptionTab(container, transactions)
     dateDropdown:SetValue("30d")
     dateDropdown:SetCallback("OnValueChanged", function(_widget, _event, value)
         filters.dateRange = value
-        self:RenderConsumptionTable(contentGroup, transactions, filters)
+        self:RenderConsumptionDashboard(contentGroup, transactions, filters)
     end)
     filterGroup:AddChild(dateDropdown)
 
@@ -766,7 +814,7 @@ function GBL:BuildConsumptionTab(container, transactions)
     catDropdown:SetValue("ALL")
     catDropdown:SetCallback("OnValueChanged", function(_widget, _event, value)
         filters.category = value
-        self:RenderConsumptionTable(contentGroup, transactions, filters)
+        self:RenderConsumptionDashboard(contentGroup, transactions, filters)
     end)
     filterGroup:AddChild(catDropdown)
 
@@ -781,7 +829,7 @@ function GBL:BuildConsumptionTab(container, transactions)
         end
         dateDropdown:SetValue("30d")
         catDropdown:SetValue("ALL")
-        self:RenderConsumptionTable(contentGroup, transactions, filters)
+        self:RenderConsumptionDashboard(contentGroup, transactions, filters)
     end)
     filterGroup:AddChild(resetBtn)
 
@@ -795,13 +843,13 @@ function GBL:BuildConsumptionTab(container, transactions)
     self._consumptionTransactions = transactions
     self._consumptionFilters = filters
 
-    self:RenderConsumptionTable(contentGroup, transactions, filters)
+    self:RenderConsumptionDashboard(contentGroup, transactions, filters)
 end
 
 --- Refresh the consumption view with current data and filters.
 function GBL:RefreshConsumptionView()
     if self._consumptionContainer and self._consumptionTransactions then
-        self:RenderConsumptionTable(
+        self:RenderConsumptionDashboard(
             self._consumptionContainer,
             self._consumptionTransactions,
             self._consumptionFilters
@@ -809,15 +857,43 @@ function GBL:RefreshConsumptionView()
     end
 end
 
---- Render the consumption summary table with sortable headers and expandable rows.
-function GBL:RenderConsumptionTable(container, transactions, filters)
+--- Render the guild-wide consumption dashboard.
+-- Three sections: guild totals, top consumers, most used items.
+function GBL:RenderConsumptionDashboard(container, transactions, filters)
     container:ReleaseChildren()
 
     local AceGUI = LibStub("AceGUI-3.0")
+
+    -- Build data for guild totals + top consumers (full filters including date range)
     local summaries = self:BuildConsumptionSummary(transactions, filters)
     self:SortConsumptionSummary(summaries, self.consumptionSortColumn, self.consumptionSortAscending)
+    local totals = self:BuildGuildTotals(summaries)
 
-    if #summaries == 0 then
+    -- Build data for top items (category filter only — time buckets are independent)
+    local categoryFilter = filters and filters.category or "ALL"
+    local itemSummaries = self:BuildGuildItemSummary(transactions, categoryFilter)
+
+    -- Sort items
+    local itemSortKey = self.itemSortColumn or "usedAll"
+    table.sort(itemSummaries, function(a, b)
+        local av = a[itemSortKey] or 0
+        local bv = b[itemSortKey] or 0
+        if self.itemSortAscending then
+            return av < bv
+        else
+            return av > bv
+        end
+    end)
+
+    -- Color helpers
+    local depositColor = self:GetAccessibleColor("DEPOSIT")
+    local withdrawColor = self:GetAccessibleColor("WITHDRAW")
+    local function colorHex(c)
+        return string.format("|cff%02x%02x%02x", c.r * 255, c.g * 255, c.b * 255)
+    end
+
+    -- Empty state
+    if #summaries == 0 and #itemSummaries == 0 then
         local emptyLabel = AceGUI:Create("Label")
         emptyLabel:SetFullWidth(true)
         emptyLabel:SetText("No consumption data available.")
@@ -825,156 +901,253 @@ function GBL:RenderConsumptionTable(container, transactions, filters)
         return
     end
 
-    -- Header row (sortable)
-    local headerGroup = AceGUI:Create("SimpleGroup")
-    headerGroup:SetFullWidth(true)
-    headerGroup:SetLayout("Flow")
-    container:AddChild(headerGroup)
+    --------------------------------------------------------------------
+    -- Section 1: Guild Totals
+    --------------------------------------------------------------------
+    local totalsHeader = AceGUI:Create("Label")
+    totalsHeader:SetFullWidth(true)
+    totalsHeader:SetText("|cffffcc00Guild Overview|r")
+    container:AddChild(totalsHeader)
 
-    for _, col in ipairs(self.CONSUMPTION_COLUMNS) do
-        if col.sortKey then
-            local btn = AceGUI:Create("InteractiveLabel")
-            btn:SetWidth(col.width)
-            btn.label:SetWordWrap(false)
-            btn:SetText("|cffffcc00" .. self:GetConsumptionSortIndicator(col.sortKey, col.label) .. "|r")
-            btn:SetCallback("OnClick", function()
-                self:SetConsumptionSort(col.sortKey)
-                self:RenderConsumptionTable(container, transactions, filters)
+    -- Player count
+    local playerLine = AceGUI:Create("Label")
+    playerLine:SetFullWidth(true)
+    playerLine:SetText(totals.playerCount .. " active player" .. (totals.playerCount ~= 1 and "s" or ""))
+    container:AddChild(playerLine)
+
+    -- Items line
+    local itemsNetColor = totals.itemsNet >= 0 and depositColor or withdrawColor
+    local itemsLine = AceGUI:Create("Label")
+    itemsLine:SetFullWidth(true)
+    itemsLine:SetText(
+        "Items:  " ..
+        colorHex(depositColor) .. totals.itemsDeposited .. " deposited|r  |  " ..
+        colorHex(withdrawColor) .. totals.itemsWithdrawn .. " withdrawn|r  |  " ..
+        "Net: " .. colorHex(itemsNetColor) .. (totals.itemsNet >= 0 and "+" or "") .. totals.itemsNet .. "|r"
+    )
+    container:AddChild(itemsLine)
+
+    -- Gold line
+    local goldNetColor = totals.goldNet >= 0 and depositColor or withdrawColor
+    local goldLine = AceGUI:Create("Label")
+    goldLine:SetFullWidth(true)
+    goldLine:SetText(
+        "Gold:   " ..
+        colorHex(depositColor) .. self:FormatMoney(totals.goldDeposited) .. " in|r  |  " ..
+        colorHex(withdrawColor) .. self:FormatMoney(totals.goldWithdrawn) .. " out|r  |  " ..
+        "Net: " .. colorHex(goldNetColor) ..
+        (totals.goldNet >= 0 and "+" or "") .. self:FormatMoney(totals.goldNet) .. "|r"
+    )
+    container:AddChild(goldLine)
+
+    -- Spacer
+    local spacer1 = AceGUI:Create("Label")
+    spacer1:SetFullWidth(true)
+    spacer1:SetText(" ")
+    container:AddChild(spacer1)
+
+    --------------------------------------------------------------------
+    -- Section 2: Top Consumers
+    --------------------------------------------------------------------
+    local consumerHeader = AceGUI:Create("Label")
+    consumerHeader:SetFullWidth(true)
+    consumerHeader:SetText("|cffffcc00Top Consumers|r")
+    container:AddChild(consumerHeader)
+
+    if #summaries == 0 then
+        local emptyConsumers = AceGUI:Create("Label")
+        emptyConsumers:SetFullWidth(true)
+        emptyConsumers:SetText("No player activity in this period.")
+        container:AddChild(emptyConsumers)
+    else
+        -- Column headers
+        local cHeaderGroup = AceGUI:Create("SimpleGroup")
+        cHeaderGroup:SetFullWidth(true)
+        cHeaderGroup:SetLayout("Flow")
+        container:AddChild(cHeaderGroup)
+
+        for _, col in ipairs(self.CONSUMER_COLUMNS) do
+            if col.sortKey then
+                local btn = AceGUI:Create("InteractiveLabel")
+                btn:SetWidth(col.width)
+                btn.label:SetWordWrap(false)
+                btn:SetText("|cffffcc00" .. self:GetConsumptionSortIndicator(col.sortKey, col.label) .. "|r")
+                btn:SetCallback("OnClick", function()
+                    self:SetConsumptionSort(col.sortKey)
+                    self:RenderConsumptionDashboard(container, transactions, filters)
+                end)
+                cHeaderGroup:AddChild(btn)
+            else
+                local lbl = AceGUI:Create("Label")
+                lbl:SetWidth(col.width)
+                lbl.label:SetWordWrap(false)
+                lbl:SetText("|cffffcc00" .. col.label .. "|r")
+                cHeaderGroup:AddChild(lbl)
+            end
+        end
+
+        -- Consumer data rows (top N)
+        local consumerCount = math.min(#summaries, self.MAX_CONSUMERS)
+        for idx = 1, consumerCount do
+            local p = summaries[idx]
+            local rowGroup = AceGUI:Create("SimpleGroup")
+            rowGroup:SetFullWidth(true)
+            rowGroup:SetLayout("Flow")
+            container:AddChild(rowGroup)
+
+            -- Player (clickable → navigate to Transactions tab)
+            local playerBtn = AceGUI:Create("InteractiveLabel")
+            playerBtn:SetWidth(self.CONSUMER_COLUMNS[1].width)
+            playerBtn.label:SetWordWrap(false)
+            playerBtn:SetText(p.player)
+            playerBtn:SetCallback("OnClick", function()
+                self._pendingSearchText = p.player
+                self.tabGroup:SelectTab("transactions")
             end)
-            headerGroup:AddChild(btn)
-        else
-            local lbl = AceGUI:Create("Label")
-            lbl:SetWidth(col.width)
-            lbl.label:SetWordWrap(false)
-            lbl:SetText("|cffffcc00" .. col.label .. "|r")
-            headerGroup:AddChild(lbl)
+            rowGroup:AddChild(playerBtn)
+
+            -- Items Out
+            local outLabel = AceGUI:Create("Label")
+            outLabel:SetWidth(self.CONSUMER_COLUMNS[2].width)
+            outLabel.label:SetWordWrap(false)
+            outLabel:SetText(tostring(p.netConsumed))
+            rowGroup:AddChild(outLabel)
+
+            -- Items In
+            local inLabel = AceGUI:Create("Label")
+            inLabel:SetWidth(self.CONSUMER_COLUMNS[3].width)
+            inLabel.label:SetWordWrap(false)
+            inLabel:SetText(tostring(p.netContributed))
+            rowGroup:AddChild(inLabel)
+
+            -- Gold Out
+            local goldOutLabel = AceGUI:Create("Label")
+            goldOutLabel:SetWidth(self.CONSUMER_COLUMNS[4].width)
+            goldOutLabel.label:SetWordWrap(false)
+            goldOutLabel:SetText(self:FormatMoney(p.moneyWithdrawn))
+            rowGroup:AddChild(goldOutLabel)
+
+            -- Gold In
+            local goldInLabel = AceGUI:Create("Label")
+            goldInLabel:SetWidth(self.CONSUMER_COLUMNS[5].width)
+            goldInLabel.label:SetWordWrap(false)
+            goldInLabel:SetText(self:FormatMoney(p.moneyDeposited))
+            rowGroup:AddChild(goldInLabel)
+
+            -- Gold Net (colored)
+            local goldNetLabel = AceGUI:Create("Label")
+            goldNetLabel:SetWidth(self.CONSUMER_COLUMNS[6].width)
+            goldNetLabel.label:SetWordWrap(false)
+            local netColor = p.moneyNet >= 0 and depositColor or withdrawColor
+            local netText = (p.moneyNet >= 0 and "+" or "") .. self:FormatMoney(p.moneyNet)
+            goldNetLabel:SetText(colorHex(netColor) .. netText .. "|r")
+            rowGroup:AddChild(goldNetLabel)
+        end
+
+        if #summaries > self.MAX_CONSUMERS then
+            local moreLabel = AceGUI:Create("Label")
+            moreLabel:SetFullWidth(true)
+            moreLabel:SetText("|cff999999..." .. (#summaries - self.MAX_CONSUMERS) .. " more players|r")
+            container:AddChild(moreLabel)
         end
     end
 
-    -- Data rows
-    for _, p in ipairs(summaries) do
-        local rowGroup = AceGUI:Create("SimpleGroup")
-        rowGroup:SetFullWidth(true)
-        rowGroup:SetLayout("Flow")
-        container:AddChild(rowGroup)
+    -- Spacer
+    local spacer2 = AceGUI:Create("Label")
+    spacer2:SetFullWidth(true)
+    spacer2:SetText(" ")
+    container:AddChild(spacer2)
 
-        -- Player (clickable to expand)
-        local isExpanded = self._expandedPlayers[p.player]
-        local prefix = isExpanded and "[-] " or "[+] "
-        local playerBtn = AceGUI:Create("InteractiveLabel")
-        playerBtn:SetWidth(self.CONSUMPTION_COLUMNS[1].width)
-        playerBtn.label:SetWordWrap(false)
-        playerBtn:SetText(prefix .. p.player)
-        playerBtn:SetCallback("OnClick", function()
-            if self._expandedPlayers[p.player] then
-                self._expandedPlayers[p.player] = nil
+    --------------------------------------------------------------------
+    -- Section 3: Most Used Items
+    --------------------------------------------------------------------
+    local itemHeader = AceGUI:Create("Label")
+    itemHeader:SetFullWidth(true)
+    itemHeader:SetText("|cffffcc00Most Used Items|r")
+    container:AddChild(itemHeader)
+
+    if #itemSummaries == 0 then
+        local emptyItems = AceGUI:Create("Label")
+        emptyItems:SetFullWidth(true)
+        emptyItems:SetText("No item withdrawals recorded.")
+        container:AddChild(emptyItems)
+    else
+        -- Column headers
+        local iHeaderGroup = AceGUI:Create("SimpleGroup")
+        iHeaderGroup:SetFullWidth(true)
+        iHeaderGroup:SetLayout("Flow")
+        container:AddChild(iHeaderGroup)
+
+        for _, col in ipairs(self.TOP_ITEM_COLUMNS) do
+            if col.sortKey then
+                local btn = AceGUI:Create("InteractiveLabel")
+                btn:SetWidth(col.width)
+                btn.label:SetWordWrap(false)
+                btn:SetText("|cffffcc00" .. self:GetItemSortIndicator(col.sortKey, col.label) .. "|r")
+                btn:SetCallback("OnClick", function()
+                    self:SetItemSort(col.sortKey)
+                    self:RenderConsumptionDashboard(container, transactions, filters)
+                end)
+                iHeaderGroup:AddChild(btn)
             else
-                self._expandedPlayers[p.player] = true
+                local lbl = AceGUI:Create("Label")
+                lbl:SetWidth(col.width)
+                lbl.label:SetWordWrap(false)
+                lbl:SetText("|cffffcc00" .. col.label .. "|r")
+                iHeaderGroup:AddChild(lbl)
             end
-            self:RenderConsumptionTable(container, transactions, filters)
-        end)
-        rowGroup:AddChild(playerBtn)
+        end
 
-        -- Consumed
-        local cLabel = AceGUI:Create("Label")
-        cLabel:SetWidth(self.CONSUMPTION_COLUMNS[2].width)
-        cLabel.label:SetWordWrap(false)
-        cLabel:SetText(tostring(p.netConsumed))
-        rowGroup:AddChild(cLabel)
+        -- Item data rows (top N)
+        local itemCount = math.min(#itemSummaries, self.MAX_TOP_ITEMS)
+        for idx = 1, itemCount do
+            local item = itemSummaries[idx]
+            local rowGroup = AceGUI:Create("SimpleGroup")
+            rowGroup:SetFullWidth(true)
+            rowGroup:SetLayout("Flow")
+            container:AddChild(rowGroup)
 
-        -- Contributed
-        local ctLabel = AceGUI:Create("Label")
-        ctLabel:SetWidth(self.CONSUMPTION_COLUMNS[3].width)
-        ctLabel.label:SetWordWrap(false)
-        ctLabel:SetText(tostring(p.netContributed))
-        rowGroup:AddChild(ctLabel)
+            -- Item name
+            local nameLabel = AceGUI:Create("Label")
+            nameLabel:SetWidth(self.TOP_ITEM_COLUMNS[1].width)
+            nameLabel.label:SetWordWrap(false)
+            nameLabel:SetText(item.itemName)
+            rowGroup:AddChild(nameLabel)
 
-        -- Gold Net
-        local goldLabel = AceGUI:Create("Label")
-        goldLabel:SetWidth(self.CONSUMPTION_COLUMNS[4].width)
-        goldLabel.label:SetWordWrap(false)
-        goldLabel:SetText(self:FormatMoney(p.moneyNet))
-        rowGroup:AddChild(goldLabel)
+            -- Category
+            local catLabel = AceGUI:Create("Label")
+            catLabel:SetWidth(self.TOP_ITEM_COLUMNS[2].width)
+            catLabel.label:SetWordWrap(false)
+            catLabel:SetText(item.categoryDisplay)
+            rowGroup:AddChild(catLabel)
 
-        -- Top Items
-        local topLabel = AceGUI:Create("Label")
-        topLabel:SetWidth(self.CONSUMPTION_COLUMNS[5].width)
-        topLabel.label:SetWordWrap(false)
-        topLabel:SetText(self:FormatTopItems(p.topItems))
-        rowGroup:AddChild(topLabel)
+            -- 7d
+            local d7Label = AceGUI:Create("Label")
+            d7Label:SetWidth(self.TOP_ITEM_COLUMNS[3].width)
+            d7Label.label:SetWordWrap(false)
+            d7Label:SetText(tostring(item.used7d))
+            rowGroup:AddChild(d7Label)
 
-        -- Last Active
-        local laLabel = AceGUI:Create("Label")
-        laLabel:SetWidth(self.CONSUMPTION_COLUMNS[6].width)
-        laLabel.label:SetWordWrap(false)
-        laLabel:SetText(self:FormatTimestamp(p.lastActive))
-        rowGroup:AddChild(laLabel)
+            -- 30d
+            local d30Label = AceGUI:Create("Label")
+            d30Label:SetWidth(self.TOP_ITEM_COLUMNS[4].width)
+            d30Label.label:SetWordWrap(false)
+            d30Label:SetText(tostring(item.used30d))
+            rowGroup:AddChild(d30Label)
 
-        -- Expanded breakdown rows
-        if isExpanded then
-            local breakdown = self:GetPlayerItemBreakdown(transactions, p.player, filters)
-            local displayItems = self:GetBreakdownForDisplay(breakdown)
+            -- All
+            local allLabel = AceGUI:Create("Label")
+            allLabel:SetWidth(self.TOP_ITEM_COLUMNS[5].width)
+            allLabel.label:SetWordWrap(false)
+            allLabel:SetText(tostring(item.usedAll))
+            rowGroup:AddChild(allLabel)
+        end
 
-            if #displayItems == 0 then
-                local emptyRow = AceGUI:Create("SimpleGroup")
-                emptyRow:SetFullWidth(true)
-                emptyRow:SetLayout("Flow")
-                container:AddChild(emptyRow)
-
-                local emptyMsg = AceGUI:Create("Label")
-                emptyMsg:SetWidth(430)
-                emptyMsg:SetText("    No item details available.")
-                emptyRow:AddChild(emptyMsg)
-            else
-                -- Breakdown header
-                local bHeaderRow = AceGUI:Create("SimpleGroup")
-                bHeaderRow:SetFullWidth(true)
-                bHeaderRow:SetLayout("Flow")
-                container:AddChild(bHeaderRow)
-
-                local bHeaders = {
-                    { label = "    Item",     width = 190 },
-                    { label = "Category",     width = 100 },
-                    { label = "Net",          width = 70  },
-                }
-                for _, bh in ipairs(bHeaders) do
-                    local lbl = AceGUI:Create("Label")
-                    lbl:SetWidth(bh.width)
-                    lbl.label:SetWordWrap(false)
-                    lbl:SetText("|cff999999" .. bh.label .. "|r")
-                    bHeaderRow:AddChild(lbl)
-                end
-
-                -- Breakdown data rows
-                for _, item in ipairs(displayItems) do
-                    local bRow = AceGUI:Create("SimpleGroup")
-                    bRow:SetFullWidth(true)
-                    bRow:SetLayout("Flow")
-                    container:AddChild(bRow)
-
-                    -- Item name (indented)
-                    local itemLabel = AceGUI:Create("Label")
-                    itemLabel:SetWidth(190)
-                    itemLabel.label:SetWordWrap(false)
-                    itemLabel:SetText("    " .. item.itemName)
-                    bRow:AddChild(itemLabel)
-
-                    -- Category
-                    local catLabel = AceGUI:Create("Label")
-                    catLabel:SetWidth(100)
-                    catLabel.label:SetWordWrap(false)
-                    catLabel:SetText(item.categoryDisplay)
-                    bRow:AddChild(catLabel)
-
-                    -- Net (positive = consumed, negative = contributed)
-                    local netLabel = AceGUI:Create("Label")
-                    netLabel:SetWidth(70)
-                    netLabel.label:SetWordWrap(false)
-                    local netStr = item.net > 0 and ("+" .. item.net) or tostring(item.net)
-                    netLabel:SetText(netStr)
-                    bRow:AddChild(netLabel)
-                end
-            end
+        if #itemSummaries > self.MAX_TOP_ITEMS then
+            local moreLabel = AceGUI:Create("Label")
+            moreLabel:SetFullWidth(true)
+            moreLabel:SetText("|cff999999..." .. (#itemSummaries - self.MAX_TOP_ITEMS) .. " more items|r")
+            container:AddChild(moreLabel)
         end
     end
 end
@@ -990,11 +1163,11 @@ end
 function GBL:CreateFilterWidgets(container, filters, onChange)
     local AceGUI = LibStub("AceGUI-3.0")
 
-    -- Search box
+    -- Search box (initialized from filters.searchText for cross-tab navigation)
     local searchBox = AceGUI:Create("EditBox")
     searchBox:SetLabel("Search")
     searchBox:SetWidth(150)
-    searchBox:SetText("")
+    searchBox:SetText(filters.searchText or "")
     searchBox:SetCallback("OnEnterPressed", function(_widget, _event, text)
         filters.searchText = text
         if onChange then onChange() end

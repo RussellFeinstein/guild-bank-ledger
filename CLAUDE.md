@@ -17,7 +17,7 @@ WoW addon that persistently logs guild bank transactions. Lua 5.1 + Ace3 stack. 
 - **Sync.lua** — Guild-wide sync via AceComm (HELLO/SYNC_REQUEST/SYNC_DATA/ACK protocol, fingerprint-based delta sync)
 - **UI/Accessibility.lua** — Colorblind-safe palettes, font scaling, keyboard nav, triple encoding
 - **UI/FilterBar.lua** — Transaction filter logic and AceGUI filter widgets
-- **UI/ConsumptionView.lua** — Per-player consumption aggregation and rendering
+- **UI/ConsumptionView.lua** — Consumption aggregation: guild totals, per-player summaries, guild-wide item usage with time buckets
 - **UI/LedgerView.lua** — Virtual-scrolling transaction list with sortable columns
 - **UI/SyncStatus.lua** — Sync tab: enable toggle, peer list, audit trail
 - **UI/ChangelogView.lua** — Changelog tab: embedded version history and in-game renderer
@@ -61,4 +61,4 @@ luacheck .                 # lint production code
 
 ## Version
 
-Current: 0.18.1 (see `VERSION` file)
+Current: 0.19.0 (see `VERSION` file)

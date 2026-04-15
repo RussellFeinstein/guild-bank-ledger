@@ -17,7 +17,7 @@ Persistent guild bank transaction logging for World of Warcraft. WoW's built-in 
 - **UI window** — Tabbed interface with Transactions, Gold Log, Consumption, and Sync views, opened via `/gbl` or minimap button
 - **Transaction list** — Scrolling list with sortable columns: Timestamp, Player, Action, Item, Count, Category, Tab
 - **Filter bar** — Search by player/item, filter by date range, category, transaction type, tab, with reset button
-- **Consumption view** — Per-player withdrawal/deposit totals with click-to-expand per-item breakdown, sortable headers, category filter, top items with names
+- **Consumption view** — Guild-wide overview dashboard with guild totals (items + gold in/out/net), top 10 consumers (flat ranked table with gold breakdown), and top 15 most used items (withdrawal counts with 7d/30d/all trend columns). Click player to jump to filtered Transactions tab
 - **Multi-officer sync** — AceComm-based sync: officers scanning the bank independently have their data merged automatically with no duplicates. HELLO broadcast, chunked delta transfer (200 tx/chunk), ACK flow, peer tracking, audit trail
 - **Sync tab** — Enable/disable sync, view online peers with version and tx count, review sync audit log
 - **Auto re-scan** — While the bank is open, re-queries all transaction logs every 5 seconds to capture item movements and gold transactions before they roll off the 25-entry-per-tab limit
