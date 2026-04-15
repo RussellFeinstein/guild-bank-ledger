@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.22.2
+    {"0.22.2", "2026-04-15", {
+        Fixed = {
+            "Pending peers queue no longer requests sync from peers detected as offline",
+            "FinishReceiving now removes the sender from the pending queue to prevent immediate re-request",
+        },
+    }},
     -- v0.22.1
     {"0.22.1", "2026-04-15", {
         Fixed = {

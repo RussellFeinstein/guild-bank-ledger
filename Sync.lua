@@ -1324,6 +1324,9 @@ end
 --- Clean up receiving state and persist sync metadata.
 -- @param sender string The peer we synced from
 function GBL:FinishReceiving(sender)
+    -- Remove sender from pending queue — no point re-requesting immediately
+    self:RemovePendingPeer(sender)
+
     local totalStored = syncState.receiveStored
 
     local guildData = self:GetGuildData()
@@ -1478,9 +1481,16 @@ function GBL:PopPendingPeer()
         -- Check if peer is still active
         local peer = syncState.peers[name]
         if peer and (now - (peer.lastSeen or 0) <= PEER_STALE_SECONDS) then
-            return name
+            -- Skip peers confirmed offline by guild roster
+            local online = self:IsGuildMemberOnline(name)
+            if online == false then
+                self:AddAuditEntry("Skipped offline pending peer: " .. name)
+            else
+                return name
+            end
+        else
+            self:AddAuditEntry("Skipped stale pending peer: " .. name)
         end
-        self:AddAuditEntry("Skipped stale pending peer: " .. name)
     end
     return nil
 end

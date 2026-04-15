@@ -5,6 +5,12 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.2] — 2026-04-15
+
+### Fixed
+- Pending peers queue no longer attempts sync with peers confirmed offline by guild roster — `PopPendingPeer()` now checks `IsGuildMemberOnline()` before returning a queued peer.
+- `FinishReceiving()` now removes the sender from the pending queue, preventing immediate re-request after a sync completes or aborts.
+
 ## [0.22.1] — 2026-04-15
 
 ### Fixed

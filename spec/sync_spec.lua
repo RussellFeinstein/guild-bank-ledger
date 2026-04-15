@@ -5038,6 +5038,23 @@ describe("Sync", function()
             assert.is_true(found, "ProcessPendingPeers timer should be scheduled")
         end)
 
+        it("FinishReceiving removes sender from pending queue", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
+            GBL:AddPendingPeer("PeerA")
+            assert.equals(1, GBL:GetSyncStatus().pendingPeersCount)
+
+            GBL:RequestSync("PeerA", 0)
+            GBL:HandleSyncData("PeerA", {
+                chunk = 1, totalChunks = 1,
+                transactions = {}, moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+
+            -- FinishReceiving should have removed PeerA from pending queue
+            assert.equals(0, GBL:GetSyncStatus().pendingPeersCount)
+        end)
+
         it("FinishReceiving schedules HELLO broadcast when new data stored", function()
             GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
             GBL:RequestSync("PeerA", 0)
@@ -5634,6 +5651,27 @@ describe("Sync", function()
             assert.is_nil(peer)
             local status = GBL:GetSyncStatus()
             assert.equals(0, status.pendingPeersCount)
+        end)
+
+        it("PopPendingPeer skips offline peers", function()
+            -- Add peer to guild roster as offline
+            table.insert(MockWoW.guildRoster, {
+                name = "OfflinePeer", isOnline = false,
+            })
+            GBL:UpdatePeer("OfflinePeer", { version = GBL.version, txCount = 5, dataHash = 99 })
+            GBL:AddPendingPeer("OfflinePeer")
+            local peer = GBL:PopPendingPeer()
+            assert.is_nil(peer)
+            assert.equals(0, GBL:GetSyncStatus().pendingPeersCount)
+        end)
+
+        it("PopPendingPeer returns nil-roster peers (conservative)", function()
+            -- Peer not in guild roster at all — allow through (don't skip unknowns)
+            GBL:UpdatePeer("UnknownPeer", { version = GBL.version, txCount = 5, dataHash = 99 })
+            GBL:AddPendingPeer("UnknownPeer")
+            local peer = GBL:PopPendingPeer()
+            assert.equals("UnknownPeer", peer)
+            assert.equals(0, GBL:GetSyncStatus().pendingPeersCount)
         end)
 
         it("PopPendingPeer returns nil on empty queue", function()
