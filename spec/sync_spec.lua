@@ -6,6 +6,31 @@ local Helpers = require("spec.helpers")
 local MockAce = Helpers.MockAce
 local MockWoW = Helpers.MockWoW
 
+--- Fire all pending jitter timers (delay <= 2s, uncancelled).
+-- HandleHello's sync initiation uses 0-2s random jitter.
+local function fireJitterTimers()
+    for _, timer in ipairs(MockWoW.pendingTimers) do
+        if timer.delay and timer.delay <= 2 and not timer.cancelled and not timer.fired then
+            timer.callback()
+            timer.fired = true
+        end
+    end
+end
+
+--- Fire the latest uncancelled receive timeout timer (any delay).
+-- With NACK backoff, delays change (20→30→45), so we can't match on exact delay.
+-- Finds the last (newest) uncancelled ticker and fires it.
+local function fireReceiveTimeout()
+    for i = #MockWoW.pendingTimers, 1, -1 do
+        local timer = MockWoW.pendingTimers[i]
+        if not timer.cancelled and timer.delay and timer.delay >= 10 then
+            timer.callback()
+            return true
+        end
+    end
+    return false
+end
+
 describe("Sync", function()
     local GBL
     local guildData
@@ -131,8 +156,9 @@ describe("Sync", function()
                 txCount = 50,
                 lastScanTime = 1000,
             })
+            fireJitterTimers()
 
-            -- HELLO reply + SYNC_REQUEST both sent immediately
+            -- HELLO reply + SYNC_REQUEST both sent (after jitter)
             assert.is_true(#MockAce.sentCommMessages >= 2)
 
             -- Find the SYNC_REQUEST among sent messages
@@ -352,6 +378,7 @@ describe("Sync", function()
                 dataHash = localHash + 1,  -- different hash
                 lastScanTime = 2000,
             })
+            fireJitterTimers()
 
             -- Should send SYNC_REQUEST despite equal counts
             local foundRequest = false
@@ -385,6 +412,7 @@ describe("Sync", function()
                 dataHash = localHash + 1,
                 lastScanTime = 2000,
             })
+            fireJitterTimers()
 
             -- Should request sync — remote has records we don't
             local foundRequest = false
@@ -437,6 +465,7 @@ describe("Sync", function()
                 txCount = 50,
                 lastScanTime = 2000,
             })
+            fireJitterTimers()
 
             -- Should still request sync via count comparison
             local foundRequest = false
@@ -1461,21 +1490,11 @@ describe("Sync", function()
 
             -- Fire timeout MAX_NACK_RETRIES times (sends NACKs but stays receiving)
             for _ = 1, GBL.SYNC_MAX_NACK_RETRIES do
-                for _, timer in ipairs(MockWoW.pendingTimers) do
-                    if timer.delay == 20 and not timer.cancelled then
-                        timer.callback()
-                        break
-                    end
-                end
+                fireReceiveTimeout()
             end
 
             -- One more timeout — should abort after exhausting retries
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 20 and not timer.cancelled then
-                    timer.callback()
-                    break
-                end
-            end
+            fireReceiveTimeout()
 
             -- Should no longer be syncing
             assert.is_false(GBL:IsSyncing())
@@ -2328,6 +2347,7 @@ describe("Sync", function()
                 -- no dataHash field
                 lastScanTime = 1000,
             })
+            fireJitterTimers()
 
             -- Should have sent SYNC_REQUEST (txCount-based fallback)
             local sentRequest = false
@@ -2484,12 +2504,7 @@ describe("Sync", function()
             MockAce.sentCommMessages = {}
 
             -- Fire the receive timeout — should NACK, not abort
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 20 and not timer.cancelled then
-                    timer.callback()
-                    break
-                end
-            end
+            fireReceiveTimeout()
 
             assert.is_true(GBL:GetSyncStatus().receiving,
                 "should still be receiving after NACK")
@@ -2547,14 +2562,9 @@ describe("Sync", function()
                 guild = "Test Guild",
             })
 
-            -- Fire timeout MAX_NACK_RETRIES times
+            -- Fire timeout MAX_NACK_RETRIES times (with backoff: 20→30→45)
             for attempt = 1, GBL.SYNC_MAX_NACK_RETRIES do
-                for _, timer in ipairs(MockWoW.pendingTimers) do
-                    if timer.delay == 20 and not timer.cancelled then
-                        timer.callback()
-                        break
-                    end
-                end
+                fireReceiveTimeout()
                 if attempt < GBL.SYNC_MAX_NACK_RETRIES then
                     assert.is_true(GBL:GetSyncStatus().receiving,
                         "should still be receiving after NACK attempt " .. attempt)
@@ -2562,12 +2572,7 @@ describe("Sync", function()
             end
 
             -- One more — should abort
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 20 and not timer.cancelled then
-                    timer.callback()
-                    break
-                end
-            end
+            fireReceiveTimeout()
             assert.is_false(GBL:GetSyncStatus().receiving,
                 "should have aborted after max NACK retries")
         end)
@@ -2587,14 +2592,9 @@ describe("Sync", function()
                 guild = "Test Guild",
             })
 
-            -- Fire timeout twice (2 NACKs sent)
+            -- Fire timeout twice (2 NACKs sent, with backoff)
             for _ = 1, 2 do
-                for _, timer in ipairs(MockWoW.pendingTimers) do
-                    if timer.delay == 20 and not timer.cancelled then
-                        timer.callback()
-                        break
-                    end
-                end
+                fireReceiveTimeout()
             end
 
             -- Now receive chunk 2 — should reset counter
@@ -2610,14 +2610,9 @@ describe("Sync", function()
             })
 
             -- Fire timeout MAX_NACK_RETRIES times — should still be receiving
-            -- because counter was reset
-            for attempt = 1, GBL.SYNC_MAX_NACK_RETRIES do
-                for _, timer in ipairs(MockWoW.pendingTimers) do
-                    if timer.delay == 20 and not timer.cancelled then
-                        timer.callback()
-                        break
-                    end
-                end
+            -- because counter was reset (backoff restarts from 20s)
+            for _ = 1, GBL.SYNC_MAX_NACK_RETRIES do
+                fireReceiveTimeout()
             end
             -- Should still be receiving (counter was reset after chunk 2)
             assert.is_true(GBL:GetSyncStatus().receiving,
@@ -2687,9 +2682,9 @@ describe("Sync", function()
             assert.is_true(GBL:GetSyncStatus().receiving)
             MockAce.sentCommMessages = {}
 
-            -- Fire the initial receive timeout (no data arrived)
+            -- Fire the initial receive timeout (now uses INITIAL_CHUNK_TIMEOUT)
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 20 and not timer.cancelled then
+                if timer.delay == GBL.SYNC_INITIAL_CHUNK_TIMEOUT and not timer.cancelled then
                     timer.callback()
                     break
                 end
@@ -4803,6 +4798,855 @@ describe("Sync", function()
             })
 
             assert.equals(10, guildData.eventCounts["pure_counts"].count)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- BUSY message
+    ---------------------------------------------------------------------------
+
+    describe("BUSY message", function()
+        it("HandleSyncRequest sends BUSY when already sending", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            local gd = GBL:GetGuildData()
+            -- Add data so first HandleSyncRequest enters sending state
+            table.insert(gd.transactions, {
+                type = "deposit", player = "Player1", tab = 1, itemID = 123,
+                classID = 0, subclassID = 0, count = 1,
+                timestamp = 1000 * 3600, id = "abc:277:0",
+                _occurrence = 0, scanTime = 1000 * 3600, scannedBy = "OfficerA",
+            })
+            gd.seenTxHashes["abc:277:0"] = 1000 * 3600
+
+            -- First request succeeds (enters sending state)
+            GBL:HandleSyncRequest("PeerA", {
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            assert.is_true(GBL:GetSyncStatus().sending)
+            MockAce.sentCommMessages = {}
+
+            -- Second request should be declined with BUSY
+            GBL:HandleSyncRequest("PeerB", {
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+
+            -- Verify BUSY was sent to PeerB (LibDeflate mock is identity,
+            -- so sent text is raw AceSerializer output)
+            local found = false
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                if msg.target == "PeerB" then
+                    local ok, d = GBL:Deserialize(msg.text)
+                    if ok and type(d) == "table" and d.type == "BUSY" then
+                        found = true
+                    end
+                end
+            end
+            assert.is_true(found, "BUSY message should have been sent to PeerB")
+        end)
+
+        it("HandleBusy clears receiving state when waiting for that peer", function()
+            -- Enter receiving state for PeerA
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
+            GBL:RequestSync("PeerA", 0)
+            local status = GBL:GetSyncStatus()
+            assert.is_true(status.receiving)
+
+            -- Receive BUSY from PeerA
+            GBL:HandleBusy("PeerA", {})
+            status = GBL:GetSyncStatus()
+            assert.is_false(status.receiving)
+            assert.is_nil(status.receiveSource)
+        end)
+
+        it("HandleBusy adds peer to pending queue", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
+            GBL:RequestSync("PeerA", 0)
+            GBL:HandleBusy("PeerA", {})
+            local status = GBL:GetSyncStatus()
+            assert.equals(1, status.pendingPeersCount)
+        end)
+
+        it("HandleBusy is no-op on receiving state when not receiving", function()
+            GBL:HandleBusy("PeerA", {})
+            local status = GBL:GetSyncStatus()
+            assert.is_false(status.receiving)
+            -- But peer is still queued
+            assert.equals(1, status.pendingPeersCount)
+        end)
+
+        it("HandleBusy does not clear state when receiving from different peer", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
+            GBL:RequestSync("PeerA", 0)
+            local status = GBL:GetSyncStatus()
+            assert.is_true(status.receiving)
+
+            -- BUSY from PeerB (different peer)
+            GBL:HandleBusy("PeerB", {})
+            status = GBL:GetSyncStatus()
+            assert.is_true(status.receiving)
+            assert.equals("PeerA", status.receiveSource)
+        end)
+
+        it("HandleBusy does not clear state after receiving data", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
+            GBL:RequestSync("PeerA", 0)
+
+            -- Simulate having received chunk 1
+            GBL:HandleSyncData("PeerA", {
+                chunk = 1, totalChunks = 2,
+                transactions = {}, moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+
+            -- BUSY after data received should not clear state
+            GBL:HandleBusy("PeerA", {})
+            local status = GBL:GetSyncStatus()
+            assert.is_true(status.receiving)
+        end)
+
+        it("BUSY message dispatches through OnSyncMessage", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
+            GBL:RequestSync("PeerA", 0)
+
+            -- Craft and send a BUSY message through the dispatch
+            local msg = GBL:Serialize({
+                type = "BUSY",
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            msg = GBL._compressMessage(msg)
+            GBL:OnSyncMessage(GBL.SYNC_PREFIX, msg, "WHISPER", "PeerA")
+
+            local status = GBL:GetSyncStatus()
+            assert.is_false(status.receiving)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Post-sync actions
+    ---------------------------------------------------------------------------
+
+    describe("post-sync actions", function()
+        it("ProcessPendingPeers pops peer and calls RequestSync", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 20, dataHash = 999 })
+            GBL:AddPendingPeer("PeerA")
+            assert.equals(1, GBL:GetSyncStatus().pendingPeersCount)
+
+            GBL:ProcessPendingPeers()
+
+            -- Should have entered receiving state for PeerA
+            local status = GBL:GetSyncStatus()
+            assert.is_true(status.receiving)
+            assert.equals("PeerA", status.receiveSource)
+            assert.equals(0, status.pendingPeersCount)
+        end)
+
+        it("ProcessPendingPeers skips converged peers", function()
+            -- Peer hash matches local
+            local localHash = GBL:GetDataHash(guildData)
+            local localCount = #guildData.transactions + #guildData.moneyTransactions
+            GBL:UpdatePeer("PeerA", {
+                version = GBL.version,
+                txCount = localCount,
+                dataHash = localHash,
+            })
+            GBL:AddPendingPeer("PeerA")
+
+            GBL:ProcessPendingPeers()
+
+            -- Should not have started sync
+            assert.is_false(GBL:GetSyncStatus().receiving)
+            assert.equals(0, GBL:GetSyncStatus().pendingPeersCount)
+        end)
+
+        it("ProcessPendingPeers respects sending guard", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 20, dataHash = 999 })
+            GBL:AddPendingPeer("PeerA")
+
+            -- Enter sending state
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P1", tab = 1, itemID = 123,
+                classID = 0, subclassID = 0, count = 1,
+                timestamp = 1000 * 3600, id = "x:277:0", _occurrence = 0,
+                scanTime = 1000 * 3600, scannedBy = "OfficerA",
+            })
+            guildData.seenTxHashes["x:277:0"] = 1000 * 3600
+            GBL:HandleSyncRequest("Other", {
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            assert.is_true(GBL:GetSyncStatus().sending)
+
+            GBL:ProcessPendingPeers()
+
+            -- PeerA should still be in queue (not consumed)
+            assert.equals(1, GBL:GetSyncStatus().pendingPeersCount)
+        end)
+
+        it("ProcessPendingPeers respects zonePaused", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 20, dataHash = 999 })
+            GBL:AddPendingPeer("PeerA")
+
+            -- Enter receiving state first so OnLoadingScreenStart sets zonePaused
+            GBL:UpdatePeer("PeerX", { version = GBL.version, txCount = 5, dataHash = 50 })
+            GBL:RequestSync("PeerX", 0)
+            GBL:OnLoadingScreenStart()
+            -- Clear receiving state but keep zonePaused
+            GBL:FinishReceiving("PeerX")
+
+            GBL:ProcessPendingPeers()
+
+            -- Should not have consumed the peer (zonePaused still true until cooldown fires)
+            assert.equals(1, GBL:GetSyncStatus().pendingPeersCount)
+        end)
+
+        it("ProcessPendingPeers is no-op with empty queue", function()
+            GBL:ProcessPendingPeers()
+            assert.is_false(GBL:GetSyncStatus().receiving)
+        end)
+
+        it("FinishReceiving schedules ProcessPendingPeers when queue non-empty", function()
+            -- Set up pending peer
+            GBL:UpdatePeer("PeerB", { version = GBL.version, txCount = 20, dataHash = 999 })
+            GBL:AddPendingPeer("PeerB")
+
+            -- Start and finish a receive
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
+            GBL:RequestSync("PeerA", 0)
+            GBL:HandleSyncData("PeerA", {
+                chunk = 1, totalChunks = 1,
+                transactions = {}, moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+
+            -- FinishReceiving was called, which should schedule ProcessPendingPeers
+            -- Check that a timer was scheduled (delay=1)
+            local found = false
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 1 and not timer.cancelled then
+                    found = true
+                end
+            end
+            assert.is_true(found, "ProcessPendingPeers timer should be scheduled")
+        end)
+
+        it("FinishReceiving schedules HELLO broadcast when new data stored", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
+            GBL:RequestSync("PeerA", 0)
+
+            -- Simulate receiving data that gets stored
+            GBL:HandleSyncData("PeerA", {
+                chunk = 1, totalChunks = 1,
+                transactions = {
+                    { type = "deposit", player = "Player1", tab = 1,
+                      itemID = 123, classID = 0, subclassID = 0, count = 1,
+                      timestamp = 1000 * 3600, id = "newtx:277:0" },
+                },
+                moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+
+            -- Check that a HELLO broadcast timer was scheduled (delay=2)
+            local found = false
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 2 and not timer.cancelled then
+                    found = true
+                end
+            end
+            assert.is_true(found, "Post-sync HELLO timer should be scheduled")
+        end)
+
+        it("no post-sync HELLO when no new data stored", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
+            GBL:RequestSync("PeerA", 0)
+            MockWoW.pendingTimers = {}
+
+            -- Simulate receiving empty data
+            GBL:HandleSyncData("PeerA", {
+                chunk = 1, totalChunks = 1,
+                transactions = {}, moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+
+            -- No delay-2 timer should be scheduled
+            local found = false
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 2 and not timer.cancelled then
+                    found = true
+                end
+            end
+            assert.is_false(found, "No post-sync HELLO timer when no new data")
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Sync jitter
+    ---------------------------------------------------------------------------
+
+    describe("sync jitter", function()
+        it("jitter timer fires and initiates sync", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:HandleHello("PeerA", {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 50,
+                dataHash = 999,
+                isReply = true,
+            })
+
+            -- Before firing jitter, should not be receiving
+            assert.is_false(GBL:GetSyncStatus().receiving)
+
+            -- After firing jitter, should be receiving
+            fireJitterTimers()
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            assert.equals("PeerA", GBL:GetSyncStatus().receiveSource)
+        end)
+
+        it("queues peer if state changed during jitter", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:HandleHello("PeerA", {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 50,
+                dataHash = 999,
+                isReply = true,
+            })
+
+            -- Before the jitter fires, start receiving from someone else
+            GBL:UpdatePeer("PeerB", { version = GBL.version, txCount = 10, dataHash = 123 })
+            GBL:RequestSync("PeerB", 0)
+            assert.is_true(GBL:GetSyncStatus().receiving)
+
+            -- Now fire the jitter — should queue PeerA instead
+            fireJitterTimers()
+            assert.equals("PeerB", GBL:GetSyncStatus().receiveSource)
+            assert.equals(1, GBL:GetSyncStatus().pendingPeersCount)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Combat guard
+    ---------------------------------------------------------------------------
+
+    describe("combat guard", function()
+        it("HandleHello defers sync during combat", function()
+            -- Override InCombatLockdown to return true
+            local origICL = _G.InCombatLockdown
+            _G.InCombatLockdown = function() return true end
+
+            GBL:HandleHello("PeerA", {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+                txCount = 20,
+                dataHash = 999,
+                isReply = true,
+            })
+
+            -- Should not be receiving (deferred)
+            assert.is_false(GBL:GetSyncStatus().receiving)
+            -- Should be queued
+            assert.equals(1, GBL:GetSyncStatus().pendingPeersCount)
+
+            _G.InCombatLockdown = origICL
+        end)
+
+        it("OnCombatEnd processes pending queue", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 20, dataHash = 999 })
+            GBL:AddPendingPeer("PeerA")
+
+            GBL:OnCombatEnd()
+
+            -- Should schedule ProcessPendingPeers (2s delay)
+            local found = false
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 2 and not timer.cancelled then
+                    found = true
+                end
+            end
+            assert.is_true(found, "OnCombatEnd should schedule ProcessPendingPeers")
+        end)
+
+        it("OnCombatEnd is no-op with empty queue", function()
+            local before = #MockWoW.pendingTimers
+            GBL:OnCombatEnd()
+            assert.equals(before, #MockWoW.pendingTimers)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Bidirectional sync after FinishSending
+    ---------------------------------------------------------------------------
+
+    describe("bidirectional sync", function()
+        it("schedules bidirectional check after FinishSending", function()
+            -- Set up a send to PeerA
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P1", tab = 1, itemID = 123,
+                classID = 0, subclassID = 0, count = 1,
+                timestamp = 1000 * 3600, id = "bidir:277:0", _occurrence = 0,
+                scanTime = 1000 * 3600, scannedBy = "OfficerA",
+            })
+            guildData.seenTxHashes["bidir:277:0"] = 1000 * 3600
+            GBL:HandleSyncRequest("PeerA", {
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            assert.is_true(GBL:GetSyncStatus().sending)
+            MockWoW.pendingTimers = {}
+
+            GBL:FinishSending()
+
+            -- Check that a 3s timer was scheduled
+            local found = false
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 3 and not timer.cancelled then
+                    found = true
+                end
+            end
+            assert.is_true(found, "Bidirectional check timer should be scheduled (3s)")
+        end)
+
+        it("requests sync when hashes differ after sending", function()
+            -- Set peer info with different hash
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 20, dataHash = 999 })
+
+            -- Enter and finish sending state
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P1", tab = 1, itemID = 123,
+                classID = 0, subclassID = 0, count = 1,
+                timestamp = 1000 * 3600, id = "bidir2:277:0", _occurrence = 0,
+                scanTime = 1000 * 3600, scannedBy = "OfficerA",
+            })
+            guildData.seenTxHashes["bidir2:277:0"] = 1000 * 3600
+            GBL:HandleSyncRequest("PeerA", {
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            GBL:FinishSending()
+
+            -- Fire the 3s timer
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if t.delay == 3 and not t.cancelled then
+                    t.callback()
+                    break
+                end
+            end
+
+            -- Should now be receiving from PeerA
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            assert.equals("PeerA", GBL:GetSyncStatus().receiveSource)
+        end)
+
+        it("processes pending queue when hashes match", function()
+            -- Set peer info with matching hash
+            local localHash = GBL:GetDataHash(guildData)
+            local localCount = #guildData.transactions + #guildData.moneyTransactions
+            GBL:UpdatePeer("PeerA", {
+                version = GBL.version, txCount = localCount, dataHash = localHash,
+            })
+            -- Queue another peer
+            GBL:UpdatePeer("PeerB", { version = GBL.version, txCount = 30, dataHash = 888 })
+            GBL:AddPendingPeer("PeerB")
+
+            -- Enter and finish sending to PeerA
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P1", tab = 1, itemID = 123,
+                classID = 0, subclassID = 0, count = 1,
+                timestamp = 1000 * 3600, id = "bidir3:277:0", _occurrence = 0,
+                scanTime = 1000 * 3600, scannedBy = "OfficerA",
+            })
+            guildData.seenTxHashes["bidir3:277:0"] = 1000 * 3600
+            GBL:HandleSyncRequest("PeerA", {
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            -- Update peer hash to match after we added data
+            local newHash = GBL:GetDataHash(guildData)
+            local newCount = #guildData.transactions + #guildData.moneyTransactions
+            GBL:UpdatePeer("PeerA", {
+                version = GBL.version, txCount = newCount, dataHash = newHash,
+            })
+
+            GBL:FinishSending()
+
+            -- Fire the 3s timer
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if t.delay == 3 and not t.cancelled then
+                    t.callback()
+                    break
+                end
+            end
+
+            -- Should be receiving from PeerB (pending queue), not PeerA
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            assert.equals("PeerB", GBL:GetSyncStatus().receiveSource)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Sender offline detection
+    ---------------------------------------------------------------------------
+
+    describe("sender offline detection", function()
+        it("aborts receive when sender is offline", function()
+            -- Set up guild roster with OfficerB offline
+            MockWoW.guildRoster = {
+                { name = "OfficerA-TestRealm", isOnline = true },
+                { name = "OfficerB-TestRealm", isOnline = false },
+            }
+
+            -- Start receiving from OfficerB
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 3,
+                transactions = {}, moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            assert.is_true(GBL:GetSyncStatus().receiving)
+
+            -- Fire receive timeout — should detect offline and abort
+            fireReceiveTimeout()
+
+            assert.is_false(GBL:GetSyncStatus().receiving)
+            -- Check audit trail mentions offline
+            local trail = GBL:GetAuditTrail()
+            local foundOffline = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("offline") then
+                    foundOffline = true
+                    break
+                end
+            end
+            assert.is_true(foundOffline, "audit trail should mention offline")
+        end)
+
+        it("proceeds with NACK when sender is online", function()
+            MockWoW.guildRoster = {
+                { name = "OfficerA-TestRealm", isOnline = true },
+                { name = "OfficerB-TestRealm", isOnline = true },
+            }
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 3,
+                transactions = {}, moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            MockAce.sentCommMessages = {}
+
+            -- Fire timeout — should send NACK (sender is online)
+            fireReceiveTimeout()
+
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            assert.is_true(#MockAce.sentCommMessages >= 1)
+        end)
+
+        it("proceeds with NACK when sender not found in roster", function()
+            MockWoW.guildRoster = {
+                { name = "OfficerA-TestRealm", isOnline = true },
+            }
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 3,
+                transactions = {}, moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            MockAce.sentCommMessages = {}
+
+            -- Fire timeout — nil return means proceed with NACK
+            fireReceiveTimeout()
+
+            assert.is_true(GBL:GetSyncStatus().receiving)
+        end)
+
+        it("proceeds with NACK when roster is empty", function()
+            MockWoW.guildRoster = {}
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 3,
+                transactions = {}, moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            MockAce.sentCommMessages = {}
+
+            fireReceiveTimeout()
+
+            assert.is_true(GBL:GetSyncStatus().receiving)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- NACK backoff
+    ---------------------------------------------------------------------------
+
+    describe("NACK backoff", function()
+        it("computes correct backoff values", function()
+            assert.equals(20, GBL._nackBackoff(0))
+            assert.equals(30, GBL._nackBackoff(1))
+            assert.equals(45, GBL._nackBackoff(2))
+            assert.equals(45, GBL._nackBackoff(3))  -- capped at 45
+            assert.equals(45, GBL._nackBackoff(10)) -- still capped
+        end)
+
+        it("uses progressive delays for successive NACKs", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Receive chunk 1 of 3 (triggers timeout for chunk 2)
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 3,
+                transactions = {}, moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+
+            -- First timeout should be at 20s (nackCount=0)
+            local firstTimer = nil
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if not t.cancelled and t.delay >= 10 then
+                    firstTimer = t
+                    break
+                end
+            end
+            assert.is_not_nil(firstTimer)
+            assert.equals(20, firstTimer.delay)
+
+            -- Fire the first NACK (schedules a new timer with backoff)
+            firstTimer.callback()
+            local secondTimer = nil
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if not t.cancelled and t.delay >= 10 then
+                    secondTimer = t
+                    break
+                end
+            end
+            assert.is_not_nil(secondTimer)
+            assert.equals(30, secondTimer.delay)
+        end)
+
+        it("resets backoff after successful chunk receipt", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Receive chunk 1 of 4
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 4,
+                transactions = {}, moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+
+            -- Fire 2 NACKs to advance backoff
+            fireReceiveTimeout()
+            fireReceiveTimeout()
+
+            -- Receive chunk 2 (resets nackCount)
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 2, totalChunks = 4,
+                transactions = {}, moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+
+            -- New timeout should be 20s (reset backoff)
+            local timer = nil
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if not t.cancelled and t.delay >= 10 then
+                    timer = t
+                    break
+                end
+            end
+            assert.is_not_nil(timer)
+            assert.equals(20, timer.delay)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Initial chunk timeout
+    ---------------------------------------------------------------------------
+
+    describe("initial chunk timeout", function()
+        it("uses shorter timeout for first chunk", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
+            MockWoW.pendingTimers = {}
+            GBL:RequestSync("PeerA", 0)
+
+            -- Find the ticker created for receive timeout
+            local found = false
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == GBL.SYNC_INITIAL_CHUNK_TIMEOUT and not timer.cancelled then
+                    found = true
+                end
+            end
+            assert.is_true(found,
+                "Initial receive timeout should use INITIAL_CHUNK_TIMEOUT ("
+                .. GBL.SYNC_INITIAL_CHUNK_TIMEOUT .. "s)")
+        end)
+
+        it("subsequent chunk timeout uses standard RECEIVE_CHUNK_TIMEOUT", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
+            GBL:RequestSync("PeerA", 0)
+            MockWoW.pendingTimers = {}
+
+            -- Receive chunk 1 of 2 (triggers new timer for chunk 2)
+            GBL:HandleSyncData("PeerA", {
+                chunk = 1, totalChunks = 2,
+                transactions = {}, moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+
+            -- Inter-chunk timeout should use the standard 20s
+            local found = false
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 20 and not timer.cancelled then
+                    found = true
+                end
+            end
+            assert.is_true(found, "Inter-chunk timeout should use 20s")
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- HandleHello pending queue integration
+    ---------------------------------------------------------------------------
+
+    describe("HandleHello pending queue", function()
+        it("queues peer when hash differs but already receiving", function()
+            -- Enter receiving state
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
+            GBL:RequestSync("PeerA", 0)
+            assert.is_true(GBL:GetSyncStatus().receiving)
+
+            -- PeerB sends HELLO with different hash
+            GBL:HandleHello("PeerB", {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+                txCount = 20,
+                dataHash = 999,
+                isReply = true,
+            })
+
+            -- PeerB should be queued
+            assert.equals(1, GBL:GetSyncStatus().pendingPeersCount)
+        end)
+
+        it("does not queue peer when datasets match", function()
+            -- Set up matching data
+            local dataHash = GBL:GetDataHash(guildData)
+            local txCount = #guildData.transactions + #guildData.moneyTransactions
+
+            GBL:HandleHello("PeerB", {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+                txCount = txCount,
+                dataHash = dataHash,
+                isReply = true,
+            })
+
+            assert.equals(0, GBL:GetSyncStatus().pendingPeersCount)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Pending peers queue
+    ---------------------------------------------------------------------------
+
+    describe("pending peers queue", function()
+        it("AddPendingPeer adds a peer and increments count", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 5, dataHash = 99 })
+            GBL:AddPendingPeer("PeerA")
+            local status = GBL:GetSyncStatus()
+            assert.equals(1, status.pendingPeersCount)
+        end)
+
+        it("AddPendingPeer is idempotent", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 5, dataHash = 99 })
+            GBL:AddPendingPeer("PeerA")
+            GBL:AddPendingPeer("PeerA")
+            local status = GBL:GetSyncStatus()
+            assert.equals(1, status.pendingPeersCount)
+        end)
+
+        it("AddPendingPeer caps at MAX_PENDING_PEERS", function()
+            for i = 1, GBL.SYNC_MAX_PENDING_PEERS + 3 do
+                GBL:UpdatePeer("Peer" .. i, { version = GBL.version, txCount = 5, dataHash = i })
+                GBL:AddPendingPeer("Peer" .. i)
+            end
+            local status = GBL:GetSyncStatus()
+            assert.equals(GBL.SYNC_MAX_PENDING_PEERS, status.pendingPeersCount)
+        end)
+
+        it("RemovePendingPeer removes a peer and decrements count", function()
+            GBL:AddPendingPeer("PeerA")
+            GBL:AddPendingPeer("PeerB")
+            GBL:RemovePendingPeer("PeerA")
+            local status = GBL:GetSyncStatus()
+            assert.equals(1, status.pendingPeersCount)
+        end)
+
+        it("RemovePendingPeer is no-op for unknown peer", function()
+            GBL:AddPendingPeer("PeerA")
+            GBL:RemovePendingPeer("PeerX")
+            local status = GBL:GetSyncStatus()
+            assert.equals(1, status.pendingPeersCount)
+        end)
+
+        it("PopPendingPeer returns a valid active peer", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 5, dataHash = 99 })
+            GBL:AddPendingPeer("PeerA")
+            local peer = GBL:PopPendingPeer()
+            assert.equals("PeerA", peer)
+            local status = GBL:GetSyncStatus()
+            assert.equals(0, status.pendingPeersCount)
+        end)
+
+        it("PopPendingPeer skips stale peers", function()
+            -- Add peer with stale lastSeen
+            GBL:UpdatePeer("StalePeer", { version = GBL.version, txCount = 5, dataHash = 99 })
+            -- Make it stale by backdating lastSeen
+            local peers = GBL:GetAllPeers()
+            peers["StalePeer"].lastSeen = GetServerTime() - GBL.SYNC_PEER_STALE_SECONDS - 10
+            GBL:AddPendingPeer("StalePeer")
+            local peer = GBL:PopPendingPeer()
+            assert.is_nil(peer)
+            local status = GBL:GetSyncStatus()
+            assert.equals(0, status.pendingPeersCount)
+        end)
+
+        it("PopPendingPeer returns nil on empty queue", function()
+            local peer = GBL:PopPendingPeer()
+            assert.is_nil(peer)
+        end)
+
+        it("ResetSyncState clears pending queue", function()
+            GBL:AddPendingPeer("PeerA")
+            GBL:AddPendingPeer("PeerB")
+            GBL:ResetSyncState()
+            local status = GBL:GetSyncStatus()
+            assert.equals(0, status.pendingPeersCount)
         end)
     end)
 end)

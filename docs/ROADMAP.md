@@ -53,8 +53,9 @@ The core addon is feature-complete for persistent guild bank logging with guild-
 
 ---
 
-## Next: Stabilization (v0.21.0 -- v0.24.x)
+## Next: Stabilization (v0.22.0 -- v0.24.x)
 
+- ~~Sync resilience (BUSY message, pending peers queue, NACK backoff, combat guard, offline detection, bidirectional sync, jitter)~~ — **Shipped in v0.22.0**
 - Sync rate limiting (per-peer bandwidth budgeting)
 - Performance audit (SavedVariables size, compaction verification, UI debouncing)
 - Community feedback iteration

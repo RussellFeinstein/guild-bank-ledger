@@ -29,6 +29,22 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.22.0
+    {"0.22.0", "2026-04-15", {
+        Added = {
+            "BUSY message: declined sync requests now respond immediately instead of 60s dead air",
+            "Pending peers queue: missed sync opportunities automatically retried after current sync",
+            "Post-sync HELLO broadcast to trigger reciprocal sync",
+            "Bidirectional sync: checks if peer has data we need after sending",
+            "Combat guard: sync deferred during combat, resumes after",
+            "Sync jitter: 0-2s random delay prevents mutual request collisions",
+            "Sender offline detection: aborts early if sender disconnects mid-sync",
+            "NACK backoff: progressive timeouts (20s, 30s, 45s) for retries",
+        },
+        Changed = {
+            "First-chunk timeout reduced from 20s to 10s for faster failure detection",
+        },
+    }},
     -- v0.21.0
     {"0.21.0", "2026-04-14", {
         Added = {

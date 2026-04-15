@@ -28,6 +28,8 @@ local CTL_BACKOFF_DELAY = 1.0
 local PEER_STALE_SECONDS = 300
 local HELLO_HEARTBEAT_INTERVAL = 120
 local EVENTCOUNTS_PER_BATCH = 10
+local MAX_PENDING_PEERS = 10
+local INITIAL_CHUNK_TIMEOUT = 10
 
 -- Expose constants for testing and UI
 GBL.SYNC_PROTOCOL_VERSION = PROTOCOL_VERSION
@@ -38,6 +40,8 @@ GBL.SYNC_MAX_NACK_RETRIES = MAX_NACK_RETRIES
 GBL.SYNC_PEER_STALE_SECONDS = PEER_STALE_SECONDS
 GBL.SYNC_HELLO_HEARTBEAT_INTERVAL = HELLO_HEARTBEAT_INTERVAL
 GBL.SYNC_EVENTCOUNTS_PER_BATCH = EVENTCOUNTS_PER_BATCH
+GBL.SYNC_MAX_PENDING_PEERS = MAX_PENDING_PEERS
+GBL.SYNC_INITIAL_CHUNK_TIMEOUT = INITIAL_CHUNK_TIMEOUT
 
 ------------------------------------------------------------------------
 -- Compression (LibDeflate)
@@ -62,9 +66,19 @@ local function decompressMessage(encoded)
     return LibDeflate:DecompressDeflate(compressed)
 end
 
+--- Calculate NACK timeout with progressive backoff.
+-- 20s * 1.5^nackCount, capped at 45s.
+-- @param nackCount number Number of NACKs already sent (0-based)
+-- @return number Timeout in seconds
+local function nackBackoff(nackCount)
+    local delay = RECEIVE_CHUNK_TIMEOUT * (1.5 ^ nackCount)
+    return math.min(delay, 45)
+end
+
 -- Expose for testing
 GBL._compressMessage = compressMessage
 GBL._decompressMessage = decompressMessage
+GBL._nackBackoff = nackBackoff
 
 -- Module state (session-only, not persisted)
 local syncState = {
@@ -100,6 +114,10 @@ local syncState = {
     currentDelay = INTER_CHUNK_DELAY_NORMAL,
     fpsFrame = nil,
     lastFpsCheck = 0,
+
+    -- Pending peers queue (retry after busy/combat/zone)
+    pendingPeers = {},
+    pendingPeersCount = 0,
 }
 
 ------------------------------------------------------------------------
@@ -126,6 +144,7 @@ function GBL:InitSync()
     self:RegisterComm(PREFIX, "OnSyncMessage")
     self:RegisterEvent("LOADING_SCREEN_ENABLED", "OnLoadingScreenStart")
     self:RegisterEvent("LOADING_SCREEN_DISABLED", "OnLoadingScreenEnd")
+    self:RegisterEvent("PLAYER_REGEN_ENABLED", "OnCombatEnd")
     self:StartHelloHeartbeat()
 end
 
@@ -135,6 +154,7 @@ function GBL:EnableSync()
     self:RegisterComm(PREFIX, "OnSyncMessage")
     self:RegisterEvent("LOADING_SCREEN_ENABLED", "OnLoadingScreenStart")
     self:RegisterEvent("LOADING_SCREEN_DISABLED", "OnLoadingScreenEnd")
+    self:RegisterEvent("PLAYER_REGEN_ENABLED", "OnCombatEnd")
     self:StartHelloHeartbeat()
     self:BroadcastHello()
 end
@@ -179,6 +199,8 @@ function GBL:DisableSync()
         syncState.helloHeartbeat = nil
     end
     self:StopFpsMonitor()
+    syncState.pendingPeers = {}
+    syncState.pendingPeersCount = 0
 end
 
 ------------------------------------------------------------------------
@@ -336,6 +358,8 @@ function GBL:OnSyncMessage(_prefix, message, distribution, sender)
         self:HandleAck(sender, data)
     elseif msgType == "NACK" then
         self:HandleNack(sender, data)
+    elseif msgType == "BUSY" then
+        self:HandleBusy(sender, data)
     end
 end
 
@@ -442,10 +466,29 @@ function GBL:HandleHello(sender, data)
     end
 
     if shouldSync and not syncState.receiving and self.db.profile.sync.autoSync then
-        self:AddAuditEntry("Sync triggered by " .. syncReason
-            .. " — requesting from " .. sender)
-        local sinceTimestamp = guildData.syncState.lastSyncTimestamp or 0
-        self:RequestSync(sender, sinceTimestamp)
+        -- Defer sync if in combat to avoid FPS impact
+        if InCombatLockdown and InCombatLockdown() then
+            self:AddPendingPeer(sender)
+            self:AddAuditEntry("Deferred sync from " .. sender .. " — in combat")
+        else
+            -- Add 0-2s random jitter to prevent mutual SYNC_REQUEST oscillation
+            -- when multiple peers respond to the same HELLO simultaneously
+            self:AddAuditEntry("Sync triggered by " .. syncReason
+                .. " — requesting from " .. sender .. " (with jitter)")
+            local jitter = math.random() * 2
+            C_Timer.After(jitter, function()
+                if syncState.receiving or syncState.sending then
+                    -- State changed during jitter — queue instead
+                    self:AddPendingPeer(sender)
+                    return
+                end
+                if not self.db.profile.sync.enabled then return end
+                local gd = self:GetGuildData()
+                if not gd then return end
+                local sinceTs = gd.syncState.lastSyncTimestamp or 0
+                self:RequestSync(sender, sinceTs)
+            end)
+        end
     else
         -- Log why we didn't sync so stalls are diagnosable
         local reason
@@ -454,6 +497,8 @@ function GBL:HandleHello(sender, data)
                 .. ", remote=" .. remoteCount .. ")"
         elseif syncState.receiving then
             reason = "already receiving from " .. (syncState.receiveSource or "?")
+            -- Queue for retry after current sync completes
+            self:AddPendingPeer(sender)
         elseif not self.db.profile.sync.autoSync then
             reason = "autoSync disabled"
         end
@@ -608,7 +653,7 @@ function GBL:RequestSync(target, sinceTimestamp)
         syncState.receiveTimer:Cancel()
     end
     syncState.receiveNackCount = 0
-    syncState.receiveTimer = C_Timer.NewTicker(RECEIVE_CHUNK_TIMEOUT, function()
+    syncState.receiveTimer = C_Timer.NewTicker(INITIAL_CHUNK_TIMEOUT, function()
         if not syncState.receiving then return end
         if syncState.receiveGot == 0 then
             if syncState.receiveNackCount >= MAX_NACK_RETRIES then
@@ -633,6 +678,15 @@ function GBL:HandleSyncRequest(sender, data)
             .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
         self:AddAuditEntry("Declined sync from " .. sender
             .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
+        -- Send BUSY so requester doesn't wait 60s for data that will never come
+        local msg = self:Serialize({
+            type = "BUSY",
+            protocolVersion = PROTOCOL_VERSION,
+            guild = self:GetGuildName(),
+        })
+        msg = compressMessage(msg)
+        self:SendCommMessage(PREFIX, msg, "WHISPER", sender)
+        self:AddAuditEntry("Sent BUSY to " .. sender)
         return
     end
 
@@ -995,6 +1049,48 @@ function GBL:FinishSending()
         syncState.sendHardTimer = nil
     end
     self:StopFpsMonitor()
+
+    -- Bidirectional check: after sending, do we need data from this peer?
+    -- Delay 3s to let the peer process our data (their FinishReceiving).
+    local cleanTarget = Ambiguate(target, "none")
+    if self.db.profile.sync.autoSync then
+        C_Timer.After(3, function()
+            if syncState.receiving or syncState.sending then return end
+            if syncState.zonePaused then return end
+            if not self.db.profile.sync.enabled then return end
+            if InCombatLockdown and InCombatLockdown() then return end
+
+            local peerInfo = syncState.peers[cleanTarget]
+            if not peerInfo or not peerInfo.dataHash then
+                -- No hash info — process pending queue instead
+                self:ProcessPendingPeers()
+                return
+            end
+
+            local gd = self:GetGuildData()
+            if not gd then return end
+            local localHash = self:GetDataHash(gd)
+            local localCount = #gd.transactions + #gd.moneyTransactions
+
+            if peerInfo.dataHash ~= localHash
+                or (peerInfo.txCount or 0) ~= localCount then
+                self:AddAuditEntry("Bidirectional check: hashes still differ with "
+                    .. cleanTarget .. " — requesting sync")
+                local since = gd.syncState.lastSyncTimestamp or 0
+                self:RequestSync(cleanTarget, since)
+            else
+                self:AddAuditEntry("Bidirectional check: hashes match with "
+                    .. cleanTarget .. " — no sync needed")
+                self:ProcessPendingPeers()
+            end
+        end)
+    else
+        -- autoSync disabled — still process pending queue
+        C_Timer.After(1, function()
+            if syncState.receiving or syncState.sending then return end
+            self:ProcessPendingPeers()
+        end)
+    end
 end
 
 ------------------------------------------------------------------------
@@ -1155,28 +1251,15 @@ function GBL:HandleSyncData(sender, data)
     syncState.receiveDuped = syncState.receiveDuped + duped
     syncState.receiveExpected = data.totalChunks or 1
 
-    -- Reset receive timeout — NACK for missing chunk instead of aborting
-    if syncState.receiveTimer then
-        syncState.receiveTimer:Cancel()
-    end
+    -- Reset receive timeout — NACK with backoff for missing chunk
     syncState.receiveNackCount = 0  -- reset on successful chunk receipt
 
     -- Only set timeout if more chunks expected
     if not (data.chunk and data.totalChunks and data.chunk >= data.totalChunks) then
-        syncState.receiveTimer = C_Timer.NewTicker(RECEIVE_CHUNK_TIMEOUT, function()
-            if not syncState.receiving then return end
-            if syncState.receiveNackCount >= MAX_NACK_RETRIES then
-                self:SyncLog("Sync: chunk " .. (syncState.receiveGot + 1) .. "/"
-                    .. syncState.receiveExpected .. " failed after "
-                    .. MAX_NACK_RETRIES .. " retries — aborting")
-                self:AddAuditEntry("NACK limit reached for chunk "
-                    .. (syncState.receiveGot + 1) .. " from "
-                    .. (syncState.receiveSource or "unknown") .. " — aborting")
-                self:FinishReceiving(syncState.receiveSource)
-            else
-                self:SendNack(syncState.receiveSource, syncState.receiveGot + 1)
-            end
-        end, 1)
+        self:ScheduleReceiveTimeout()
+    elseif syncState.receiveTimer then
+        syncState.receiveTimer:Cancel()
+        syncState.receiveTimer = nil
     end
 
     -- Send ACK
@@ -1317,6 +1400,27 @@ function GBL:FinishReceiving(sender)
         and self.mainFrame.frame:IsShown() then
         self:RefreshUI()
     end
+
+    -- Post-sync: process pending peers queue after a brief delay
+    if syncState.pendingPeersCount > 0 and self.db.profile.sync.autoSync then
+        C_Timer.After(1, function()
+            if syncState.receiving or syncState.sending then return end
+            if syncState.zonePaused then return end
+            if InCombatLockdown and InCombatLockdown() then return end
+            self:ProcessPendingPeers()
+        end)
+    end
+
+    -- Post-sync HELLO: broadcast updated dataset so peers discover our new data
+    -- and can request what we now have. Only if we actually stored new records.
+    if totalStored > 0 then
+        C_Timer.After(2, function()
+            if not self.db.profile.sync.enabled then return end
+            self:BroadcastHello(true)  -- force=true bypasses cooldown
+            self:AddAuditEntry("Post-sync HELLO broadcast (received "
+                .. totalStored .. " new records)")
+        end)
+    end
 end
 
 ------------------------------------------------------------------------
@@ -1337,6 +1441,85 @@ function GBL:UpdatePeer(sender, data)
 end
 
 ------------------------------------------------------------------------
+-- Pending peers queue
+------------------------------------------------------------------------
+
+--- Add a peer to the pending sync queue (idempotent, capped at MAX_PENDING_PEERS).
+-- Peers are queued when a sync opportunity is missed (busy, combat, zone change)
+-- and processed after the current sync completes.
+-- @param name string Peer character name
+function GBL:AddPendingPeer(name)
+    local clean = Ambiguate(name, "none")
+    if syncState.pendingPeers[clean] then return end
+    if syncState.pendingPeersCount >= MAX_PENDING_PEERS then return end
+    syncState.pendingPeers[clean] = { addedAt = GetServerTime() }
+    syncState.pendingPeersCount = syncState.pendingPeersCount + 1
+    self:AddAuditEntry("Queued pending peer: " .. clean)
+end
+
+--- Remove a peer from the pending sync queue.
+-- @param name string Peer character name
+function GBL:RemovePendingPeer(name)
+    local clean = Ambiguate(name, "none")
+    if syncState.pendingPeers[clean] then
+        syncState.pendingPeers[clean] = nil
+        syncState.pendingPeersCount = syncState.pendingPeersCount - 1
+    end
+end
+
+--- Pop the next valid peer from the pending queue.
+-- Skips stale peers (not seen within PEER_STALE_SECONDS). Returns nil if empty.
+-- @return string|nil Peer name to sync with
+function GBL:PopPendingPeer()
+    local now = GetServerTime()
+    for name, _ in pairs(syncState.pendingPeers) do
+        syncState.pendingPeers[name] = nil
+        syncState.pendingPeersCount = syncState.pendingPeersCount - 1
+        -- Check if peer is still active
+        local peer = syncState.peers[name]
+        if peer and (now - (peer.lastSeen or 0) <= PEER_STALE_SECONDS) then
+            return name
+        end
+        self:AddAuditEntry("Skipped stale pending peer: " .. name)
+    end
+    return nil
+end
+
+--- Process the next peer in the pending sync queue.
+-- Called after FinishReceiving and FinishSending when the sync lock is free.
+-- Skips peers whose data has already converged (hash match).
+function GBL:ProcessPendingPeers()
+    if syncState.receiving or syncState.sending then return end
+    if syncState.zonePaused then return end
+    if not self.db.profile.sync.enabled then return end
+    if not self.db.profile.sync.autoSync then return end
+
+    local peer = self:PopPendingPeer()
+    if not peer then return end
+
+    local guildData = self:GetGuildData()
+    if not guildData then return end
+
+    -- Verify hashes still differ (data may have converged via another sync)
+    local peerInfo = syncState.peers[peer]
+    if peerInfo and peerInfo.dataHash then
+        local localHash = self:GetDataHash(guildData)
+        local localCount = #guildData.transactions + #guildData.moneyTransactions
+        if peerInfo.dataHash == localHash and (peerInfo.txCount or 0) == localCount then
+            self:AddAuditEntry("Skipped queued peer " .. peer
+                .. " — hashes now match")
+            -- Try next peer in queue
+            self:ProcessPendingPeers()
+            return
+        end
+    end
+
+    self:AddAuditEntry("Processing queued peer: " .. peer)
+    local sinceTimestamp = guildData.syncState.lastSyncTimestamp or 0
+    self:RequestSync(peer, sinceTimestamp)
+end
+
+------------------------------------------------------------------------
 -- Helpers
 ------------------------------------------------------------------------
 
@@ -1350,6 +1533,25 @@ function GBL:AddAuditEntry(message)
     while #syncState.auditTrail > 200 do
         table.remove(syncState.auditTrail)
     end
+end
+
+--- Check if a guild member is currently online via the guild roster.
+-- @param name string Character name (bare or realm-qualified)
+-- @return boolean|nil true if online, false if offline, nil if not found
+function GBL:IsGuildMemberOnline(name)
+    local target = self:StripRealm(name)
+    local numMembers = GetNumGuildMembers()
+    if not numMembers or numMembers == 0 then return nil end
+    for i = 1, numMembers do
+        local fullName, _, _, _, _, _, _, _, isOnline = GetGuildRosterInfo(i)
+        if fullName then
+            local base = self:StripRealm(fullName)
+            if base == target then
+                return isOnline
+            end
+        end
+    end
+    return nil  -- not found in roster
 end
 
 ------------------------------------------------------------------------
@@ -1368,6 +1570,8 @@ function GBL:GetSyncStatus()
         sendProgress = syncState.sendChunkIndex .. "/" .. #syncState.sendChunks,
         receiveProgress = syncState.receiveGot .. "/" .. syncState.receiveExpected,
         zonePaused = syncState.zonePaused,
+        pendingPeersCount = syncState.pendingPeersCount,
+        receiveNackCount = syncState.receiveNackCount,
     }
 end
 
@@ -1465,6 +1669,50 @@ function GBL:ResetSyncState()
     syncState.currentDelay = INTER_CHUNK_DELAY_NORMAL
     syncState.fpsFrame = nil
     syncState.lastFpsCheck = 0
+    syncState.pendingPeers = {}
+    syncState.pendingPeersCount = 0
+end
+
+------------------------------------------------------------------------
+-- Receive timeout scheduling (NACK backoff)
+------------------------------------------------------------------------
+
+--- Schedule (or reschedule) the receive timeout with NACK backoff.
+-- Cancels any existing receive timer first. Uses progressive delays:
+-- 20s → 30s → 45s (capped). After MAX_NACK_RETRIES, aborts the sync.
+function GBL:ScheduleReceiveTimeout()
+    if syncState.receiveTimer then
+        syncState.receiveTimer:Cancel()
+    end
+    local timeout = nackBackoff(syncState.receiveNackCount)
+    syncState.receiveTimer = C_Timer.NewTicker(timeout, function()
+        if not syncState.receiving then return end
+
+        -- Check if sender went offline (abort early instead of wasting NACKs)
+        local online = self:IsGuildMemberOnline(syncState.receiveSource)
+        if online == false then
+            self:SyncLog("Sync: " .. (syncState.receiveSource or "?")
+                .. " went offline — aborting")
+            self:AddAuditEntry("Sender " .. (syncState.receiveSource or "?")
+                .. " offline — aborting receive")
+            self:FinishReceiving(syncState.receiveSource)
+            return
+        end
+
+        if syncState.receiveNackCount >= MAX_NACK_RETRIES then
+            self:SyncLog("Sync: chunk " .. (syncState.receiveGot + 1) .. "/"
+                .. syncState.receiveExpected .. " failed after "
+                .. MAX_NACK_RETRIES .. " retries — aborting")
+            self:AddAuditEntry("NACK limit reached for chunk "
+                .. (syncState.receiveGot + 1) .. " from "
+                .. (syncState.receiveSource or "unknown") .. " — aborting")
+            self:FinishReceiving(syncState.receiveSource)
+        else
+            self:SendNack(syncState.receiveSource, syncState.receiveGot + 1)
+            -- Reschedule with increased backoff
+            self:ScheduleReceiveTimeout()
+        end
+    end, 1)
 end
 
 ------------------------------------------------------------------------
@@ -1522,6 +1770,63 @@ function GBL:HandleNack(sender, data)
 end
 
 ------------------------------------------------------------------------
+-- BUSY response
+------------------------------------------------------------------------
+
+--- Handle an incoming BUSY response from a peer we requested sync from.
+-- Clears receiving state immediately (instead of waiting 60s for NACKs to expire)
+-- and queues the peer for retry after the current sync completes.
+-- @param sender string Peer who is busy
+-- @param data table Deserialized BUSY payload (unused, reserved)
+function GBL:HandleBusy(sender, data) -- luacheck: ignore 212/data
+    local cleanSender = Ambiguate(sender, "none")
+    self:AddAuditEntry("Received BUSY from " .. cleanSender)
+
+    -- Only clear receiving state if we're actually waiting for this peer
+    -- and haven't received any data yet (receiveGot == 0).
+    if syncState.receiving
+        and self:StripRealm(sender) == self:StripRealm(syncState.receiveSource)
+        and syncState.receiveGot == 0 then
+        if syncState.receiveTimer then
+            syncState.receiveTimer:Cancel()
+            syncState.receiveTimer = nil
+        end
+        syncState.receiving = false
+        syncState.receiveSource = nil
+        syncState.receiveExpected = 0
+        syncState.receiveGot = 0
+        syncState.receiveStored = 0
+        syncState.receiveDuped = 0
+        syncState.receiveNormalized = 0
+        syncState.receiveStartTime = 0
+        syncState.receiveNackCount = 0
+        self._syncReceiving = false
+
+        self:SyncLog("Sync: " .. cleanSender .. " is busy — will retry later")
+    end
+
+    -- Queue for retry regardless of whether we cleared state
+    self:AddPendingPeer(cleanSender)
+end
+
+------------------------------------------------------------------------
+-- Combat protection
+------------------------------------------------------------------------
+
+--- Resume pending sync after combat ends.
+-- Called by PLAYER_REGEN_ENABLED event.
+function GBL:OnCombatEnd()
+    if syncState.pendingPeersCount > 0
+        and not syncState.receiving and not syncState.sending then
+        C_Timer.After(2, function()
+            if syncState.receiving or syncState.sending then return end
+            if syncState.zonePaused then return end
+            self:ProcessPendingPeers()
+        end)
+    end
+end
+
+------------------------------------------------------------------------
 -- Zone change protection
 ------------------------------------------------------------------------
 
@@ -1572,16 +1877,9 @@ function GBL:OnLoadingScreenEnd()
             self:SendNextChunk()
         end
 
-        -- Restart receive timeout if we were receiving
+        -- Restart receive timeout if we were receiving (uses backoff)
         if syncState.receiving then
-            syncState.receiveTimer = C_Timer.NewTicker(RECEIVE_CHUNK_TIMEOUT, function()
-                if not syncState.receiving then return end
-                if syncState.receiveNackCount >= MAX_NACK_RETRIES then
-                    self:FinishReceiving(syncState.receiveSource)
-                else
-                    self:SendNack(syncState.receiveSource, syncState.receiveGot + 1)
-                end
-            end, 1)
+            self:ScheduleReceiveTimeout()
         end
     end, 1)
 end

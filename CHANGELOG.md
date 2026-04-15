@@ -5,6 +5,23 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] — 2026-04-15
+
+### Added
+- **BUSY message type** — When a sync request is declined (sender already busy), a BUSY response is sent immediately so the requester doesn't wait 60s for data that will never come.
+- **Pending peers queue** — Missed sync opportunities (busy, combat, zone change) are queued and automatically retried after the current sync completes. Capped at 10 peers.
+- **Post-sync HELLO broadcast** — After receiving new data, broadcasts updated dataset fingerprint so peers discover the new data and can request it.
+- **Post-sync queue processing** — After completing a receive, automatically syncs with the next queued peer.
+- **Bidirectional sync** — After finishing sending data to a peer, checks if that peer has data we need and requests it (3s delay for processing).
+- **Combat guard** — Sync initiation deferred during combat (PLAYER_REGEN_ENABLED resumes pending queue).
+- **Mutual sync jitter** — 0-2s random delay on sync initiation to prevent collisions when multiple peers respond to the same HELLO.
+- **Sender offline detection** — During receive timeout, checks guild roster to abort early if the sender went offline instead of waiting for NACK retries.
+- **NACK backoff** — Progressive timeout delays (20s → 30s → 45s) instead of fixed 20s intervals for NACK retries.
+
+### Changed
+- **Shorter first-chunk timeout** — Initial receive timeout reduced from 20s to 10s since in-game addon messages have no network latency.
+- **GetSyncStatus** now includes `pendingPeersCount` and `receiveNackCount` fields.
+
 ## [0.21.0] — 2026-04-14
 
 ### Added

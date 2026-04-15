@@ -17,6 +17,8 @@ read_globals = {
     "GetGuildBankMoneyTransaction",
     "GetNumGuildBankMoneyTransactions",
     "InCombatLockdown",
+    "GetGuildRosterInfo",
+    "GetNumGuildMembers",
     "IsInGuild",
     "IsInRaid",
     "UnitAffectingCombat",
