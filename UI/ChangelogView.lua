@@ -29,6 +29,18 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.20.0
+    {"0.20.0", "2026-04-14", {
+        Changed = {
+            "Documentation sync for beta preparation: README, ROADMAP, CurseForge description updated",
+        },
+        Fixed = {
+            "Changelog tab showing blank content — nav bar moved inside scroll frame",
+        },
+        Removed = {
+            "Obsolete planning docs (IMPLEMENTATION_PLAN.md, PLAN.md) deleted",
+        },
+    }},
     -- v0.19.3
     {"0.19.3", "2026-04-14", {
         Changed = {
@@ -472,12 +484,20 @@ function GBL:BuildChangelogTab(container)
     local startIdx = (page - 1) * CHANGELOG_PAGE_SIZE + 1
     local endIdx = math.min(startIdx + CHANGELOG_PAGE_SIZE - 1, totalEntries)
 
-    -- Navigation bar (only when multiple pages)
+    -- Scrollable content (only direct child of container, so List layout
+    -- gives it proper height — adding siblings before it breaks sizing)
+    local scroll = AceGUI:Create("ScrollFrame")
+    scroll:SetFullWidth(true)
+    scroll:SetFullHeight(true)
+    scroll:SetLayout("List")
+    container:AddChild(scroll)
+
+    -- Navigation bar inside scroll (only when multiple pages)
     if totalPages > 1 then
         local navGroup = AceGUI:Create("SimpleGroup")
         navGroup:SetFullWidth(true)
         navGroup:SetLayout("Flow")
-        container:AddChild(navGroup)
+        scroll:AddChild(navGroup)
 
         -- Previous button
         local prevBtn = AceGUI:Create("Button")
@@ -527,13 +547,6 @@ function GBL:BuildChangelogTab(container)
         self:RegisterFocusable(prevBtn, 1)
         self:RegisterFocusable(nextBtn, 2)
     end
-
-    -- Scrollable content
-    local scroll = AceGUI:Create("ScrollFrame")
-    scroll:SetFullWidth(true)
-    scroll:SetFullHeight(true)
-    scroll:SetLayout("List")
-    container:AddChild(scroll)
 
     -- Render version entries for current page
     -- (AceGUI Labels are single-line; multi-line \n text gets truncated)

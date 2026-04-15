@@ -5,6 +5,18 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] — 2026-04-14
+
+### Changed
+- **Documentation sync for beta preparation** — Updated README with accurate feature list (guild-wide sync, changelog tab, version label, peer version status, access control, 4 colorblind modes). Replaced stale ROADMAP with forward-looking release plan (v0.20.x beta prep, v0.21.0 export/beta, v1.0.0 public release, post-1.0 features). Updated CurseForge description from "Alpha" to "Beta" with correct consumption dashboard description. Updated .toc Notes to mention sync.
+
+### Fixed
+- **Changelog tab showing blank content** — pagination nav bar was added as a sibling before the ScrollFrame, preventing it from getting proper height in AceGUI's List layout. Moved nav controls inside the ScrollFrame so it remains the only direct container child.
+
+### Removed
+- `docs/IMPLEMENTATION_PLAN.md` — Obsolete planning document (v0.11.0 era), superseded by ROADMAP.md and CHANGELOG.md.
+- `docs/PLAN.md` — Obsolete planning document, superseded by ROADMAP.md.
+
 ## [0.19.3] — 2026-04-14
 
 ### Changed

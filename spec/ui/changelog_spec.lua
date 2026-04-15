@@ -231,7 +231,9 @@ describe("ChangelogView", function()
             GBL:BuildChangelogTab(container)
 
             local scroll = findChild(container, "ScrollFrame")
-            local firstLabel = scroll._children[1]
+            -- First child is navGroup (when paginated), version header follows
+            local labelIdx = scroll._children[1]._type == "SimpleGroup" and 2 or 1
+            local firstLabel = scroll._children[labelIdx]
             local newest = GBL.CHANGELOG_DATA[1][1]
             assert.truthy(firstLabel._text:find(newest, 1, true))
         end)
@@ -319,10 +321,12 @@ describe("ChangelogView", function()
 
             GBL:BuildChangelogTab(container)
 
-            -- First child is nav group, second is ScrollFrame
-            assert.equals(2, #container._children)
-            assert.equals("SimpleGroup", container._children[1]._type)
-            assert.equals("ScrollFrame", container._children[2]._type)
+            -- Only child is ScrollFrame (nav is inside scroll)
+            assert.equals(1, #container._children)
+            assert.equals("ScrollFrame", container._children[1]._type)
+            -- First child of scroll is the nav group
+            local scroll = container._children[1]
+            assert.equals("SimpleGroup", scroll._children[1]._type)
 
             GBL.CHANGELOG_DATA = original
         end)
@@ -338,9 +342,9 @@ describe("ChangelogView", function()
 
             assert.equals(1, GBL._changelogCurrentPage)
 
-            -- First label in scroll should be the first entry's version
+            -- First child is navGroup, second is first entry's version header
             local scroll = findChild(container, "ScrollFrame")
-            local firstLabel = scroll._children[1]
+            local firstLabel = scroll._children[2]  -- skip navGroup
             assert.truthy(firstLabel._text:find("0.15.0", 1, true))
 
             GBL.CHANGELOG_DATA = original
@@ -355,16 +359,18 @@ describe("ChangelogView", function()
 
             GBL:BuildChangelogTab(container)
 
-            -- Fire the Next button's OnClick
-            local navGroup = container._children[1]
+            -- Fire the Next button's OnClick (navGroup is first child of scroll)
+            local scroll = findChild(container, "ScrollFrame")
+            local navGroup = scroll._children[1]
             local nextBtn = navGroup._children[3] -- prev, label, next
             nextBtn:Fire("OnClick")
 
             assert.equals(2, GBL._changelogCurrentPage)
 
             -- Scroll should now show entries from page 2 (entries 11-15)
-            local scroll = findChild(container, "ScrollFrame")
-            local firstLabel = scroll._children[1]
+            scroll = findChild(container, "ScrollFrame")
+            local navGroup2 = scroll._children[1]  -- nav is still first
+            local firstLabel = scroll._children[2]  -- first entry after nav
             assert.truthy(firstLabel._text:find("0.5.0", 1, true))
 
             GBL.CHANGELOG_DATA = original
@@ -379,7 +385,8 @@ describe("ChangelogView", function()
 
             GBL:BuildChangelogTab(container)
 
-            local navGroup = container._children[1]
+            local scroll = findChild(container, "ScrollFrame")
+            local navGroup = scroll._children[1]
             local prevBtn = navGroup._children[1]
             assert.is_true(prevBtn._disabled)
             assert.truthy(prevBtn._text:find("- Previous -"))
@@ -397,7 +404,8 @@ describe("ChangelogView", function()
             GBL._changelogCurrentPage = 2
             GBL:BuildChangelogTab(container)
 
-            local navGroup = container._children[1]
+            local scroll = findChild(container, "ScrollFrame")
+            local navGroup = scroll._children[1]
             local nextBtn = navGroup._children[3]
             assert.is_true(nextBtn._disabled)
             assert.truthy(nextBtn._text:find("- Next -"))
@@ -414,7 +422,8 @@ describe("ChangelogView", function()
 
             GBL:BuildChangelogTab(container)
 
-            local navGroup = container._children[1]
+            local scroll = findChild(container, "ScrollFrame")
+            local navGroup = scroll._children[1]
             local pageLabel = navGroup._children[2]
             assert.truthy(pageLabel._text:find("Page 1 of 3"))
 
