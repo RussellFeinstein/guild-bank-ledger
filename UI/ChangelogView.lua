@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.22.1
+    {"0.22.1", "2026-04-15", {
+        Fixed = {
+            "Automatic duplicate cleanup now runs after bank scan refreshes eventCounts",
+        },
+    }},
     -- v0.22.0
     {"0.22.0", "2026-04-15", {
         Added = {

@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.1] — 2026-04-15
+
+### Fixed
+- Automatic duplicate cleanup now runs after bank scan refreshes eventCounts, fixing a bug where duplicates from prior sync sessions survived because the OnEnable cleanup lacked fresh API ground truth to detect them.
+
 ## [0.22.0] — 2026-04-15
 
 ### Added

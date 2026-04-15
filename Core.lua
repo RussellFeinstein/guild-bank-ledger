@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.22.0"
+local VERSION = "0.22.1"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -128,8 +128,9 @@ function GBL:OnEnable()
     -- Migrate occurrence scheme before sync starts (v0.12.0)
     self:MigrateAllGuilds()
 
-    -- Deduplicate all guild data on every login/reload — catches duplicates
-    -- from sync, counting bugs, or any other source before sync starts.
+    -- Early dedup pass: uses eventCounts from previous session. May miss
+    -- duplicates whose prefix+slot lacks ground truth. Definitive cleanup
+    -- runs after bank scan refreshes eventCounts (see OnBankOpened).
     if self.db and self.db.global and self.db.global.guilds then
         for _, guildData in pairs(self.db.global.guilds) do
             self:DeduplicateRecords(guildData)
@@ -1244,6 +1245,16 @@ function GBL:OnBankOpened()
                     local guildData = self:GetGuildData()
                     if guildData then
                         self:RunCompaction(guildData)
+                        -- Post-scan dedup: eventCounts was refreshed by
+                        -- StoreBatchRecords during scanning, so
+                        -- CleanupWithEventCounts now has fresh API ground
+                        -- truth to detect duplicates from prior sync.
+                        local removed = self:DeduplicateRecords(guildData)
+                        if removed > 0 then
+                            self:AddAuditEntry("Post-scan cleanup: removed "
+                                .. removed .. " duplicate record(s)")
+                            self:RefreshUI()
+                        end
                     end
                     self._initialScanComplete = true
                     self:StartPeriodicRescan()

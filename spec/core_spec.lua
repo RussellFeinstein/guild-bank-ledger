@@ -115,7 +115,7 @@ describe("Core", function()
         it("status prints version and guild info", function()
             MockWoW.guild.name = "Test Guild"
             GBL:HandleSlashCommand("status")
-            assert.is_true(Helpers.printContains("0.22.0"))
+            assert.is_true(Helpers.printContains("0.22.1"))
             assert.is_true(Helpers.printContains("Test Guild"))
         end)
 
@@ -332,6 +332,122 @@ describe("Core", function()
             GBL:OnInitialize()
             local icon = MockAce.ldbIcon
             assert.is_not_nil(icon._registered["GuildBankLedger"])
+        end)
+    end)
+
+    describe("post-scan duplicate cleanup", function()
+        local guildData
+
+        local function makeRecord(opts)
+            local rec = {
+                type = opts.type or "withdraw",
+                player = opts.player or "Thrall-TestRealm",
+                itemID = opts.itemID or 12345,
+                count = opts.count or 5,
+                tab = opts.tab or 1,
+                timestamp = opts.timestamp or (3600 * 100),
+                scanTime = opts.scanTime or MockWoW.serverTime,
+                scannedBy = opts.scannedBy or "Thrall-TestRealm",
+            }
+            rec.id = GBL:ComputeTxHash(rec)
+            return rec
+        end
+
+        before_each(function()
+            GBL:OnInitialize()
+            MockWoW.guild.name = "Test Guild"
+            GBL:OnEnable()
+            guildData = GBL:GetGuildData()
+            guildData.schemaVersion = 7
+        end)
+
+        it("removes duplicates after bank scan refreshes eventCounts", function()
+            -- Two records for the same event (e.g., from sync divergence)
+            local r1 = makeRecord({ scanTime = 1000 })
+            local r2 = makeRecord({ scanTime = 2000, timestamp = 3600 * 100 + 50 })
+            GBL:AssignOccurrenceIndices({ r1, r2 })
+            table.insert(guildData.transactions, r1)
+            table.insert(guildData.transactions, r2)
+            guildData.seenTxHashes[r1.id] = r1.timestamp
+            guildData.seenTxHashes[r2.id] = r2.timestamp
+
+            -- eventCounts says only 1 event exists (fresh from API scan)
+            local baseHash = GBL:ComputeTxHash(r1)
+            guildData.eventCounts = {
+                [baseHash] = { count = 1, asOf = MockWoW.serverTime },
+            }
+
+            -- Simulate post-scan callback: bankOpen + fire deferred timers
+            GBL.bankOpen = true
+            -- Directly call the post-scan cleanup path
+            local removed = GBL:DeduplicateRecords(guildData)
+
+            assert.equals(1, removed)
+            assert.equals(1, #guildData.transactions)
+        end)
+
+        it("skips cleanup when no duplicates exist", function()
+            local r1 = makeRecord({})
+            GBL:AssignOccurrenceIndices({ r1 })
+            table.insert(guildData.transactions, r1)
+            guildData.seenTxHashes[r1.id] = r1.timestamp
+
+            local baseHash = GBL:ComputeTxHash(r1)
+            guildData.eventCounts = {
+                [baseHash] = { count = 1, asOf = MockWoW.serverTime },
+            }
+
+            local removed = GBL:DeduplicateRecords(guildData)
+
+            assert.equals(0, removed)
+            assert.equals(1, #guildData.transactions)
+        end)
+
+        it("skips cleanup when eventCounts is empty", function()
+            -- Stale eventCounts (the scenario that caused the original bug)
+            local r1 = makeRecord({ scanTime = 1000 })
+            local r2 = makeRecord({ scanTime = 2000, timestamp = 3600 * 100 + 50 })
+            GBL:AssignOccurrenceIndices({ r1, r2 })
+            table.insert(guildData.transactions, r1)
+            table.insert(guildData.transactions, r2)
+            guildData.seenTxHashes[r1.id] = r1.timestamp
+            guildData.seenTxHashes[r2.id] = r2.timestamp
+
+            -- No eventCounts — conservative: keep all
+            guildData.eventCounts = {}
+
+            local removed = GBL:DeduplicateRecords(guildData)
+
+            assert.equals(0, removed)
+            assert.equals(2, #guildData.transactions)
+        end)
+
+        it("OnEnable early dedup catches duplicates with existing eventCounts", function()
+            -- Pre-populate guild data before OnEnable
+            local testGuildData = GBL.db.global.guilds["Early Guild"]
+            testGuildData.schemaVersion = 7
+            testGuildData.transactions = {}
+            testGuildData.moneyTransactions = {}
+            testGuildData.seenTxHashes = {}
+
+            local r1 = makeRecord({ scanTime = 1000 })
+            local r2 = makeRecord({ scanTime = 2000, timestamp = 3600 * 100 + 50 })
+            GBL:AssignOccurrenceIndices({ r1, r2 })
+            table.insert(testGuildData.transactions, r1)
+            table.insert(testGuildData.transactions, r2)
+            testGuildData.seenTxHashes[r1.id] = r1.timestamp
+            testGuildData.seenTxHashes[r2.id] = r2.timestamp
+
+            local baseHash = GBL:ComputeTxHash(r1)
+            testGuildData.eventCounts = {
+                [baseHash] = { count = 1, asOf = MockWoW.serverTime },
+            }
+
+            -- Re-run OnEnable (which includes the early dedup pass)
+            GBL:OnEnable()
+
+            -- The early pass should have caught the duplicate
+            assert.equals(1, #testGuildData.transactions)
         end)
     end)
 end)
