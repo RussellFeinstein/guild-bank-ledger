@@ -27,6 +27,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.19.1
+    {"0.19.1", "2026-04-14", {
+        Fixed = {
+            "Sync chunk 1 no longer oversized — eventCounts spread across chunks",
+        },
+    }},
     -- v0.19.0
     {"0.19.0", "2026-04-14", {
         Changed = {

@@ -27,6 +27,7 @@ local CTL_BANDWIDTH_MIN = 400
 local CTL_BACKOFF_DELAY = 1.0
 local PEER_STALE_SECONDS = 300
 local HELLO_HEARTBEAT_INTERVAL = 120
+local EVENTCOUNTS_PER_BATCH = 10
 
 -- Expose constants for testing and UI
 GBL.SYNC_PROTOCOL_VERSION = PROTOCOL_VERSION
@@ -36,6 +37,7 @@ GBL.SYNC_MAX_RETRIES = MAX_RETRIES
 GBL.SYNC_MAX_NACK_RETRIES = MAX_NACK_RETRIES
 GBL.SYNC_PEER_STALE_SECONDS = PEER_STALE_SECONDS
 GBL.SYNC_HELLO_HEARTBEAT_INTERVAL = HELLO_HEARTBEAT_INTERVAL
+GBL.SYNC_EVENTCOUNTS_PER_BATCH = EVENTCOUNTS_PER_BATCH
 
 ------------------------------------------------------------------------
 -- Compression (LibDeflate)
@@ -720,6 +722,14 @@ function GBL:HandleSyncRequest(sender, data)
     -- Collect eventCounts for the buckets we're sending (nil diffDays = send all)
     local sendEventCounts = self:CollectEventCountsForBuckets(guildData, diffDays)
 
+    -- Partition eventCounts into batches to spread across chunks
+    local batches = self:PartitionEventCounts(sendEventCounts)
+
+    -- Extend chunks array if more batches than record chunks
+    while #batches > #chunks do
+        chunks[#chunks + 1] = { transactions = {}, moneyTransactions = {} }
+    end
+
     if #chunks == 0 then
         -- Nothing to send — send an empty chunk so receiver finishes cleanly
         local msg = self:Serialize({
@@ -728,7 +738,7 @@ function GBL:HandleSyncRequest(sender, data)
             totalChunks = 1,
             transactions = {},
             moneyTransactions = {},
-            eventCounts = sendEventCounts,
+            eventCounts = batches[1],
             protocolVersion = PROTOCOL_VERSION,
             guild = self:GetGuildName(),
         })
@@ -744,7 +754,7 @@ function GBL:HandleSyncRequest(sender, data)
     syncState.sendChunkIndex = 0
     syncState.sendStartTime = GetServerTime()
     syncState.sendTotalRecords = #txToSend + #moneyToSend
-    syncState.sendEventCounts = sendEventCounts
+    syncState.sendEventCountBatches = batches
     self:StartFpsMonitor()
 
     local totalTx = #txToSend + #moneyToSend
@@ -759,6 +769,37 @@ end
 ------------------------------------------------------------------------
 -- Chunking
 ------------------------------------------------------------------------
+
+--- Partition an eventCounts table into fixed-size batches for spread across chunks.
+-- Each batch contains at most batchSize entries.
+-- @param eventCounts table { [baseHash] = { count=N, asOf=T } }
+-- @param batchSize number max entries per batch
+-- @return table array of sub-tables, each a slice of the eventCounts map
+function GBL:PartitionEventCounts(eventCounts, batchSize)
+    if not eventCounts then return {} end
+    batchSize = batchSize or EVENTCOUNTS_PER_BATCH
+
+    local batches = {}
+    local current = {}
+    local count = 0
+
+    for baseHash, entry in pairs(eventCounts) do
+        current[baseHash] = entry
+        count = count + 1
+        if count >= batchSize then
+            batches[#batches + 1] = current
+            current = {}
+            count = 0
+        end
+    end
+
+    -- Seal the last partial batch
+    if count > 0 then
+        batches[#batches + 1] = current
+    end
+
+    return batches
+end
 
 --- Split transaction arrays into size-aware chunks.
 -- Each chunk stays under CHUNK_BYTE_BUDGET estimated bytes and
@@ -846,7 +887,8 @@ function GBL:SendNextChunk()
         totalChunks = #syncState.sendChunks,
         transactions = chunk.transactions,
         moneyTransactions = chunk.moneyTransactions,
-        eventCounts = (idx == 1) and syncState.sendEventCounts or nil,
+        eventCounts = syncState.sendEventCountBatches
+            and syncState.sendEventCountBatches[idx] or nil,
         protocolVersion = PROTOCOL_VERSION,
         guild = self:GetGuildName(),
     })
@@ -943,7 +985,7 @@ function GBL:FinishSending()
     syncState.sendRetryCount = 0
     syncState.sendStartTime = 0
     syncState.sendTotalRecords = 0
-    syncState.sendEventCounts = nil
+    syncState.sendEventCountBatches = nil
     if syncState.sendTimer then
         syncState.sendTimer:Cancel()
         syncState.sendTimer = nil
@@ -1401,7 +1443,7 @@ function GBL:ResetSyncState()
     syncState.sendRetryCount = 0
     syncState.sendStartTime = 0
     syncState.sendTotalRecords = 0
-    syncState.sendEventCounts = nil
+    syncState.sendEventCountBatches = nil
     syncState.receiving = false
     syncState.receiveSource = nil
     syncState.receiveExpected = 0

@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.1] — 2026-04-14
+
+### Fixed
+- **Sync chunk 1 oversized** — eventCounts metadata (dedup ground truth) was stuffed entirely into chunk 1, causing it to exceed AceComm's ~2KB WHISPER safe limit on full syncs. EventCounts are now partitioned into batches and spread across chunks. Fully backwards-compatible (no protocol version bump).
+
 ## [0.19.0] — 2026-04-14
 
 ### Changed

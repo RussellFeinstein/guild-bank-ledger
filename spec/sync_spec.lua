@@ -4630,4 +4630,179 @@ describe("Sync", function()
             assert.equals(3, guildData.eventCounts[baseHash].count)
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- PartitionEventCounts
+    ---------------------------------------------------------------------------
+
+    describe("PartitionEventCounts", function()
+        it("splits into batches of batchSize", function()
+            local ec = {}
+            for i = 1, 25 do
+                ec["key" .. i] = { count = i, asOf = 1000 }
+            end
+            local batches = GBL:PartitionEventCounts(ec, 10)
+            assert.equals(3, #batches)
+
+            -- Verify all entries present (no loss)
+            local total = 0
+            local seen = {}
+            for _, batch in ipairs(batches) do
+                for k, v in pairs(batch) do
+                    assert.is_nil(seen[k])
+                    seen[k] = true
+                    total = total + 1
+                    assert.equals("table", type(v))
+                    assert.equals("number", type(v.count))
+                end
+            end
+            assert.equals(25, total)
+        end)
+
+        it("returns empty array for empty input", function()
+            local batches = GBL:PartitionEventCounts({}, 10)
+            assert.equals(0, #batches)
+        end)
+
+        it("returns empty array for nil input", function()
+            local batches = GBL:PartitionEventCounts(nil, 10)
+            assert.equals(0, #batches)
+        end)
+
+        it("returns single batch for fewer entries than batchSize", function()
+            local ec = {
+                ["a"] = { count = 1, asOf = 100 },
+                ["b"] = { count = 2, asOf = 200 },
+                ["c"] = { count = 3, asOf = 300 },
+            }
+            local batches = GBL:PartitionEventCounts(ec, 10)
+            assert.equals(1, #batches)
+            -- All 3 entries in the one batch
+            local count = 0
+            for _ in pairs(batches[1]) do count = count + 1 end
+            assert.equals(3, count)
+        end)
+
+        it("returns single batch for exactly batchSize entries", function()
+            local ec = {}
+            for i = 1, 10 do
+                ec["key" .. i] = { count = i, asOf = 1000 }
+            end
+            local batches = GBL:PartitionEventCounts(ec, 10)
+            assert.equals(1, #batches)
+            local count = 0
+            for _ in pairs(batches[1]) do count = count + 1 end
+            assert.equals(10, count)
+        end)
+
+        it("uses default batch size from constant", function()
+            local ec = {}
+            for i = 1, GBL.SYNC_EVENTCOUNTS_PER_BATCH + 1 do
+                ec["key" .. i] = { count = i, asOf = 1000 }
+            end
+            local batches = GBL:PartitionEventCounts(ec)
+            assert.equals(2, #batches)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- eventCounts spread across chunks (receive side)
+    ---------------------------------------------------------------------------
+
+    describe("eventCounts spread across chunks", function()
+        it("merges eventCounts from multiple chunks", function()
+            guildData.eventCounts = {}
+
+            -- Chunk 1 carries first batch
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 3,
+                transactions = {},
+                moneyTransactions = {},
+                eventCounts = {
+                    ["key1"] = { count = 5, asOf = 1000 },
+                    ["key2"] = { count = 3, asOf = 1000 },
+                },
+            })
+
+            -- Chunk 2 carries second batch
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 2,
+                totalChunks = 3,
+                transactions = {},
+                moneyTransactions = {},
+                eventCounts = {
+                    ["key3"] = { count = 7, asOf = 1000 },
+                },
+            })
+
+            -- Chunk 3 carries no eventCounts
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 3,
+                totalChunks = 3,
+                transactions = {},
+                moneyTransactions = {},
+            })
+
+            assert.equals(5, guildData.eventCounts["key1"].count)
+            assert.equals(3, guildData.eventCounts["key2"].count)
+            assert.equals(7, guildData.eventCounts["key3"].count)
+        end)
+
+        it("later chunk eventCounts merge with max-wins", function()
+            guildData.eventCounts = {
+                ["existing"] = { count = 2, asOf = 500 },
+            }
+
+            -- Chunk 3 sends higher count for existing key
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 3,
+                totalChunks = 5,
+                transactions = {},
+                moneyTransactions = {},
+                eventCounts = {
+                    ["existing"] = { count = 8, asOf = 2000 },
+                },
+            })
+
+            assert.equals(8, guildData.eventCounts["existing"].count)
+        end)
+
+        it("retransmitted chunk is idempotent", function()
+            guildData.eventCounts = {}
+
+            local chunkData = {
+                chunk = 2,
+                totalChunks = 3,
+                transactions = {},
+                moneyTransactions = {},
+                eventCounts = {
+                    ["key1"] = { count = 5, asOf = 1000 },
+                },
+            }
+
+            -- Receive same chunk twice (retransmit)
+            GBL:HandleSyncData("OfficerB", chunkData)
+            GBL:HandleSyncData("OfficerB", chunkData)
+
+            -- Count is still 5, not doubled
+            assert.equals(5, guildData.eventCounts["key1"].count)
+        end)
+
+        it("chunk with eventCounts but no records merges correctly", function()
+            guildData.eventCounts = {}
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 5,
+                totalChunks = 5,
+                transactions = {},
+                moneyTransactions = {},
+                eventCounts = {
+                    ["pure_counts"] = { count = 10, asOf = 3000 },
+                },
+            })
+
+            assert.equals(10, guildData.eventCounts["pure_counts"].count)
+        end)
+    end)
 end)
