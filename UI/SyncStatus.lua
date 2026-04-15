@@ -262,13 +262,22 @@ function GBL:RenderPeerList(container)
             agoStr = math.floor(ago / 3600) .. "h ago"
         end
 
-        -- Version status indicator
+        -- Version status indicator (directional: who needs to update?)
         local peerVersion = info.version or "?"
         local versionTag = ""
         if info.outdated then
-            versionTag = " |cffff4400(outdated — no sync)|r"
+            if info.versionRelation == "local_behind" then
+                versionTag = " |cff44aaff(newer — update available)|r"
+            else
+                versionTag = " |cffff4400(outdated — no sync)|r"
+            end
         elseif peerVersion ~= self.version then
-            versionTag = " |cffff6600(outdated)|r"
+            local cmp = self:CompareSemver(self.version, peerVersion)
+            if cmp < 0 then
+                versionTag = " |cff44aaff(newer — update available)|r"
+            else
+                versionTag = " |cffff6600(outdated)|r"
+            end
         end
 
         lbl:SetText("  " .. name

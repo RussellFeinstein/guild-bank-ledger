@@ -27,6 +27,14 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.18.0
+    {"0.18.0", "2026-04-14", {
+        Added = {
+            "Directional peer version status — shows who needs to update",
+            "Version label in top-right corner with peer-based update detection",
+            "CompareSemver utility and GetHighestPeerVersion getter",
+        },
+    }},
     -- v0.17.0
     {"0.17.0", "2026-04-14", {
         Added = {

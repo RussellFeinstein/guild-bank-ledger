@@ -369,6 +369,14 @@ function MockWoW.install()
             EnableMouse = function() end,
             RegisterForDrag = function() end,
             SetClampedToScreen = function() end,
+            CreateFontString = function()
+                local fs = { _text = "" }
+                fs.SetFont = function() end
+                fs.SetPoint = function() end
+                fs.SetText = function(_, t) fs._text = t end
+                fs.GetText = function() return fs._text end
+                return fs
+            end,
         }
         table.insert(MockWoW.frames, frame)
         return frame

@@ -283,13 +283,19 @@ function GBL:OnSyncMessage(_prefix, message, distribution, sender)
     if data.protocolVersion and data.protocolVersion ~= PROTOCOL_VERSION then
         if msgType == "HELLO" then
             local cleanSender = Ambiguate(sender, "none")
+            local peerVer = data.version or "?"
+            local relation = "peer_behind"
+            if peerVer ~= "?" and self:CompareSemver(self.version, peerVer) < 0 then
+                relation = "local_behind"
+            end
             syncState.peers[cleanSender] = {
-                version = data.version or "?",
+                version = peerVer,
                 txCount = data.txCount or 0,
                 dataHash = data.dataHash,
                 lastScanTime = data.lastScanTime or 0,
                 lastSeen = GetServerTime(),
                 outdated = true,
+                versionRelation = relation,
             }
         end
         self:AddAuditEntry("Ignored message from " .. sender
@@ -385,6 +391,9 @@ function GBL:HandleHello(sender, data)
         local cleanSender = Ambiguate(sender, "none")
         if syncState.peers[cleanSender] then
             syncState.peers[cleanSender].outdated = true
+            local cmp = self:CompareSemver(self.version, data.version)
+            syncState.peers[cleanSender].versionRelation =
+                (cmp < 0) and "local_behind" or "peer_behind"
         end
         self:AddAuditEntry("WARNING: " .. sender .. " on v"
             .. tostring(data.version) .. " (version mismatch, need v" .. self.version .. ")")
@@ -1331,6 +1340,22 @@ function GBL:GetSyncPeers()
         end
     end
     return active
+end
+
+--- Return the highest version string among active peers (or nil).
+-- @return string|nil Highest peer version
+function GBL:GetHighestPeerVersion()
+    local peers = self:GetSyncPeers()
+    local highest = nil
+    for _, info in pairs(peers) do
+        local pv = info.version
+        if pv and pv ~= "?" then
+            if not highest or self:CompareSemver(pv, highest) > 0 then
+                highest = pv
+            end
+        end
+    end
+    return highest
 end
 
 --- Return all peers seen this session, including stale ones (for diagnostics).

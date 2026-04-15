@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.17.0"
+local VERSION = "0.18.0"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -12,6 +12,30 @@ local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceComm-3.0",
     "AceSerializer-3.0"
 )
+
+------------------------------------------------------------------------
+-- Version comparison
+------------------------------------------------------------------------
+
+--- Compare two semantic version strings (major.minor.patch).
+-- @param a string|nil First version (e.g. "0.17.0")
+-- @param b string|nil Second version
+-- @return number -1 if a < b, 0 if equal, 1 if a > b
+function GBL:CompareSemver(a, b)
+    if a == b then return 0 end
+    if not a then return -1 end
+    if not b then return 1 end
+    local aMajor, aMinor, aPatch = a:match("^(%d+)%.(%d+)%.(%d+)$")
+    local bMajor, bMinor, bPatch = b:match("^(%d+)%.(%d+)%.(%d+)$")
+    if not aMajor then return -1 end
+    if not bMajor then return 1 end
+    aMajor, aMinor, aPatch = tonumber(aMajor), tonumber(aMinor), tonumber(aPatch)
+    bMajor, bMinor, bPatch = tonumber(bMajor), tonumber(bMinor), tonumber(bPatch)
+    if aMajor ~= bMajor then return aMajor < bMajor and -1 or 1 end
+    if aMinor ~= bMinor then return aMinor < bMinor and -1 or 1 end
+    if aPatch ~= bPatch then return aPatch < bPatch and -1 or 1 end
+    return 0
+end
 
 -- AceDB defaults
 local defaults = {

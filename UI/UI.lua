@@ -26,6 +26,14 @@ function GBL:CreateMainFrame()
     end)
     frame:Hide()
 
+    -- Version label (top-right corner, respects font scaling)
+    local versionLabel = frame.frame:CreateFontString(nil, "OVERLAY")
+    local fontPath, fontSize = self:GetScaledFont()
+    versionLabel:SetFont(fontPath, fontSize)
+    versionLabel:SetPoint("TOPRIGHT", frame.frame, "TOPRIGHT", -30, -10)
+    versionLabel:SetText("|cff888888v" .. self.version .. "|r")
+    self._versionLabel = versionLabel
+
     -- Tab group
     local tabGroup = AceGUI:Create("TabGroup")
     tabGroup:SetLayout("List")
@@ -96,6 +104,8 @@ end
 function GBL:RefreshUI()
     if not self.tabGroup then return end
 
+    self:UpdateVersionLabel()
+
     local guildData = self:GetGuildData()
     local tab = self.activeTab or "transactions"
 
@@ -117,6 +127,18 @@ function GBL:RefreshUI()
     else
         -- Tab not built yet or sync tab — full rebuild
         self.tabGroup:SelectTab(tab)
+    end
+end
+
+--- Update the version label to reflect peer-based update availability.
+function GBL:UpdateVersionLabel()
+    if not self._versionLabel then return end
+    local highest = self:GetHighestPeerVersion()
+    if highest and self:CompareSemver(self.version, highest) < 0 then
+        self._versionLabel:SetText("|cffff8800v" .. self.version
+            .. " — update available (v" .. highest .. ")!|r")
+    else
+        self._versionLabel:SetText("|cff888888v" .. self.version .. "|r")
     end
 end
 

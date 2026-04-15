@@ -2061,6 +2061,95 @@ describe("Sync", function()
             assert.equals("0.12.2", peers["OutdatedPeer"].version)
             assert.is_true(peers["OutdatedPeer"].outdated)
         end)
+
+        it("sets versionRelation=peer_behind for older protocol peer", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local msg = GBL:Serialize({
+                type = "HELLO",
+                version = "0.12.2",
+                protocolVersion = 2,
+                guild = "TestGuild",
+                txCount = 50,
+                dataHash = 999,
+            })
+            GBL:OnSyncMessage(GBL.SYNC_PREFIX, msg, "GUILD", "OldPeer")
+
+            local peers = GBL:GetSyncPeers()
+            assert.equals("peer_behind", peers["OldPeer"].versionRelation)
+        end)
+
+        it("sets versionRelation=local_behind for newer protocol peer", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local msg = GBL:Serialize({
+                type = "HELLO",
+                version = "99.0.0",
+                protocolVersion = 999,
+                guild = "TestGuild",
+                txCount = 50,
+                dataHash = 999,
+            })
+            GBL:OnSyncMessage(GBL.SYNC_PREFIX, msg, "GUILD", "NewerPeer")
+
+            local peers = GBL:GetSyncPeers()
+            assert.equals("local_behind", peers["NewerPeer"].versionRelation)
+        end)
+
+        it("sets versionRelation=peer_behind for addon version mismatch (older peer)", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:HandleHello("OldPeer", {
+                version = "0.1.0",
+                txCount = 10,
+                lastScanTime = 1000,
+            })
+
+            local peers = GBL:GetSyncPeers()
+            assert.is_true(peers["OldPeer"].outdated)
+            assert.equals("peer_behind", peers["OldPeer"].versionRelation)
+        end)
+
+        it("sets versionRelation=local_behind for addon version mismatch (newer peer)", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:HandleHello("NewerPeer", {
+                version = "99.0.0",
+                txCount = 10,
+                lastScanTime = 1000,
+            })
+
+            local peers = GBL:GetSyncPeers()
+            assert.is_true(peers["NewerPeer"].outdated)
+            assert.equals("local_behind", peers["NewerPeer"].versionRelation)
+        end)
+
+        it("GetHighestPeerVersion returns nil with no peers", function()
+            assert.is_nil(GBL:GetHighestPeerVersion())
+        end)
+
+        it("GetHighestPeerVersion returns highest among active peers", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Add peers with different versions via protocol-mismatched HELLOs
+            for _, info in ipairs({
+                { name = "PeerA", version = "0.15.0" },
+                { name = "PeerB", version = "0.18.0" },
+                { name = "PeerC", version = "0.16.0" },
+            }) do
+                local msg = GBL:Serialize({
+                    type = "HELLO",
+                    version = info.version,
+                    protocolVersion = 999,
+                    guild = "TestGuild",
+                    txCount = 10,
+                    dataHash = 123,
+                })
+                GBL:OnSyncMessage(GBL.SYNC_PREFIX, msg, "GUILD", info.name)
+            end
+
+            assert.equals("0.18.0", GBL:GetHighestPeerVersion())
+        end)
     end)
 
     ---------------------------------------------------------------------------
