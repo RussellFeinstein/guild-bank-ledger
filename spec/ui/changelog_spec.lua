@@ -6,11 +6,21 @@ local Helpers = require("spec.helpers")
 
 local GBL
 
+--- Find the first child of a given type in a container.
+local function findChild(container, widgetType)
+    for _, child in ipairs(container._children) do
+        if child._type == widgetType then
+            return child
+        end
+    end
+end
+
 describe("ChangelogView", function()
     before_each(function()
         Helpers.setupMocks()
         GBL = Helpers.loadAddon()
         GBL:OnInitialize()
+        GBL._changelogCurrentPage = nil -- reset pagination state
     end)
 
     ----------------------------------------------------------------
@@ -187,23 +197,31 @@ describe("ChangelogView", function()
 
             GBL:BuildChangelogTab(container)
 
-            assert.is_true(#container._children > 0)
-            local scroll = container._children[1]
-            assert.equals("ScrollFrame", scroll._type)
+            local scroll = findChild(container, "ScrollFrame")
+            assert.is_not_nil(scroll)
         end)
 
         it("creates individual label widgets per line", function()
             local AceGUI = LibStub("AceGUI-3.0")
             local container = AceGUI:Create("SimpleGroup")
 
+            -- Use a small dataset (single page) to avoid pagination nav bar
+            local original = GBL.CHANGELOG_DATA
+            GBL.CHANGELOG_DATA = {
+                {"1.0.0", "2026-01-01", { Added = {"Feature A"} }},
+                {"0.9.0", "2025-12-01", { Fixed = {"Bug B"} }},
+            }
+
             GBL:BuildChangelogTab(container)
 
-            local scroll = container._children[1]
+            local scroll = findChild(container, "ScrollFrame")
             -- More children than entries (one per line, not one per entry)
             assert.is_true(#scroll._children > #GBL.CHANGELOG_DATA)
             for _, child in ipairs(scroll._children) do
                 assert.equals("Label", child._type)
             end
+
+            GBL.CHANGELOG_DATA = original
         end)
 
         it("first label contains the newest version", function()
@@ -212,7 +230,7 @@ describe("ChangelogView", function()
 
             GBL:BuildChangelogTab(container)
 
-            local scroll = container._children[1]
+            local scroll = findChild(container, "ScrollFrame")
             local firstLabel = scroll._children[1]
             local newest = GBL.CHANGELOG_DATA[1][1]
             assert.truthy(firstLabel._text:find(newest, 1, true))
@@ -233,7 +251,7 @@ describe("ChangelogView", function()
 
             GBL:BuildChangelogTab(container)
 
-            local scroll = container._children[1]
+            local scroll = findChild(container, "ScrollFrame")
             local texts = {}
             for _, child in ipairs(scroll._children) do
                 texts[#texts + 1] = child._text
@@ -254,8 +272,199 @@ describe("ChangelogView", function()
 
             GBL:BuildChangelogTab(container)
 
-            local scroll = container._children[1]
+            local scroll = findChild(container, "ScrollFrame")
             assert.equals(0, #scroll._children)
+        end)
+    end)
+
+    ----------------------------------------------------------------
+    -- Pagination
+    ----------------------------------------------------------------
+
+    describe("Pagination", function()
+        local function makeEntries(n)
+            local data = {}
+            for i = 1, n do
+                data[i] = {
+                    string.format("0.%d.0", n - i + 1),
+                    "2026-01-01",
+                    { Added = {"Entry " .. i} },
+                }
+            end
+            return data
+        end
+
+        it("hides nav bar when data fits one page", function()
+            local AceGUI = LibStub("AceGUI-3.0")
+            local container = AceGUI:Create("SimpleGroup")
+
+            local original = GBL.CHANGELOG_DATA
+            GBL.CHANGELOG_DATA = makeEntries(5)
+
+            GBL:BuildChangelogTab(container)
+
+            -- Only child should be the ScrollFrame (no nav bar)
+            assert.equals(1, #container._children)
+            assert.equals("ScrollFrame", container._children[1]._type)
+
+            GBL.CHANGELOG_DATA = original
+        end)
+
+        it("shows nav bar when data exceeds one page", function()
+            local AceGUI = LibStub("AceGUI-3.0")
+            local container = AceGUI:Create("SimpleGroup")
+
+            local original = GBL.CHANGELOG_DATA
+            GBL.CHANGELOG_DATA = makeEntries(15)
+
+            GBL:BuildChangelogTab(container)
+
+            -- First child is nav group, second is ScrollFrame
+            assert.equals(2, #container._children)
+            assert.equals("SimpleGroup", container._children[1]._type)
+            assert.equals("ScrollFrame", container._children[2]._type)
+
+            GBL.CHANGELOG_DATA = original
+        end)
+
+        it("defaults to page 1", function()
+            local AceGUI = LibStub("AceGUI-3.0")
+            local container = AceGUI:Create("SimpleGroup")
+
+            local original = GBL.CHANGELOG_DATA
+            GBL.CHANGELOG_DATA = makeEntries(15)
+
+            GBL:BuildChangelogTab(container)
+
+            assert.equals(1, GBL._changelogCurrentPage)
+
+            -- First label in scroll should be the first entry's version
+            local scroll = findChild(container, "ScrollFrame")
+            local firstLabel = scroll._children[1]
+            assert.truthy(firstLabel._text:find("0.15.0", 1, true))
+
+            GBL.CHANGELOG_DATA = original
+        end)
+
+        it("Next button advances to page 2", function()
+            local AceGUI = LibStub("AceGUI-3.0")
+            local container = AceGUI:Create("SimpleGroup")
+
+            local original = GBL.CHANGELOG_DATA
+            GBL.CHANGELOG_DATA = makeEntries(15)
+
+            GBL:BuildChangelogTab(container)
+
+            -- Fire the Next button's OnClick
+            local navGroup = container._children[1]
+            local nextBtn = navGroup._children[3] -- prev, label, next
+            nextBtn:Fire("OnClick")
+
+            assert.equals(2, GBL._changelogCurrentPage)
+
+            -- Scroll should now show entries from page 2 (entries 11-15)
+            local scroll = findChild(container, "ScrollFrame")
+            local firstLabel = scroll._children[1]
+            assert.truthy(firstLabel._text:find("0.5.0", 1, true))
+
+            GBL.CHANGELOG_DATA = original
+        end)
+
+        it("Prev button disabled on page 1", function()
+            local AceGUI = LibStub("AceGUI-3.0")
+            local container = AceGUI:Create("SimpleGroup")
+
+            local original = GBL.CHANGELOG_DATA
+            GBL.CHANGELOG_DATA = makeEntries(15)
+
+            GBL:BuildChangelogTab(container)
+
+            local navGroup = container._children[1]
+            local prevBtn = navGroup._children[1]
+            assert.is_true(prevBtn._disabled)
+            assert.truthy(prevBtn._text:find("- Previous -"))
+
+            GBL.CHANGELOG_DATA = original
+        end)
+
+        it("Next button disabled on last page", function()
+            local AceGUI = LibStub("AceGUI-3.0")
+            local container = AceGUI:Create("SimpleGroup")
+
+            local original = GBL.CHANGELOG_DATA
+            GBL.CHANGELOG_DATA = makeEntries(15)
+
+            GBL._changelogCurrentPage = 2
+            GBL:BuildChangelogTab(container)
+
+            local navGroup = container._children[1]
+            local nextBtn = navGroup._children[3]
+            assert.is_true(nextBtn._disabled)
+            assert.truthy(nextBtn._text:find("- Next -"))
+
+            GBL.CHANGELOG_DATA = original
+        end)
+
+        it("page label shows correct page count", function()
+            local AceGUI = LibStub("AceGUI-3.0")
+            local container = AceGUI:Create("SimpleGroup")
+
+            local original = GBL.CHANGELOG_DATA
+            GBL.CHANGELOG_DATA = makeEntries(25)
+
+            GBL:BuildChangelogTab(container)
+
+            local navGroup = container._children[1]
+            local pageLabel = navGroup._children[2]
+            assert.truthy(pageLabel._text:find("Page 1 of 3"))
+
+            GBL.CHANGELOG_DATA = original
+        end)
+
+        it("clamps page to valid range", function()
+            local AceGUI = LibStub("AceGUI-3.0")
+            local container = AceGUI:Create("SimpleGroup")
+
+            local original = GBL.CHANGELOG_DATA
+            GBL.CHANGELOG_DATA = makeEntries(15)
+
+            -- Set page beyond range
+            GBL._changelogCurrentPage = 99
+            GBL:BuildChangelogTab(container)
+            assert.equals(2, GBL._changelogCurrentPage)
+
+            -- Set page below range
+            container:ReleaseChildren()
+            GBL._changelogCurrentPage = -5
+            GBL:BuildChangelogTab(container)
+            assert.equals(1, GBL._changelogCurrentPage)
+
+            GBL.CHANGELOG_DATA = original
+        end)
+
+        it("renders only entries for the current page", function()
+            local AceGUI = LibStub("AceGUI-3.0")
+            local container = AceGUI:Create("SimpleGroup")
+
+            local original = GBL.CHANGELOG_DATA
+            GBL.CHANGELOG_DATA = makeEntries(15)
+
+            GBL:BuildChangelogTab(container)
+
+            local scroll = findChild(container, "ScrollFrame")
+            local texts = {}
+            for _, child in ipairs(scroll._children) do
+                texts[#texts + 1] = child._text
+            end
+            local combined = table.concat(texts, "\n")
+
+            -- Page 1 should have entries 1-10 (versions 0.15.0 down to 0.6.0)
+            assert.truthy(combined:find("0.15.0", 1, true))
+            assert.truthy(combined:find("0.6.0", 1, true))
+            -- Should NOT have page 2 entries
+            assert.falsy(combined:find("0.5.0", 1, true))
+
+            GBL.CHANGELOG_DATA = original
         end)
     end)
 end)

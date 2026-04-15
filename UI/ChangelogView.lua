@@ -12,6 +12,8 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 
 local SECTION_ORDER = { "Added", "Changed", "Fixed", "Removed", "Deprecated", "Security" }
 
+local CHANGELOG_PAGE_SIZE = 10
+
 local SECTION_COLORS = {
     Added      = "|cff55ff55",
     Changed    = "|cff55bbff",
@@ -27,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.19.2
+    {"0.19.2", "2026-04-14", {
+        Changed = {
+            "Changelog tab now paginates (10 versions per page) for faster loading",
+            "Previous/Next navigation with accessible disabled-state labels",
+        },
+    }},
     -- v0.19.1
     {"0.19.1", "2026-04-14", {
         Fixed = {
@@ -441,9 +450,77 @@ end
 ------------------------------------------------------------------------
 
 --- Build the Changelog tab inside a container.
+-- Paginates by version entry (CHANGELOG_PAGE_SIZE per page).
 -- @param container AceGUI container (the TabGroup content area)
 function GBL:BuildChangelogTab(container)
     local AceGUI = LibStub("AceGUI-3.0")
+
+    local data = self.CHANGELOG_DATA or {}
+    local totalEntries = #data
+
+    -- Pagination math
+    self._changelogCurrentPage = self._changelogCurrentPage or 1
+    local totalPages = math.max(1, math.ceil(totalEntries / CHANGELOG_PAGE_SIZE))
+    local page = math.max(1, math.min(self._changelogCurrentPage, totalPages))
+    self._changelogCurrentPage = page
+    local startIdx = (page - 1) * CHANGELOG_PAGE_SIZE + 1
+    local endIdx = math.min(startIdx + CHANGELOG_PAGE_SIZE - 1, totalEntries)
+
+    -- Navigation bar (only when multiple pages)
+    if totalPages > 1 then
+        local navGroup = AceGUI:Create("SimpleGroup")
+        navGroup:SetFullWidth(true)
+        navGroup:SetLayout("Flow")
+        container:AddChild(navGroup)
+
+        -- Previous button
+        local prevBtn = AceGUI:Create("Button")
+        prevBtn:SetWidth(100)
+        if page <= 1 then
+            prevBtn:SetText("- Previous -")
+            prevBtn:SetDisabled(true)
+        else
+            prevBtn:SetText("< Previous")
+            prevBtn:SetDisabled(false)
+        end
+        prevBtn:SetCallback("OnClick", function()
+            self._changelogCurrentPage = page - 1
+            container:ReleaseChildren()
+            self:BuildChangelogTab(container)
+        end)
+        navGroup:AddChild(prevBtn)
+
+        -- Page label
+        local pageLabel = AceGUI:Create("Label")
+        pageLabel:SetWidth(140)
+        pageLabel:SetText(string.format("  Page %d of %d", page, totalPages))
+        pageLabel:SetJustifyH("CENTER")
+        local fontPath, fontSize = self:GetScaledFont()
+        pageLabel:SetFont(fontPath, fontSize)
+        navGroup:AddChild(pageLabel)
+
+        -- Next button
+        local nextBtn = AceGUI:Create("Button")
+        nextBtn:SetWidth(100)
+        if page >= totalPages then
+            nextBtn:SetText("- Next -")
+            nextBtn:SetDisabled(true)
+        else
+            nextBtn:SetText("Next >")
+            nextBtn:SetDisabled(false)
+        end
+        nextBtn:SetCallback("OnClick", function()
+            self._changelogCurrentPage = page + 1
+            container:ReleaseChildren()
+            self:BuildChangelogTab(container)
+        end)
+        navGroup:AddChild(nextBtn)
+
+        -- Register buttons for keyboard navigation
+        self:ClearFocusOrder()
+        self:RegisterFocusable(prevBtn, 1)
+        self:RegisterFocusable(nextBtn, 2)
+    end
 
     -- Scrollable content
     local scroll = AceGUI:Create("ScrollFrame")
@@ -452,10 +529,10 @@ function GBL:BuildChangelogTab(container)
     scroll:SetLayout("List")
     container:AddChild(scroll)
 
-    -- Render each version as individual per-line widgets
+    -- Render version entries for current page
     -- (AceGUI Labels are single-line; multi-line \n text gets truncated)
-    local data = self.CHANGELOG_DATA or {}
-    for _, entry in ipairs(data) do
+    for i = startIdx, endIdx do
+        local entry = data[i]
         local version, date, sections, milestone = entry[1], entry[2], entry[3], entry[4]
 
         -- Version header (larger font)

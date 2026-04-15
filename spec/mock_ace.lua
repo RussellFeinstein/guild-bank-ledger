@@ -344,6 +344,8 @@ function MockAce.install()
         widget.SelectTab = function(self, tab) self._selectedTab = tab end
         widget.SetFullHeight = function() end
         widget.SetFontObject = function() end
+        widget.SetJustifyH = function() end
+        widget.SetFont = function() end
         return widget
     end
 

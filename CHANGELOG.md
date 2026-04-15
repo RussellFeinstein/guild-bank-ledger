@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.2] — 2026-04-14
+
+### Changed
+- **Changelog tab pagination** — changelog now loads 10 versions per page with Previous/Next navigation, eliminating the slow full-render on tab open. Nav bar hidden when data fits a single page. Buttons use dual-channel disabled state (text change + grayed) for accessibility. Page label respects font scaling.
+
 ## [0.19.1] — 2026-04-14
 
 ### Fixed
