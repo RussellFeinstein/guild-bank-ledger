@@ -7,6 +7,28 @@ local ADDON_NAME = "GuildBankLedger"
 local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 
 ------------------------------------------------------------------------
+-- Helpers
+------------------------------------------------------------------------
+
+--- Format sync status text from a status snapshot.
+-- @param status table From GetSyncStatus()
+-- @return string Human-readable status text
+function GBL:FormatSyncStatusText(status)
+    local parts = {}
+    if status.sending then
+        table.insert(parts, "Sending to " .. (status.sendTarget or "?")
+            .. " (" .. status.sendProgress .. ")")
+    end
+    if status.receiving then
+        local progress = status.receiveProgress
+        if progress == "0/0" then progress = "waiting..." end
+        table.insert(parts, "Receiving from " .. (status.receiveSource or "?")
+            .. " (" .. progress .. ")")
+    end
+    return (#parts > 0) and table.concat(parts, " | ") or "Idle"
+end
+
+------------------------------------------------------------------------
 -- Tab builder
 ------------------------------------------------------------------------
 
@@ -203,14 +225,7 @@ function GBL:RenderSyncContent(container)
 
     -- Current status
     local status = self:GetSyncStatus()
-    local statusText = "Idle"
-    if status.sending then
-        statusText = "Sending to " .. (status.sendTarget or "?")
-            .. " (" .. status.sendProgress .. ")"
-    elseif status.receiving then
-        statusText = "Receiving from " .. (status.receiveSource or "?")
-            .. " (" .. status.receiveProgress .. ")"
-    end
+    local statusText = self:FormatSyncStatusText(status)
 
     local statusLabel = AceGUI:Create("Label")
     statusLabel:SetFullWidth(true)

@@ -1147,6 +1147,113 @@ describe("Sync", function()
             table.insert(guildData.transactions, { type = "deposit", player = "X", timestamp = 1 })
             assert.equals(1, GBL:GetTxCount())
         end)
+
+        it("reports sendTarget and sendProgress during active send", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "h1",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            local status = GBL:GetSyncStatus()
+            assert.is_true(status.sending)
+            assert.equals("OfficerB", status.sendTarget)
+            assert.is_string(status.sendProgress)
+            assert.truthy(status.sendProgress:match("^%d+/%d+$"))
+        end)
+
+        it("reports receiveSource and receiveProgress during active receive", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:RequestSync("OfficerB", 0)
+
+            local status = GBL:GetSyncStatus()
+            assert.is_true(status.receiving)
+            assert.equals("OfficerB", status.receiveSource)
+            assert.is_string(status.receiveProgress)
+        end)
+
+        it("allows both sending and receiving simultaneously", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Start receiving from OfficerB
+            GBL:RequestSync("OfficerB", 0)
+            assert.is_true(GBL:GetSyncStatus().receiving)
+
+            -- Start sending to OfficerC (they request sync from us)
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "h1",
+            })
+            GBL:HandleSyncRequest("OfficerC", { sinceTimestamp = 0 })
+
+            local status = GBL:GetSyncStatus()
+            assert.is_true(status.sending)
+            assert.is_true(status.receiving)
+            assert.equals("OfficerC", status.sendTarget)
+            assert.equals("OfficerB", status.receiveSource)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- FormatSyncStatusText
+    ---------------------------------------------------------------------------
+
+    describe("FormatSyncStatusText", function()
+        it("returns Idle when neither sending nor receiving", function()
+            local text = GBL:FormatSyncStatusText({
+                sending = false, receiving = false,
+            })
+            assert.equals("Idle", text)
+        end)
+
+        it("shows sending status only", function()
+            local text = GBL:FormatSyncStatusText({
+                sending = true, sendTarget = "Alice", sendProgress = "2/5",
+                receiving = false,
+            })
+            assert.equals("Sending to Alice (2/5)", text)
+        end)
+
+        it("shows receiving status only", function()
+            local text = GBL:FormatSyncStatusText({
+                sending = false,
+                receiving = true, receiveSource = "Bob", receiveProgress = "3/8",
+            })
+            assert.equals("Receiving from Bob (3/8)", text)
+        end)
+
+        it("shows both sending and receiving with pipe separator", function()
+            local text = GBL:FormatSyncStatusText({
+                sending = true, sendTarget = "Alice", sendProgress = "2/5",
+                receiving = true, receiveSource = "Bob", receiveProgress = "3/8",
+            })
+            assert.equals("Sending to Alice (2/5) | Receiving from Bob (3/8)", text)
+        end)
+
+        it("shows waiting when receive progress is 0/0", function()
+            local text = GBL:FormatSyncStatusText({
+                sending = false,
+                receiving = true, receiveSource = "Bob", receiveProgress = "0/0",
+            })
+            assert.equals("Receiving from Bob (waiting...)", text)
+        end)
+
+        it("falls back to ? for nil sendTarget", function()
+            local text = GBL:FormatSyncStatusText({
+                sending = true, sendTarget = nil, sendProgress = "1/3",
+                receiving = false,
+            })
+            assert.equals("Sending to ? (1/3)", text)
+        end)
+
+        it("falls back to ? for nil receiveSource", function()
+            local text = GBL:FormatSyncStatusText({
+                sending = false,
+                receiving = true, receiveSource = nil, receiveProgress = "2/4",
+            })
+            assert.equals("Receiving from ? (2/4)", text)
+        end)
     end)
 
     ---------------------------------------------------------------------------

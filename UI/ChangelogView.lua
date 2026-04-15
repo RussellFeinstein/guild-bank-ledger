@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.22.3
+    {"0.22.3", "2026-04-15", {
+        Fixed = {
+            "Sync status now shows both Sending and Receiving when active simultaneously",
+            "Receive progress shows waiting instead of 0/0 while awaiting first chunk",
+        },
+    }},
     -- v0.22.2
     {"0.22.2", "2026-04-15", {
         Fixed = {
