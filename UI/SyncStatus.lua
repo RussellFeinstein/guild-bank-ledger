@@ -295,10 +295,14 @@ function GBL:RenderPeerList(container)
             end
         end
 
+        local seenStr = info.rosterOnly
+            and "|cffa0a0a0online (no HELLO)|r"
+            or ("seen " .. agoStr)
+
         lbl:SetText("  " .. name
             .. " — v" .. peerVersion .. versionTag
             .. ", " .. (info.txCount or 0) .. " tx"
-            .. ", seen " .. agoStr)
+            .. ", " .. seenStr)
         container:AddChild(lbl)
     end
 

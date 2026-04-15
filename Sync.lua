@@ -29,6 +29,7 @@ local PEER_STALE_SECONDS = 300
 local HELLO_HEARTBEAT_INTERVAL = 120
 local EVENTCOUNTS_PER_BATCH = 10
 local MAX_PENDING_PEERS = 10
+local KNOWN_PEER_EXPIRE_SECONDS = 30 * 24 * 3600  -- 30 days
 local INITIAL_CHUNK_TIMEOUT = 10
 
 -- Expose constants for testing and UI
@@ -41,6 +42,7 @@ GBL.SYNC_PEER_STALE_SECONDS = PEER_STALE_SECONDS
 GBL.SYNC_HELLO_HEARTBEAT_INTERVAL = HELLO_HEARTBEAT_INTERVAL
 GBL.SYNC_EVENTCOUNTS_PER_BATCH = EVENTCOUNTS_PER_BATCH
 GBL.SYNC_MAX_PENDING_PEERS = MAX_PENDING_PEERS
+GBL.SYNC_KNOWN_PEER_EXPIRE_SECONDS = KNOWN_PEER_EXPIRE_SECONDS
 GBL.SYNC_INITIAL_CHUNK_TIMEOUT = INITIAL_CHUNK_TIMEOUT
 
 ------------------------------------------------------------------------
@@ -145,6 +147,25 @@ function GBL:InitSync()
     self:RegisterEvent("LOADING_SCREEN_ENABLED", "OnLoadingScreenStart")
     self:RegisterEvent("LOADING_SCREEN_DISABLED", "OnLoadingScreenEnd")
     self:RegisterEvent("PLAYER_REGEN_ENABLED", "OnCombatEnd")
+    -- Seed session peers from persisted knownPeers (cross-session discovery).
+    -- Seeded peers keep their original lastSeen (stale), so they won't be
+    -- targeted for sync. The roster fallback in GetSyncPeers shows them
+    -- as "online (no HELLO)" if the guild roster confirms they're online.
+    local guildData = self:GetGuildData()
+    if guildData and guildData.knownPeers then
+        local now = GetServerTime()
+        for name, info in pairs(guildData.knownPeers) do
+            if now - (info.lastSeen or 0) < KNOWN_PEER_EXPIRE_SECONDS then
+                syncState.peers[name] = {
+                    version = info.version,
+                    txCount = info.txCount or 0,
+                    lastSeen = info.lastSeen or 0,
+                }
+            else
+                guildData.knownPeers[name] = nil
+            end
+        end
+    end
     self:StartHelloHeartbeat()
 end
 
@@ -1434,13 +1455,23 @@ end
 -- @param sender string Peer name
 -- @param data table HELLO payload
 function GBL:UpdatePeer(sender, data)
-    syncState.peers[Ambiguate(sender, "none")] = {
+    local clean = Ambiguate(sender, "none")
+    syncState.peers[clean] = {
         version = data.version,
         txCount = data.txCount or 0,
         dataHash = data.dataHash,
         lastScanTime = data.lastScanTime or 0,
         lastSeen = GetServerTime(),
     }
+    -- Persist for cross-session discovery (survives relog)
+    local guildData = self:GetGuildData()
+    if guildData then
+        guildData.knownPeers[clean] = {
+            version = data.version,
+            txCount = data.txCount or 0,
+            lastSeen = GetServerTime(),
+        }
+    end
 end
 
 ------------------------------------------------------------------------
@@ -1585,14 +1616,26 @@ function GBL:GetSyncStatus()
     }
 end
 
---- Return active peers (seen within PEER_STALE_SECONDS).
--- @return table Map of name → { version, txCount, lastScanTime, lastSeen }
+--- Return active peers (seen within PEER_STALE_SECONDS, or online per guild roster).
+-- Peers whose HELLO is stale but who are still online according to the guild roster
+-- are included with rosterOnly=true so the UI can display them without sync attempting
+-- to contact them (guild addon messages don't reliably cross instance boundaries).
+-- @return table Map of name → { version, txCount, lastScanTime, lastSeen, rosterOnly? }
 function GBL:GetSyncPeers()
     local now = GetServerTime()
     local active = {}
     for name, info in pairs(syncState.peers) do
         if now - (info.lastSeen or 0) <= PEER_STALE_SECONDS then
             active[name] = info
+        else
+            -- Stale HELLO — check guild roster as fallback
+            local online = self:IsGuildMemberOnline(name)
+            if online then
+                local copy = {}
+                for k, v in pairs(info) do copy[k] = v end
+                copy.rosterOnly = true
+                active[name] = copy
+            end
         end
     end
     return active

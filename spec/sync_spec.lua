@@ -3266,6 +3266,177 @@ describe("Sync", function()
             assert.is_nil(GBL:GetSyncPeers()["OfficerB"])
         end)
 
+        it("stale peer stays visible if guild roster says online", function()
+            MockWoW.serverTime = 100000
+            GBL:UpdatePeer("OfficerB", {
+                version = GBL.version, txCount = 5, lastScanTime = 99999,
+            })
+
+            -- Advance past stale window
+            MockWoW.serverTime = 100000 + GBL.SYNC_PEER_STALE_SECONDS + 100
+
+            -- Set up roster with OfficerB online
+            MockWoW.guildRoster = {
+                { name = "OfficerB-TestRealm", isOnline = true },
+            }
+
+            local peers = GBL:GetSyncPeers()
+            assert.is_not_nil(peers["OfficerB"])
+            assert.is_true(peers["OfficerB"].rosterOnly)
+        end)
+
+        it("stale peer drops if guild roster says offline", function()
+            MockWoW.serverTime = 100000
+            GBL:UpdatePeer("OfficerB", {
+                version = GBL.version, txCount = 5, lastScanTime = 99999,
+            })
+
+            MockWoW.serverTime = 100000 + GBL.SYNC_PEER_STALE_SECONDS + 100
+
+            MockWoW.guildRoster = {
+                { name = "OfficerB-TestRealm", isOnline = false },
+            }
+
+            assert.is_nil(GBL:GetSyncPeers()["OfficerB"])
+        end)
+
+        it("roster fallback does not mutate original syncState peer entry", function()
+            MockWoW.serverTime = 100000
+            GBL:UpdatePeer("OfficerB", {
+                version = GBL.version, txCount = 5, lastScanTime = 99999,
+            })
+
+            MockWoW.serverTime = 100000 + GBL.SYNC_PEER_STALE_SECONDS + 100
+
+            MockWoW.guildRoster = {
+                { name = "OfficerB-TestRealm", isOnline = true },
+            }
+
+            -- Get peers triggers roster fallback
+            local peers = GBL:GetSyncPeers()
+            assert.is_true(peers["OfficerB"].rosterOnly)
+
+            -- Original should NOT have rosterOnly
+            local all = GBL:GetAllPeers()
+            assert.is_nil(all["OfficerB"].rosterOnly)
+        end)
+
+        it("UpdatePeer persists to guildData.knownPeers", function()
+            MockWoW.serverTime = 100000
+            GBL:UpdatePeer("OfficerB", {
+                version = "0.22.3", txCount = 42, lastScanTime = 99999,
+            })
+
+            local kp = guildData.knownPeers["OfficerB"]
+            assert.is_not_nil(kp)
+            assert.equals("0.22.3", kp.version)
+            assert.equals(42, kp.txCount)
+            assert.equals(100000, kp.lastSeen)
+        end)
+
+        it("InitSync seeds session peers from knownPeers", function()
+            MockWoW.serverTime = 100000
+            -- Simulate persisted knownPeers from a prior session
+            guildData.knownPeers["OfficerB"] = {
+                version = "0.20.0", txCount = 10, lastSeen = 99000,
+            }
+
+            GBL:ResetSyncState()
+            assert.is_nil(GBL:GetAllPeers()["OfficerB"])
+
+            GBL:InitSync()
+
+            local peer = GBL:GetAllPeers()["OfficerB"]
+            assert.is_not_nil(peer)
+            assert.equals("0.20.0", peer.version)
+            assert.equals(99000, peer.lastSeen)  -- stays stale
+        end)
+
+        it("seeded peer with roster online appears in GetSyncPeers", function()
+            MockWoW.serverTime = 100000
+            guildData.knownPeers["OfficerB"] = {
+                version = "0.20.0", txCount = 10, lastSeen = 99000,
+            }
+
+            GBL:ResetSyncState()
+            GBL:InitSync()
+
+            MockWoW.guildRoster = {
+                { name = "OfficerB-TestRealm", isOnline = true },
+            }
+
+            local peers = GBL:GetSyncPeers()
+            assert.is_not_nil(peers["OfficerB"])
+            assert.is_true(peers["OfficerB"].rosterOnly)
+        end)
+
+        it("seeded peer is overwritten by fresh HELLO", function()
+            MockWoW.serverTime = 100000
+            guildData.knownPeers["OfficerB"] = {
+                version = "0.20.0", txCount = 10, lastSeen = 99000,
+            }
+
+            GBL:ResetSyncState()
+            GBL:InitSync()
+
+            -- Fresh HELLO arrives
+            MockWoW.serverTime = 100001
+            GBL:UpdatePeer("OfficerB", {
+                version = "0.22.4", txCount = 50, lastScanTime = 100001,
+            })
+
+            local peer = GBL:GetAllPeers()["OfficerB"]
+            assert.equals("0.22.4", peer.version)
+            assert.equals(100001, peer.lastSeen)
+
+            -- Should be fresh, not roster-only
+            local active = GBL:GetSyncPeers()
+            assert.is_not_nil(active["OfficerB"])
+            assert.is_nil(active["OfficerB"].rosterOnly)
+        end)
+
+        it("InitSync expires knownPeers older than 30 days", function()
+            MockWoW.serverTime = 100000
+            local expireSeconds = GBL.SYNC_KNOWN_PEER_EXPIRE_SECONDS
+
+            guildData.knownPeers["OfficerB"] = {
+                version = "0.20.0", txCount = 10,
+                lastSeen = 100000 - expireSeconds - 1,  -- just expired
+            }
+            guildData.knownPeers["OfficerC"] = {
+                version = "0.21.0", txCount = 20,
+                lastSeen = 100000 - expireSeconds + 3600,  -- still valid
+            }
+
+            GBL:ResetSyncState()
+            GBL:InitSync()
+
+            -- OfficerB expired from knownPeers and not seeded
+            assert.is_nil(guildData.knownPeers["OfficerB"])
+            assert.is_nil(GBL:GetAllPeers()["OfficerB"])
+
+            -- OfficerC still valid and seeded
+            assert.is_not_nil(guildData.knownPeers["OfficerC"])
+            assert.is_not_nil(GBL:GetAllPeers()["OfficerC"])
+        end)
+
+        it("seeded stale peer is skipped by PopPendingPeer", function()
+            MockWoW.serverTime = 100000
+            guildData.knownPeers["OfficerB"] = {
+                version = "0.20.0", txCount = 10, lastSeen = 99000,
+            }
+
+            GBL:ResetSyncState()
+            GBL:InitSync()
+
+            -- Queue OfficerB as pending
+            GBL:AddPendingPeer("OfficerB")
+
+            -- Pop should skip (stale lastSeen)
+            local popped = GBL:PopPendingPeer()
+            assert.is_nil(popped)
+        end)
+
         it("heartbeat timer starts on InitSync", function()
             MockWoW.pendingTimers = {}
             GBL:InitSync()

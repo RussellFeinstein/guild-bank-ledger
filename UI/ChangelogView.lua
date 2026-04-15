@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.22.4
+    {"0.22.4", "2026-04-15", {
+        Added = {
+            "Peers in M+ or raids stay visible via guild roster fallback",
+            "Known peers persisted across sessions for instant discovery on login",
+        },
+    }},
     -- v0.22.3
     {"0.22.3", "2026-04-15", {
         Fixed = {
