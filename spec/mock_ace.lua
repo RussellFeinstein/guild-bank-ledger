@@ -340,7 +340,37 @@ function MockAce.install()
         widget.SetAutoAdjustHeight = function() end
         widget.SetStatusTable = function() end
         widget.EnableResize = function() end
-        widget.SetTabs = function(self, tabs) self._tabs = tabs end
+        widget.SetTabs = function(self, tabs)
+            self._tabs = tabs
+            self.tablist = tabs
+            -- Create mock tab button frames matching real AceGUI TabGroup
+            self.tabs = self.tabs or {}
+            for i, def in ipairs(tabs) do
+                if not self.tabs[i] then
+                    self.tabs[i] = {
+                        value = def.value,
+                        _points = {},
+                        ClearAllPoints = function(t) t._points = {} end,
+                        SetPoint = function(t, ...) table.insert(t._points, {...}) end,
+                        GetWidth = function() return 80 end,
+                        GetFontString = function()
+                            return { GetStringWidth = function() return 40 end }
+                        end,
+                        SetText = function() end,
+                        SetDisabled = function() end,
+                        Show = function() end,
+                        Hide = function() end,
+                    }
+                end
+                self.tabs[i].value = def.value
+            end
+            -- Mock titletext (matches real AceGUI TabGroup field)
+            if not self.titletext then
+                self.titletext = { GetText = function() return "" end }
+            end
+            if self.BuildTabs then self:BuildTabs() end
+        end
+        widget.BuildTabs = function() end
         widget.SelectTab = function(self, tab) self._selectedTab = tab end
         widget.SetFullHeight = function() end
         widget.SetFontObject = function() end

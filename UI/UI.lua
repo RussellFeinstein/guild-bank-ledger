@@ -73,6 +73,40 @@ function GBL:RebuildTabs()
 
     self.tabGroup:SetTabs(tabs)
 
+    -- Hook BuildTabs to right-align utility tabs (Sync, Changelog)
+    if not self._buildTabsHooked then
+        local origBuildTabs = self.tabGroup.BuildTabs
+        self.tabGroup.BuildTabs = function(widget)
+            origBuildTabs(widget)
+            if not widget.tablist or not widget.tabs then return end
+
+            local rightIndices = {}
+            for i, def in ipairs(widget.tablist) do
+                if def.value == "sync" or def.value == "changelog" then
+                    rightIndices[#rightIndices + 1] = i
+                end
+            end
+            if #rightIndices == 0 then return end
+
+            local hastitle = widget.titletext
+                and widget.titletext:GetText()
+                and widget.titletext:GetText() ~= ""
+            local yOff = -(hastitle and 14 or 7)
+
+            for j = #rightIndices, 1, -1 do
+                local tab = widget.tabs[rightIndices[j]]
+                tab:ClearAllPoints()
+                if j == #rightIndices then
+                    tab:SetPoint("TOPRIGHT", widget.frame, "TOPRIGHT", 0, yOff)
+                else
+                    tab:SetPoint("RIGHT", widget.tabs[rightIndices[j + 1]], "LEFT", 10, 0)
+                end
+            end
+        end
+        self._buildTabsHooked = true
+        self.tabGroup:BuildTabs()
+    end
+
     -- Ensure activeTab is valid for the current tab set
     local validTab = false
     for _, t in ipairs(tabs) do

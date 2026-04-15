@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.19.3
+    {"0.19.3", "2026-04-14", {
+        Changed = {
+            "Sync and Changelog tabs right-aligned in tab bar to separate from data tabs",
+        },
+    }},
     -- v0.19.2
     {"0.19.2", "2026-04-14", {
         Changed = {

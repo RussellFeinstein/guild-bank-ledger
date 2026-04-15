@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.3] — 2026-04-14
+
+### Changed
+- **Sync and Changelog tabs right-aligned** — utility tabs (Sync, Changelog) are now pushed to the right side of the tab bar, visually separating them from the data tabs (Transactions, Gold Log, Consumption). Hooks AceGUI TabGroup's `BuildTabs` to reanchor on resize.
+
 ## [0.19.2] — 2026-04-14
 
 ### Changed
