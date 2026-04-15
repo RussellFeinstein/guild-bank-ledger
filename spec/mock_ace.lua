@@ -376,6 +376,8 @@ function MockAce.install()
         widget.SetFontObject = function() end
         widget.SetJustifyH = function() end
         widget.SetFont = function() end
+        widget.DisableButton = function() end
+        widget.ClearFocus = function() end
         return widget
     end
 

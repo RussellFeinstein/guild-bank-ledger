@@ -5,6 +5,19 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] — 2026-04-14
+
+### Added
+- **About tab** — New right-aligned tab with addon info, author credit (RexxyBear), copyable Ko-fi and CurseForge URLs, library credits, and license info. Visible to all access levels.
+- **GitHub Sponsors integration** — `.github/FUNDING.yml` enables the Sponsor button on the repository (GitHub Sponsors + Ko-fi).
+- **Support section in README** — Ko-fi and GitHub Sponsors links.
+- **`.toc` donation metadata** — `X-Donate` field for CurseForge integration.
+
+## [0.20.1] — 2026-04-14
+
+### Changed
+- **Roadmap: moved Export to post-1.0** — Export feature (CSV, Discord Markdown, BBCode) deprioritized from beta release path to post-1.0. Stabilization is now the next milestone after beta preparation.
+
 ## [0.20.0] — 2026-04-14
 
 ### Changed

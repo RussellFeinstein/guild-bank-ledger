@@ -29,6 +29,19 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.21.0
+    {"0.21.0", "2026-04-14", {
+        Added = {
+            "About tab with addon info, Ko-fi donation link, CurseForge link, and credits",
+            "GitHub Sponsors integration and README support section",
+        },
+    }},
+    -- v0.20.1
+    {"0.20.1", "2026-04-14", {
+        Changed = {
+            "Roadmap: moved Export feature to post-1.0; Stabilization is now the next milestone",
+        },
+    }},
     -- v0.20.0
     {"0.20.0", "2026-04-14", {
         Changed = {

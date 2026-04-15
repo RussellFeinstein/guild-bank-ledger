@@ -60,6 +60,7 @@ function GBL:RebuildTabs()
         tabs = {
             { value = "sync", text = "Sync" },
             { value = "changelog", text = "Changelog" },
+            { value = "about", text = "About" },
         }
     else
         tabs = {
@@ -68,6 +69,7 @@ function GBL:RebuildTabs()
             { value = "consumption", text = "Consumption" },
             { value = "sync", text = "Sync" },
             { value = "changelog", text = "Changelog" },
+            { value = "about", text = "About" },
         }
     end
 
@@ -82,7 +84,7 @@ function GBL:RebuildTabs()
 
             local rightIndices = {}
             for i, def in ipairs(widget.tablist) do
-                if def.value == "sync" or def.value == "changelog" then
+                if def.value == "sync" or def.value == "changelog" or def.value == "about" then
                     rightIndices[#rightIndices + 1] = i
                 end
             end
@@ -222,6 +224,8 @@ function GBL:SelectTab(tabName)
         self:BuildSyncTab(self.tabGroup)
     elseif tabName == "changelog" then
         self:BuildChangelogTab(self.tabGroup)
+    elseif tabName == "about" then
+        self:BuildAboutTab(self.tabGroup)
     end
 end
 
