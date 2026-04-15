@@ -375,12 +375,65 @@ function GBL:StoreBatchRecords(batch, guildData, storageKey, prevCounts)
         end
     end
 
+    -- Persist API-observed event counts (ground truth for cleanup).
+    -- Uses max: never decrease, since events age out of the WoW API
+    -- but the historical high-water mark is the correct count.
+    if not guildData.eventCounts then guildData.eventCounts = {} end
+    local now = GetServerTime()
+    for _, baseHash in ipairs(order) do
+        local batchCount = currentCounts[baseHash]
+        local existing = guildData.eventCounts[baseHash]
+        if not existing or batchCount > existing.count then
+            guildData.eventCounts[baseHash] = { count = batchCount, asOf = now }
+        end
+    end
+
     return stored, currentCounts
 end
 
 ------------------------------------------------------------------------
 -- Maintenance
 ------------------------------------------------------------------------
+
+--- Remove eventCounts entries older than maxAge days.
+-- Mirrors PruneSeenHashes lifecycle.
+-- @param maxAgeDays number Maximum age in days (default 90)
+-- @param guildData table Guild data table
+function GBL:PruneEventCounts(maxAgeDays, guildData)
+    if not guildData or not guildData.eventCounts then return end
+    maxAgeDays = maxAgeDays or 90
+    local cutoff = GetServerTime() - (maxAgeDays * 86400)
+    for baseHash, entry in pairs(guildData.eventCounts) do
+        if type(entry) ~= "table" or (entry.asOf or 0) < cutoff then
+            guildData.eventCounts[baseHash] = nil
+        end
+    end
+end
+
+--- Collect eventCounts entries matching a set of fingerprint bucket keys.
+-- Used by sync to include only relevant counts in the payload.
+-- @param guildData table Guild data from AceDB
+-- @param diffBuckets table|nil Set of 6-hour bucket keys that differ; nil = send all
+-- @return table Filtered eventCounts subset
+function GBL:CollectEventCountsForBuckets(guildData, diffBuckets)
+    if not guildData or not guildData.eventCounts then return {} end
+    local result = {}
+    for baseHash, entry in pairs(guildData.eventCounts) do
+        if not diffBuckets then
+            -- No filter: send all
+            result[baseHash] = entry
+        else
+            local _, slot = self:SplitBaseHash(baseHash)
+            if slot then
+                local bucketKey = math.floor(slot / 6)
+                if diffBuckets[bucketKey] then
+                    result[baseHash] = entry
+                end
+            end
+        end
+    end
+    return result
+end
 
 --- Remove seen hashes older than maxAge days.
 -- Handles both old format (number) and new format with occurrence suffix.

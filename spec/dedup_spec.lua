@@ -1085,6 +1085,187 @@ describe("Dedup", function()
         end)
     end)
 
+    describe("eventCounts persistence", function()
+        it("initial scan persists count per baseHash", function()
+            -- Two records with the same prefix+hour
+            local batch = {
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 100 }),
+            }
+            GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
+
+            local baseHash = "withdraw|Thrall|12345|5|1|100"
+            assert.is_not_nil(guildData.eventCounts)
+            assert.is_not_nil(guildData.eventCounts[baseHash])
+            assert.equals(2, guildData.eventCounts[baseHash].count)
+            assert.equals(Helpers.MockWoW.serverTime, guildData.eventCounts[baseHash].asOf)
+        end)
+
+        it("rescan updates count upward", function()
+            -- Initial: 2 records
+            local batch1 = {
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 100 }),
+            }
+            local _, prevCounts = GBL:StoreBatchRecords(batch1, guildData, "transactions", nil)
+
+            local baseHash = "withdraw|Thrall|12345|5|1|100"
+            assert.equals(2, guildData.eventCounts[baseHash].count)
+
+            -- Rescan: now 3 records (new event happened)
+            local batch2 = {
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 100 }),
+            }
+            GBL:StoreBatchRecords(batch2, guildData, "transactions", prevCounts)
+
+            assert.equals(3, guildData.eventCounts[baseHash].count)
+        end)
+
+        it("count never decreases on rescan (aged out events)", function()
+            -- Initial: 3 records
+            local batch1 = {
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 100 }),
+            }
+            local _, prevCounts = GBL:StoreBatchRecords(batch1, guildData, "transactions", nil)
+
+            local baseHash = "withdraw|Thrall|12345|5|1|100"
+            assert.equals(3, guildData.eventCounts[baseHash].count)
+
+            -- Rescan: now only 2 records (1 aged out of API)
+            local batch2 = {
+                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 100 }),
+            }
+            GBL:StoreBatchRecords(batch2, guildData, "transactions", prevCounts)
+
+            -- Count must not decrease
+            assert.equals(3, guildData.eventCounts[baseHash].count)
+        end)
+
+        it("multiple prefixes get independent counts", function()
+            local batch = {
+                itemRecord({ timestamp = 3600 * 100, player = "Thrall" }),
+                itemRecord({ timestamp = 3600 * 100, player = "Thrall" }),
+                itemRecord({ timestamp = 3600 * 100, player = "Jaina", itemID = 99999 }),
+            }
+            GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
+
+            local hash1 = "withdraw|Thrall|12345|5|1|100"
+            local hash2 = "withdraw|Jaina|99999|5|1|100"
+            assert.equals(2, guildData.eventCounts[hash1].count)
+            assert.equals(1, guildData.eventCounts[hash2].count)
+        end)
+
+        it("works with money transactions", function()
+            local batch = {
+                moneyRecord({ timestamp = 3600 * 100 }),
+                moneyRecord({ timestamp = 3600 * 100 }),
+            }
+            GBL:StoreBatchRecords(batch, guildData, "moneyTransactions", nil)
+
+            local baseHash = "deposit|Thrall|50000|100"
+            assert.is_not_nil(guildData.eventCounts[baseHash])
+            assert.equals(2, guildData.eventCounts[baseHash].count)
+        end)
+
+        it("does not create entry for empty batch", function()
+            GBL:StoreBatchRecords({}, guildData, "transactions", nil)
+            -- eventCounts table created but empty
+            assert.is_not_nil(guildData.eventCounts)
+            local count = 0
+            for _ in pairs(guildData.eventCounts) do count = count + 1 end
+            assert.equals(0, count)
+        end)
+    end)
+
+    describe("PruneEventCounts", function()
+        it("removes old entries and preserves recent", function()
+            local now = Helpers.MockWoW.serverTime
+            guildData.eventCounts = {
+                ["withdraw|Thrall|12345|5|1|100"] = { count = 2, asOf = now - (91 * 86400) },
+                ["withdraw|Jaina|99999|5|1|200"] = { count = 1, asOf = now - (10 * 86400) },
+            }
+            GBL:PruneEventCounts(90, guildData)
+
+            assert.is_nil(guildData.eventCounts["withdraw|Thrall|12345|5|1|100"])
+            assert.is_not_nil(guildData.eventCounts["withdraw|Jaina|99999|5|1|200"])
+        end)
+
+        it("handles corrupted entries (non-table)", function()
+            local now = Helpers.MockWoW.serverTime
+            guildData.eventCounts = {
+                ["bad_entry"] = "garbage",
+                ["good_entry"] = { count = 1, asOf = now },
+            }
+            GBL:PruneEventCounts(90, guildData)
+
+            assert.is_nil(guildData.eventCounts["bad_entry"])
+            assert.is_not_nil(guildData.eventCounts["good_entry"])
+        end)
+
+        it("uses default 90 days when nil passed", function()
+            local now = Helpers.MockWoW.serverTime
+            guildData.eventCounts = {
+                ["old"] = { count = 1, asOf = now - (91 * 86400) },
+                ["recent"] = { count = 1, asOf = now - (89 * 86400) },
+            }
+            GBL:PruneEventCounts(nil, guildData)
+
+            assert.is_nil(guildData.eventCounts["old"])
+            assert.is_not_nil(guildData.eventCounts["recent"])
+        end)
+
+        it("handles nil guildData gracefully", function()
+            -- Should not error
+            GBL:PruneEventCounts(90, nil)
+            GBL:PruneEventCounts(90, {})
+        end)
+    end)
+
+    describe("CollectEventCountsForBuckets", function()
+        it("returns all when no filter provided", function()
+            guildData.eventCounts = {
+                ["withdraw|Thrall|12345|5|1|100"] = { count = 2, asOf = 1000 },
+                ["deposit|Jaina|99999|5|2|200"] = { count = 1, asOf = 2000 },
+            }
+            local result = GBL:CollectEventCountsForBuckets(guildData, nil)
+            local count = 0
+            for _ in pairs(result) do count = count + 1 end
+            assert.equals(2, count)
+        end)
+
+        it("filters by 6-hour bucket keys", function()
+            -- slot 100 → bucket 16, slot 200 → bucket 33
+            guildData.eventCounts = {
+                ["withdraw|Thrall|12345|5|1|100"] = { count = 2, asOf = 1000 },
+                ["deposit|Jaina|99999|5|2|200"] = { count = 1, asOf = 2000 },
+            }
+            local diffBuckets = { [16] = true }  -- only bucket 16
+            local result = GBL:CollectEventCountsForBuckets(guildData, diffBuckets)
+
+            assert.is_not_nil(result["withdraw|Thrall|12345|5|1|100"])
+            assert.is_nil(result["deposit|Jaina|99999|5|2|200"])
+        end)
+
+        it("returns empty table when no eventCounts", function()
+            local result = GBL:CollectEventCountsForBuckets(guildData, nil)
+            local count = 0
+            for _ in pairs(result) do count = count + 1 end
+            assert.equals(0, count)
+        end)
+
+        it("handles nil guildData gracefully", function()
+            local result = GBL:CollectEventCountsForBuckets(nil, nil)
+            local count = 0
+            for _ in pairs(result) do count = count + 1 end
+            assert.equals(0, count)
+        end)
+    end)
+
     describe("PruneSeenHashes", function()
         it("removes old entries and preserves recent", function()
             local now = Helpers.MockWoW.serverTime

@@ -27,6 +27,16 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.17.0
+    {"0.17.0", "2026-04-14", {
+        Added = {
+            "Event count metadata — persists API-observed counts for accurate dedup",
+            "Count-based cleanup replaces heuristic anchor logic",
+            "Post-sync cleanup trims diverged-index duplicates automatically",
+            "eventCounts synced between peers (max wins, backwards-compatible)",
+        },
+        Fixed = {"Genuine synced records no longer deleted by cleanup"},
+    }},
     -- v0.16.0
     {"0.16.0", "2026-04-14", {
         Added = {"Changelog tab in addon UI — scrollable version history"},

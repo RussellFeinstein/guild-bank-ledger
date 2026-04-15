@@ -4220,4 +4220,325 @@ describe("Sync", function()
             assert.is_true(found, "Expected GBL_ACCESS_CONTROL_CHANGED message")
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- eventCounts sync
+    ---------------------------------------------------------------------------
+
+    describe("eventCounts sync", function()
+        it("receiver merges remote counts with max", function()
+            -- Local has count=1 for a baseHash
+            guildData.eventCounts = {
+                ["withdraw|Thrall|12345|5|1|100"] = { count = 1, asOf = 1000 },
+            }
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {},
+                moneyTransactions = {},
+                eventCounts = {
+                    ["withdraw|Thrall|12345|5|1|100"] = { count = 3, asOf = 2000 },
+                },
+            })
+
+            assert.equals(3, guildData.eventCounts["withdraw|Thrall|12345|5|1|100"].count)
+        end)
+
+        it("receiver keeps higher local count", function()
+            guildData.eventCounts = {
+                ["withdraw|Thrall|12345|5|1|100"] = { count = 5, asOf = 3000 },
+            }
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {},
+                moneyTransactions = {},
+                eventCounts = {
+                    ["withdraw|Thrall|12345|5|1|100"] = { count = 2, asOf = 2000 },
+                },
+            })
+
+            assert.equals(5, guildData.eventCounts["withdraw|Thrall|12345|5|1|100"].count)
+        end)
+
+        it("receiver creates eventCounts when local has none", function()
+            guildData.eventCounts = nil
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {},
+                moneyTransactions = {},
+                eventCounts = {
+                    ["deposit|Jaina|99999|5|2|200"] = { count = 2, asOf = 1000 },
+                },
+            })
+
+            assert.is_not_nil(guildData.eventCounts)
+            assert.equals(2, guildData.eventCounts["deposit|Jaina|99999|5|2|200"].count)
+        end)
+
+        it("backwards compat: old peer sends no eventCounts", function()
+            guildData.eventCounts = {
+                ["withdraw|Thrall|12345|5|1|100"] = { count = 1, asOf = 1000 },
+            }
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {},
+                moneyTransactions = {},
+                -- no eventCounts field
+            })
+
+            -- Local counts preserved, no crash
+            assert.equals(1, guildData.eventCounts["withdraw|Thrall|12345|5|1|100"].count)
+        end)
+
+        it("ignores corrupted remote entries", function()
+            guildData.eventCounts = {}
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {},
+                moneyTransactions = {},
+                eventCounts = {
+                    ["bad1"] = "garbage",
+                    ["bad2"] = { count = "not a number" },
+                    ["good"] = { count = 2, asOf = 1000 },
+                },
+            })
+
+            assert.is_nil(guildData.eventCounts["bad1"])
+            assert.is_nil(guildData.eventCounts["bad2"])
+            assert.equals(2, guildData.eventCounts["good"].count)
+        end)
+
+        it("merges multiple baseHashes in one payload", function()
+            guildData.eventCounts = {
+                ["withdraw|Thrall|12345|5|1|100"] = { count = 1, asOf = 1000 },
+            }
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {},
+                moneyTransactions = {},
+                eventCounts = {
+                    ["withdraw|Thrall|12345|5|1|100"] = { count = 3, asOf = 2000 },
+                    ["deposit|Jaina|99999|5|2|200"] = { count = 2, asOf = 2000 },
+                },
+            })
+
+            assert.equals(3, guildData.eventCounts["withdraw|Thrall|12345|5|1|100"].count)
+            assert.equals(2, guildData.eventCounts["deposit|Jaina|99999|5|2|200"].count)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Multi-peer eventCounts convergence
+    ---------------------------------------------------------------------------
+
+    describe("multi-peer eventCounts convergence", function()
+        local baseHash
+
+        before_each(function()
+            baseHash = "withdraw|Thrall-TestRealm|12345|5|1|100"
+        end)
+
+        it("two-peer: receiver adopts higher count and stores new records", function()
+            -- Local: 1 record, count=1
+            local r1 = {
+                type = "withdraw", player = "Thrall-TestRealm",
+                itemID = 12345, count = 5, tab = 1,
+                timestamp = 3600 * 100, scanTime = 1000,
+                scannedBy = "OfficerA-TestRealm",
+                _occurrence = 0,
+            }
+            r1.id = baseHash .. ":0"
+            table.insert(guildData.transactions, r1)
+            guildData.seenTxHashes[r1.id] = r1.timestamp
+            guildData.eventCounts = {
+                [baseHash] = { count = 1, asOf = 1000 },
+            }
+
+            -- Peer B sends 2 records + count=2
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        type = "withdraw", player = "Thrall",
+                        itemID = 12345, count = 5, tab = 1,
+                        timestamp = 3600 * 100, scanTime = 900,
+                        scannedBy = "OfficerB",
+                        id = baseHash .. ":0", _occurrence = 0,
+                    },
+                    {
+                        type = "withdraw", player = "Thrall",
+                        itemID = 12345, count = 5, tab = 1,
+                        timestamp = 3600 * 100 + 50, scanTime = 900,
+                        scannedBy = "OfficerB",
+                        id = baseHash .. ":1", _occurrence = 1,
+                    },
+                },
+                moneyTransactions = {},
+                eventCounts = {
+                    [baseHash] = { count = 2, asOf = 900 },
+                },
+            })
+
+            -- Count merged to max(1,2)=2
+            assert.equals(2, guildData.eventCounts[baseHash].count)
+            -- 1 original + 1 new (the :0 was deduplicated)
+            assert.equals(2, #guildData.transactions)
+        end)
+
+        it("diverged indices cleaned by post-sync cleanup", function()
+            -- Local: 1 record as :0, count=1
+            local r1 = {
+                type = "withdraw", player = "Thrall-TestRealm",
+                itemID = 12345, count = 5, tab = 1,
+                timestamp = 3600 * 100, scanTime = 1000,
+                scannedBy = "OfficerA-TestRealm",
+                _occurrence = 0,
+            }
+            r1.id = baseHash .. ":0"
+            table.insert(guildData.transactions, r1)
+            guildData.seenTxHashes[r1.id] = r1.timestamp
+            guildData.eventCounts = {
+                [baseHash] = { count = 1, asOf = 1000 },
+            }
+
+            -- Peer sends same event but as :2 (diverged index) + count=1
+            -- HandleSyncData stores it (IsDuplicate misses diverged occurrence),
+            -- then FinishReceiving runs CleanupWithEventCounts which trims to 1.
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        type = "withdraw", player = "Thrall",
+                        itemID = 12345, count = 5, tab = 1,
+                        timestamp = 3600 * 100 + 30, scanTime = 900,
+                        scannedBy = "OfficerB",
+                        id = baseHash .. ":2", _occurrence = 2,
+                    },
+                },
+                moneyTransactions = {},
+                eventCounts = {
+                    [baseHash] = { count = 1, asOf = 900 },
+                },
+            })
+
+            -- After FinishReceiving's post-sync cleanup: only 1 record remains
+            assert.equals(1, guildData.eventCounts[baseHash].count)
+            assert.equals(1, #guildData.transactions)
+        end)
+
+        it("three-peer convergence: order independent", function()
+            -- Simulate A's state after syncing with B then C
+            guildData.eventCounts = {}
+            guildData.transactions = {}
+            guildData.seenTxHashes = {}
+
+            -- Peer B: count=1 (same event, diverged)
+            GBL:HandleSyncData("PeerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        type = "withdraw", player = "Thrall",
+                        itemID = 12345, count = 5, tab = 1,
+                        timestamp = 3600 * 100, scanTime = 500,
+                        scannedBy = "PeerB",
+                        id = baseHash .. ":0", _occurrence = 0,
+                    },
+                },
+                moneyTransactions = {},
+                eventCounts = {
+                    [baseHash] = { count = 1, asOf = 500 },
+                },
+            })
+
+            assert.equals(1, #guildData.transactions)
+            assert.equals(1, guildData.eventCounts[baseHash].count)
+
+            -- Peer C: count=2 (saw a genuine second event)
+            GBL:HandleSyncData("PeerC", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    {
+                        type = "withdraw", player = "Thrall",
+                        itemID = 12345, count = 5, tab = 1,
+                        timestamp = 3600 * 100 + 10, scanTime = 600,
+                        scannedBy = "PeerC",
+                        id = baseHash .. ":0", _occurrence = 0,
+                    },
+                    {
+                        type = "withdraw", player = "Thrall",
+                        itemID = 12345, count = 5, tab = 1,
+                        timestamp = 3600 * 100 + 50, scanTime = 600,
+                        scannedBy = "PeerC",
+                        id = baseHash .. ":1", _occurrence = 1,
+                    },
+                },
+                moneyTransactions = {},
+                eventCounts = {
+                    [baseHash] = { count = 2, asOf = 600 },
+                },
+            })
+
+            -- Count merged to max(1,2)=2
+            assert.equals(2, guildData.eventCounts[baseHash].count)
+            -- After cleanup: exactly 2 records
+            GBL:CleanupWithEventCounts(guildData)
+            assert.equals(2, #guildData.transactions)
+        end)
+
+        it("concurrent different counts: max wins", function()
+            guildData.eventCounts = {}
+
+            -- Peer A sends count=1
+            GBL:HandleSyncData("PeerA", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {},
+                moneyTransactions = {},
+                eventCounts = {
+                    [baseHash] = { count = 1, asOf = 100 },
+                },
+            })
+            assert.equals(1, guildData.eventCounts[baseHash].count)
+
+            -- Peer C sends count=3
+            GBL:HandleSyncData("PeerC", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {},
+                moneyTransactions = {},
+                eventCounts = {
+                    [baseHash] = { count = 3, asOf = 300 },
+                },
+            })
+            assert.equals(3, guildData.eventCounts[baseHash].count)
+
+            -- Peer B sends count=2 (lower than what we already have)
+            GBL:HandleSyncData("PeerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {},
+                moneyTransactions = {},
+                eventCounts = {
+                    [baseHash] = { count = 2, asOf = 200 },
+                },
+            })
+            -- max(3, 2) = 3 — stays at 3
+            assert.equals(3, guildData.eventCounts[baseHash].count)
+        end)
+    end)
 end)

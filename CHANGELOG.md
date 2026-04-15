@@ -5,6 +5,21 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] — 2026-04-14
+
+### Added
+- **Event count metadata** — `StoreBatchRecords` now persists API-observed event counts per prefix+hour as ground truth for dedup cleanup. Counts propagate via sync (max wins) and survive across sessions.
+- **Count-based cleanup** — new `CleanupWithEventCounts` replaces the anchor-based heuristic for post-schema-6 data. Uses persisted event counts to correctly distinguish diverged-index duplicates (trim) from genuine repeated events (preserve).
+- **Post-sync cleanup** — `FinishReceiving` runs count-based cleanup after merging synced records, preventing diverged-index duplicates from accumulating between sync cycles.
+- **eventCounts in sync protocol** — SYNC_DATA chunk 1 includes event counts; receiver merges with max(). Fully backwards-compatible with older peers (nil handled gracefully, no protocol version bump).
+- **eventCounts pruning** — `PruneEventCounts` mirrors `PruneSeenHashes` lifecycle (90-day default in compaction, configurable in purge).
+
+### Changed
+- **`DeduplicateRecords`** — legacy anchor-based cleanup now only runs for pre-schema-6 data. Post-schema-6 data uses the authoritative count-based cleanup.
+
+### Fixed
+- **Genuine synced records no longer deleted by cleanup** — the "diverged-index duplicate vs genuine second event" problem is resolved. Both contradictory test cases now pass: count=1 trims excess, count=2 preserves both.
+
 ## [0.16.0] — 2026-04-14
 
 ### Added

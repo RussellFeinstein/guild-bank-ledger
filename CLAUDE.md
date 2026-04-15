@@ -9,7 +9,7 @@ WoW addon that persistently logs guild bank transactions. Lua 5.1 + Ace3 stack. 
 - **Core.lua** — AceAddon bootstrap, lifecycle, slash commands, bank open/close detection
 - **Scanner.lua** — Guild bank slot scanning (inventory snapshots)
 - **Categories.lua** — Item classification via WoW classID/subclassID
-- **Dedup.lua** — Deduplication engine (hour-bucket fuzzy matching across guild members)
+- **Dedup.lua** — Deduplication engine (hour-bucket fuzzy matching, event count metadata, count-based cleanup)
 - **Ledger.lua** — Transaction recording from GetGuildBankTransaction API
 - **Storage.lua** — Tiered storage, compaction (30d daily, 90d weekly), pruning
 - **Fingerprint.lua** — Dataset fingerprinting (djb2 hash, XOR aggregation, per-day bucket hashes)
@@ -61,4 +61,4 @@ luacheck .                 # lint production code
 
 ## Version
 
-Current: 0.16.0 (see `VERSION` file)
+Current: 0.17.0 (see `VERSION` file)

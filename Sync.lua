@@ -630,11 +630,12 @@ function GBL:HandleSyncRequest(sender, data)
 
     local txToSend = {}
     local moneyToSend = {}
+    local diffDays  -- bucket keys that differ (nil = send all)
 
     if data.bucketHashes then
         -- Bucket-filtered sync: only send records from days where hashes differ
         local localBuckets = self:ComputeBucketHashes(guildData)
-        local diffDays = {}
+        diffDays = {}
         local totalLocalDays = 0
         local totalRemoteDays = 0
         local matchingDays = 0
@@ -707,6 +708,9 @@ function GBL:HandleSyncRequest(sender, data)
     -- Prepare and send chunks
     local chunks = self:PrepareChunks(txToSend, moneyToSend)
 
+    -- Collect eventCounts for the buckets we're sending (nil diffDays = send all)
+    local sendEventCounts = self:CollectEventCountsForBuckets(guildData, diffDays)
+
     if #chunks == 0 then
         -- Nothing to send — send an empty chunk so receiver finishes cleanly
         local msg = self:Serialize({
@@ -715,6 +719,7 @@ function GBL:HandleSyncRequest(sender, data)
             totalChunks = 1,
             transactions = {},
             moneyTransactions = {},
+            eventCounts = sendEventCounts,
             protocolVersion = PROTOCOL_VERSION,
             guild = self:GetGuildName(),
         })
@@ -730,6 +735,7 @@ function GBL:HandleSyncRequest(sender, data)
     syncState.sendChunkIndex = 0
     syncState.sendStartTime = GetServerTime()
     syncState.sendTotalRecords = #txToSend + #moneyToSend
+    syncState.sendEventCounts = sendEventCounts
     self:StartFpsMonitor()
 
     local totalTx = #txToSend + #moneyToSend
@@ -831,6 +837,7 @@ function GBL:SendNextChunk()
         totalChunks = #syncState.sendChunks,
         transactions = chunk.transactions,
         moneyTransactions = chunk.moneyTransactions,
+        eventCounts = (idx == 1) and syncState.sendEventCounts or nil,
         protocolVersion = PROTOCOL_VERSION,
         guild = self:GetGuildName(),
     })
@@ -927,6 +934,7 @@ function GBL:FinishSending()
     syncState.sendRetryCount = 0
     syncState.sendStartTime = 0
     syncState.sendTotalRecords = 0
+    syncState.sendEventCounts = nil
     if syncState.sendTimer then
         syncState.sendTimer:Cancel()
         syncState.sendTimer = nil
@@ -1071,6 +1079,22 @@ function GBL:HandleSyncData(sender, data)
         end
     end
 
+    -- Merge remote eventCounts (max wins, backwards-compat with old peers)
+    if data.eventCounts then
+        if not guildData.eventCounts then guildData.eventCounts = {} end
+        for baseHash, remote in pairs(data.eventCounts) do
+            if type(remote) == "table" and type(remote.count) == "number" then
+                local localEntry = guildData.eventCounts[baseHash]
+                if not localEntry or remote.count > localEntry.count then
+                    guildData.eventCounts[baseHash] = {
+                        count = remote.count,
+                        asOf = remote.asOf or 0,
+                    }
+                end
+            end
+        end
+    end
+
     syncState.receiveNormalized = (syncState.receiveNormalized or 0) + normalized
 
     local stored = itemStored + moneyStored
@@ -1179,6 +1203,16 @@ function GBL:FinishReceiving(sender)
             lastSync = GetServerTime(),
             stored = totalStored,
         }
+    end
+
+    -- Post-sync cleanup: trim excess records using merged eventCounts
+    if guildData then
+        local cleanupRemoved = self:CleanupWithEventCounts(guildData)
+        if cleanupRemoved > 0 then
+            totalStored = math.max(0, totalStored - cleanupRemoved)
+            self:AddAuditEntry("Post-sync cleanup: removed " .. cleanupRemoved
+                .. " excess record(s)")
+        end
     end
 
     local totalDuped = syncState.receiveDuped
@@ -1342,6 +1376,7 @@ function GBL:ResetSyncState()
     syncState.sendRetryCount = 0
     syncState.sendStartTime = 0
     syncState.sendTotalRecords = 0
+    syncState.sendEventCounts = nil
     syncState.receiving = false
     syncState.receiveSource = nil
     syncState.receiveExpected = 0

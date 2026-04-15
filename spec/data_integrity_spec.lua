@@ -993,17 +993,23 @@ describe("Data integrity", function()
             end
         end
 
-        it("runs without schema guard regardless of schemaVersion", function()
+        it("runs count-based cleanup regardless of schemaVersion", function()
             guildData.schemaVersion = 99
             local r1 = makeRecord({ scanTime = 1000 })
             local r2 = makeRecord({ scanTime = 1003 })
             assignAndStore({ r1, r2 }, guildData, "transactions")
 
+            -- eventCounts says only 1 event exists
+            local baseHash = GBL:ComputeTxHash(r1)
+            guildData.eventCounts = {
+                [baseHash] = { count = 1, asOf = 1000 },
+            }
+
             local removed = GBL:DeduplicateRecords(guildData)
 
             assert.equals(1, removed)
             assert.equals(1, #guildData.transactions)
-            -- Schema should be restored to original (99 > 6)
+            -- Schema should stay at 99 (legacy pass skipped for schema >= 6)
             assert.equals(99, guildData.schemaVersion)
         end)
 
@@ -1027,6 +1033,12 @@ describe("Data integrity", function()
             synced.id = GBL:ComputeTxHash(synced) .. ":1"
             table.insert(guildData.transactions, synced)
             guildData.seenTxHashes[synced.id] = synced.timestamp
+
+            -- eventCounts says API showed only 1 event for this prefix+hour
+            local baseHash = GBL:ComputeTxHash(local1)
+            guildData.eventCounts = {
+                [baseHash] = { count = 1, asOf = 1000 },
+            }
 
             local removed = GBL:DeduplicateRecords(guildData)
 
@@ -1065,11 +1077,178 @@ describe("Data integrity", function()
             table.insert(guildData.transactions, synced)
             guildData.seenTxHashes[synced.id] = synced.timestamp
 
+            -- eventCounts says API showed 2 events — both are genuine
+            local baseHash = GBL:ComputeTxHash(local1)
+            guildData.eventCounts = {
+                [baseHash] = { count = 2, asOf = 1000 },
+            }
+
             local removed = GBL:DeduplicateRecords(guildData)
 
             -- Both records must survive — the synced one is genuine
             assert.equals(0, removed)
             assert.equals(2, #guildData.transactions)
+        end)
+
+        it("no eventCounts means no trimming (conservative default)", function()
+            guildData.schemaVersion = 7
+            local r1 = makeRecord({ scanTime = 1000 })
+            local r2 = makeRecord({ scanTime = 2000, scannedBy = "sync:Voxle" })
+            local r3 = makeRecord({ scanTime = 3000, scannedBy = "sync:Arthas" })
+            for i, r in ipairs({r1, r2, r3}) do
+                r._occurrence = i - 1
+                r.id = GBL:ComputeTxHash(r) .. ":" .. (i - 1)
+                table.insert(guildData.transactions, r)
+                guildData.seenTxHashes[r.id] = r.timestamp
+            end
+            -- No eventCounts at all
+            guildData.eventCounts = nil
+
+            local removed = GBL:DeduplicateRecords(guildData)
+
+            assert.equals(0, removed)
+            assert.equals(3, #guildData.transactions)
+        end)
+
+        it("trims 3 records to count=2 and re-indexes survivors", function()
+            guildData.schemaVersion = 7
+            local records = {}
+            for i = 1, 3 do
+                local r = makeRecord({
+                    scanTime = 1000 * i,
+                    scannedBy = i == 3 and "sync:Voxle" or nil,
+                })
+                r._occurrence = i - 1
+                r.id = GBL:ComputeTxHash(r) .. ":" .. (i - 1)
+                table.insert(guildData.transactions, r)
+                guildData.seenTxHashes[r.id] = r.timestamp
+                records[i] = r
+            end
+
+            local baseHash = GBL:ComputeTxHash(records[1])
+            guildData.eventCounts = {
+                [baseHash] = { count = 2, asOf = 1000 },
+            }
+
+            local removed = GBL:DeduplicateRecords(guildData)
+
+            assert.equals(1, removed)
+            assert.equals(2, #guildData.transactions)
+            -- Survivors re-indexed as :0 and :1
+            assert.is_truthy(guildData.transactions[1].id:find(":0$"))
+            assert.is_truthy(guildData.transactions[2].id:find(":1$"))
+        end)
+
+        it("rebuilds seenTxHashes after trimming", function()
+            guildData.schemaVersion = 7
+            local r1 = makeRecord({ scanTime = 1000 })
+            r1._occurrence = 0
+            r1.id = GBL:ComputeTxHash(r1) .. ":0"
+            table.insert(guildData.transactions, r1)
+            guildData.seenTxHashes[r1.id] = r1.timestamp
+
+            local r2 = makeRecord({ scanTime = 2000, scannedBy = "sync:Voxle" })
+            r2._occurrence = 2
+            r2.id = GBL:ComputeTxHash(r2) .. ":2"
+            table.insert(guildData.transactions, r2)
+            guildData.seenTxHashes[r2.id] = r2.timestamp
+
+            local baseHash = GBL:ComputeTxHash(r1)
+            guildData.eventCounts = {
+                [baseHash] = { count = 1, asOf = 1000 },
+            }
+
+            GBL:DeduplicateRecords(guildData)
+
+            -- Old hash gone, new hash present
+            assert.is_nil(guildData.seenTxHashes[baseHash .. ":2"])
+            assert.is_not_nil(guildData.seenTxHashes[baseHash .. ":0"])
+        end)
+
+        it("handles multiple prefix+hours independently", function()
+            guildData.schemaVersion = 7
+            -- Prefix 1: 2 records, count=1 → trim
+            local r1a = makeRecord({ scanTime = 1000, player = "Thrall-TestRealm" })
+            r1a._occurrence = 0
+            r1a.id = GBL:ComputeTxHash(r1a) .. ":0"
+            table.insert(guildData.transactions, r1a)
+            guildData.seenTxHashes[r1a.id] = r1a.timestamp
+
+            local r1b = makeRecord({
+                scanTime = 2000, player = "Thrall-TestRealm",
+                scannedBy = "sync:Voxle",
+            })
+            r1b._occurrence = 1
+            r1b.id = GBL:ComputeTxHash(r1b) .. ":1"
+            table.insert(guildData.transactions, r1b)
+            guildData.seenTxHashes[r1b.id] = r1b.timestamp
+
+            -- Prefix 2: 3 records, count=3 → no trim
+            local r2a = makeRecord({
+                scanTime = 1000, player = "Jaina-TestRealm", itemID = 99999,
+            })
+            r2a._occurrence = 0
+            r2a.id = GBL:ComputeTxHash(r2a) .. ":0"
+            table.insert(guildData.transactions, r2a)
+            guildData.seenTxHashes[r2a.id] = r2a.timestamp
+
+            local r2b = makeRecord({
+                scanTime = 2000, player = "Jaina-TestRealm", itemID = 99999,
+            })
+            r2b._occurrence = 1
+            r2b.id = GBL:ComputeTxHash(r2b) .. ":1"
+            table.insert(guildData.transactions, r2b)
+            guildData.seenTxHashes[r2b.id] = r2b.timestamp
+
+            local r2c = makeRecord({
+                scanTime = 3000, player = "Jaina-TestRealm", itemID = 99999,
+            })
+            r2c._occurrence = 2
+            r2c.id = GBL:ComputeTxHash(r2c) .. ":2"
+            table.insert(guildData.transactions, r2c)
+            guildData.seenTxHashes[r2c.id] = r2c.timestamp
+
+            local base1 = GBL:ComputeTxHash(r1a)
+            local base2 = GBL:ComputeTxHash(r2a)
+            guildData.eventCounts = {
+                [base1] = { count = 1, asOf = 1000 },
+                [base2] = { count = 3, asOf = 1000 },
+            }
+
+            local removed = GBL:DeduplicateRecords(guildData)
+
+            assert.equals(1, removed)
+            assert.equals(4, #guildData.transactions)
+        end)
+
+        it("cross-slot cleanup checks adjacent eventCounts", function()
+            guildData.schemaVersion = 7
+            -- Two records with timestamps at adjacent hour boundaries
+            local r1 = makeRecord({ timestamp = 3600 * 100 + 3500, scanTime = 1000 })
+            r1._occurrence = 0
+            r1.id = GBL:ComputeTxHash(r1) .. ":0"
+            table.insert(guildData.transactions, r1)
+            guildData.seenTxHashes[r1.id] = r1.timestamp
+
+            local r2 = makeRecord({
+                timestamp = 3600 * 100 + 100,
+                scanTime = 2000, scannedBy = "sync:Voxle",
+            })
+            r2._occurrence = 1
+            r2.id = GBL:ComputeTxHash(r2) .. ":1"
+            table.insert(guildData.transactions, r2)
+            guildData.seenTxHashes[r2.id] = r2.timestamp
+
+            -- eventCount is for the exact slot; cleanup checks ±1
+            local baseHash = GBL:ComputeTxHash(r1)
+            guildData.eventCounts = {
+                [baseHash] = { count = 1, asOf = 1000 },
+            }
+
+            local removed = GBL:DeduplicateRecords(guildData)
+
+            assert.equals(1, removed)
+            assert.equals(1, #guildData.transactions)
         end)
     end)
 end)

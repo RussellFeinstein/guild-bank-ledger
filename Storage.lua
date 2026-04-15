@@ -207,6 +207,7 @@ function GBL:RunCompaction(guildData)
     self:CompactToDailySummaries(guildData)
     self:CompactToWeeklySummaries(guildData)
     self:PruneSeenHashes(90, guildData)
+    self:PruneEventCounts(90, guildData)
 end
 
 ------------------------------------------------------------------------
@@ -226,7 +227,8 @@ end
 function GBL:GetStorageStats(guildData)
     if not guildData then
         return { transactions = 0, moneyTransactions = 0,
-                 dailySummaries = 0, weeklySummaries = 0, seenHashes = 0 }
+                 dailySummaries = 0, weeklySummaries = 0,
+                 seenHashes = 0, eventCounts = 0 }
     end
     return {
         transactions = #guildData.transactions,
@@ -234,6 +236,7 @@ function GBL:GetStorageStats(guildData)
         dailySummaries = countKeys(guildData.dailySummaries),
         weeklySummaries = countKeys(guildData.weeklySummaries),
         seenHashes = countKeys(guildData.seenTxHashes),
+        eventCounts = guildData.eventCounts and countKeys(guildData.eventCounts) or 0,
     }
 end
 
@@ -248,6 +251,7 @@ function GBL:EstimateStorageSize(guildData)
          + stats.dailySummaries * 300
          + stats.weeklySummaries * 400
          + stats.seenHashes * 60
+         + stats.eventCounts * 80
 end
 
 --- Purge all data older than daysToKeep.
@@ -304,6 +308,7 @@ function GBL:PurgeOldData(daysToKeep, guildData)
         end
     end
 
-    -- Purge seen hashes
+    -- Purge seen hashes and event counts
     self:PruneSeenHashes(daysToKeep, guildData)
+    self:PruneEventCounts(daysToKeep, guildData)
 end

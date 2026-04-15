@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.16.0"
+local VERSION = "0.17.0"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -1488,12 +1488,192 @@ end
 function GBL:DeduplicateRecords(guildData)
     if not guildData then return 0 end
 
-    local savedSchema = guildData.schemaVersion
-    guildData.schemaVersion = 5
-    local removed = self:MigrateCrossSlotDedup(guildData)
-    -- MigrateCrossSlotDedup sets schemaVersion=6; restore if it was higher
-    if savedSchema > 6 then guildData.schemaVersion = savedSchema end
-    return removed
+    -- Legacy anchor-based cleanup: only for data that hasn't been migrated yet.
+    -- Once eventCounts is populated, CleanupWithEventCounts is authoritative.
+    local legacyRemoved = 0
+    if (guildData.schemaVersion or 0) < 6 then
+        local savedSchema = guildData.schemaVersion
+        guildData.schemaVersion = 5
+        legacyRemoved = self:MigrateCrossSlotDedup(guildData)
+        if savedSchema > 6 then guildData.schemaVersion = savedSchema end
+    end
+
+    -- Count-based cleanup (uses API-observed ground truth)
+    local countRemoved = self:CleanupWithEventCounts(guildData)
+
+    return legacyRemoved + countRemoved
+end
+
+--- Remove excess records using persisted eventCounts as ground truth.
+-- Groups records by prefix, clusters by timestamp proximity, then trims
+-- each cluster to the max known eventCount for its baseHash (±1 slot).
+-- Safe default: clusters with no eventCount data are never trimmed.
+-- @param guildData table Guild data from AceDB
+-- @return number Total records removed
+function GBL:CleanupWithEventCounts(guildData)
+    if not guildData or not guildData.eventCounts
+        or not next(guildData.eventCounts) then
+        return 0
+    end
+
+    local totalRemoved = 0
+
+    for _, storageKey in ipairs({ "transactions", "moneyTransactions" }) do
+        local records = guildData[storageKey]
+        if records and #records > 0 then
+            -- Group by prefix (slot-independent)
+            local groups = {}
+            local groupOrder = {}
+            for _, record in ipairs(records) do
+                local prefix = self:BuildTxPrefix(record)
+                if not groups[prefix] then
+                    groups[prefix] = {}
+                    groupOrder[#groupOrder + 1] = prefix
+                end
+                groups[prefix][#groups[prefix] + 1] = record
+            end
+
+            local surviving = {}
+            for _, prefix in ipairs(groupOrder) do
+                local group = groups[prefix]
+                if #group <= 1 then
+                    surviving[#surviving + 1] = group[1]
+                else
+                    -- Sort by timestamp to identify event clusters
+                    table.sort(group, function(a, b)
+                        return (a.timestamp or 0) < (b.timestamp or 0)
+                    end)
+
+                    -- Cluster records by timestamp proximity (< 3600 = same hour event)
+                    local clusters = {}
+                    local currentCluster = { group[1] }
+                    for i = 2, #group do
+                        local diff = math.abs(
+                            (group[i].timestamp or 0) - (group[i-1].timestamp or 0))
+                        if diff < 3600 then
+                            currentCluster[#currentCluster + 1] = group[i]
+                        else
+                            clusters[#clusters + 1] = currentCluster
+                            currentCluster = { group[i] }
+                        end
+                    end
+                    clusters[#clusters + 1] = currentCluster
+
+                    for _, cluster in ipairs(clusters) do
+                        -- Find max eventCount across all relevant baseHashes (±1 slot)
+                        local slotsChecked = {}
+                        for _, rec in ipairs(cluster) do
+                            local slot = math.floor((rec.timestamp or 0) / 3600)
+                            slotsChecked[slot] = true
+                        end
+
+                        local maxKnownCount = 0
+                        for slot in pairs(slotsChecked) do
+                            for s = slot - 1, slot + 1 do
+                                local baseHash = prefix .. s
+                                local entry = guildData.eventCounts[baseHash]
+                                if entry and type(entry) == "table"
+                                    and type(entry.count) == "number"
+                                    and entry.count > maxKnownCount then
+                                    maxKnownCount = entry.count
+                                end
+                            end
+                        end
+
+                        if maxKnownCount == 0 or #cluster <= maxKnownCount then
+                            -- No count data or within bounds: keep all
+                            for _, rec in ipairs(cluster) do
+                                surviving[#surviving + 1] = rec
+                            end
+                        else
+                            -- Trim to maxKnownCount, preferring oldest by scanTime
+                            table.sort(cluster, function(a, b)
+                                return (a.scanTime or 0) < (b.scanTime or 0)
+                            end)
+                            for i = 1, maxKnownCount do
+                                surviving[#surviving + 1] = cluster[i]
+                            end
+                            totalRemoved = totalRemoved + (#cluster - maxKnownCount)
+                        end
+                    end
+                end
+            end
+
+            -- Replace storage array (preserve AceDB table ref)
+            for i = #records, 1, -1 do records[i] = nil end
+            for i, rec in ipairs(surviving) do records[i] = rec end
+        end
+    end
+
+    if totalRemoved > 0 then
+        -- Rebuild occurrence indices, seenTxHashes, and playerStats
+        local allRecords = {}
+        for _, tx in ipairs(guildData.transactions or {}) do
+            allRecords[#allRecords + 1] = tx
+        end
+        for _, tx in ipairs(guildData.moneyTransactions or {}) do
+            allRecords[#allRecords + 1] = tx
+        end
+
+        -- Reassign occurrence indices per baseHash
+        local idGroups = {}
+        for _, record in ipairs(allRecords) do
+            local baseHash = self:ComputeTxHash(record)
+            if not idGroups[baseHash] then idGroups[baseHash] = {} end
+            idGroups[baseHash][#idGroups[baseHash] + 1] = record
+        end
+        for _, idGroup in pairs(idGroups) do
+            table.sort(idGroup, function(a, b)
+                if (a.timestamp or 0) == (b.timestamp or 0) then
+                    return (a.scanTime or 0) < (b.scanTime or 0)
+                end
+                return (a.timestamp or 0) < (b.timestamp or 0)
+            end)
+            for i, record in ipairs(idGroup) do
+                local occ = i - 1
+                record._occurrence = occ
+                record.id = self:ComputeTxHash(record) .. ":" .. occ
+            end
+        end
+
+        -- Rebuild seenTxHashes
+        for k in pairs(guildData.seenTxHashes) do
+            guildData.seenTxHashes[k] = nil
+        end
+        for _, record in ipairs(allRecords) do
+            if record.id then
+                guildData.seenTxHashes[record.id] = record.timestamp or 0
+            end
+        end
+
+        -- Rebuild playerStats
+        local statsDefaults = {
+            withdrawals = {}, deposits = {},
+            totalWithdrawCount = 0, totalDepositCount = 0,
+            moneyWithdrawn = 0, moneyDeposited = 0,
+            firstSeen = 0, lastSeen = 0,
+        }
+        for k in pairs(guildData.playerStats) do
+            guildData.playerStats[k] = nil
+        end
+        for _, record in ipairs(allRecords) do
+            if record.player then
+                if not guildData.playerStats[record.player]
+                    or not guildData.playerStats[record.player].totalWithdrawCount then
+                    guildData.playerStats[record.player] = {}
+                    for dk, dv in pairs(statsDefaults) do
+                        guildData.playerStats[record.player][dk] =
+                            type(dv) == "table" and {} or dv
+                    end
+                end
+                self:UpdatePlayerStats(record, guildData)
+            end
+        end
+
+        self:ResetHashCache()
+    end
+
+    return totalRemoved
 end
 
 --- Manually run the deduplication cleanup with user feedback.
