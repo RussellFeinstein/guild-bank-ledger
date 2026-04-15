@@ -27,6 +27,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.18.1
+    {"0.18.1", "2026-04-14", {
+        Fixed = {
+            "Changelog tab now displays full content instead of truncating with '...'",
+        },
+    }},
     -- v0.18.0
     {"0.18.0", "2026-04-14", {
         Added = {
@@ -427,12 +433,50 @@ function GBL:BuildChangelogTab(container)
     scroll:SetLayout("List")
     container:AddChild(scroll)
 
-    -- Render each version as one label
+    -- Render each version as individual per-line widgets
+    -- (AceGUI Labels are single-line; multi-line \n text gets truncated)
     local data = self.CHANGELOG_DATA or {}
     for _, entry in ipairs(data) do
-        local label = AceGUI:Create("Label")
-        label:SetFullWidth(true)
-        label:SetText(self:FormatChangelogEntry(entry))
-        scroll:AddChild(label)
+        local version, date, sections, milestone = entry[1], entry[2], entry[3], entry[4]
+
+        -- Version header (larger font)
+        local header = AceGUI:Create("Label")
+        header:SetFullWidth(true)
+        header:SetFontObject(GameFontNormalLarge)
+        header:SetText(string.format("|cffffcc00v%s|r  |cff999999(%s)|r", version, date))
+        scroll:AddChild(header)
+
+        -- Milestone label
+        if milestone then
+            local ml = AceGUI:Create("Label")
+            ml:SetFullWidth(true)
+            ml:SetText("  |cffffcc00" .. milestone .. "|r")
+            scroll:AddChild(ml)
+        end
+
+        -- Section entries in standard order
+        for _, sType in ipairs(SECTION_ORDER) do
+            local entries = sections[sType]
+            if entries then
+                local color = SECTION_COLORS[sType] or "|cffcccccc"
+                local sl = AceGUI:Create("Label")
+                sl:SetFullWidth(true)
+                sl:SetText("  " .. color .. sType .. ":|r")
+                scroll:AddChild(sl)
+
+                for _, text in ipairs(entries) do
+                    local el = AceGUI:Create("Label")
+                    el:SetFullWidth(true)
+                    el:SetText("    - " .. text)
+                    scroll:AddChild(el)
+                end
+            end
+        end
+
+        -- Spacer between entries
+        local spacer = AceGUI:Create("Label")
+        spacer:SetFullWidth(true)
+        spacer:SetText(" ")
+        scroll:AddChild(spacer)
     end
 end

@@ -2134,7 +2134,7 @@ describe("Sync", function()
             -- Add peers with different versions via protocol-mismatched HELLOs
             for _, info in ipairs({
                 { name = "PeerA", version = "0.15.0" },
-                { name = "PeerB", version = "0.18.0" },
+                { name = "PeerB", version = "0.18.1" },
                 { name = "PeerC", version = "0.16.0" },
             }) do
                 local msg = GBL:Serialize({
@@ -2148,7 +2148,7 @@ describe("Sync", function()
                 GBL:OnSyncMessage(GBL.SYNC_PREFIX, msg, "GUILD", info.name)
             end
 
-            assert.equals("0.18.0", GBL:GetHighestPeerVersion())
+            assert.equals("0.18.1", GBL:GetHighestPeerVersion())
         end)
     end)
 

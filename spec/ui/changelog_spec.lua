@@ -192,14 +192,15 @@ describe("ChangelogView", function()
             assert.equals("ScrollFrame", scroll._type)
         end)
 
-        it("creates one label per changelog entry", function()
+        it("creates individual label widgets per line", function()
             local AceGUI = LibStub("AceGUI-3.0")
             local container = AceGUI:Create("SimpleGroup")
 
             GBL:BuildChangelogTab(container)
 
             local scroll = container._children[1]
-            assert.equals(#GBL.CHANGELOG_DATA, #scroll._children)
+            -- More children than entries (one per line, not one per entry)
+            assert.is_true(#scroll._children > #GBL.CHANGELOG_DATA)
             for _, child in ipairs(scroll._children) do
                 assert.equals("Label", child._type)
             end
@@ -215,6 +216,35 @@ describe("ChangelogView", function()
             local firstLabel = scroll._children[1]
             local newest = GBL.CHANGELOG_DATA[1][1]
             assert.truthy(firstLabel._text:find(newest, 1, true))
+        end)
+
+        it("section content is visible in child labels", function()
+            local AceGUI = LibStub("AceGUI-3.0")
+            local container = AceGUI:Create("SimpleGroup")
+
+            -- Use a minimal dataset to test
+            local original = GBL.CHANGELOG_DATA
+            GBL.CHANGELOG_DATA = {
+                {"1.0.0", "2026-01-01", {
+                    Added = {"Visible feature"},
+                    Fixed = {"Visible fix"},
+                }},
+            }
+
+            GBL:BuildChangelogTab(container)
+
+            local scroll = container._children[1]
+            local texts = {}
+            for _, child in ipairs(scroll._children) do
+                texts[#texts + 1] = child._text
+            end
+            local combined = table.concat(texts, "\n")
+            assert.truthy(combined:find("Added:"))
+            assert.truthy(combined:find("Fixed:"))
+            assert.truthy(combined:find("Visible feature"))
+            assert.truthy(combined:find("Visible fix"))
+
+            GBL.CHANGELOG_DATA = original
         end)
 
         it("works with empty CHANGELOG_DATA", function()

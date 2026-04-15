@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1] — 2026-04-14
+
+### Fixed
+- **Changelog tab content truncated** — each version entry was rendered as a single AceGUI Label widget, which has a fixed single-line height and truncated multi-line text with "...". Refactored to emit one widget per visual line (version header, section headers, bullet items) so the full changelog is readable in-game.
+
 ## [0.18.0] — 2026-04-14
 
 ### Added

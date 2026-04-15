@@ -436,6 +436,7 @@ function MockWoW.install()
         SetFont = function() end,
     }
     _G.GameFontNormal = _G.GameFontNormal or fontStub
+    _G.GameFontNormalLarge = _G.GameFontNormalLarge or fontStub
     _G.GameFontHighlight = _G.GameFontHighlight or fontStub
     _G.ChatFontNormal = _G.ChatFontNormal or fontStub
 
