@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.25.1
+    {"0.25.1", "2026-04-16", {
+        Fixed = {
+            "Online peers list showed peers for up to 5 minutes after disconnect — roster is now cross-checked for recently-seen peers",
+        },
+    }},
     -- v0.25.0
     {"0.25.0", "2026-04-16", {
         Added = {

@@ -1851,7 +1851,11 @@ function GBL:GetSyncPeers()
     local active = {}
     for name, info in pairs(syncState.peers) do
         if now - (info.lastSeen or 0) <= PEER_STALE_SECONDS then
-            active[name] = info
+            -- Cross-check guild roster to catch peers who went offline
+            -- since their last message (e.g., disconnect during sync)
+            if self:IsGuildMemberOnline(name) ~= false then
+                active[name] = info
+            end
         else
             -- Stale HELLO — check guild roster as fallback
             local online = self:IsGuildMemberOnline(name)

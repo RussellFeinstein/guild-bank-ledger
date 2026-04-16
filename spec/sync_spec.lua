@@ -3379,6 +3379,36 @@ describe("Sync", function()
             assert.is_nil(GBL:GetSyncPeers()["OfficerB"])
         end)
 
+        it("recently-seen peer drops if guild roster says offline", function()
+            MockWoW.serverTime = 100000
+            GBL:UpdatePeer("OfficerB", {
+                version = GBL.version, txCount = 5, lastScanTime = 99999,
+            })
+
+            -- Still within staleness window (peer messaged us recently)
+            MockWoW.serverTime = 100000 + 30
+
+            -- But roster says they went offline (e.g., disconnected during sync)
+            MockWoW.guildRoster = {
+                { name = "OfficerB-TestRealm", isOnline = false },
+            }
+
+            assert.is_nil(GBL:GetSyncPeers()["OfficerB"])
+        end)
+
+        it("recently-seen peer stays if roster unknown", function()
+            MockWoW.serverTime = 100000
+            GBL:UpdatePeer("OfficerB", {
+                version = GBL.version, txCount = 5, lastScanTime = 99999,
+            })
+
+            MockWoW.serverTime = 100000 + 30
+
+            -- Empty roster (nil return) — don't filter out
+            MockWoW.guildRoster = {}
+            assert.is_not_nil(GBL:GetSyncPeers()["OfficerB"])
+        end)
+
         it("roster fallback does not mutate original syncState peer entry", function()
             MockWoW.serverTime = 100000
             GBL:UpdatePeer("OfficerB", {
