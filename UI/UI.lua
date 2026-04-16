@@ -300,6 +300,23 @@ function GBL:AddSettingsRow(container)
         end
     end)
     row:AddChild(rescanCB)
+
+    local minimapCB = AceGUI:Create("CheckBox")
+    minimapCB:SetLabel("Show minimap button")
+    minimapCB:SetWidth(200)
+    minimapCB:SetValue(not self.db.profile.minimap.hide)
+    minimapCB:SetCallback("OnValueChanged", function(_widget, _event, value)
+        self.db.profile.minimap.hide = not value
+        local LDBIcon = LibStub("LibDBIcon-1.0", true)
+        if LDBIcon then
+            if value then
+                LDBIcon:Show("GuildBankLedger")
+            else
+                LDBIcon:Hide("GuildBankLedger")
+            end
+        end
+    end)
+    row:AddChild(minimapCB)
 end
 
 ------------------------------------------------------------------------

@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.24.0
+    {"0.24.0", "2026-04-15", {
+        Added = {
+            "\"Show minimap button\" toggle — hide the minimap icon while keeping the LDB launcher for display addons (requested by Rox)",
+        },
+    }},
     -- v0.23.0
     {"0.23.0", "2026-04-15", {
         Changed = {

@@ -115,7 +115,7 @@ describe("Core", function()
         it("status prints version and guild info", function()
             MockWoW.guild.name = "Test Guild"
             GBL:HandleSlashCommand("status")
-            assert.is_true(Helpers.printContains("0.23.0"))
+            assert.is_true(Helpers.printContains("0.24.0"))
             assert.is_true(Helpers.printContains("Test Guild"))
         end)
 
@@ -332,6 +332,31 @@ describe("Core", function()
             GBL:OnInitialize()
             local icon = MockAce.ldbIcon
             assert.is_not_nil(icon._registered["GuildBankLedger"])
+        end)
+
+        it("toggle hides minimap icon but keeps LDB object", function()
+            GBL:OnInitialize()
+            local icon = MockAce.ldbIcon
+            local ldb = MockAce.ldb
+
+            -- Simulate unchecking "Show minimap button"
+            local hideCalled, showCalled = false, false
+            icon.Hide = function() hideCalled = true end
+            icon.Show = function() showCalled = true end
+
+            GBL.db.profile.minimap.hide = true
+            icon.Hide()
+            assert.is_true(hideCalled)
+            assert.is_true(GBL.db.profile.minimap.hide)
+            -- LDB data object still registered
+            assert.is_not_nil(ldb._objects["GuildBankLedger"])
+
+            -- Simulate re-checking "Show minimap button"
+            GBL.db.profile.minimap.hide = false
+            icon.Show()
+            assert.is_true(showCalled)
+            assert.is_false(GBL.db.profile.minimap.hide)
+            assert.is_not_nil(ldb._objects["GuildBankLedger"])
         end)
     end)
 
