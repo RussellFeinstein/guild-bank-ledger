@@ -5,6 +5,22 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] — 2026-04-16
+
+### Added
+- **Epidemic gossip sync**: data propagates exponentially across guild members — each peer becomes a seed after receiving data, leveraging N independent bandwidth budgets for O(log N) convergence instead of O(N).
+- Concurrent send + receive: clients can send data to one peer while simultaneously receiving from another, doubling sync throughput per client.
+- Smart peer selection: pending peer queue uses priority scoring (divergence, BUSY cooldown, starvation prevention) instead of FIFO — most divergent peers sync first.
+- GUILD manifest broadcast: bucket hash manifests broadcast every 5 minutes so all peers know each other's data state without N² WHISPER exchanges.
+- Hash-gated HELLO reply suppression: WHISPER replies to broadcast HELLOs are suppressed when our data hasn't changed, reducing O(N²) traffic to near-zero in large guilds.
+- Forced HELLO rate limiting: post-sync forced HELLOs capped at one per 10 seconds to prevent broadcast storms during rapid epidemic propagation.
+
+### Changed
+- Bidirectional check delay reduced from 3s to 0.5s — peers discover new data faster after sync.
+- Post-receive HELLO broadcast delay reduced from 2s to 0.5–2s with jitter — faster re-seeding without storms.
+- Pending peers queue processing delay reduced from 1s to 0.2s — faster epidemic chain reactions.
+- Sync initiation jitter reduced from 0–2s to 0–1s — sufficient for oscillation prevention with bucket-based delta sync.
+
 ## [0.24.0] — 2026-04-15
 
 ### Added

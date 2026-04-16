@@ -29,6 +29,23 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.25.0
+    {"0.25.0", "2026-04-16", {
+        Added = {
+            "Epidemic gossip sync — data propagates exponentially across guild; each peer becomes a seed after receiving",
+            "Concurrent send + receive — send to one peer while receiving from another simultaneously",
+            "Smart peer selection — priority scoring replaces FIFO queue (most divergent peers sync first)",
+            "GUILD manifest broadcast — bucket hashes broadcast every 5 min for state discovery",
+            "Hash-gated HELLO reply suppression — near-zero WHISPER traffic in large guilds",
+            "Forced HELLO rate limiting — prevents broadcast storms during rapid propagation",
+        },
+        Changed = {
+            "Bidirectional check delay: 3s → 0.5s",
+            "Post-receive HELLO delay: 2s → 0.5–2s with jitter",
+            "Pending peers processing delay: 1s → 0.2s",
+            "Sync initiation jitter: 0–2s → 0–1s",
+        },
+    }},
     -- v0.24.0
     {"0.24.0", "2026-04-15", {
         Added = {

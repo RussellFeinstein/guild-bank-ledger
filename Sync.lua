@@ -31,6 +31,11 @@ local EVENTCOUNTS_PER_BATCH = 10
 local MAX_PENDING_PEERS = 10
 local KNOWN_PEER_EXPIRE_SECONDS = 30 * 24 * 3600  -- 30 days
 local INITIAL_CHUNK_TIMEOUT = 10
+local BUSY_COOLDOWN = 30
+local PEER_STARVATION_SECONDS = 60
+local FORCED_HELLO_COOLDOWN = 10
+local MANIFEST_INTERVAL = 300  -- 5 minutes
+local MANIFEST_MAX_BUCKETS = 200
 
 -- Expose constants for testing and UI
 GBL.SYNC_PROTOCOL_VERSION = PROTOCOL_VERSION
@@ -44,6 +49,11 @@ GBL.SYNC_EVENTCOUNTS_PER_BATCH = EVENTCOUNTS_PER_BATCH
 GBL.SYNC_MAX_PENDING_PEERS = MAX_PENDING_PEERS
 GBL.SYNC_KNOWN_PEER_EXPIRE_SECONDS = KNOWN_PEER_EXPIRE_SECONDS
 GBL.SYNC_INITIAL_CHUNK_TIMEOUT = INITIAL_CHUNK_TIMEOUT
+GBL.SYNC_BUSY_COOLDOWN = BUSY_COOLDOWN
+GBL.SYNC_PEER_STARVATION_SECONDS = PEER_STARVATION_SECONDS
+GBL.SYNC_FORCED_HELLO_COOLDOWN = FORCED_HELLO_COOLDOWN
+GBL.SYNC_MANIFEST_INTERVAL = MANIFEST_INTERVAL
+GBL.SYNC_MANIFEST_MAX_BUCKETS = MANIFEST_MAX_BUCKETS
 
 ------------------------------------------------------------------------
 -- Compression (LibDeflate)
@@ -120,6 +130,16 @@ local syncState = {
     -- Pending peers queue (retry after busy/combat/zone)
     pendingPeers = {},
     pendingPeersCount = 0,
+
+    -- HELLO traffic management (M4)
+    lastForcedHelloTime = 0,
+    lastHelloReplyHash = {},  -- name → hash we last communicated to this peer
+
+    -- GUILD manifest broadcast (M5)
+    peerManifests = {},        -- name → { buckets={}, txCount, dataHash, receivedAt }
+    lastManifestHash = 0,
+    lastManifestTime = 0,
+    manifestTimer = nil,
 }
 
 ------------------------------------------------------------------------
@@ -167,6 +187,12 @@ function GBL:InitSync()
         end
     end
     self:StartHelloHeartbeat()
+    -- Start manifest broadcast heartbeat
+    if not syncState.manifestTimer then
+        syncState.manifestTimer = C_Timer.NewTicker(MANIFEST_INTERVAL, function()
+            self:BroadcastManifest()
+        end)
+    end
 end
 
 --- Enable sync at runtime (from UI toggle).
@@ -178,6 +204,12 @@ function GBL:EnableSync()
     self:RegisterEvent("PLAYER_REGEN_ENABLED", "OnCombatEnd")
     self:StartHelloHeartbeat()
     self:BroadcastHello()
+    -- Start manifest broadcast heartbeat
+    if not syncState.manifestTimer then
+        syncState.manifestTimer = C_Timer.NewTicker(MANIFEST_INTERVAL, function()
+            self:BroadcastManifest()
+        end)
+    end
 end
 
 --- Start the periodic HELLO heartbeat so peers don't expire while we're online.
@@ -222,6 +254,15 @@ function GBL:DisableSync()
     self:StopFpsMonitor()
     syncState.pendingPeers = {}
     syncState.pendingPeersCount = 0
+    syncState.lastForcedHelloTime = 0
+    syncState.lastHelloReplyHash = {}
+    syncState.peerManifests = {}
+    syncState.lastManifestHash = 0
+    syncState.lastManifestTime = 0
+    if syncState.manifestTimer then
+        syncState.manifestTimer:Cancel()
+        syncState.manifestTimer = nil
+    end
 end
 
 ------------------------------------------------------------------------
@@ -236,6 +277,12 @@ function GBL:BroadcastHello(force)
 
     local now = GetServerTime()
     if not force and now - syncState.lastHelloTime < HELLO_COOLDOWN then return end
+
+    -- Rate-limit forced HELLOs to prevent storms during epidemic propagation
+    if force then
+        if now - syncState.lastForcedHelloTime < FORCED_HELLO_COOLDOWN then return end
+        syncState.lastForcedHelloTime = now
+    end
 
     local guildData = self:GetGuildData()
     if not guildData then return end
@@ -260,7 +307,91 @@ function GBL:BroadcastHello(force)
     self:SendCommMessage(PREFIX, msg, "GUILD")
     self:AddAuditEntry("Sent HELLO (tx: " .. txCount
         .. ", hash: " .. dataHash .. ")")
+
+    -- Broadcast-mark: all peers receive this GUILD broadcast, so mark them
+    -- as knowing our current hash. Suppresses redundant WHISPER replies.
+    for name in pairs(syncState.lastHelloReplyHash) do
+        syncState.lastHelloReplyHash[name] = dataHash
+    end
 end
+
+------------------------------------------------------------------------
+-- GUILD manifest broadcast
+------------------------------------------------------------------------
+
+--- Broadcast a compact bucket hash manifest on GUILD so all peers
+-- learn our bucket-level state without N² WHISPER exchanges.
+-- Only broadcasts if our data has changed since the last manifest.
+function GBL:BroadcastManifest()
+    if not self.db.profile.sync.enabled then return end
+
+    local guildData = self:GetGuildData()
+    if not guildData then return end
+
+    local dataHash = self:GetDataHash(guildData)
+    if dataHash == syncState.lastManifestHash then return end
+
+    local buckets = self:ComputeBucketHashes(guildData)
+
+    -- Truncate to most recent MANIFEST_MAX_BUCKETS if exceeded
+    local bucketCount = 0
+    for _ in pairs(buckets) do bucketCount = bucketCount + 1 end
+    if bucketCount > MANIFEST_MAX_BUCKETS then
+        -- Keep the highest keys (most recent)
+        local keys = {}
+        for k in pairs(buckets) do keys[#keys + 1] = k end
+        table.sort(keys)
+        for i = 1, #keys - MANIFEST_MAX_BUCKETS do
+            buckets[keys[i]] = nil
+        end
+    end
+
+    local txCount = #guildData.transactions + #guildData.moneyTransactions
+    local msg = self:Serialize({
+        type = "MANIFEST",
+        protocolVersion = PROTOCOL_VERSION,
+        guild = self:GetGuildName(),
+        dataHash = dataHash,
+        txCount = txCount,
+        buckets = buckets,
+    })
+    msg = compressMessage(msg)
+
+    self:SendCommMessage(PREFIX, msg, "GUILD")
+    syncState.lastManifestHash = dataHash
+    syncState.lastManifestTime = GetServerTime()
+    self:AddAuditEntry("Sent MANIFEST (" .. bucketCount .. " buckets, hash: " .. dataHash .. ")")
+end
+
+--- Handle an incoming MANIFEST from another guild member.
+-- Caches the peer's bucket hashes for smart peer selection.
+-- @param sender string Sender name
+-- @param data table Deserialized MANIFEST payload
+function GBL:HandleManifest(sender, data)
+    if not data.buckets then return end
+
+    local clean = Ambiguate(sender, "none")
+    syncState.peerManifests[clean] = {
+        buckets = data.buckets,
+        txCount = data.txCount or 0,
+        dataHash = data.dataHash or 0,
+        receivedAt = GetServerTime(),
+    }
+
+    -- Also update peer info (like a lightweight HELLO)
+    if syncState.peers[clean] then
+        syncState.peers[clean].txCount = data.txCount or syncState.peers[clean].txCount
+        syncState.peers[clean].dataHash = data.dataHash or syncState.peers[clean].dataHash
+        syncState.peers[clean].lastSeen = GetServerTime()
+    end
+
+    self:AddAuditEntry("Received MANIFEST from " .. clean
+        .. " (hash: " .. tostring(data.dataHash) .. ", tx: " .. (data.txCount or 0) .. ")")
+end
+
+------------------------------------------------------------------------
+-- HELLO reply
+------------------------------------------------------------------------
 
 --- Send a targeted HELLO reply to a specific peer via WHISPER.
 -- Used when we receive a broadcast HELLO so the sender discovers us.
@@ -381,6 +512,8 @@ function GBL:OnSyncMessage(_prefix, message, distribution, sender)
         self:HandleNack(sender, data)
     elseif msgType == "BUSY" then
         self:HandleBusy(sender, data)
+    elseif msgType == "MANIFEST" then
+        self:HandleManifest(sender, data)
     end
 end
 
@@ -427,10 +560,17 @@ function GBL:HandleHello(sender, data)
     end
 
     -- Reply to broadcast HELLOs so the sender discovers us.
-    -- Uses WHISPER (targeted) — each peer replies individually.
-    -- Do NOT reply to reply HELLOs (prevents infinite ping-pong).
+    -- Hash-gated: only reply when our data changed since we last told this peer,
+    -- or on first contact. Suppresses O(N²) reply traffic in large guilds.
     if not data.isReply then
-        self:SendHelloReply(sender)
+        local cleanSenderReply = Ambiguate(sender, "none")
+        local gd = self:GetGuildData()
+        local currentHash = gd and self:GetDataHash(gd) or 0
+        local lastHash = syncState.lastHelloReplyHash[cleanSenderReply]
+        if lastHash == nil or currentHash ~= lastHash then
+            self:SendHelloReply(sender)
+            syncState.lastHelloReplyHash[cleanSenderReply] = currentHash
+        end
     end
 
     -- Exact version match — refuse sync on any version difference
@@ -496,10 +636,10 @@ function GBL:HandleHello(sender, data)
             -- when multiple peers respond to the same HELLO simultaneously
             self:AddAuditEntry("Sync triggered by " .. syncReason
                 .. " — requesting from " .. sender .. " (with jitter)")
-            local jitter = math.random() * 2
+            local jitter = math.random() * 1
             C_Timer.After(jitter, function()
-                if syncState.receiving or syncState.sending then
-                    -- State changed during jitter — queue instead
+                if syncState.receiving then
+                    -- Already receiving — queue instead
                     self:AddPendingPeer(sender)
                     return
                 end
@@ -1072,11 +1212,11 @@ function GBL:FinishSending()
     self:StopFpsMonitor()
 
     -- Bidirectional check: after sending, do we need data from this peer?
-    -- Delay 3s to let the peer process our data (their FinishReceiving).
+    -- Brief delay to let the peer process our data (their FinishReceiving).
     local cleanTarget = Ambiguate(target, "none")
     if self.db.profile.sync.autoSync then
-        C_Timer.After(3, function()
-            if syncState.receiving or syncState.sending then return end
+        C_Timer.After(0.5, function()
+            if syncState.receiving then return end
             if syncState.zonePaused then return end
             if not self.db.profile.sync.enabled then return end
             if InCombatLockdown and InCombatLockdown() then return end
@@ -1107,8 +1247,8 @@ function GBL:FinishSending()
         end)
     else
         -- autoSync disabled — still process pending queue
-        C_Timer.After(1, function()
-            if syncState.receiving or syncState.sending then return end
+        C_Timer.After(0.2, function()
+            if syncState.receiving then return end
             self:ProcessPendingPeers()
         end)
     end
@@ -1434,8 +1574,8 @@ function GBL:FinishReceiving(sender)
 
     -- Post-sync: process pending peers queue after a brief delay
     if syncState.pendingPeersCount > 0 and self.db.profile.sync.autoSync then
-        C_Timer.After(1, function()
-            if syncState.receiving or syncState.sending then return end
+        C_Timer.After(0.2, function()
+            if syncState.receiving then return end
             if syncState.zonePaused then return end
             if InCombatLockdown and InCombatLockdown() then return end
             self:ProcessPendingPeers()
@@ -1445,7 +1585,7 @@ function GBL:FinishReceiving(sender)
     -- Post-sync HELLO: broadcast updated dataset so peers discover our new data
     -- and can request what we now have. Only if we actually stored new records.
     if totalStored > 0 then
-        C_Timer.After(2, function()
+        C_Timer.After(0.5 + math.random() * 1.5, function()
             if not self.db.profile.sync.enabled then return end
             self:BroadcastHello(true)  -- force=true bypasses cooldown
             self:AddAuditEntry("Post-sync HELLO broadcast (received "
@@ -1493,7 +1633,23 @@ function GBL:AddPendingPeer(name)
     local clean = Ambiguate(name, "none")
     if syncState.pendingPeers[clean] then return end
     if syncState.pendingPeersCount >= MAX_PENDING_PEERS then return end
-    syncState.pendingPeers[clean] = { addedAt = GetServerTime() }
+
+    -- Compute priority metadata for smart peer selection
+    local txCountDiff = 0
+    local peerInfo = syncState.peers[clean]
+    if peerInfo then
+        local gd = self:GetGuildData()
+        if gd then
+            local localCount = #gd.transactions + #gd.moneyTransactions
+            txCountDiff = math.abs(localCount - (peerInfo.txCount or 0))
+        end
+    end
+
+    syncState.pendingPeers[clean] = {
+        addedAt = GetServerTime(),
+        txCountDiff = txCountDiff,
+        busyUntil = 0,
+    }
     syncState.pendingPeersCount = syncState.pendingPeersCount + 1
     self:AddAuditEntry("Queued pending peer: " .. clean)
 end
@@ -1508,36 +1664,98 @@ function GBL:RemovePendingPeer(name)
     end
 end
 
---- Pop the next valid peer from the pending queue.
--- Skips stale peers (not seen within PEER_STALE_SECONDS). Returns nil if empty.
+--- Pop the highest-priority valid peer from the pending queue.
+-- Uses scored selection: txCountDiff (divergence), BUSY cooldown, starvation prevention.
+-- Skips stale/offline peers. Returns nil if empty.
 -- @return string|nil Peer name to sync with
 function GBL:PopPendingPeer()
     local now = GetServerTime()
-    for name, _ in pairs(syncState.pendingPeers) do
-        syncState.pendingPeers[name] = nil
-        syncState.pendingPeersCount = syncState.pendingPeersCount - 1
-        -- Check if peer is still active
+    local bestName = nil
+    local bestScore = -math.huge
+
+    -- First pass: find the highest-scoring valid peer
+    for name, entry in pairs(syncState.pendingPeers) do
         local peer = syncState.peers[name]
-        if peer and (now - (peer.lastSeen or 0) <= PEER_STALE_SECONDS) then
-            -- Skip peers confirmed offline by guild roster
+        if not peer or (now - (peer.lastSeen or 0) > PEER_STALE_SECONDS) then
+            -- Stale — remove silently (cleaned up below)
+        else
             local online = self:IsGuildMemberOnline(name)
             if online == false then
-                self:AddAuditEntry("Skipped offline pending peer: " .. name)
+                -- Offline — remove silently (cleaned up below)
             else
-                return name
+                -- Compute priority score
+                local score = (entry.txCountDiff or 0) * 10
+                -- Manifest-based bucket diff (more precise than txCount)
+                local manifest = syncState.peerManifests[name]
+                if manifest and manifest.buckets then
+                    local gd = self:GetGuildData()
+                    if gd then
+                        local localBuckets = self:ComputeBucketHashes(gd)
+                        local diffCount = 0
+                        for key, hash in pairs(manifest.buckets) do
+                            if hash ~= (localBuckets[key] or 0) then
+                                diffCount = diffCount + 1
+                            end
+                        end
+                        for key in pairs(localBuckets) do
+                            if not manifest.buckets[key] then
+                                diffCount = diffCount + 1
+                            end
+                        end
+                        score = score + diffCount * 20
+                    end
+                end
+                -- Starvation prevention: boost after PEER_STARVATION_SECONDS in queue
+                if (entry.addedAt or 0) < now - PEER_STARVATION_SECONDS then
+                    score = score + 1000
+                end
+                -- Deprioritize recently-BUSY peers
+                if (entry.busyUntil or 0) > now then
+                    score = score - 500
+                end
+                if score > bestScore then
+                    bestScore = score
+                    bestName = name
+                end
             end
-        else
-            self:AddAuditEntry("Skipped stale pending peer: " .. name)
         end
     end
-    return nil
+
+    -- Second pass: clean up stale/offline entries
+    local toRemove = {}
+    for name, _ in pairs(syncState.pendingPeers) do
+        local peer = syncState.peers[name]
+        if not peer or (now - (peer.lastSeen or 0) > PEER_STALE_SECONDS) then
+            toRemove[#toRemove + 1] = name
+            self:AddAuditEntry("Skipped stale pending peer: " .. name)
+        else
+            local online = self:IsGuildMemberOnline(name)
+            if online == false then
+                toRemove[#toRemove + 1] = name
+                self:AddAuditEntry("Skipped offline pending peer: " .. name)
+            end
+        end
+    end
+    for _, name in ipairs(toRemove) do
+        syncState.pendingPeers[name] = nil
+        syncState.peerManifests[name] = nil  -- clean stale manifests too
+        syncState.pendingPeersCount = syncState.pendingPeersCount - 1
+    end
+
+    -- Remove the selected peer from the queue
+    if bestName then
+        syncState.pendingPeers[bestName] = nil
+        syncState.pendingPeersCount = syncState.pendingPeersCount - 1
+    end
+
+    return bestName
 end
 
 --- Process the next peer in the pending sync queue.
 -- Called after FinishReceiving and FinishSending when the sync lock is free.
 -- Skips peers whose data has already converged (hash match).
 function GBL:ProcessPendingPeers()
-    if syncState.receiving or syncState.sending then return end
+    if syncState.receiving then return end
     if syncState.zonePaused then return end
     if not self.db.profile.sync.enabled then return end
     if not self.db.profile.sync.autoSync then return end
@@ -1731,6 +1949,15 @@ function GBL:ResetSyncState()
     syncState.lastFpsCheck = 0
     syncState.pendingPeers = {}
     syncState.pendingPeersCount = 0
+    syncState.lastForcedHelloTime = 0
+    syncState.lastHelloReplyHash = {}
+    syncState.peerManifests = {}
+    syncState.lastManifestHash = 0
+    syncState.lastManifestTime = 0
+    if syncState.manifestTimer then
+        syncState.manifestTimer:Cancel()
+        syncState.manifestTimer = nil
+    end
 end
 
 ------------------------------------------------------------------------
@@ -1867,6 +2094,10 @@ function GBL:HandleBusy(sender, data) -- luacheck: ignore 212/data
 
     -- Queue for retry regardless of whether we cleared state
     self:AddPendingPeer(cleanSender)
+    -- Deprioritize busy peers — they'll be selected after non-busy peers
+    if syncState.pendingPeers[cleanSender] then
+        syncState.pendingPeers[cleanSender].busyUntil = GetServerTime() + BUSY_COOLDOWN
+    end
 end
 
 ------------------------------------------------------------------------
@@ -1876,10 +2107,9 @@ end
 --- Resume pending sync after combat ends.
 -- Called by PLAYER_REGEN_ENABLED event.
 function GBL:OnCombatEnd()
-    if syncState.pendingPeersCount > 0
-        and not syncState.receiving and not syncState.sending then
+    if syncState.pendingPeersCount > 0 and not syncState.receiving then
         C_Timer.After(2, function()
-            if syncState.receiving or syncState.sending then return end
+            if syncState.receiving then return end
             if syncState.zonePaused then return end
             self:ProcessPendingPeers()
         end)
