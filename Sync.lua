@@ -37,6 +37,7 @@ local FORCED_HELLO_COOLDOWN = 10
 local MANIFEST_INTERVAL = 300  -- 5 minutes
 local MANIFEST_MAX_BUCKETS = 200
 local WHISPER_TRACK_EXPIRE = 30
+local MAX_RECEIVE_DURATION = 1800  -- 30 minutes absolute maximum receive time
 
 -- Expose constants for testing and UI
 GBL.SYNC_PROTOCOL_VERSION = PROTOCOL_VERSION
@@ -52,6 +53,7 @@ GBL.SYNC_KNOWN_PEER_EXPIRE_SECONDS = KNOWN_PEER_EXPIRE_SECONDS
 GBL.SYNC_INITIAL_CHUNK_TIMEOUT = INITIAL_CHUNK_TIMEOUT
 GBL.SYNC_BUSY_COOLDOWN = BUSY_COOLDOWN
 GBL.SYNC_PEER_STARVATION_SECONDS = PEER_STARVATION_SECONDS
+GBL.SYNC_MAX_RECEIVE_DURATION = MAX_RECEIVE_DURATION
 GBL.SYNC_FORCED_HELLO_COOLDOWN = FORCED_HELLO_COOLDOWN
 GBL.SYNC_MANIFEST_INTERVAL = MANIFEST_INTERVAL
 GBL.SYNC_MANIFEST_MAX_BUCKETS = MANIFEST_MAX_BUCKETS
@@ -886,25 +888,9 @@ function GBL:RequestSync(target, sinceTimestamp)
         .. ", " .. msgBytes .. " bytes)")
     self:SendMessage("GBL_SYNC_STARTED", target)
 
-    -- Request timeout — if no SYNC_DATA arrives, NACK for chunk 1 instead of aborting
-    if syncState.receiveTimer then
-        syncState.receiveTimer:Cancel()
-    end
+    -- Request timeout — NACK with backoff, then abort after MAX_NACK_RETRIES
     syncState.receiveNackCount = 0
-    syncState.receiveTimer = C_Timer.NewTicker(INITIAL_CHUNK_TIMEOUT, function()
-        if not syncState.receiving then return end
-        if syncState.receiveGot == 0 then
-            if syncState.receiveNackCount >= MAX_NACK_RETRIES then
-                self:SyncLog("Sync: no response from " .. target
-                    .. " after " .. MAX_NACK_RETRIES .. " retries — aborting")
-                self:AddAuditEntry("Request timeout — no data from "
-                    .. target .. " after " .. MAX_NACK_RETRIES .. " retries")
-                self:FinishReceiving(target)
-            else
-                self:SendNack(target, 1)
-            end
-        end
-    end, 1)
+    self:ScheduleReceiveTimeout()
 end
 
 --- Handle an incoming SYNC_REQUEST — gather and send matching transactions.
@@ -2049,6 +2035,12 @@ function GBL:ResetSyncState()
     end
 end
 
+--- Set receiveStartTime directly. Exposed for testing only.
+-- @param ts number Timestamp to set
+function GBL:SetReceiveStartTime(ts)
+    syncState.receiveStartTime = ts
+end
+
 ------------------------------------------------------------------------
 -- Receive timeout scheduling (NACK backoff)
 ------------------------------------------------------------------------
@@ -2063,6 +2055,15 @@ function GBL:ScheduleReceiveTimeout()
     local timeout = nackBackoff(syncState.receiveNackCount)
     syncState.receiveTimer = C_Timer.NewTicker(timeout, function()
         if not syncState.receiving then return end
+
+        -- Safety net: abort if receiving has been stuck for too long
+        if syncState.receiveStartTime > 0
+            and (GetServerTime() - syncState.receiveStartTime) > MAX_RECEIVE_DURATION then
+            self:AddAuditEntry("Receive timeout: stuck for >"
+                .. MAX_RECEIVE_DURATION .. "s — aborting")
+            self:FinishReceiving(syncState.receiveSource)
+            return
+        end
 
         -- Check if sender went offline (abort early instead of wasting NACKs)
         local online = self:IsGuildMemberOnline(syncState.receiveSource)
@@ -2158,11 +2159,10 @@ function GBL:HandleBusy(sender, data) -- luacheck: ignore 212/data
     local cleanSender = Ambiguate(sender, "none")
     self:AddAuditEntry("Received BUSY from " .. cleanSender)
 
-    -- Only clear receiving state if we're actually waiting for this peer
-    -- and haven't received any data yet (receiveGot == 0).
+    -- Clear receiving state if we're waiting for this peer (even with partial data).
+    -- Already-stored records are safe; next sync uses bucket hashes to avoid re-sending.
     if syncState.receiving
-        and self:StripRealm(sender) == self:StripRealm(syncState.receiveSource)
-        and syncState.receiveGot == 0 then
+        and self:StripRealm(sender) == self:StripRealm(syncState.receiveSource) then
         if syncState.receiveTimer then
             syncState.receiveTimer:Cancel()
             syncState.receiveTimer = nil

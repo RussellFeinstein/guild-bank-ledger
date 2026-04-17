@@ -5,6 +5,13 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.3] — 2026-04-17
+
+### Fixed
+- Sync receiving state no longer gets permanently stuck when a sync request goes unanswered — `RequestSync` now uses `ScheduleReceiveTimeout()` with proper NACK backoff and retry limits instead of a single-fire timer that expired after one attempt.
+- BUSY response from a peer now clears receiving state even when partial data has been received, preventing permanent sync blockage.
+- Added 30-minute safety net (`MAX_RECEIVE_DURATION`) to auto-abort any stuck receive session, providing defense-in-depth against future edge cases.
+
 ## [0.25.2] — 2026-04-16
 
 ### Fixed

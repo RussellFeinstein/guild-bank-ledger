@@ -2868,13 +2868,8 @@ describe("Sync", function()
             assert.is_true(GBL:GetSyncStatus().receiving)
             MockAce.sentCommMessages = {}
 
-            -- Fire the initial receive timeout (now uses INITIAL_CHUNK_TIMEOUT)
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == GBL.SYNC_INITIAL_CHUNK_TIMEOUT and not timer.cancelled then
-                    timer.callback()
-                    break
-                end
-            end
+            -- Fire the receive timeout (now uses ScheduleReceiveTimeout with backoff)
+            fireReceiveTimeout()
 
             -- Should have sent a NACK for chunk 1, not aborted
             assert.is_true(GBL:GetSyncStatus().receiving,
@@ -2884,6 +2879,54 @@ describe("Sync", function()
             assert.is_true(ok)
             assert.equals("NACK", data.type)
             assert.equals(1, data.chunk)
+        end)
+
+        it("RequestSync timeout retries and aborts after MAX_NACK_RETRIES", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:RequestSync("OfficerB", 0)
+            assert.is_true(GBL:GetSyncStatus().receiving)
+
+            -- Fire timeout MAX_NACK_RETRIES times (sends NACKs, stays receiving)
+            for _ = 1, GBL.SYNC_MAX_NACK_RETRIES do
+                fireReceiveTimeout()
+                assert.is_true(GBL:GetSyncStatus().receiving,
+                    "should still be receiving during NACK retries")
+            end
+
+            -- One more timeout — should abort after exhausting retries
+            fireReceiveTimeout()
+            assert.is_false(GBL:IsSyncing(),
+                "should no longer be syncing after NACK retries exhausted")
+            assert.is_false(GBL:GetSyncStatus().receiving)
+        end)
+
+        it("MAX_RECEIVE_DURATION safety net aborts stuck receive", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:RequestSync("OfficerB", 0)
+            assert.is_true(GBL:GetSyncStatus().receiving)
+
+            -- Simulate receiving having started long ago by backdating receiveStartTime
+            local status = GBL:GetSyncStatus()
+            -- Access internal state via GetSyncStatus — need to set it directly
+            -- Use a SYNC_DATA chunk to get past initial state, then backdate
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 100,
+                transactions = {}, moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            assert.is_true(GBL:GetSyncStatus().receiving)
+
+            -- Backdate receiveStartTime to exceed MAX_RECEIVE_DURATION
+            GBL:SetReceiveStartTime(
+                MockWoW.serverTime - GBL.SYNC_MAX_RECEIVE_DURATION - 1)
+
+            -- Fire timeout — should abort due to duration safety net
+            fireReceiveTimeout()
+            assert.is_false(GBL:GetSyncStatus().receiving,
+                "should abort after MAX_RECEIVE_DURATION exceeded")
         end)
     end)
 
@@ -5278,7 +5321,7 @@ describe("Sync", function()
             assert.equals("PeerA", status.receiveSource)
         end)
 
-        it("HandleBusy does not clear state after receiving data", function()
+        it("HandleBusy clears state even after receiving partial data", function()
             GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
             GBL:RequestSync("PeerA", 0)
 
@@ -5290,10 +5333,10 @@ describe("Sync", function()
                 guild = "Test Guild",
             })
 
-            -- BUSY after data received should not clear state
+            -- BUSY after partial data should clear state (data already stored)
             GBL:HandleBusy("PeerA", {})
             local status = GBL:GetSyncStatus()
-            assert.is_true(status.receiving)
+            assert.is_false(status.receiving)
         end)
 
         it("BUSY message dispatches through OnSyncMessage", function()
@@ -5893,21 +5936,20 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
 
     describe("initial chunk timeout", function()
-        it("uses shorter timeout for first chunk", function()
+        it("uses ScheduleReceiveTimeout for initial request", function()
             GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
             MockWoW.pendingTimers = {}
             GBL:RequestSync("PeerA", 0)
 
-            -- Find the ticker created for receive timeout
+            -- RequestSync now uses ScheduleReceiveTimeout (nackBackoff(0) = 20s)
             local found = false
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == GBL.SYNC_INITIAL_CHUNK_TIMEOUT and not timer.cancelled then
+                if timer.delay == 20 and not timer.cancelled then
                     found = true
                 end
             end
             assert.is_true(found,
-                "Initial receive timeout should use INITIAL_CHUNK_TIMEOUT ("
-                .. GBL.SYNC_INITIAL_CHUNK_TIMEOUT .. "s)")
+                "Initial receive timeout should use ScheduleReceiveTimeout (20s)")
         end)
 
         it("subsequent chunk timeout uses standard RECEIVE_CHUNK_TIMEOUT", function()

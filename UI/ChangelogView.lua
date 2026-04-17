@@ -29,6 +29,14 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.25.3
+    {"0.25.3", "2026-04-17", {
+        Fixed = {
+            "Sync receiving state no longer gets permanently stuck when a sync request goes unanswered — properly retries with backoff and aborts after 3 attempts",
+            "BUSY response from a peer now clears receiving state even with partial data received, preventing stuck sync",
+            "Added 30-minute safety net to auto-abort any stuck receive session",
+        },
+    }},
     -- v0.25.2
     {"0.25.2", "2026-04-16", {
         Fixed = {
