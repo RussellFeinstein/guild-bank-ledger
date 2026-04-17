@@ -36,6 +36,7 @@ local PEER_STARVATION_SECONDS = 60
 local FORCED_HELLO_COOLDOWN = 10
 local MANIFEST_INTERVAL = 300  -- 5 minutes
 local MANIFEST_MAX_BUCKETS = 200
+local WHISPER_TRACK_EXPIRE = 30
 
 -- Expose constants for testing and UI
 GBL.SYNC_PROTOCOL_VERSION = PROTOCOL_VERSION
@@ -142,6 +143,13 @@ local syncState = {
     manifestTimer = nil,
 }
 
+-- Track names we're actively whispering via sync, so the system message
+-- filter can distinguish addon-caused errors from user-caused errors.
+local recentWhisperTargets = {}  -- stripped_name → GetServerTime()
+
+-- Expose for testing
+GBL._recentWhisperTargets = recentWhisperTargets
+
 ------------------------------------------------------------------------
 -- Chat logging
 ------------------------------------------------------------------------
@@ -152,6 +160,41 @@ function GBL:SyncLog(...)
     if self.db and self.db.profile.sync.chatLog then
         self:Print(...)
     end
+end
+
+------------------------------------------------------------------------
+-- Safe whisper wrapper
+------------------------------------------------------------------------
+
+--- Expire old entries from the whisper tracking set.
+-- Entries older than WHISPER_TRACK_EXPIRE seconds are removed.
+local function cleanWhisperTargets()
+    local now = GetServerTime()
+    for name, ts in pairs(recentWhisperTargets) do
+        if now - ts > WHISPER_TRACK_EXPIRE then
+            recentWhisperTargets[name] = nil
+        end
+    end
+end
+
+--- Send a sync whisper to target, with online pre-check and tracking.
+-- Returns false if the target is confirmed offline (whisper not sent).
+-- @param prefix string AceComm prefix
+-- @param msg string Compressed message
+-- @param target string Target player name
+-- @param prio string|nil Priority ("NORMAL", "ALERT", etc.)
+-- @param callbackFn function|nil AceComm progress callback
+-- @param callbackArg any|nil Callback argument
+-- @return boolean true if whisper was sent, false if target offline
+function GBL:SendSyncWhisper(prefix, msg, target, prio, callbackFn, callbackArg)
+    local online = self:IsGuildMemberOnline(target)
+    if online == false then
+        self:AddAuditEntry("Blocked whisper to offline player: " .. target)
+        return false
+    end
+    recentWhisperTargets[self:StripRealm(target)] = GetServerTime()
+    self:SendCommMessage(prefix, msg, "WHISPER", target, prio, callbackFn, callbackArg)
+    return true
 end
 
 ------------------------------------------------------------------------
@@ -167,6 +210,36 @@ function GBL:InitSync()
     self:RegisterEvent("LOADING_SCREEN_ENABLED", "OnLoadingScreenStart")
     self:RegisterEvent("LOADING_SCREEN_DISABLED", "OnLoadingScreenEnd")
     self:RegisterEvent("PLAYER_REGEN_ENABLED", "OnCombatEnd")
+    -- Suppress "No player named 'X' is currently playing." errors caused by
+    -- sync whispers to players who went offline (roster lag race condition).
+    -- Only suppresses errors for players the addon recently whispered.
+    if ChatFrame_AddMessageEventFilter then
+        ChatFrame_AddMessageEventFilter("CHAT_MSG_SYSTEM", function(_chatFrame, _event, msg)
+            if not msg then return false end
+            local pattern = ERR_CHAT_PLAYER_NOT_FOUND_S
+                and ERR_CHAT_PLAYER_NOT_FOUND_S:gsub("%%s", "(.+)")
+            if not pattern then return false end
+            local playerName = msg:match(pattern)
+            if not playerName then return false end
+
+            cleanWhisperTargets()
+            local bare = GBL:StripRealm(playerName)
+            if not recentWhisperTargets[bare] then return false end
+            -- DO NOT remove tracking entry — AceComm CTL splits one message
+            -- into multiple whispers, each generating a separate error. Keep
+            -- suppressing for the full WHISPER_TRACK_EXPIRE window.
+
+            -- Abort sending if stuck (callback never fires on failed whisper →
+            -- sendHardTimer is the only safety net at 120s, which is too long)
+            if syncState.sending and syncState.sendTarget
+                and GBL:StripRealm(syncState.sendTarget) == bare then
+                GBL:AddAuditEntry("Target " .. syncState.sendTarget
+                    .. " confirmed offline (system error) — aborting send")
+                GBL:FinishSending()
+            end
+            return true  -- suppress the system message
+        end)
+    end
     -- Seed session peers from persisted knownPeers (cross-session discovery).
     -- Seeded peers keep their original lastSeen (stale), so they won't be
     -- targeted for sync. The roster fallback in GetSyncPeers shows them
@@ -419,7 +492,7 @@ function GBL:SendHelloReply(target)
     })
     msg = compressMessage(msg)
 
-    self:SendCommMessage(PREFIX, msg, "WHISPER", target)
+    if not self:SendSyncWhisper(PREFIX, msg, target) then return end
     self:AddAuditEntry("Sent HELLO reply to " .. target
         .. " (tx: " .. txCount .. ", hash: " .. dataHash .. ")")
 end
@@ -801,7 +874,11 @@ function GBL:RequestSync(target, sinceTimestamp)
     end
 
     local msgBytes = #msg
-    self:SendCommMessage(PREFIX, msg, "WHISPER", target)
+    if not self:SendSyncWhisper(PREFIX, msg, target) then
+        self:AddAuditEntry("Target offline — aborting sync request to " .. target)
+        self:FinishReceiving(target)
+        return
+    end
     self:SyncLog("Sync: requesting data from " .. target .. "...")
     self:AddAuditEntry("Requesting sync from " .. target
         .. " (since " .. sinceTimestamp
@@ -846,7 +923,7 @@ function GBL:HandleSyncRequest(sender, data)
             guild = self:GetGuildName(),
         })
         msg = compressMessage(msg)
-        self:SendCommMessage(PREFIX, msg, "WHISPER", sender)
+        self:SendSyncWhisper(PREFIX, msg, sender)
         self:AddAuditEntry("Sent BUSY to " .. sender)
         return
     end
@@ -958,7 +1035,7 @@ function GBL:HandleSyncRequest(sender, data)
             guild = self:GetGuildName(),
         })
         msg = compressMessage(msg)
-        self:SendCommMessage(PREFIX, msg, "WHISPER", sender)
+        self:SendSyncWhisper(PREFIX, msg, sender)
         self:AddAuditEntry("Sent empty sync to " .. sender)
         return
     end
@@ -1147,7 +1224,7 @@ function GBL:SendNextChunk()
 
     -- ACK timer deferred until message fully transmitted via AceComm callback.
     -- AceComm calls callbackFn(callbackArg, bytesSent, totalLen) per CTL piece.
-    self:SendCommMessage(PREFIX, msg, "WHISPER", syncState.sendTarget, "NORMAL",
+    if not self:SendSyncWhisper(PREFIX, msg, syncState.sendTarget, "NORMAL",
         function(_cbArg, sent, totalBytes)
             if sent < totalBytes then return end
             -- Message fully transmitted — now start ACK timer
@@ -1177,7 +1254,12 @@ function GBL:SendNextChunk()
                     self:FinishSending()
                 end
             end, 1)
-        end)
+        end) then
+        self:AddAuditEntry("Target " .. (syncState.sendTarget or "?")
+            .. " went offline — aborting send")
+        self:FinishSending()
+        return
+    end
 end
 
 --- Clean up sending state after sync completes or aborts.
@@ -1432,7 +1514,7 @@ function GBL:HandleSyncData(sender, data)
         guild = self:GetGuildName(),
     })
     ackMsg = compressMessage(ackMsg)
-    self:SendCommMessage(PREFIX, ackMsg, "WHISPER", sender, "ALERT")
+    self:SendSyncWhisper(PREFIX, ackMsg, sender, "ALERT")
 
     self:SyncLog("Sync: chunk " .. (data.chunk or "?") .. "/"
         .. (data.totalChunks or "?") .. " from " .. sender
@@ -1962,6 +2044,9 @@ function GBL:ResetSyncState()
         syncState.manifestTimer:Cancel()
         syncState.manifestTimer = nil
     end
+    for k in pairs(recentWhisperTargets) do
+        recentWhisperTargets[k] = nil
+    end
 end
 
 ------------------------------------------------------------------------
@@ -2022,7 +2107,7 @@ function GBL:SendNack(target, chunkIndex)
         guild = self:GetGuildName(),
     })
     msg = compressMessage(msg)
-    self:SendCommMessage(PREFIX, msg, "WHISPER", target, "ALERT")
+    if not self:SendSyncWhisper(PREFIX, msg, target, "ALERT") then return end
     self:SyncLog("Sync: requesting re-send of chunk " .. chunkIndex
         .. " from " .. target .. " (attempt " .. syncState.receiveNackCount
         .. "/" .. MAX_NACK_RETRIES .. ")")

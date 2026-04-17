@@ -6555,4 +6555,243 @@ describe("Sync", function()
             -- The peer manifests are cleared in DisableSync
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- SendSyncWhisper (safe whisper wrapper)
+    ---------------------------------------------------------------------------
+
+    describe("SendSyncWhisper", function()
+        it("blocks whisper to offline target", function()
+            MockWoW.guildRoster = {
+                { name = "OfflinePeer-TestRealm", isOnline = false },
+            }
+            MockAce.sentCommMessages = {}
+
+            local result = GBL:SendSyncWhisper("GBLSync", "test", "OfflinePeer")
+            assert.is_false(result)
+            assert.equals(0, #MockAce.sentCommMessages)
+        end)
+
+        it("allows whisper to online target", function()
+            MockWoW.guildRoster = {
+                { name = "OnlinePeer-TestRealm", isOnline = true },
+            }
+            MockAce.sentCommMessages = {}
+
+            local result = GBL:SendSyncWhisper("GBLSync", "test", "OnlinePeer")
+            assert.is_true(result)
+            assert.equals(1, #MockAce.sentCommMessages)
+            assert.equals("WHISPER", MockAce.sentCommMessages[1].distribution)
+            assert.equals("OnlinePeer", MockAce.sentCommMessages[1].target)
+        end)
+
+        it("allows whisper when target not in roster (unknown)", function()
+            MockWoW.guildRoster = {}
+            MockAce.sentCommMessages = {}
+
+            local result = GBL:SendSyncWhisper("GBLSync", "test", "UnknownPeer")
+            assert.is_true(result)
+            assert.equals(1, #MockAce.sentCommMessages)
+        end)
+
+        it("tracks whisper target in recentWhisperTargets", function()
+            MockWoW.guildRoster = {
+                { name = "OnlinePeer-TestRealm", isOnline = true },
+            }
+
+            GBL:SendSyncWhisper("GBLSync", "test", "OnlinePeer")
+            assert.is_not_nil(GBL._recentWhisperTargets["OnlinePeer"])
+            assert.equals(MockWoW.serverTime, GBL._recentWhisperTargets["OnlinePeer"])
+        end)
+
+        it("does not track offline target", function()
+            MockWoW.guildRoster = {
+                { name = "OfflinePeer-TestRealm", isOnline = false },
+            }
+
+            GBL:SendSyncWhisper("GBLSync", "test", "OfflinePeer")
+            assert.is_nil(GBL._recentWhisperTargets["OfflinePeer"])
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Offline abort during sync operations
+    ---------------------------------------------------------------------------
+
+    describe("offline abort", function()
+        it("SendChunk aborts send when target is offline", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Set up a sending state
+            local tx = {
+                id = "tx1", tab = 1, type = "deposit", player = "Someone",
+                timestamp = MockWoW.serverTime - 100, itemID = 12345,
+                itemName = "Test Item", count = 1,
+            }
+            table.insert(guildData.transactions, tx)
+
+            -- Simulate receiving a sync request from OnlinePeer
+            MockWoW.guildRoster = {
+                { name = "OnlinePeer-TestRealm", isOnline = true },
+            }
+            GBL:UpdatePeer("OnlinePeer", {
+                version = GBL.version, txCount = 0, dataHash = 99,
+                lastScanTime = MockWoW.serverTime,
+            })
+
+            local requestMsg = GBL:Serialize({
+                type = "SYNC_REQUEST",
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            requestMsg = GBL._compressMessage(requestMsg)
+            GBL:OnSyncMessage("GBLSync", requestMsg, "WHISPER", "OnlinePeer")
+
+            assert.is_true(GBL:IsSyncing())
+
+            -- Now mark peer as offline and trigger next chunk
+            MockWoW.guildRoster = {
+                { name = "OnlinePeer-TestRealm", isOnline = false },
+            }
+            MockAce.sentCommMessages = {}
+
+            -- Fire the ACK-triggered timer to attempt next chunk
+            -- Since the first chunk was sent while online, we need to simulate
+            -- the send completing and then the next attempt
+            GBL:SendNextChunk()
+
+            -- Should have aborted — sending state cleared
+            assert.is_false(GBL:IsSyncing())
+        end)
+
+        it("RequestSync aborts receive when target is offline", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            MockWoW.guildRoster = {
+                { name = "OfflinePeer-TestRealm", isOnline = false },
+            }
+
+            MockAce.sentCommMessages = {}
+            GBL:RequestSync("OfflinePeer", 0)
+
+            -- Should not have sent the request
+            assert.equals(0, #MockAce.sentCommMessages)
+            -- Receiving state should be cleaned up
+            assert.is_false(GBL:IsSyncing())
+        end)
+
+        it("SendNack skips send when target is offline", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            MockWoW.guildRoster = {
+                { name = "OfflinePeer-TestRealm", isOnline = false },
+            }
+
+            MockAce.sentCommMessages = {}
+            GBL:SendNack("OfflinePeer", 1)
+
+            -- No message sent
+            assert.equals(0, #MockAce.sentCommMessages)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- System message filter
+    ---------------------------------------------------------------------------
+
+    describe("system message filter", function()
+        local filter
+
+        before_each(function()
+            -- InitSync installs the filter
+            GBL:InitSync()
+            -- Find the filter function that was registered
+            local filters = MockWoW.chatMessageFilters["CHAT_MSG_SYSTEM"]
+            assert.is_not_nil(filters)
+            assert.is_true(#filters > 0)
+            filter = filters[#filters]
+        end)
+
+        it("suppresses error for tracked player", function()
+            GBL._recentWhisperTargets["SomePeer"] = MockWoW.serverTime
+
+            local suppress = filter(nil, "CHAT_MSG_SYSTEM",
+                "No player named 'SomePeer' is currently playing.")
+            assert.is_true(suppress)
+        end)
+
+        it("passes error for untracked player", function()
+            -- recentWhisperTargets is empty after ResetSyncState
+            local suppress = filter(nil, "CHAT_MSG_SYSTEM",
+                "No player named 'SomePeer' is currently playing.")
+            assert.is_false(suppress)
+        end)
+
+        it("passes non-matching system messages", function()
+            GBL._recentWhisperTargets["SomePeer"] = MockWoW.serverTime
+
+            local suppress = filter(nil, "CHAT_MSG_SYSTEM",
+                "You are not in a guild.")
+            assert.is_false(suppress)
+        end)
+
+        it("aborts in-progress send for confirmed-offline target", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Add a transaction so sync has data to send
+            local tx = {
+                id = "tx1", tab = 1, type = "deposit", player = "Someone",
+                timestamp = MockWoW.serverTime - 100, itemID = 12345,
+                itemName = "Test Item", count = 1,
+            }
+            table.insert(guildData.transactions, tx)
+
+            -- Peer is online when sync request arrives
+            MockWoW.guildRoster = {
+                { name = "OnlinePeer-TestRealm", isOnline = true },
+            }
+            GBL:UpdatePeer("OnlinePeer", {
+                version = GBL.version, txCount = 0, dataHash = 99,
+                lastScanTime = MockWoW.serverTime,
+            })
+
+            -- Simulate receiving a sync request to start sending
+            local requestMsg = GBL:Serialize({
+                type = "SYNC_REQUEST",
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            requestMsg = GBL._compressMessage(requestMsg)
+            GBL:OnSyncMessage("GBLSync", requestMsg, "WHISPER", "OnlinePeer")
+
+            assert.is_true(GBL:IsSyncing())
+
+            -- Track the peer (simulates what SendSyncWhisper does)
+            GBL._recentWhisperTargets["OnlinePeer"] = MockWoW.serverTime
+
+            -- Fire the filter as if WoW reported the peer offline
+            filter(nil, "CHAT_MSG_SYSTEM",
+                "No player named 'OnlinePeer' is currently playing.")
+
+            -- Sending should be aborted
+            assert.is_false(GBL:IsSyncing())
+        end)
+
+        it("keeps tracking entry after suppression (CTL multi-piece)", function()
+            GBL._recentWhisperTargets["SomePeer"] = MockWoW.serverTime
+
+            -- First suppression
+            filter(nil, "CHAT_MSG_SYSTEM",
+                "No player named 'SomePeer' is currently playing.")
+            -- Entry should still be present for subsequent CTL pieces
+            assert.is_not_nil(GBL._recentWhisperTargets["SomePeer"])
+
+            -- Second suppression should also work
+            local suppress = filter(nil, "CHAT_MSG_SYSTEM",
+                "No player named 'SomePeer' is currently playing.")
+            assert.is_true(suppress)
+        end)
+    end)
 end)

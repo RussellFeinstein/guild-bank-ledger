@@ -30,6 +30,7 @@ read_globals = {
 
     -- WoW constants and tables
     "Enum",
+    "ERR_CHAT_PLAYER_NOT_FOUND_S",
     "MAX_GUILDBANK_SLOTS_PER_TAB",
     "MAX_GUILDBANK_TABS",
     "NORMAL_FONT_COLOR",
@@ -37,6 +38,7 @@ read_globals = {
     "SOUNDKIT",
 
     -- WoW UI
+    "ChatFrame_AddMessageEventFilter",
     "GameTooltip",
     "UIParent",
     "UISpecialFrames",

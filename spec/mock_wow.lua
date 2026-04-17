@@ -80,6 +80,7 @@ function MockWoW.reset()
     MockWoW.frames = {}
     MockWoW.cvars = {}
     MockWoW.framerate = 60
+    MockWoW.chatMessageFilters = {}
 end
 
 ---------------------------------------------------------------------------
@@ -116,6 +117,13 @@ function MockWoW.install()
     -- Constants
     _G.MAX_GUILDBANK_SLOTS_PER_TAB = 98
     _G.MAX_GUILDBANK_TABS = 8
+    _G.ERR_CHAT_PLAYER_NOT_FOUND_S = "No player named '%s' is currently playing."
+
+    -- Chat frame message filter mock
+    _G.ChatFrame_AddMessageEventFilter = function(event, func)
+        MockWoW.chatMessageFilters[event] = MockWoW.chatMessageFilters[event] or {}
+        table.insert(MockWoW.chatMessageFilters[event], func)
+    end
 
     -- Print capture
     _G.print = function(...)

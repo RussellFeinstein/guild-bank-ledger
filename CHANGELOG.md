@@ -5,6 +5,12 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.2] — 2026-04-16
+
+### Fixed
+- Sync whispers to offline players no longer generate "No player named" system errors in chat — online status is checked before every whisper, and any errors from roster-lag race conditions are suppressed.
+- In-progress sync aborts cleanly when the target peer goes offline instead of hanging for up to 120 seconds.
+
 ## [0.25.1] — 2026-04-16
 
 ### Fixed

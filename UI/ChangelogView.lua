@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.25.2
+    {"0.25.2", "2026-04-16", {
+        Fixed = {
+            "Sync whispers to offline players no longer generate \"No player named\" system errors in chat",
+            "In-progress sync aborts cleanly when target peer goes offline instead of hanging",
+        },
+    }},
     -- v0.25.1
     {"0.25.1", "2026-04-16", {
         Fixed = {
