@@ -389,7 +389,7 @@ describe("Sync", function()
                 "should request sync when hash differs, even with equal counts")
         end)
 
-        it("triggers sync when hash differs and local has more", function()
+        it("skips request when hash differs but local has more (superset skip)", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
             -- Add 10 local transactions
@@ -400,7 +400,7 @@ describe("Sync", function()
                 })
             end
 
-            -- Remote has fewer but different data
+            -- Remote has fewer records and different hash
             local localHash = GBL:GetDataHash(guildData)
             GBL:HandleHello("OfficerB", {
                 version = GBL.version,
@@ -411,16 +411,23 @@ describe("Sync", function()
             })
             fireJitterTimers()
 
-            -- Should request sync — remote has records we don't
-            local foundRequest = false
+            -- Should NOT request sync — local is likely a superset
             for _, msg in ipairs(MockAce.sentCommMessages) do
                 local ok, data = GBL:Deserialize(msg.text)
-                if ok and data.type == "SYNC_REQUEST" then
-                    foundRequest = true
+                if ok then
+                    assert.not_equals("SYNC_REQUEST", data.type,
+                        "should skip sync request when local has more records (superset skip)")
                 end
             end
-            assert.is_true(foundRequest,
-                "should request sync when hash differs, even when local has more")
+
+            -- Audit trail should explain why
+            local found = false
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message and entry.message:find("likely superset") then
+                    found = true
+                end
+            end
+            assert.is_true(found, "audit trail should contain 'likely superset' entry")
         end)
 
         it("skips sync when hash matches and counts match", function()
@@ -5747,6 +5754,49 @@ describe("Sync", function()
             -- Should be receiving from PeerB (pending queue), not PeerA
             assert.is_true(GBL:GetSyncStatus().receiving)
             assert.equals("PeerB", GBL:GetSyncStatus().receiveSource)
+        end)
+
+        it("skips request when local has more than peer (superset skip)", function()
+            -- Add several local transactions so local count > peer count
+            for i = 1, 10 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "P1", tab = 1, itemID = 100 + i,
+                    classID = 0, subclassID = 0, count = 1,
+                    timestamp = 1000 * 3600 + i, id = "bidir_ss" .. i .. ":277:0",
+                    _occurrence = 0, scanTime = 1000 * 3600 + i, scannedBy = "OfficerA",
+                })
+                guildData.seenTxHashes["bidir_ss" .. i .. ":277:0"] = 1000 * 3600 + i
+            end
+
+            -- Peer has fewer records and a different hash
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 3, dataHash = 999 })
+
+            -- Queue a pending peer to verify ProcessPendingPeers is called
+            GBL:UpdatePeer("PeerB", { version = GBL.version, txCount = 50, dataHash = 888 })
+            GBL:AddPendingPeer("PeerB")
+
+            -- Enter and finish sending to PeerA
+            GBL:HandleSyncRequest("PeerA", {
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            GBL:FinishSending()
+
+            -- Fire the 0.5s bidirectional check timer
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if t.delay == 0.5 and not t.cancelled then
+                    t.callback()
+                    break
+                end
+            end
+
+            -- Should NOT be receiving from PeerA (superset skip)
+            -- Instead should have moved to PeerB from pending queue
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            assert.equals("PeerB", GBL:GetSyncStatus().receiveSource,
+                "should process pending queue instead of requesting from peer with fewer records")
         end)
     end)
 

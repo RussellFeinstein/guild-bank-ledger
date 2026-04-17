@@ -692,7 +692,15 @@ function GBL:HandleHello(sender, data)
     local shouldSync = false
     local syncReason
     if localDataHash and data.dataHash ~= localDataHash then
-        -- Hashes differ — we have records they don't, or vice versa
+        if localCount > remoteCount then
+            -- We have strictly more records — likely a superset.
+            -- Peer will request from us; bidirectional check handles edge cases.
+            self:AddAuditEntry("Skipped request from " .. sender
+                .. " — likely superset (local=" .. localCount
+                .. " > remote=" .. remoteCount .. ")")
+            return
+        end
+        -- Hashes differ and peer has equal or more records — request sync
         shouldSync = true
         syncReason = "hash mismatch"
     elseif not data.dataHash and remoteCount > localCount then
@@ -1301,12 +1309,19 @@ function GBL:FinishSending()
             local localHash = self:GetDataHash(gd)
             local localCount = #gd.transactions + #gd.moneyTransactions
 
+            local remoteTxCount = peerInfo.txCount or 0
             if peerInfo.dataHash ~= localHash
-                or (peerInfo.txCount or 0) ~= localCount then
-                self:AddAuditEntry("Bidirectional check: hashes still differ with "
-                    .. cleanTarget .. " — requesting sync")
-                local since = gd.syncState.lastSyncTimestamp or 0
-                self:RequestSync(cleanTarget, since)
+                or remoteTxCount ~= localCount then
+                if localCount > remoteTxCount then
+                    self:AddAuditEntry("Bidirectional check: skipped — likely superset (local="
+                        .. localCount .. " > remote=" .. remoteTxCount .. ")")
+                    self:ProcessPendingPeers()
+                else
+                    self:AddAuditEntry("Bidirectional check: hashes still differ with "
+                        .. cleanTarget .. " — requesting sync")
+                    local since = gd.syncState.lastSyncTimestamp or 0
+                    self:RequestSync(cleanTarget, since)
+                end
             else
                 self:AddAuditEntry("Bidirectional check: hashes match with "
                     .. cleanTarget .. " — no sync needed")

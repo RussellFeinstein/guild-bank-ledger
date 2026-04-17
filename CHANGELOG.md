@@ -5,6 +5,12 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.4] — 2026-04-17
+
+### Fixed
+- Sync no longer requests data from peers with fewer records — avoids receiving 100% duplicate chunks that waste bandwidth and slow down the outbound sync that actually matters.
+- Bidirectional check after sending now skips reverse-requesting from peers with fewer records, deferring to the peer's post-sync HELLO for convergence.
+
 ## [0.25.3] — 2026-04-17
 
 ### Fixed

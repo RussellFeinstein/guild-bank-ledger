@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.25.4
+    {"0.25.4", "2026-04-17", {
+        Fixed = {
+            "Sync no longer requests data from peers with fewer records — avoids receiving duplicate chunks that waste bandwidth",
+            "Bidirectional check after sending skips reverse-requesting from peers with fewer records",
+        },
+    }},
     -- v0.25.3
     {"0.25.3", "2026-04-17", {
         Fixed = {
