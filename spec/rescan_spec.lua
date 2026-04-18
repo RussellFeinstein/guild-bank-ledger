@@ -279,6 +279,88 @@ describe("Periodic Rescan", function()
         end)
     end)
 
+    describe("sync-stored records", function()
+        it("are not double-stored by next rescan when caches are invalidated", function()
+            MockWoW.guildBank.numTabs = 1
+            local link = Helpers.makeItemLink(12345, "Flask", 1)
+            Helpers.setItemInfo(12345, 0, 5)
+
+            -- Initial scan: API has event A
+            Helpers.addTabTransactions(1, {
+                Helpers.makeTransaction("withdraw", "Raider1", link, 5, 1, nil, 0),
+            })
+            local guildData = GBL:GetGuildData()
+            GBL:ReadAllTransactions(guildData)
+            local countAfterInitial = #guildData.transactions
+
+            -- Simulate sync: store event B directly (not from API)
+            local syncRecord = GBL:CreateTxRecord(
+                "deposit", "Officer1", link, 10, 1, nil,
+                0, 0, 0, 1  -- 1 hour ago
+            )
+            GBL:StoreTx(syncRecord, guildData)
+            local countAfterSync = #guildData.transactions
+            assert.equals(countAfterInitial + 1, countAfterSync)
+
+            -- Invalidate caches (what HandleSyncData now does)
+            GBL._lastTabBatchCounts = nil
+
+            -- API catches up: now returns both events A and B
+            Helpers.addTabTransactions(1, {
+                Helpers.makeTransaction("withdraw", "Raider1", link, 5, 1, nil, 0),
+                Helpers.makeTransaction("deposit", "Officer1", link, 10, 1, nil, 1),
+            })
+
+            -- Rescan — with invalidated caches, uses BuildStoredRecordIndex
+            local result
+            GBL:RescanTransactionLogs(function(count) result = count end)
+            MockWoW.fireTimers()
+
+            assert.equals(0, result)
+            assert.equals(countAfterSync, #guildData.transactions)
+        end)
+
+        it("without cache invalidation, rescan creates duplicates", function()
+            MockWoW.guildBank.numTabs = 1
+            local link = Helpers.makeItemLink(12345, "Flask", 1)
+            Helpers.setItemInfo(12345, 0, 5)
+
+            -- Initial scan: API has event A
+            Helpers.addTabTransactions(1, {
+                Helpers.makeTransaction("withdraw", "Raider1", link, 5, 1, nil, 0),
+            })
+            local guildData = GBL:GetGuildData()
+            GBL:ReadAllTransactions(guildData)
+            local countAfterInitial = #guildData.transactions
+
+            -- Simulate sync: store event B directly
+            local syncRecord = GBL:CreateTxRecord(
+                "deposit", "Officer1", link, 10, 1, nil,
+                0, 0, 0, 1  -- 1 hour ago
+            )
+            GBL:StoreTx(syncRecord, guildData)
+            local countAfterSync = #guildData.transactions
+            assert.equals(countAfterInitial + 1, countAfterSync)
+
+            -- Do NOT invalidate caches (pre-fix behavior)
+
+            -- API catches up: now returns both events A and B
+            Helpers.addTabTransactions(1, {
+                Helpers.makeTransaction("withdraw", "Raider1", link, 5, 1, nil, 0),
+                Helpers.makeTransaction("deposit", "Officer1", link, 10, 1, nil, 1),
+            })
+
+            -- Rescan — stale caches cause double-store
+            local result
+            GBL:RescanTransactionLogs(function(count) result = count end)
+            MockWoW.fireTimers()
+
+            -- Pre-fix: rescan sees event B as "new" because prevCounts doesn't know about it
+            assert.equals(1, result)
+            assert.equals(countAfterSync + 1, #guildData.transactions)
+        end)
+    end)
+
     describe("lifecycle integration", function()
         it("OnBankClosed stops periodic rescan", function()
             GBL:OnEnable()

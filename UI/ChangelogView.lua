@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.25.5
+    {"0.25.5", "2026-04-17", {
+        Fixed = {
+            "Periodic rescan no longer double-stores records that arrived via sync — session caches are invalidated after each sync chunk",
+        },
+    }},
     -- v0.25.4
     {"0.25.4", "2026-04-17", {
         Fixed = {

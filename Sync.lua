@@ -1489,6 +1489,12 @@ function GBL:HandleSyncData(sender, data)
     syncState.receiveNormalized = (syncState.receiveNormalized or 0) + normalized
 
     local stored = itemStored + moneyStored
+    -- Invalidate rescan session caches so the next periodic rescan uses
+    -- BuildStoredRecordIndex (ground truth) instead of stale batch counts.
+    if stored > 0 then
+        self._lastTabBatchCounts = nil
+        self._lastMoneyBatchCounts = nil
+    end
     local duped = itemDuped + moneyDuped
     syncState.receiveGot = syncState.receiveGot + 1
     syncState.receiveStored = syncState.receiveStored + stored
