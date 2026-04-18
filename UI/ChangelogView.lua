@@ -29,6 +29,15 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.26.0
+    {"0.26.0", "2026-04-17", {
+        Added = {
+            "Sync aborts immediately when entering combat and notifies partner via BUSY — no more 95-second NACK timeout stalls during M+ or raid",
+            "Separate 2-second combat cooldown prevents sync from resuming during rapid trash-pack combat cycling",
+            "HandleBusy now also aborts sending when the send target reports busy",
+            "Sync status UI shows \"Paused (combat)\" when combat pause is active",
+        },
+    }},
     -- v0.25.5
     {"0.25.5", "2026-04-17", {
         Fixed = {

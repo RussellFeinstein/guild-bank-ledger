@@ -5,6 +5,14 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.0] — 2026-04-17
+
+### Added
+- Sync aborts immediately when entering combat (M+, raid) and notifies the partner via BUSY — previously the sync stalled through ~95 seconds of NACK timeout cycles.
+- Separate 2-second combat cooldown prevents sync from resuming during rapid trash-pack combat cycling.
+- HandleBusy now also aborts sending when the send target reports busy — previously only aborted receiving.
+- Sync status UI shows "Paused (combat)" when combat pause is active.
+
 ## [0.25.5] — 2026-04-17
 
 ### Fixed

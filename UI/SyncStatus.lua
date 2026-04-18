@@ -25,6 +25,9 @@ function GBL:FormatSyncStatusText(status)
         table.insert(parts, "Receiving from " .. (status.receiveSource or "?")
             .. " (" .. progress .. ")")
     end
+    if status.combatPaused then
+        table.insert(parts, "Paused (combat)")
+    end
     return (#parts > 0) and table.concat(parts, " | ") or "Idle"
 end
 

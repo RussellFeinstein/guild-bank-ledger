@@ -5643,6 +5643,307 @@ describe("Sync", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Combat protection (proactive abort)
+    ---------------------------------------------------------------------------
+
+    describe("combat protection", function()
+        -- Helper: enter sending state via HandleSyncRequest
+        local function enterSendingState()
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P1", tab = 1, itemID = 123,
+                classID = 0, subclassID = 0, count = 1,
+                timestamp = 1000 * 3600, id = "combat:277:0", _occurrence = 0,
+                scanTime = 1000 * 3600, scannedBy = "Me",
+            })
+            guildData.seenTxHashes["combat:277:0"] = 1000 * 3600
+            GBL:HandleSyncRequest("PeerA", {
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            assert.is_true(GBL:GetSyncStatus().sending)
+        end
+
+        -- Helper: enter receiving state via RequestSync
+        local function enterReceivingState()
+            GBL:RequestSync("PeerB", 0)
+            assert.is_true(GBL:GetSyncStatus().receiving)
+        end
+
+        it("OnCombatStart aborts active send and sends BUSY to partner", function()
+            enterSendingState()
+            MockAce.sentCommMessages = {}
+
+            GBL:OnCombatStart()
+
+            assert.is_false(GBL:GetSyncStatus().sending)
+            assert.is_true(GBL:GetSyncStatus().combatPaused)
+
+            -- Should have sent BUSY to PeerA
+            local busyFound = false
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                if msg.target == "PeerA" then
+                    local ok, data = GBL:Deserialize(msg.text)
+                    if ok and data.type == "BUSY" then
+                        busyFound = true
+                    end
+                end
+            end
+            assert.is_true(busyFound, "BUSY should be sent to send target")
+        end)
+
+        it("OnCombatStart aborts active receive and sends BUSY to partner", function()
+            enterReceivingState()
+            MockAce.sentCommMessages = {}
+
+            GBL:OnCombatStart()
+
+            assert.is_false(GBL:GetSyncStatus().receiving)
+            assert.is_true(GBL:GetSyncStatus().combatPaused)
+
+            -- Should have sent BUSY to PeerB
+            local busyFound = false
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                if msg.target == "PeerB" then
+                    local ok, data = GBL:Deserialize(msg.text)
+                    if ok and data.type == "BUSY" then
+                        busyFound = true
+                    end
+                end
+            end
+            assert.is_true(busyFound, "BUSY should be sent to receive source")
+        end)
+
+        it("OnCombatStart aborts concurrent send+receive and sends BUSY to both", function()
+            enterSendingState()
+            enterReceivingState()
+            MockAce.sentCommMessages = {}
+
+            GBL:OnCombatStart()
+
+            assert.is_false(GBL:GetSyncStatus().sending)
+            assert.is_false(GBL:GetSyncStatus().receiving)
+            assert.is_true(GBL:GetSyncStatus().combatPaused)
+
+            -- Should have sent BUSY to both PeerA and PeerB
+            local targets = {}
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "BUSY" then
+                    targets[msg.target] = true
+                end
+            end
+            assert.is_true(targets["PeerA"], "BUSY should be sent to send target")
+            assert.is_true(targets["PeerB"], "BUSY should be sent to receive source")
+        end)
+
+        it("OnCombatStart is no-op when idle", function()
+            assert.is_false(GBL:GetSyncStatus().sending)
+            assert.is_false(GBL:GetSyncStatus().receiving)
+
+            GBL:OnCombatStart()
+
+            -- combatPaused should NOT be set when idle
+            assert.is_false(GBL:GetSyncStatus().combatPaused)
+        end)
+
+        it("OnCombatStart cancels all sync timers", function()
+            enterSendingState()
+            enterReceivingState()
+
+            -- Verify timers exist (sending uses inter-chunk timer, receiving uses timeout)
+            local timersBefore = #MockWoW.pendingTimers
+
+            GBL:OnCombatStart()
+
+            -- All pending timers should be cancelled
+            local uncancelled = 0
+            for _, t in ipairs(MockWoW.pendingTimers) do
+                if not t.cancelled then
+                    uncancelled = uncancelled + 1
+                end
+            end
+            -- Only uncancelled timers should be the ones created by OnCombatStart itself
+            -- (FinishSending/FinishReceiving may schedule new timers, but with combat guards)
+            assert.is_false(GBL:GetSyncStatus().sending)
+            assert.is_false(GBL:GetSyncStatus().receiving)
+        end)
+
+        it("OnCombatEnd clears combatPaused after cooldown", function()
+            enterSendingState()
+            GBL:OnCombatStart()
+            assert.is_true(GBL:GetSyncStatus().combatPaused)
+
+            GBL:OnCombatEnd()
+
+            -- Still paused (cooldown hasn't fired yet)
+            assert.is_true(GBL:GetSyncStatus().combatPaused)
+
+            -- Fire the cooldown ticker
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if t.delay == GBL.SYNC_COMBAT_COOLDOWN and not t.cancelled then
+                    t.callback()
+                    break
+                end
+            end
+
+            assert.is_false(GBL:GetSyncStatus().combatPaused)
+        end)
+
+        it("OnCombatEnd processes pending peers after cooldown", function()
+            enterSendingState()
+            GBL:UpdatePeer("PeerQ", { version = GBL.version, txCount = 20, dataHash = 888 })
+            GBL:AddPendingPeer("PeerQ")
+
+            GBL:OnCombatStart()
+            GBL:OnCombatEnd()
+
+            -- Fire cooldown
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if t.delay == GBL.SYNC_COMBAT_COOLDOWN and not t.cancelled then
+                    t.callback()
+                    break
+                end
+            end
+
+            -- After cooldown, should attempt to process pending peers
+            -- ProcessPendingPeers sends SYNC_REQUEST
+            local requestSent = false
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                if msg.target == "PeerQ" then
+                    local ok, data = GBL:Deserialize(msg.text)
+                    if ok and data.type == "SYNC_REQUEST" then
+                        requestSent = true
+                    end
+                end
+            end
+            assert.is_true(requestSent, "pending peer should be processed after combat cooldown")
+        end)
+
+        it("rapid combat in/out cancels stale cooldown timer", function()
+            enterSendingState()
+            GBL:OnCombatStart()
+
+            -- Exit combat — starts cooldown
+            GBL:OnCombatEnd()
+            local firstCooldownFound = false
+            for _, t in ipairs(MockWoW.pendingTimers) do
+                if t.delay == GBL.SYNC_COMBAT_COOLDOWN and not t.cancelled then
+                    firstCooldownFound = true
+                end
+            end
+            assert.is_true(firstCooldownFound)
+
+            -- Re-enter combat before cooldown fires (new sync starts in between)
+            GBL:ResetSyncState()
+            GBL.db.profile.sync.enabled = true
+            GBL.db.profile.sync.autoSync = true
+            guildData = GBL:GetGuildData()
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P2", tab = 1, itemID = 456,
+                classID = 0, subclassID = 0, count = 1,
+                timestamp = 2000 * 3600, id = "combat2:277:0", _occurrence = 0,
+                scanTime = 2000 * 3600, scannedBy = "Me",
+            })
+            guildData.seenTxHashes["combat2:277:0"] = 2000 * 3600
+            GBL:HandleSyncRequest("PeerC", {
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            GBL:OnCombatStart()
+
+            -- First cooldown timer should be cancelled
+            local uncancelledCooldowns = 0
+            for _, t in ipairs(MockWoW.pendingTimers) do
+                if t.delay == GBL.SYNC_COMBAT_COOLDOWN and not t.cancelled then
+                    uncancelledCooldowns = uncancelledCooldowns + 1
+                end
+            end
+            -- Should be 0 — OnCombatStart cancels any prior cooldown
+            assert.equals(0, uncancelledCooldowns)
+            assert.is_true(GBL:GetSyncStatus().combatPaused)
+        end)
+
+        it("combat + zone overlap: clearing combat alone does not unpause", function()
+            enterSendingState()
+            -- Zone pause first (while still sending)
+            GBL:OnLoadingScreenStart()
+            assert.is_true(GBL:GetSyncStatus().zonePaused)
+
+            -- Then combat starts (aborts sync, sets combatPaused)
+            GBL:OnCombatStart()
+            assert.is_true(GBL:GetSyncStatus().combatPaused)
+            assert.is_true(GBL:GetSyncStatus().zonePaused)
+
+            -- Clear combat via cooldown
+            GBL:OnCombatEnd()
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if t.delay == GBL.SYNC_COMBAT_COOLDOWN and not t.cancelled then
+                    t.callback()
+                    break
+                end
+            end
+
+            -- combatPaused cleared but zonePaused still set
+            assert.is_false(GBL:GetSyncStatus().combatPaused)
+            assert.is_true(GBL:GetSyncStatus().zonePaused)
+        end)
+
+        it("HandleBusy aborts sending when from send target", function()
+            enterSendingState()
+            assert.is_true(GBL:GetSyncStatus().sending)
+            assert.equals("PeerA", GBL:GetSyncStatus().sendTarget)
+
+            GBL:HandleBusy("PeerA", {})
+
+            assert.is_false(GBL:GetSyncStatus().sending)
+        end)
+
+        it("HandleBusy does NOT abort sending when from different peer", function()
+            enterSendingState()
+            assert.is_true(GBL:GetSyncStatus().sending)
+
+            GBL:HandleBusy("PeerZ", {})
+
+            -- Still sending to PeerA
+            assert.is_true(GBL:GetSyncStatus().sending)
+            assert.equals("PeerA", GBL:GetSyncStatus().sendTarget)
+        end)
+
+        it("OnLoadingScreenEnd defers resume when combatPaused", function()
+            enterSendingState()
+            -- Zone pause first (while still sending)
+            GBL:OnLoadingScreenStart()
+            assert.is_true(GBL:GetSyncStatus().zonePaused)
+
+            -- Then combat starts (aborts sync, sets combatPaused)
+            GBL:OnCombatStart()
+            assert.is_true(GBL:GetSyncStatus().combatPaused)
+
+            -- Now end loading screen
+            GBL:OnLoadingScreenEnd()
+
+            -- Fire zone cooldown timer
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if t.delay == 5 and not t.cancelled then  -- ZONE_COOLDOWN = 5
+                    t.callback()
+                    break
+                end
+            end
+
+            -- zonePaused should be cleared
+            assert.is_false(GBL:GetSyncStatus().zonePaused)
+            -- but combatPaused should still be true
+            assert.is_true(GBL:GetSyncStatus().combatPaused)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Bidirectional sync after FinishSending
     ---------------------------------------------------------------------------
 

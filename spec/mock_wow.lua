@@ -32,6 +32,9 @@ MockWoW.player = { name = "TestOfficer", realm = "TestRealm" }
 -- Mock group state
 MockWoW.inRaid = false
 
+-- Mock combat state
+MockWoW.inCombat = false
+
 -- Mock item info (itemID -> {classID, subclassID})
 MockWoW.itemInfo = {}
 
@@ -291,8 +294,9 @@ function MockWoW.install()
     end
 
     -- Combat state
-    _G.InCombatLockdown = function() return false end
-    _G.UnitAffectingCombat = function() return false end
+    MockWoW.inCombat = false
+    _G.InCombatLockdown = function() return MockWoW.inCombat end
+    _G.UnitAffectingCombat = function() return MockWoW.inCombat end
 
     -- Bank close (hookable)
     _G.C_PlayerInteractionManager = {

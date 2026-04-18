@@ -18,6 +18,7 @@ local MAX_NACK_RETRIES = 3
 local HELLO_COOLDOWN = 60
 local WHISPER_SAFE_BYTES = 2000
 local ZONE_COOLDOWN = 5
+local COMBAT_COOLDOWN = 2
 local INTER_CHUNK_DELAY_NORMAL = 0.1
 local INTER_CHUNK_DELAY_SLOW = 0.5
 local FPS_THRESHOLD_LOW = 20
@@ -57,6 +58,7 @@ GBL.SYNC_MAX_RECEIVE_DURATION = MAX_RECEIVE_DURATION
 GBL.SYNC_FORCED_HELLO_COOLDOWN = FORCED_HELLO_COOLDOWN
 GBL.SYNC_MANIFEST_INTERVAL = MANIFEST_INTERVAL
 GBL.SYNC_MANIFEST_MAX_BUCKETS = MANIFEST_MAX_BUCKETS
+GBL.SYNC_COMBAT_COOLDOWN = COMBAT_COOLDOWN
 
 ------------------------------------------------------------------------
 -- Compression (LibDeflate)
@@ -125,6 +127,10 @@ local syncState = {
     zonePaused = false,
     zoneCooldownTimer = nil,
 
+    -- Combat protection
+    combatPaused = false,
+    combatCooldownTimer = nil,
+
     -- FPS-adaptive throttling
     currentDelay = INTER_CHUNK_DELAY_NORMAL,
     fpsFrame = nil,
@@ -144,6 +150,12 @@ local syncState = {
     lastManifestTime = 0,
     manifestTimer = nil,
 }
+
+--- Check if sync is paused due to zone change or combat.
+-- @return boolean true if either pause flag is active
+local function isSyncPaused()
+    return syncState.zonePaused or syncState.combatPaused
+end
 
 -- Track names we're actively whispering via sync, so the system message
 -- filter can distinguish addon-caused errors from user-caused errors.
@@ -212,6 +224,7 @@ function GBL:InitSync()
     self:RegisterEvent("LOADING_SCREEN_ENABLED", "OnLoadingScreenStart")
     self:RegisterEvent("LOADING_SCREEN_DISABLED", "OnLoadingScreenEnd")
     self:RegisterEvent("PLAYER_REGEN_ENABLED", "OnCombatEnd")
+    self:RegisterEvent("PLAYER_REGEN_DISABLED", "OnCombatStart")
     -- Suppress "No player named 'X' is currently playing." errors caused by
     -- sync whispers to players who went offline (roster lag race condition).
     -- Only suppresses errors for players the addon recently whispered.
@@ -277,6 +290,7 @@ function GBL:EnableSync()
     self:RegisterEvent("LOADING_SCREEN_ENABLED", "OnLoadingScreenStart")
     self:RegisterEvent("LOADING_SCREEN_DISABLED", "OnLoadingScreenEnd")
     self:RegisterEvent("PLAYER_REGEN_ENABLED", "OnCombatEnd")
+    self:RegisterEvent("PLAYER_REGEN_DISABLED", "OnCombatStart")
     self:StartHelloHeartbeat()
     self:BroadcastHello()
     -- Start manifest broadcast heartbeat
@@ -321,6 +335,11 @@ function GBL:DisableSync()
     if syncState.zoneCooldownTimer then
         syncState.zoneCooldownTimer:Cancel()
         syncState.zoneCooldownTimer = nil
+    end
+    syncState.combatPaused = false
+    if syncState.combatCooldownTimer then
+        syncState.combatCooldownTimer:Cancel()
+        syncState.combatCooldownTimer = nil
     end
     if syncState.helloHeartbeat then
         syncState.helloHeartbeat:Cancel()
@@ -1143,9 +1162,9 @@ end
 function GBL:SendNextChunk()
     if not syncState.sending then return end
 
-    -- Zone change protection — defer until loading screen ends
-    if syncState.zonePaused then
-        self:AddAuditEntry("SendNextChunk deferred — zone transition in progress")
+    -- Zone/combat protection — defer until safe
+    if isSyncPaused() then
+        self:AddAuditEntry("SendNextChunk deferred — zone/combat transition in progress")
         return
     end
 
@@ -1293,7 +1312,7 @@ function GBL:FinishSending()
     if self.db.profile.sync.autoSync then
         C_Timer.After(0.5, function()
             if syncState.receiving then return end
-            if syncState.zonePaused then return end
+            if isSyncPaused() then return end
             if not self.db.profile.sync.enabled then return end
             if InCombatLockdown and InCombatLockdown() then return end
 
@@ -1665,7 +1684,7 @@ function GBL:FinishReceiving(sender)
     if syncState.pendingPeersCount > 0 and self.db.profile.sync.autoSync then
         C_Timer.After(0.2, function()
             if syncState.receiving then return end
-            if syncState.zonePaused then return end
+            if isSyncPaused() then return end
             if InCombatLockdown and InCombatLockdown() then return end
             self:ProcessPendingPeers()
         end)
@@ -1845,7 +1864,7 @@ end
 -- Skips peers whose data has already converged (hash match).
 function GBL:ProcessPendingPeers()
     if syncState.receiving then return end
-    if syncState.zonePaused then return end
+    if isSyncPaused() then return end
     if not self.db.profile.sync.enabled then return end
     if not self.db.profile.sync.autoSync then return end
 
@@ -1925,6 +1944,7 @@ function GBL:GetSyncStatus()
         sendProgress = syncState.sendChunkIndex .. "/" .. #syncState.sendChunks,
         receiveProgress = syncState.receiveGot .. "/" .. syncState.receiveExpected,
         zonePaused = syncState.zonePaused,
+        combatPaused = syncState.combatPaused,
         pendingPeersCount = syncState.pendingPeersCount,
         receiveNackCount = syncState.receiveNackCount,
     }
@@ -2037,6 +2057,11 @@ function GBL:ResetSyncState()
     end
     syncState.zonePaused = false
     syncState.zoneCooldownTimer = nil
+    syncState.combatPaused = false
+    if syncState.combatCooldownTimer then
+        syncState.combatCooldownTimer:Cancel()
+    end
+    syncState.combatCooldownTimer = nil
     syncState.currentDelay = INTER_CHUNK_DELAY_NORMAL
     syncState.fpsFrame = nil
     syncState.lastFpsCheck = 0
@@ -2202,6 +2227,31 @@ function GBL:HandleBusy(sender, data) -- luacheck: ignore 212/data
         self:SyncLog("Sync: " .. cleanSender .. " is busy — will retry later")
     end
 
+    -- Also abort sending if BUSY came from our send target
+    -- (partner entered combat or became busy while we were sending to them)
+    if syncState.sending
+        and self:StripRealm(sender) == self:StripRealm(syncState.sendTarget) then
+        if syncState.sendTimer then
+            syncState.sendTimer:Cancel()
+            syncState.sendTimer = nil
+        end
+        if syncState.sendHardTimer then
+            syncState.sendHardTimer:Cancel()
+            syncState.sendHardTimer = nil
+        end
+        syncState.sending = false
+        syncState.sendTarget = nil
+        syncState.sendChunks = {}
+        syncState.sendChunkIndex = 0
+        syncState.sendRetryCount = 0
+        syncState.sendStartTime = 0
+        syncState.sendTotalRecords = 0
+        syncState.sendEventCountBatches = nil
+        self:StopFpsMonitor()
+
+        self:SyncLog("Sync: " .. cleanSender .. " is busy — aborting send")
+    end
+
     -- Queue for retry regardless of whether we cleared state
     self:AddPendingPeer(cleanSender)
     -- Deprioritize busy peers — they'll be selected after non-busy peers
@@ -2214,13 +2264,92 @@ end
 -- Combat protection
 ------------------------------------------------------------------------
 
+--- Abort sync immediately when combat starts.
+-- Sends BUSY to partner, aborts in-progress sync, and sets combatPaused.
+-- No-op if not actively sending or receiving.
+-- Called by PLAYER_REGEN_DISABLED event.
+function GBL:OnCombatStart()
+    if not syncState.sending and not syncState.receiving then return end
+
+    syncState.combatPaused = true
+
+    -- Cancel any pending combat cooldown from a prior rapid combat cycle
+    if syncState.combatCooldownTimer then
+        syncState.combatCooldownTimer:Cancel()
+        syncState.combatCooldownTimer = nil
+    end
+
+    self:AddAuditEntry("Combat started — aborting sync")
+
+    -- Capture partner names BEFORE calling Finish (which clears them)
+    local sendTarget = syncState.sendTarget
+    local receiveSource = syncState.receiveSource
+
+    -- Cancel all sync timers to prevent false timeouts during combat
+    if syncState.sendTimer then
+        syncState.sendTimer:Cancel()
+        syncState.sendTimer = nil
+    end
+    if syncState.sendHardTimer then
+        syncState.sendHardTimer:Cancel()
+        syncState.sendHardTimer = nil
+    end
+    if syncState.receiveTimer then
+        syncState.receiveTimer:Cancel()
+        syncState.receiveTimer = nil
+    end
+
+    -- Abort active sync
+    if syncState.sending then
+        self:FinishSending()
+    end
+    if syncState.receiving then
+        self:FinishReceiving(receiveSource or "?")
+    end
+
+    -- Notify partners via BUSY so they abort immediately
+    local busyMsg = self:Serialize({
+        type = "BUSY",
+        protocolVersion = PROTOCOL_VERSION,
+        guild = self:GetGuildName(),
+    })
+    busyMsg = compressMessage(busyMsg)
+
+    if sendTarget then
+        self:SendSyncWhisper(PREFIX, busyMsg, sendTarget, "ALERT")
+        self:AddAuditEntry("Sent BUSY to send target: " .. sendTarget)
+    end
+    if receiveSource and receiveSource ~= sendTarget then
+        self:SendSyncWhisper(PREFIX, busyMsg, receiveSource, "ALERT")
+        self:AddAuditEntry("Sent BUSY to receive source: " .. receiveSource)
+    end
+end
+
 --- Resume pending sync after combat ends.
 -- Called by PLAYER_REGEN_ENABLED event.
 function GBL:OnCombatEnd()
+    if syncState.combatPaused then
+        -- Cancel any prior cooldown timer (rapid combat in/out)
+        if syncState.combatCooldownTimer then
+            syncState.combatCooldownTimer:Cancel()
+        end
+        syncState.combatCooldownTimer = C_Timer.NewTicker(COMBAT_COOLDOWN, function()
+            syncState.combatPaused = false
+            syncState.combatCooldownTimer = nil
+            self:AddAuditEntry("Combat cooldown complete — sync resumed")
+            if syncState.pendingPeersCount > 0 and not syncState.receiving
+                and not isSyncPaused() and self.db.profile.sync.autoSync then
+                self:ProcessPendingPeers()
+            end
+        end, 1)
+        return
+    end
+
+    -- Legacy path: pending peers without combat pause (e.g., deferred from HandleHello)
     if syncState.pendingPeersCount > 0 and not syncState.receiving then
         C_Timer.After(2, function()
             if syncState.receiving then return end
-            if syncState.zonePaused then return end
+            if isSyncPaused() then return end
             self:ProcessPendingPeers()
         end)
     end
@@ -2270,6 +2399,13 @@ function GBL:OnLoadingScreenEnd()
     syncState.zoneCooldownTimer = C_Timer.NewTicker(ZONE_COOLDOWN, function()
         syncState.zonePaused = false
         syncState.zoneCooldownTimer = nil
+
+        -- Don't resume if still in combat (zone change during combat scenario)
+        if syncState.combatPaused then
+            self:AddAuditEntry("Zone cooldown complete but still in combat — deferring")
+            return
+        end
+
         self:AddAuditEntry("Zone cooldown complete — sync resumed")
 
         -- Resume sending if we were the sender
