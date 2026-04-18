@@ -89,7 +89,7 @@ luacheck .
 
 If you find GuildBankLedger useful, consider supporting development:
 
-- [Ko-fi](https://ko-fi.com/RexxyBear)
+- [Ko-fi](https://ko-fi.com/rexxybear)
 - [GitHub Sponsors](https://github.com/sponsors/RussellFeinstein)
 
 ## License
