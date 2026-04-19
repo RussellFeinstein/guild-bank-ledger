@@ -7,6 +7,19 @@ local ADDON_NAME = "GuildBankLedger"
 local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 
 ------------------------------------------------------------------------
+-- Timestamp validation
+------------------------------------------------------------------------
+
+local MIN_VALID_TIMESTAMP = 1072915200  -- 2004-01-01, before WoW launch
+
+--- Check whether a timestamp is plausible (post-2004, before WoW existed).
+-- @param ts any Value to check
+-- @return boolean True if ts is a valid WoW-era timestamp
+function GBL:IsValidTimestamp(ts)
+    return type(ts) == "number" and ts >= MIN_VALID_TIMESTAMP
+end
+
+------------------------------------------------------------------------
 -- Hash computation
 ------------------------------------------------------------------------
 
@@ -32,7 +45,7 @@ end
 -- @param record table Transaction record
 -- @return string Hash key, number Time slot
 function GBL:ComputeTxHash(record)
-    local timeSlot = math.floor((record.timestamp or 0) / 3600)
+    local timeSlot = math.floor((record.timestamp or GetServerTime()) / 3600)
     local prefix = buildPrefix(record)
     return prefix .. timeSlot, timeSlot
 end
@@ -73,7 +86,7 @@ function GBL:IsDuplicate(record, guildData)
     local _, timeSlot = self:ComputeTxHash(record)
     local prefix = buildPrefix(record)
     local occ = record._occurrence or 0
-    local incomingTs = record.timestamp or 0
+    local incomingTs = record.timestamp or GetServerTime()
 
     for slot = timeSlot - 1, timeSlot + 1 do
         local key = prefix .. slot .. ":" .. occ
@@ -102,7 +115,7 @@ end
 -- @param guildData table Guild data table
 function GBL:MarkSeen(hash, timestamp, guildData)
     if not guildData or not hash then return end
-    guildData.seenTxHashes[hash] = timestamp or 0
+    guildData.seenTxHashes[hash] = GBL:IsValidTimestamp(timestamp) and timestamp or GetServerTime()
 end
 
 ------------------------------------------------------------------------
@@ -196,7 +209,7 @@ function GBL:BuildStoredRecordIndex(guildData, storageKey)
     local index = {}
     for _, record in ipairs(guildData[storageKey] or {}) do
         local prefix = buildPrefix(record)
-        local slot = math.floor((record.timestamp or 0) / 3600)
+        local slot = math.floor((record.timestamp or GetServerTime()) / 3600)
         if not index[prefix] then index[prefix] = {} end
         index[prefix][slot] = (index[prefix][slot] or 0) + 1
     end

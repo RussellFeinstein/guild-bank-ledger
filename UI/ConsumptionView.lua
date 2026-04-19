@@ -432,7 +432,7 @@ function GBL:BuildGuildItemSummary(transactions, categoryFilter)
                 end
                 local item = byItem[itemID]
                 local count = tx.count or 0
-                local ts = tx.timestamp or 0
+                local ts = tx.timestamp or GetServerTime()
 
                 item.usedAll = item.usedAll + count
                 if ts >= cutoff30d then

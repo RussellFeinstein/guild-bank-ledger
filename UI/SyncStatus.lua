@@ -97,6 +97,15 @@ function GBL:BuildSyncTab(container)
     end)
     controlRow:AddChild(helloBtn)
 
+    -- Open Sync Log button
+    local logBtn = AceGUI:Create("Button")
+    logBtn:SetText("Open Sync Log")
+    logBtn:SetWidth(140)
+    logBtn:SetCallback("OnClick", function()
+        self:ShowSyncLog()
+    end)
+    controlRow:AddChild(logBtn)
+
     -- GM-only access control section
     if self:IsGuildMaster() then
         self:BuildAccessControlRow(container)

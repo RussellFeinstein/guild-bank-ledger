@@ -162,6 +162,10 @@ function GBL:StoreTx(record, guildData)
     if not record.type or record.type == "" then return false end
     if not record.player or record.player == "" then return false end
 
+    if not self:IsValidTimestamp(record.timestamp) then
+        record.timestamp = GetServerTime()
+    end
+
     if self:IsDuplicate(record, guildData) then
         return false
     end
@@ -180,6 +184,10 @@ function GBL:StoreMoneyTx(record, guildData)
     if not guildData then return false end
     if not record.type or record.type == "" then return false end
     if not record.player or record.player == "" then return false end
+
+    if not self:IsValidTimestamp(record.timestamp) then
+        record.timestamp = GetServerTime()
+    end
 
     if self:IsDuplicate(record, guildData) then
         return false

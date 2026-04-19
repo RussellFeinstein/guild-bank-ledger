@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.26.0"
+local VERSION = "0.27.0"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -72,7 +72,7 @@ local defaults = {
                     configuredBy = nil,
                     configuredAt = 0,
                 },
-                schemaVersion = 7,
+                schemaVersion = 8,
             },
         },
     },
@@ -231,7 +231,7 @@ function GBL:MigrateOccurrenceScheme(guildData)
     local newHashes = {}
     for _, record in ipairs(allRecords) do
         if record.id then
-            newHashes[record.id] = record.timestamp or 0
+            newHashes[record.id] = self:IsValidTimestamp(record.timestamp) and record.timestamp or GetServerTime()
         end
     end
 
@@ -468,7 +468,7 @@ function GBL:MigrateSchemaV2ToV3(guildData)
     end
     for _, record in ipairs(newAllRecords) do
         if record.id then
-            guildData.seenTxHashes[record.id] = record.timestamp or 0
+            guildData.seenTxHashes[record.id] = self:IsValidTimestamp(record.timestamp) and record.timestamp or GetServerTime()
         end
     end
 
@@ -596,7 +596,7 @@ function GBL:MigrateOccurrenceToPerSlot(guildData)
     end
     for _, record in ipairs(allRecords) do
         if record.id then
-            guildData.seenTxHashes[record.id] = record.timestamp or 0
+            guildData.seenTxHashes[record.id] = self:IsValidTimestamp(record.timestamp) and record.timestamp or GetServerTime()
         end
     end
 
@@ -747,7 +747,7 @@ function GBL:MigrateDeduplicateRecords(guildData)
         end
         for _, record in ipairs(allRecords) do
             if record.id then
-                guildData.seenTxHashes[record.id] = record.timestamp or 0
+                guildData.seenTxHashes[record.id] = self:IsValidTimestamp(record.timestamp) and record.timestamp or GetServerTime()
             end
         end
 
@@ -946,7 +946,7 @@ function GBL:MigrateCrossSlotDedup(guildData)
         end
         for _, record in ipairs(allRecords) do
             if record.id then
-                guildData.seenTxHashes[record.id] = record.timestamp or 0
+                guildData.seenTxHashes[record.id] = self:IsValidTimestamp(record.timestamp) and record.timestamp or GetServerTime()
             end
         end
 
@@ -994,6 +994,82 @@ function GBL:MigrateAccessControl(guildData)
     guildData.schemaVersion = 7
 end
 
+--- Repair records with epoch-0 timestamps (schema 7 → 8).
+-- Scans all transactions for invalid timestamps, attempts recovery from
+-- the timeSlot encoded in the record ID, then falls back to GetServerTime().
+-- Also cleans up compacted summaries attributed to 1970-01-01.
+function GBL:MigrateRepairEpochTimestamps(guildData)
+    if not guildData or (guildData.schemaVersion or 0) >= 8 then return end
+
+    local repaired = 0
+    local function repairRecords(records)
+        for _, record in ipairs(records or {}) do
+            if not self:IsValidTimestamp(record.timestamp) then
+                -- Try to recover from ID timeSlot
+                local recovered = false
+                if record.id then
+                    local timeSlot = record.id:match("|(%d+):%d+$")
+                    if timeSlot then
+                        local ts = tonumber(timeSlot) * 3600
+                        if self:IsValidTimestamp(ts) then
+                            record.timestamp = ts
+                            recovered = true
+                        end
+                    end
+                end
+                if not recovered then
+                    record.timestamp = GetServerTime()
+                end
+                -- Rebuild ID with corrected timestamp
+                local baseHash = self:ComputeTxHash(record)
+                local occ = record._occurrence or 0
+                record.id = baseHash .. ":" .. occ
+                repaired = repaired + 1
+            end
+        end
+    end
+
+    repairRecords(guildData.transactions)
+    repairRecords(guildData.moneyTransactions)
+
+    -- Clean up compacted data attributed to epoch-0 dates
+    if guildData.dailySummaries then
+        guildData.dailySummaries["1970-01-01"] = nil
+    end
+    if guildData.weeklySummaries then
+        for key in pairs(guildData.weeklySummaries) do
+            if key:find("^1970%-") then
+                guildData.weeklySummaries[key] = nil
+            end
+        end
+    end
+
+    -- Rebuild seenTxHashes from corrected records
+    if repaired > 0 then
+        local newHashes = {}
+        for _, record in ipairs(guildData.transactions or {}) do
+            if record.id then
+                newHashes[record.id] = self:IsValidTimestamp(record.timestamp)
+                    and record.timestamp or GetServerTime()
+            end
+        end
+        for _, record in ipairs(guildData.moneyTransactions or {}) do
+            if record.id then
+                newHashes[record.id] = self:IsValidTimestamp(record.timestamp)
+                    and record.timestamp or GetServerTime()
+            end
+        end
+        for k in pairs(guildData.seenTxHashes) do
+            guildData.seenTxHashes[k] = nil
+        end
+        for k, v in pairs(newHashes) do
+            guildData.seenTxHashes[k] = v
+        end
+    end
+
+    guildData.schemaVersion = 8
+end
+
 --- Run migration for all guild data namespaces.
 function GBL:MigrateAllGuilds()
     if not self.db or not self.db.global or not self.db.global.guilds then return end
@@ -1004,6 +1080,7 @@ function GBL:MigrateAllGuilds()
         self:MigrateDeduplicateRecords(guildData)
         self:MigrateCrossSlotDedup(guildData)
         self:MigrateAccessControl(guildData)
+        self:MigrateRepairEpochTimestamps(guildData)
     end
 end
 
@@ -1071,7 +1148,7 @@ function GBL:RepairPlayerNames()
     end
     for _, record in ipairs(allRecords) do
         if record.id then
-            guildData.seenTxHashes[record.id] = record.timestamp or 0
+            guildData.seenTxHashes[record.id] = self:IsValidTimestamp(record.timestamp) and record.timestamp or GetServerTime()
         end
     end
 
@@ -1599,7 +1676,7 @@ function GBL:CleanupWithEventCounts(guildData)
                         -- Find max eventCount across all relevant baseHashes (±1 slot)
                         local slotsChecked = {}
                         for _, rec in ipairs(cluster) do
-                            local slot = math.floor((rec.timestamp or 0) / 3600)
+                            local slot = math.floor((rec.timestamp or GetServerTime()) / 3600)
                             slotsChecked[slot] = true
                         end
 
@@ -1678,7 +1755,7 @@ function GBL:CleanupWithEventCounts(guildData)
         end
         for _, record in ipairs(allRecords) do
             if record.id then
-                guildData.seenTxHashes[record.id] = record.timestamp or 0
+                guildData.seenTxHashes[record.id] = self:IsValidTimestamp(record.timestamp) and record.timestamp or GetServerTime()
             end
         end
 

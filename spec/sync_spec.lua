@@ -858,116 +858,116 @@ describe("Sync", function()
             -- Local record stored with hour-101 ID
             local localTx = {
                 type = "deposit", player = "Thrall", itemID = 12345,
-                count = 5, tab = 1, timestamp = 3600 * 101,
-                id = "deposit|Thrall|12345|5|1|101:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475101,
+                id = "deposit|Thrall|12345|5|1|475101:0", _occurrence = 0,
             }
             table.insert(guildData.transactions, localTx)
-            guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"] = 3600 * 101
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|475101:0"] = 3600 * 475101
 
-            local idIndex = { ["deposit|Thrall|12345|5|1|101:0"] = localTx }
+            local idIndex = { ["deposit|Thrall|12345|5|1|475101:0"] = localTx }
 
             -- Incoming record with hour-100 ID (sender's ID adopted regardless)
             local incoming = {
                 type = "deposit", player = "Thrall", itemID = 12345,
-                count = 5, tab = 1, timestamp = 3600 * 100,
-                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475100,
+                id = "deposit|Thrall|12345|5|1|475100:0", _occurrence = 0,
             }
 
-            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|101:0", guildData, idIndex)
+            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|475101:0", guildData, idIndex)
             assert.is_true(result)
-            assert.equals("deposit|Thrall|12345|5|1|100:0", localTx.id)
-            assert.is_not_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|100:0"])
-            assert.is_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"])
+            assert.equals("deposit|Thrall|12345|5|1|475100:0", localTx.id)
+            assert.is_not_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|475100:0"])
+            assert.is_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|475101:0"])
         end)
 
         it("adopts sender ID even when local ID is smaller", function()
             -- Local has smaller ID (hour-100), but sender-wins still adopts incoming
             local localTx = {
                 type = "deposit", player = "Thrall", itemID = 12345,
-                count = 5, tab = 1, timestamp = 3600 * 100,
-                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475100,
+                id = "deposit|Thrall|12345|5|1|475100:0", _occurrence = 0,
             }
             table.insert(guildData.transactions, localTx)
-            guildData.seenTxHashes["deposit|Thrall|12345|5|1|100:0"] = 3600 * 100
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|475100:0"] = 3600 * 475100
 
-            local idIndex = { ["deposit|Thrall|12345|5|1|100:0"] = localTx }
+            local idIndex = { ["deposit|Thrall|12345|5|1|475100:0"] = localTx }
 
             -- Incoming with hour-101 (larger, but sender-wins)
             local incoming = {
                 type = "deposit", player = "Thrall", itemID = 12345,
-                count = 5, tab = 1, timestamp = 3600 * 101,
-                id = "deposit|Thrall|12345|5|1|101:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475101,
+                id = "deposit|Thrall|12345|5|1|475101:0", _occurrence = 0,
             }
 
-            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|100:0", guildData, idIndex)
+            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|475100:0", guildData, idIndex)
             assert.is_true(result)
-            assert.equals("deposit|Thrall|12345|5|1|101:0", localTx.id)
-            assert.equals(3600 * 101, localTx.timestamp)
+            assert.equals("deposit|Thrall|12345|5|1|475101:0", localTx.id)
+            assert.equals(3600 * 475101, localTx.timestamp)
         end)
 
         it("handles money transactions and normalizes timestamp", function()
             local localTx = {
                 type = "repair", player = "Thrall", amount = 50000,
-                timestamp = 3600 * 101,
-                id = "repair|Thrall|50000|101:0", _occurrence = 0,
+                timestamp = 3600 * 475101,
+                id = "repair|Thrall|50000|475101:0", _occurrence = 0,
             }
             table.insert(guildData.moneyTransactions, localTx)
-            guildData.seenTxHashes["repair|Thrall|50000|101:0"] = 3600 * 101
+            guildData.seenTxHashes["repair|Thrall|50000|475101:0"] = 3600 * 475101
 
-            local idIndex = { ["repair|Thrall|50000|101:0"] = localTx }
+            local idIndex = { ["repair|Thrall|50000|475101:0"] = localTx }
 
             local incoming = {
                 type = "repair", player = "Thrall", amount = 50000,
-                timestamp = 3600 * 100,
-                id = "repair|Thrall|50000|100:0", _occurrence = 0,
+                timestamp = 3600 * 475100,
+                id = "repair|Thrall|50000|475100:0", _occurrence = 0,
             }
 
-            local result = GBL:NormalizeRecordId(incoming, "repair|Thrall|50000|101:0", guildData, idIndex)
+            local result = GBL:NormalizeRecordId(incoming, "repair|Thrall|50000|475101:0", guildData, idIndex)
             assert.is_true(result)
-            assert.equals("repair|Thrall|50000|100:0", localTx.id)
-            assert.equals(3600 * 100, localTx.timestamp)
+            assert.equals("repair|Thrall|50000|475100:0", localTx.id)
+            assert.equals(3600 * 475100, localTx.timestamp)
         end)
 
         it("handles compacted record (not in transactions)", function()
             -- seenTxHashes has an entry but no corresponding record in transactions
-            guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"] = 3600 * 101
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|475101:0"] = 3600 * 475101
 
             local idIndex = {}  -- empty, record was compacted
 
             local incoming = {
                 type = "deposit", player = "Thrall", itemID = 12345,
-                count = 5, tab = 1, timestamp = 3600 * 100,
-                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475100,
+                id = "deposit|Thrall|12345|5|1|475100:0", _occurrence = 0,
             }
 
-            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|101:0", guildData, idIndex)
+            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|475101:0", guildData, idIndex)
             assert.is_true(result)
             -- seenTxHashes updated even though record not found
-            assert.is_not_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|100:0"])
-            assert.is_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"])
+            assert.is_not_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|475100:0"])
+            assert.is_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|475101:0"])
         end)
 
         it("updates idIndex after normalization", function()
             local localTx = {
                 type = "deposit", player = "Thrall", itemID = 12345,
-                count = 5, tab = 1, timestamp = 3600 * 101,
-                id = "deposit|Thrall|12345|5|1|101:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475101,
+                id = "deposit|Thrall|12345|5|1|475101:0", _occurrence = 0,
             }
             table.insert(guildData.transactions, localTx)
-            guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"] = 3600 * 101
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|475101:0"] = 3600 * 475101
 
-            local idIndex = { ["deposit|Thrall|12345|5|1|101:0"] = localTx }
+            local idIndex = { ["deposit|Thrall|12345|5|1|475101:0"] = localTx }
 
             local incoming = {
                 type = "deposit", player = "Thrall", itemID = 12345,
-                count = 5, tab = 1, timestamp = 3600 * 100,
-                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475100,
+                id = "deposit|Thrall|12345|5|1|475100:0", _occurrence = 0,
             }
 
-            GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|101:0", guildData, idIndex)
+            GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|475101:0", guildData, idIndex)
 
             -- Caller should update idIndex; verify the record reference is still valid
-            assert.equals("deposit|Thrall|12345|5|1|100:0", localTx.id)
+            assert.equals("deposit|Thrall|12345|5|1|475100:0", localTx.id)
         end)
     end)
 
@@ -983,11 +983,11 @@ describe("Sync", function()
             local localTx = {
                 type = "deposit", player = "Thrall-TestRealm", itemID = 12345,
                 classID = 0, subclassID = 5,
-                count = 5, tab = 1, timestamp = 3600 * 101 + 1800,
-                id = "deposit|Thrall-TestRealm|12345|5|1|101:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475101 + 1800,
+                id = "deposit|Thrall-TestRealm|12345|5|1|475101:0", _occurrence = 0,
             }
             table.insert(guildData.transactions, localTx)
-            guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|101:0"] = 3600 * 101 + 1800
+            guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|475101:0"] = 3600 * 475101 + 1800
 
             -- Receive same event with hour-100 ID (smaller, will win tiebreaker)
             GBL:HandleSyncData("OfficerB", {
@@ -998,8 +998,8 @@ describe("Sync", function()
                         type = "deposit", player = "Thrall",
                         itemID = 12345, classID = 0, subclassID = 5,
                         count = 5, tab = 1,
-                        timestamp = 3600 * 100 + 2400,
-                        id = "deposit|Thrall-TestRealm|12345|5|1|100:0",
+                        timestamp = 3600 * 475100 + 2400,
+                        id = "deposit|Thrall-TestRealm|12345|5|1|475100:0",
                         _occurrence = 0,
                     },
                 },
@@ -1007,11 +1007,11 @@ describe("Sync", function()
             })
 
             -- Local record should be normalized to the sender's ID
-            assert.equals("deposit|Thrall-TestRealm|12345|5|1|100:0", localTx.id)
+            assert.equals("deposit|Thrall-TestRealm|12345|5|1|475100:0", localTx.id)
             -- No new record stored (it was a duplicate)
             assert.equals(1, #guildData.transactions)
             -- seenTxHashes updated
-            assert.is_not_nil(guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|100:0"])
+            assert.is_not_nil(guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|475100:0"])
         end)
 
         it("stores new records normally alongside normalizations", function()
@@ -1021,11 +1021,11 @@ describe("Sync", function()
             local localTx = {
                 type = "deposit", player = "Thrall-TestRealm", itemID = 12345,
                 classID = 0, subclassID = 5,
-                count = 5, tab = 1, timestamp = 3600 * 101 + 1800,
-                id = "deposit|Thrall-TestRealm|12345|5|1|101:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475101 + 1800,
+                id = "deposit|Thrall-TestRealm|12345|5|1|475101:0", _occurrence = 0,
             }
             table.insert(guildData.transactions, localTx)
-            guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|101:0"] = 3600 * 101 + 1800
+            guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|475101:0"] = 3600 * 475101 + 1800
 
             -- Receive: one fuzzy dup (normalize) + one genuinely new record
             GBL:HandleSyncData("OfficerB", {
@@ -1036,8 +1036,8 @@ describe("Sync", function()
                         type = "deposit", player = "Thrall",
                         itemID = 12345, classID = 0, subclassID = 5,
                         count = 5, tab = 1,
-                        timestamp = 3600 * 100 + 2400,
-                        id = "deposit|Thrall-TestRealm|12345|5|1|100:0",
+                        timestamp = 3600 * 475100 + 2400,
+                        id = "deposit|Thrall-TestRealm|12345|5|1|475100:0",
                         _occurrence = 0,
                     },
                     {
@@ -1054,7 +1054,7 @@ describe("Sync", function()
 
             -- 1 original (normalized) + 1 new = 2 total
             assert.equals(2, #guildData.transactions)
-            assert.equals("deposit|Thrall-TestRealm|12345|5|1|100:0", localTx.id)
+            assert.equals("deposit|Thrall-TestRealm|12345|5|1|475100:0", localTx.id)
         end)
 
         it("hash converges after normalization", function()
@@ -1064,14 +1064,14 @@ describe("Sync", function()
             local localTx = {
                 type = "deposit", player = "Thrall-TestRealm", itemID = 12345,
                 classID = 0, subclassID = 5,
-                count = 5, tab = 1, timestamp = 3600 * 101 + 1800,
-                id = "deposit|Thrall-TestRealm|12345|5|1|101:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475101 + 1800,
+                id = "deposit|Thrall-TestRealm|12345|5|1|475101:0", _occurrence = 0,
             }
             table.insert(guildData.transactions, localTx)
-            guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|101:0"] = 3600 * 101 + 1800
+            guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|475101:0"] = 3600 * 475101 + 1800
 
             -- Compute sender's hash (with hour-100 ID)
-            local senderHash = GBL:HashString("deposit|Thrall-TestRealm|12345|5|1|100:0")
+            local senderHash = GBL:HashString("deposit|Thrall-TestRealm|12345|5|1|475100:0")
 
             -- Receive with hour-100 ID
             GBL:HandleSyncData("OfficerB", {
@@ -1082,8 +1082,8 @@ describe("Sync", function()
                         type = "deposit", player = "Thrall",
                         itemID = 12345, classID = 0, subclassID = 5,
                         count = 5, tab = 1,
-                        timestamp = 3600 * 100 + 2400,
-                        id = "deposit|Thrall-TestRealm|12345|5|1|100:0",
+                        timestamp = 3600 * 475100 + 2400,
+                        id = "deposit|Thrall-TestRealm|12345|5|1|475100:0",
                         _occurrence = 0,
                     },
                 },
@@ -3709,106 +3709,107 @@ describe("Sync", function()
         it("returns false when incoming id is nil", function()
             local localTx = {
                 type = "deposit", player = "Thrall", itemID = 12345,
-                count = 5, tab = 1, timestamp = 3600 * 101,
-                id = "deposit|Thrall|12345|5|1|101:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475101,
+                id = "deposit|Thrall|12345|5|1|475101:0", _occurrence = 0,
             }
             table.insert(guildData.transactions, localTx)
-            guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"] = 3600 * 101
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|475101:0"] = 3600 * 475101
 
-            local idIndex = { ["deposit|Thrall|12345|5|1|101:0"] = localTx }
+            local idIndex = { ["deposit|Thrall|12345|5|1|475101:0"] = localTx }
 
             local incoming = {
                 type = "deposit", player = "Thrall", itemID = 12345,
-                count = 5, tab = 1, timestamp = 3600 * 100,
+                count = 5, tab = 1, timestamp = 3600 * 475100,
                 id = nil, _occurrence = 0,
             }
 
-            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|101:0", guildData, idIndex)
+            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|475101:0", guildData, idIndex)
             assert.is_false(result)
             -- Local record unchanged
-            assert.equals("deposit|Thrall|12345|5|1|101:0", localTx.id)
-            assert.is_not_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"])
+            assert.equals("deposit|Thrall|12345|5|1|475101:0", localTx.id)
+            assert.is_not_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|475101:0"])
         end)
 
         it("returns false when incoming id equals matched key", function()
             local localTx = {
                 type = "deposit", player = "Thrall", itemID = 12345,
-                count = 5, tab = 1, timestamp = 3600 * 100,
-                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475100,
+                id = "deposit|Thrall|12345|5|1|475100:0", _occurrence = 0,
             }
             table.insert(guildData.transactions, localTx)
-            guildData.seenTxHashes["deposit|Thrall|12345|5|1|100:0"] = 3600 * 100
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|475100:0"] = 3600 * 475100
 
-            local idIndex = { ["deposit|Thrall|12345|5|1|100:0"] = localTx }
+            local idIndex = { ["deposit|Thrall|12345|5|1|475100:0"] = localTx }
 
             local incoming = {
                 type = "deposit", player = "Thrall", itemID = 12345,
-                count = 5, tab = 1, timestamp = 3600 * 100,
-                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475100,
+                id = "deposit|Thrall|12345|5|1|475100:0", _occurrence = 0,
             }
 
-            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|100:0", guildData, idIndex)
+            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|475100:0", guildData, idIndex)
             assert.is_false(result)
             -- Nothing changed
-            assert.equals(3600 * 100, localTx.timestamp)
+            assert.equals(3600 * 475100, localTx.timestamp)
         end)
 
-        it("sets timestamp to 0 when incoming timestamp is nil", function()
+        it("uses GetServerTime when incoming timestamp is nil", function()
             local localTx = {
                 type = "deposit", player = "Thrall", itemID = 12345,
-                count = 5, tab = 1, timestamp = 3600 * 101,
-                id = "deposit|Thrall|12345|5|1|101:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475101,
+                id = "deposit|Thrall|12345|5|1|475101:0", _occurrence = 0,
             }
             table.insert(guildData.transactions, localTx)
-            guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"] = 3600 * 101
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|475101:0"] = 3600 * 475101
 
-            local idIndex = { ["deposit|Thrall|12345|5|1|101:0"] = localTx }
+            local idIndex = { ["deposit|Thrall|12345|5|1|475101:0"] = localTx }
 
             local incoming = {
                 type = "deposit", player = "Thrall", itemID = 12345,
                 count = 5, tab = 1, timestamp = nil,
-                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+                id = "deposit|Thrall|12345|5|1|475100:0", _occurrence = 0,
             }
 
-            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|101:0", guildData, idIndex)
+            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|475101:0", guildData, idIndex)
             assert.is_true(result)
-            assert.equals(0, localTx.timestamp)
-            assert.equals(0, guildData.seenTxHashes["deposit|Thrall|12345|5|1|100:0"])
+            -- nil timestamp now falls back to GetServerTime() instead of 0
+            assert.equals(Helpers.MockWoW.serverTime, localTx.timestamp)
+            assert.equals(Helpers.MockWoW.serverTime, guildData.seenTxHashes["deposit|Thrall|12345|5|1|475100:0"])
         end)
 
         it("updates seenTxHashes even when idIndex is nil", function()
-            guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"] = 3600 * 101
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|475101:0"] = 3600 * 475101
 
             local incoming = {
                 type = "deposit", player = "Thrall", itemID = 12345,
-                count = 5, tab = 1, timestamp = 3600 * 100,
-                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475100,
+                id = "deposit|Thrall|12345|5|1|475100:0", _occurrence = 0,
             }
 
-            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|101:0", guildData, nil)
+            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|475101:0", guildData, nil)
             assert.is_true(result)
-            assert.is_not_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|100:0"])
-            assert.is_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"])
+            assert.is_not_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|475100:0"])
+            assert.is_nil(guildData.seenTxHashes["deposit|Thrall|12345|5|1|475101:0"])
         end)
 
         it("normalizes record with matching _occurrence=0", function()
             local localTx = {
                 type = "deposit", player = "Thrall", itemID = 12345,
-                count = 5, tab = 1, timestamp = 3600 * 101,
-                id = "deposit|Thrall|12345|5|1|101:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475101,
+                id = "deposit|Thrall|12345|5|1|475101:0", _occurrence = 0,
             }
             table.insert(guildData.transactions, localTx)
-            guildData.seenTxHashes["deposit|Thrall|12345|5|1|101:0"] = 3600 * 101
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|475101:0"] = 3600 * 475101
 
-            local idIndex = { ["deposit|Thrall|12345|5|1|101:0"] = localTx }
+            local idIndex = { ["deposit|Thrall|12345|5|1|475101:0"] = localTx }
 
             local incoming = {
                 type = "deposit", player = "Thrall", itemID = 12345,
-                count = 5, tab = 1, timestamp = 3600 * 100,
-                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475100,
+                id = "deposit|Thrall|12345|5|1|475100:0", _occurrence = 0,
             }
 
-            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|101:0", guildData, idIndex)
+            local result = GBL:NormalizeRecordId(incoming, "deposit|Thrall|12345|5|1|475101:0", guildData, idIndex)
             assert.is_true(result)
             assert.equals(0, localTx._occurrence)
         end)
@@ -3820,9 +3821,9 @@ describe("Sync", function()
 
     describe("seenTxHashes atomic update", function()
         it("seenTxHashes has only new key after normalization (old key removed)", function()
-            local oldKey = "deposit|Thrall|12345|5|1|101:0"
-            local newKey = "deposit|Thrall|12345|5|1|100:0"
-            guildData.seenTxHashes[oldKey] = 3600 * 101
+            local oldKey = "deposit|Thrall|12345|5|1|475101:0"
+            local newKey = "deposit|Thrall|12345|5|1|475100:0"
+            guildData.seenTxHashes[oldKey] = 3600 * 475101
 
             -- Count keys before
             local countBefore = 0
@@ -3831,7 +3832,7 @@ describe("Sync", function()
 
             local localTx = {
                 type = "deposit", player = "Thrall", itemID = 12345,
-                count = 5, tab = 1, timestamp = 3600 * 101,
+                count = 5, tab = 1, timestamp = 3600 * 475101,
                 id = oldKey, _occurrence = 0,
             }
             table.insert(guildData.transactions, localTx)
@@ -3839,7 +3840,7 @@ describe("Sync", function()
 
             local incoming = {
                 type = "deposit", player = "Thrall", itemID = 12345,
-                count = 5, tab = 1, timestamp = 3600 * 100,
+                count = 5, tab = 1, timestamp = 3600 * 475100,
                 id = newKey, _occurrence = 0,
             }
 
@@ -3850,7 +3851,7 @@ describe("Sync", function()
             for _ in pairs(guildData.seenTxHashes) do countAfter = countAfter + 1 end
             assert.equals(1, countAfter)
 
-            assert.equals(3600 * 100, guildData.seenTxHashes[newKey])
+            assert.equals(3600 * 475100, guildData.seenTxHashes[newKey])
             assert.is_nil(guildData.seenTxHashes[oldKey])
         end)
     end)
@@ -3866,19 +3867,19 @@ describe("Sync", function()
             local localTx1 = {
                 type = "deposit", player = "Thrall-TestRealm", itemID = 12345,
                 classID = 0, subclassID = 5,
-                count = 5, tab = 1, timestamp = 3600 * 101 + 1800,
-                id = "deposit|Thrall-TestRealm|12345|5|1|101:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475101 + 1800,
+                id = "deposit|Thrall-TestRealm|12345|5|1|475101:0", _occurrence = 0,
             }
             local localTx2 = {
                 type = "withdraw", player = "Jaina-TestRealm", itemID = 99999,
                 classID = 0, subclassID = 1,
-                count = 10, tab = 2, timestamp = 3600 * 201 + 1800,
-                id = "withdraw|Jaina-TestRealm|99999|10|2|201:0", _occurrence = 0,
+                count = 10, tab = 2, timestamp = 3600 * 475201 + 1800,
+                id = "withdraw|Jaina-TestRealm|99999|10|2|475201:0", _occurrence = 0,
             }
             table.insert(guildData.transactions, localTx1)
             table.insert(guildData.transactions, localTx2)
-            guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|101:0"] = 3600 * 101 + 1800
-            guildData.seenTxHashes["withdraw|Jaina-TestRealm|99999|10|2|201:0"] = 3600 * 201 + 1800
+            guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|475101:0"] = 3600 * 475101 + 1800
+            guildData.seenTxHashes["withdraw|Jaina-TestRealm|99999|10|2|475201:0"] = 3600 * 475201 + 1800
 
             GBL:HandleSyncData("OfficerB", {
                 chunk = 1,
@@ -3888,16 +3889,16 @@ describe("Sync", function()
                         type = "deposit", player = "Thrall",
                         itemID = 12345, classID = 0, subclassID = 5,
                         count = 5, tab = 1,
-                        timestamp = 3600 * 100 + 2400,
-                        id = "deposit|Thrall-TestRealm|12345|5|1|100:0",
+                        timestamp = 3600 * 475100 + 2400,
+                        id = "deposit|Thrall-TestRealm|12345|5|1|475100:0",
                         _occurrence = 0,
                     },
                     {
                         type = "withdraw", player = "Jaina",
                         itemID = 99999, classID = 0, subclassID = 1,
                         count = 10, tab = 2,
-                        timestamp = 3600 * 200 + 2400,
-                        id = "withdraw|Jaina-TestRealm|99999|10|2|200:0",
+                        timestamp = 3600 * 475200 + 2400,
+                        id = "withdraw|Jaina-TestRealm|99999|10|2|475200:0",
                         _occurrence = 0,
                     },
                 },
@@ -3905,15 +3906,15 @@ describe("Sync", function()
             })
 
             -- Both records normalized
-            assert.equals("deposit|Thrall-TestRealm|12345|5|1|100:0", localTx1.id)
-            assert.equals("withdraw|Jaina-TestRealm|99999|10|2|200:0", localTx2.id)
+            assert.equals("deposit|Thrall-TestRealm|12345|5|1|475100:0", localTx1.id)
+            assert.equals("withdraw|Jaina-TestRealm|99999|10|2|475200:0", localTx2.id)
             -- No new records stored
             assert.equals(2, #guildData.transactions)
             -- seenTxHashes updated
-            assert.is_not_nil(guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|100:0"])
-            assert.is_not_nil(guildData.seenTxHashes["withdraw|Jaina-TestRealm|99999|10|2|200:0"])
-            assert.is_nil(guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|101:0"])
-            assert.is_nil(guildData.seenTxHashes["withdraw|Jaina-TestRealm|99999|10|2|201:0"])
+            assert.is_not_nil(guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|475100:0"])
+            assert.is_not_nil(guildData.seenTxHashes["withdraw|Jaina-TestRealm|99999|10|2|475200:0"])
+            assert.is_nil(guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|475101:0"])
+            assert.is_nil(guildData.seenTxHashes["withdraw|Jaina-TestRealm|99999|10|2|475201:0"])
         end)
 
         it("handles mix of normalization and new record in same chunk", function()
@@ -3922,11 +3923,11 @@ describe("Sync", function()
             local localTx = {
                 type = "deposit", player = "Thrall-TestRealm", itemID = 12345,
                 classID = 0, subclassID = 5,
-                count = 5, tab = 1, timestamp = 3600 * 101 + 1800,
-                id = "deposit|Thrall-TestRealm|12345|5|1|101:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475101 + 1800,
+                id = "deposit|Thrall-TestRealm|12345|5|1|475101:0", _occurrence = 0,
             }
             table.insert(guildData.transactions, localTx)
-            guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|101:0"] = 3600 * 101 + 1800
+            guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|475101:0"] = 3600 * 475101 + 1800
 
             GBL:HandleSyncData("OfficerB", {
                 chunk = 1,
@@ -3936,25 +3937,25 @@ describe("Sync", function()
                         type = "deposit", player = "Thrall",
                         itemID = 12345, classID = 0, subclassID = 5,
                         count = 5, tab = 1,
-                        timestamp = 3600 * 100 + 2400,
-                        id = "deposit|Thrall-TestRealm|12345|5|1|100:0",
+                        timestamp = 3600 * 475100 + 2400,
+                        id = "deposit|Thrall-TestRealm|12345|5|1|475100:0",
                         _occurrence = 0,
                     },
                     {
                         type = "deposit", player = "Arthas",
                         itemID = 55555, classID = 0, subclassID = 1,
                         count = 3, tab = 2,
-                        timestamp = 3600 * 300,
-                        id = "deposit|Arthas-TestRealm|55555|3|2|300:0",
+                        timestamp = 3600 * 475300,
+                        id = "deposit|Arthas-TestRealm|55555|3|2|475300:0",
                         _occurrence = 0,
                     },
                 },
                 moneyTransactions = {},
             })
 
-            assert.equals("deposit|Thrall-TestRealm|12345|5|1|100:0", localTx.id)
+            assert.equals("deposit|Thrall-TestRealm|12345|5|1|475100:0", localTx.id)
             assert.equals(2, #guildData.transactions)
-            assert.is_not_nil(guildData.seenTxHashes["deposit|Arthas-TestRealm|55555|3|2|300:0"])
+            assert.is_not_nil(guildData.seenTxHashes["deposit|Arthas-TestRealm|55555|3|2|475300:0"])
         end)
     end)
 
@@ -3969,11 +3970,11 @@ describe("Sync", function()
             local localTx = {
                 type = "deposit", player = "Thrall-TestRealm", itemID = 12345,
                 classID = 0, subclassID = 5,
-                count = 5, tab = 1, timestamp = 3600 * 101 + 1800,
-                id = "deposit|Thrall-TestRealm|12345|5|1|101:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475101 + 1800,
+                id = "deposit|Thrall-TestRealm|12345|5|1|475101:0", _occurrence = 0,
             }
             table.insert(guildData.transactions, localTx)
-            guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|101:0"] = 3600 * 101 + 1800
+            guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|475101:0"] = 3600 * 475101 + 1800
 
             -- Populate cache
             local hashBefore = GBL:GetDataHash(guildData)
@@ -3988,8 +3989,8 @@ describe("Sync", function()
                         type = "deposit", player = "Thrall",
                         itemID = 12345, classID = 0, subclassID = 5,
                         count = 5, tab = 1,
-                        timestamp = 3600 * 100 + 2400,
-                        id = "deposit|Thrall-TestRealm|12345|5|1|100:0",
+                        timestamp = 3600 * 475100 + 2400,
+                        id = "deposit|Thrall-TestRealm|12345|5|1|475100:0",
                         _occurrence = 0,
                     },
                 },
@@ -4000,7 +4001,7 @@ describe("Sync", function()
             local hashAfter = GBL:GetDataHash(guildData)
             assert.are_not.equals(hashBefore, hashAfter)
             -- Should match the hash of the normalized ID
-            assert.equals(GBL:HashString("deposit|Thrall-TestRealm|12345|5|1|100:0"), hashAfter)
+            assert.equals(GBL:HashString("deposit|Thrall-TestRealm|12345|5|1|475100:0"), hashAfter)
         end)
 
         it("does NOT reset hash cache when no normalization occurred", function()
@@ -4009,11 +4010,11 @@ describe("Sync", function()
             local localTx = {
                 type = "deposit", player = "Thrall", itemID = 12345,
                 classID = 0, subclassID = 5,
-                count = 5, tab = 1, timestamp = 3600 * 100,
-                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475100,
+                id = "deposit|Thrall|12345|5|1|475100:0", _occurrence = 0,
             }
             table.insert(guildData.transactions, localTx)
-            guildData.seenTxHashes["deposit|Thrall|12345|5|1|100:0"] = 3600 * 100
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|475100:0"] = 3600 * 475100
 
             -- Spy on ResetHashCache
             local originalReset = GBL.ResetHashCache
@@ -4032,8 +4033,8 @@ describe("Sync", function()
                         type = "deposit", player = "Thrall",
                         itemID = 12345, classID = 0, subclassID = 5,
                         count = 5, tab = 1,
-                        timestamp = 3600 * 100,
-                        id = "deposit|Thrall|12345|5|1|100:0",
+                        timestamp = 3600 * 475100,
+                        id = "deposit|Thrall|12345|5|1|475100:0",
                         _occurrence = 0,
                     },
                 },
@@ -4057,14 +4058,14 @@ describe("Sync", function()
             local bRecord = {
                 type = "deposit", player = "Thrall-TestRealm", itemID = 12345,
                 classID = 0, subclassID = 5,
-                count = 5, tab = 1, timestamp = 3600 * 101 + 1800,
-                id = "deposit|Thrall-TestRealm|12345|5|1|101:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475101 + 1800,
+                id = "deposit|Thrall-TestRealm|12345|5|1|475101:0", _occurrence = 0,
             }
             table.insert(guildData.transactions, bRecord)
-            guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|101:0"] = 3600 * 101 + 1800
+            guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|475101:0"] = 3600 * 475101 + 1800
 
-            local aTimestamp = 3600 * 100 + 2400
-            local aId = "deposit|Thrall-TestRealm|12345|5|1|100:0"
+            local aTimestamp = 3600 * 475100 + 2400
+            local aId = "deposit|Thrall-TestRealm|12345|5|1|475100:0"
 
             GBL:HandleSyncData("PeerA", {
                 chunk = 1,
@@ -4135,8 +4136,8 @@ describe("Sync", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
             -- Both peers already have identical records
-            local sharedId = "deposit|Thrall|12345|5|1|100:0"
-            local sharedTs = 3600 * 100 + 2400
+            local sharedId = "deposit|Thrall|12345|5|1|475100:0"
+            local sharedTs = 3600 * 475100 + 2400
 
             local localTx = {
                 type = "deposit", player = "Thrall", itemID = 12345,
@@ -4183,11 +4184,11 @@ describe("Sync", function()
             local localTx = {
                 type = "deposit", player = "Thrall", itemID = 12345,
                 classID = 0, subclassID = 5,
-                count = 5, tab = 1, timestamp = 3600 * 100,
-                id = "deposit|Thrall|12345|5|1|100:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475100,
+                id = "deposit|Thrall|12345|5|1|475100:0", _occurrence = 0,
             }
             table.insert(guildData.transactions, localTx)
-            guildData.seenTxHashes["deposit|Thrall|12345|5|1|100:0"] = 3600 * 100
+            guildData.seenTxHashes["deposit|Thrall|12345|5|1|475100:0"] = 3600 * 475100
 
             -- Incoming has :1 occurrence (second identical tx in same hour)
             GBL:HandleSyncData("OfficerB", {
@@ -4198,8 +4199,8 @@ describe("Sync", function()
                         type = "deposit", player = "Thrall",
                         itemID = 12345, classID = 0, subclassID = 5,
                         count = 5, tab = 1,
-                        timestamp = 3600 * 100,
-                        id = "deposit|Thrall|12345|5|1|100:1",
+                        timestamp = 3600 * 475100,
+                        id = "deposit|Thrall|12345|5|1|475100:1",
                         _occurrence = 1,
                     },
                 },
@@ -4208,7 +4209,7 @@ describe("Sync", function()
 
             -- Should be stored as a new record, not normalized
             assert.equals(2, #guildData.transactions)
-            assert.equals("deposit|Thrall|12345|5|1|100:0", localTx.id)
+            assert.equals("deposit|Thrall|12345|5|1|475100:0", localTx.id)
         end)
     end)
 
@@ -4253,7 +4254,7 @@ describe("Sync", function()
                         type = "deposit", player = "Thrall",
                         itemID = 12345, classID = 0, subclassID = 5,
                         count = 5, tab = 1,
-                        id = "deposit|Thrall|12345|5|1|500:0",
+                        id = "deposit|Thrall|12345|5|1|475100:0",
                         -- No timestamp — should recover from ID
                     },
                 },
@@ -4262,8 +4263,8 @@ describe("Sync", function()
 
             assert.equals(1, #guildData.transactions)
             local stored = guildData.transactions[1]
-            assert.equals(500 * 3600, stored.timestamp)
-            assert.equals("deposit|Thrall|12345|5|1|500:0", stored.id)
+            assert.equals(475100 * 3600, stored.timestamp)
+            assert.equals("deposit|Thrall|12345|5|1|475100:0", stored.id)
         end)
     end)
 
@@ -4359,38 +4360,38 @@ describe("Sync", function()
             local shared1_A = {
                 type = "deposit", player = "Thrall-TestRealm", itemID = 12345,
                 classID = 0, subclassID = 5,
-                count = 5, tab = 1, timestamp = 3600 * 100 + 2400,
-                id = "deposit|Thrall-TestRealm|12345|5|1|100:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475100 + 2400,
+                id = "deposit|Thrall-TestRealm|12345|5|1|475100:0", _occurrence = 0,
             }
             local shared1_B = {
                 type = "deposit", player = "Thrall-TestRealm", itemID = 12345,
                 classID = 0, subclassID = 5,
-                count = 5, tab = 1, timestamp = 3600 * 101 + 1800,
-                id = "deposit|Thrall-TestRealm|12345|5|1|101:0", _occurrence = 0,
+                count = 5, tab = 1, timestamp = 3600 * 475101 + 1800,
+                id = "deposit|Thrall-TestRealm|12345|5|1|475101:0", _occurrence = 0,
             }
             local shared2_A = {
                 type = "withdraw", player = "Jaina-TestRealm", itemID = 99999,
                 classID = 0, subclassID = 1,
-                count = 10, tab = 2, timestamp = 3600 * 200 + 2400,
-                id = "withdraw|Jaina-TestRealm|99999|10|2|200:0", _occurrence = 0,
+                count = 10, tab = 2, timestamp = 3600 * 475200 + 2400,
+                id = "withdraw|Jaina-TestRealm|99999|10|2|475200:0", _occurrence = 0,
             }
             local shared2_B = {
                 type = "withdraw", player = "Jaina-TestRealm", itemID = 99999,
                 classID = 0, subclassID = 1,
-                count = 10, tab = 2, timestamp = 3600 * 201 + 1800,
-                id = "withdraw|Jaina-TestRealm|99999|10|2|201:0", _occurrence = 0,
+                count = 10, tab = 2, timestamp = 3600 * 475201 + 1800,
+                id = "withdraw|Jaina-TestRealm|99999|10|2|475201:0", _occurrence = 0,
             }
             local aOnly = {
                 type = "deposit", player = "Arthas-TestRealm", itemID = 55555,
                 classID = 0, subclassID = 1,
-                count = 3, tab = 2, timestamp = 3600 * 300,
-                id = "deposit|Arthas-TestRealm|55555|3|2|300:0", _occurrence = 0,
+                count = 3, tab = 2, timestamp = 3600 * 475300,
+                id = "deposit|Arthas-TestRealm|55555|3|2|475300:0", _occurrence = 0,
             }
             local bOnly = {
                 type = "deposit", player = "Varian-TestRealm", itemID = 77777,
                 classID = 0, subclassID = 1,
-                count = 1, tab = 1, timestamp = 3600 * 400,
-                id = "deposit|Varian-TestRealm|77777|1|1|400:0", _occurrence = 0,
+                count = 1, tab = 1, timestamp = 3600 * 475400,
+                id = "deposit|Varian-TestRealm|77777|1|1|475400:0", _occurrence = 0,
             }
 
             -- === Step 1: A sends to B ===
@@ -4567,16 +4568,16 @@ describe("Sync", function()
                         player = "Thrall",
                         itemID = 12345, classID = 0, subclassID = 5,
                         count = 5, tab = 1,
-                        timestamp = 3600 * 100,
-                        id = "|Thrall|12345|5|1|100:0",
+                        timestamp = 3600 * 475100,
+                        id = "|Thrall|12345|5|1|475100:0",
                     },
                     {
                         -- Valid record
                         type = "deposit", player = "Jaina",
                         itemID = 99999, classID = 0, subclassID = 1,
                         count = 10, tab = 2,
-                        timestamp = 3600 * 200,
-                        id = "deposit|Jaina|99999|10|2|200:0",
+                        timestamp = 3600 * 475200,
+                        id = "deposit|Jaina|99999|10|2|475200:0",
                     },
                 },
                 moneyTransactions = {
@@ -4584,8 +4585,8 @@ describe("Sync", function()
                         -- Missing player field
                         type = "repair",
                         amount = 50000,
-                        timestamp = 3600 * 300,
-                        id = "repair||50000|300:0",
+                        timestamp = 3600 * 475300,
+                        id = "repair||50000|475300:0",
                     },
                 },
             })
@@ -4867,7 +4868,7 @@ describe("Sync", function()
         local baseHash
 
         before_each(function()
-            baseHash = "withdraw|Thrall-TestRealm|12345|5|1|100"
+            baseHash = "withdraw|Thrall-TestRealm|12345|5|1|475100"
         end)
 
         it("two-peer: receiver adopts higher count and stores new records", function()
@@ -4875,7 +4876,7 @@ describe("Sync", function()
             local r1 = {
                 type = "withdraw", player = "Thrall-TestRealm",
                 itemID = 12345, count = 5, tab = 1,
-                timestamp = 3600 * 100, scanTime = 1000,
+                timestamp = 3600 * 475100, scanTime = 1000,
                 scannedBy = "OfficerA-TestRealm",
                 _occurrence = 0,
             }
@@ -4894,14 +4895,14 @@ describe("Sync", function()
                     {
                         type = "withdraw", player = "Thrall",
                         itemID = 12345, count = 5, tab = 1,
-                        timestamp = 3600 * 100, scanTime = 900,
+                        timestamp = 3600 * 475100, scanTime = 900,
                         scannedBy = "OfficerB",
                         id = baseHash .. ":0", _occurrence = 0,
                     },
                     {
                         type = "withdraw", player = "Thrall",
                         itemID = 12345, count = 5, tab = 1,
-                        timestamp = 3600 * 100 + 50, scanTime = 900,
+                        timestamp = 3600 * 475100 + 50, scanTime = 900,
                         scannedBy = "OfficerB",
                         id = baseHash .. ":1", _occurrence = 1,
                     },
@@ -4923,7 +4924,7 @@ describe("Sync", function()
             local r1 = {
                 type = "withdraw", player = "Thrall-TestRealm",
                 itemID = 12345, count = 5, tab = 1,
-                timestamp = 3600 * 100, scanTime = 1000,
+                timestamp = 3600 * 475100, scanTime = 1000,
                 scannedBy = "OfficerA-TestRealm",
                 _occurrence = 0,
             }
@@ -4944,7 +4945,7 @@ describe("Sync", function()
                     {
                         type = "withdraw", player = "Thrall",
                         itemID = 12345, count = 5, tab = 1,
-                        timestamp = 3600 * 100 + 30, scanTime = 900,
+                        timestamp = 3600 * 475100 + 30, scanTime = 900,
                         scannedBy = "OfficerB",
                         id = baseHash .. ":2", _occurrence = 2,
                     },
@@ -4974,7 +4975,7 @@ describe("Sync", function()
                     {
                         type = "withdraw", player = "Thrall",
                         itemID = 12345, count = 5, tab = 1,
-                        timestamp = 3600 * 100, scanTime = 500,
+                        timestamp = 3600 * 475100, scanTime = 500,
                         scannedBy = "PeerB",
                         id = baseHash .. ":0", _occurrence = 0,
                     },
@@ -4996,14 +4997,14 @@ describe("Sync", function()
                     {
                         type = "withdraw", player = "Thrall",
                         itemID = 12345, count = 5, tab = 1,
-                        timestamp = 3600 * 100 + 10, scanTime = 600,
+                        timestamp = 3600 * 475100 + 10, scanTime = 600,
                         scannedBy = "PeerC",
                         id = baseHash .. ":0", _occurrence = 0,
                     },
                     {
                         type = "withdraw", player = "Thrall",
                         itemID = 12345, count = 5, tab = 1,
-                        timestamp = 3600 * 100 + 50, scanTime = 600,
+                        timestamp = 3600 * 475100 + 50, scanTime = 600,
                         scannedBy = "PeerC",
                         id = baseHash .. ":1", _occurrence = 1,
                     },
@@ -7185,6 +7186,183 @@ describe("Sync", function()
             local suppress = filter(nil, "CHAT_MSG_SYSTEM",
                 "No player named 'SomePeer' is currently playing.")
             assert.is_true(suppress)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Unified logging (v0.27.0)
+    ---------------------------------------------------------------------------
+
+    describe("unified logging", function()
+        it("AddAuditEntry prints to chat when chatLog enabled", function()
+            GBL.db.profile.sync.chatLog = true
+
+            local printed = {}
+            GBL.Print = function(_, msg)
+                table.insert(printed, msg)
+            end
+
+            GBL:AddAuditEntry("test message")
+
+            assert.equals(1, #printed)
+            assert.equals("Sync: test message", printed[1])
+            -- Also in audit trail
+            local trail = GBL:GetAuditTrail()
+            assert.equals("test message", trail[1].message)
+        end)
+
+        it("AddAuditEntry does not print to chat when chatLog disabled", function()
+            GBL.db.profile.sync.chatLog = false
+
+            local printed = {}
+            GBL.Print = function(_, msg)
+                table.insert(printed, msg)
+            end
+
+            GBL:AddAuditEntry("test message")
+
+            assert.equals(0, #printed)
+            local trail = GBL:GetAuditTrail()
+            assert.equals("test message", trail[1].message)
+        end)
+
+        it("AddAuditEntry with chatOnly prints to chat but not audit trail", function()
+            GBL.db.profile.sync.chatLog = true
+
+            local printed = {}
+            GBL.Print = function(_, msg)
+                table.insert(printed, msg)
+            end
+
+            GBL:AddAuditEntry("chat only msg", true)
+
+            assert.equals(1, #printed)
+            assert.equals("Sync: chat only msg", printed[1])
+            -- NOT in audit trail
+            local trail = GBL:GetAuditTrail()
+            for _, entry in ipairs(trail) do
+                assert.falsy(entry.message:find("chat only msg"))
+            end
+        end)
+
+        it("SyncLog function no longer exists", function()
+            assert.is_nil(GBL.SyncLog)
+        end)
+
+        it("BUSY abort-send creates audit entry", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Set up sending state to OfficerB
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "busy1:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending)
+
+            -- Receive BUSY from OfficerB
+            GBL:HandleBusy("OfficerB", {})
+
+            local trail = GBL:GetAuditTrail()
+            local found = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("busy.*aborting send") then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found, "BUSY abort-send should create audit entry")
+        end)
+
+        it("BUSY clear-receive creates audit entry", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Simulate active receiving state
+            local status = GBL:GetSyncStatus()
+            -- Trigger by requesting sync (sets up receiving)
+            GBL:RequestSync("OfficerB", 0)
+
+            -- Receive BUSY from OfficerB
+            GBL:HandleBusy("OfficerB", {})
+
+            local trail = GBL:GetAuditTrail()
+            local found = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("busy.*cleared receive") or
+                   entry.message:find("busy.*will retry") then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found, "BUSY clear-receive should create audit entry")
+        end)
+
+        it("hard timeout audit includes 120s", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Suppress AceComm callback to trigger hard timeout
+            local origSend = GBL.SendCommMessage
+            GBL.SendCommMessage = function(self, prefix, text, dist, target, prio, cbFn, cbArg)
+                table.insert(MockAce.sentCommMessages, {
+                    prefix = prefix, text = text, distribution = dist, target = target,
+                })
+            end
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "ht1",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            -- Fire the hard timeout
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 120 and not timer.cancelled then
+                    timer.callback()
+                    break
+                end
+            end
+
+            local trail = GBL:GetAuditTrail()
+            local found = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("120s") and entry.message:find("AceComm") then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found, "Hard timeout audit should include 120s and AceComm")
+
+            GBL.SendCommMessage = origSend
+        end)
+
+        it("received chunk audit includes running totals", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:RequestSync("OfficerB", 0)
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 2,
+                transactions = {
+                    {
+                        type = "deposit", player = "Thrall",
+                        itemID = 12345, classID = 0, subclassID = 5,
+                        count = 5, tab = 1,
+                        timestamp = 3600 * 475100,
+                        id = "deposit|Thrall|12345|5|1|475100:0",
+                    },
+                },
+                moneyTransactions = {},
+            })
+
+            local trail = GBL:GetAuditTrail()
+            local found = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("total so far:") then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found, "Received chunk audit should include running totals")
         end)
     end)
 end)

@@ -131,7 +131,7 @@ describe("Dedup", function()
         end)
 
         it("detects adjacent hour slot as duplicate", function()
-            local baseTime = 3600 * 100
+            local baseTime = 3600 * 475100
             local rec1 = itemRecord({ timestamp = baseTime + 3000 })  -- :50 in hour 100
             rec1._occurrence = 0
             rec1.id = rec1.id .. ":0"
@@ -145,7 +145,7 @@ describe("Dedup", function()
         end)
 
         it("does NOT detect 2-hour drift as duplicate", function()
-            local baseTime = 3600 * 100
+            local baseTime = 3600 * 475100
             local rec1 = itemRecord({ timestamp = baseTime })
             rec1._occurrence = 0
             rec1.id = rec1.id .. ":0"
@@ -187,12 +187,12 @@ describe("Dedup", function()
         it("adjacent hour with timestamps >= 3600 apart is NOT duplicate", function()
             -- Genuinely different events: same player, same item, same count,
             -- but in consecutive hours scanned by the same client (diff = exactly 3600)
-            local rec1 = itemRecord({ timestamp = 3600 * 100 })
+            local rec1 = itemRecord({ timestamp = 3600 * 475100 })
             rec1._occurrence = 0
             rec1.id = rec1.id .. ":0"
             GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
 
-            local rec2 = itemRecord({ timestamp = 3600 * 101 })
+            local rec2 = itemRecord({ timestamp = 3600 * 475101 })
             rec2._occurrence = 0
             rec2.id = rec2.id .. ":0"
 
@@ -201,12 +201,12 @@ describe("Dedup", function()
 
         it("adjacent hour with timestamps < 3600 apart IS duplicate", function()
             -- Same event scanned across hour boundary by different clients
-            local rec1 = itemRecord({ timestamp = 3600 * 100 + 2700 })  -- hour 100, min 45
+            local rec1 = itemRecord({ timestamp = 3600 * 475100 + 2700 })  -- hour 100, min 45
             rec1._occurrence = 0
             rec1.id = rec1.id .. ":0"
             GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
 
-            local rec2 = itemRecord({ timestamp = 3600 * 101 + 900 })   -- hour 101, min 15
+            local rec2 = itemRecord({ timestamp = 3600 * 475101 + 900 })   -- hour 101, min 15
             rec2._occurrence = 0
             rec2.id = rec2.id .. ":0"
             -- diff = 1800 < 3600 → same event
@@ -216,12 +216,12 @@ describe("Dedup", function()
 
         it("prevents money record false positive in adjacent hours", function()
             -- Same player repairs for the same amount in consecutive hours
-            local rec1 = moneyRecord({ type = "repair", amount = 500000, timestamp = 3600 * 100 })
+            local rec1 = moneyRecord({ type = "repair", amount = 500000, timestamp = 3600 * 475100 })
             rec1._occurrence = 0
             rec1.id = rec1.id .. ":0"
             GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
 
-            local rec2 = moneyRecord({ type = "repair", amount = 500000, timestamp = 3600 * 101 })
+            local rec2 = moneyRecord({ type = "repair", amount = 500000, timestamp = 3600 * 475101 })
             rec2._occurrence = 0
             rec2.id = rec2.id .. ":0"
             -- diff = 3600, NOT < 3600 → genuinely different repair
@@ -231,12 +231,12 @@ describe("Dedup", function()
 
         it("legacy storedTs=0 falls back to match (backward compat)", function()
             -- Old records stored with timestamp 0 should still be treated as dups
-            local rec = itemRecord({ timestamp = 3600 * 100 })
+            local rec = itemRecord({ timestamp = 3600 * 475100 })
             rec._occurrence = 0
-            local key = "withdraw|Thrall|12345|5|1|100:0"
+            local key = "withdraw|Thrall|12345|5|1|475100:0"
             guildData.seenTxHashes[key] = 0  -- legacy: no timestamp stored
 
-            local rec2 = itemRecord({ timestamp = 3600 * 101 })
+            local rec2 = itemRecord({ timestamp = 3600 * 475101 })
             rec2._occurrence = 0
             rec2.id = rec2.id .. ":0"
 
@@ -245,18 +245,18 @@ describe("Dedup", function()
 
         it("table-format stored entry uses embedded timestamp", function()
             -- Old table format: { count = N, timestamp = T }
-            local rec1Ts = 3600 * 100 + 2700
-            local key = "withdraw|Thrall|12345|5|1|100:0"
+            local rec1Ts = 3600 * 475100 + 2700
+            local key = "withdraw|Thrall|12345|5|1|475100:0"
             guildData.seenTxHashes[key] = { count = 1, timestamp = rec1Ts }
 
             -- Close enough → duplicate
-            local rec2 = itemRecord({ timestamp = 3600 * 101 + 900 })
+            local rec2 = itemRecord({ timestamp = 3600 * 475101 + 900 })
             rec2._occurrence = 0
             rec2.id = rec2.id .. ":0"
             assert.is_true(GBL:IsDuplicate(rec2, guildData))
 
             -- Too far → not duplicate
-            local rec3 = itemRecord({ timestamp = 3600 * 101 + 2700 })
+            local rec3 = itemRecord({ timestamp = 3600 * 475101 + 2700 })
             rec3._occurrence = 0
             rec3.id = rec3.id .. ":0"
             assert.is_false(GBL:IsDuplicate(rec3, guildData))
@@ -264,7 +264,7 @@ describe("Dedup", function()
 
         -- Return value tests for ID normalization support
         it("returns matched key on fuzzy match", function()
-            local baseTime = 3600 * 100
+            local baseTime = 3600 * 475100
             local rec1 = itemRecord({ timestamp = baseTime + 3000 })
             rec1._occurrence = 0
             rec1.id = rec1.id .. ":0"
@@ -297,7 +297,7 @@ describe("Dedup", function()
             rec1.id = rec1.id .. ":0"
             GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
 
-            local rec2 = itemRecord({ player = "Jaina", timestamp = 3600 * 200 })
+            local rec2 = itemRecord({ player = "Jaina", timestamp = 3600 * 475200 })
             rec2._occurrence = 0
             rec2.id = rec2.id .. ":0"
 
@@ -307,7 +307,7 @@ describe("Dedup", function()
         end)
 
         it("returns matched key with legacy table-format entry", function()
-            local baseTime = 3600 * 100
+            local baseTime = 3600 * 475100
             local rec1 = itemRecord({ timestamp = baseTime + 3000 })
             rec1._occurrence = 0
             rec1.id = rec1.id .. ":0"
@@ -380,8 +380,8 @@ describe("Dedup", function()
         it("counts independently per hour slot", function()
             -- Two records with same prefix but different timeSlots
             -- Each slot has its own counter — both get :0
-            local rec1 = itemRecord({ timestamp = 3600 * 100 })
-            local rec2 = itemRecord({ timestamp = 3600 * 101 })
+            local rec1 = itemRecord({ timestamp = 3600 * 475100 })
+            local rec2 = itemRecord({ timestamp = 3600 * 475101 })
 
             GBL:AssignOccurrenceIndices({ rec1, rec2 })
 
@@ -395,8 +395,8 @@ describe("Dedup", function()
             -- Two genuinely different events, same prefix, adjacent hours.
             -- Both get :0 (per-slot counting), but IsDuplicate's < 3600
             -- timestamp check correctly separates them (diff == exactly 3600).
-            local rec1 = itemRecord({ timestamp = 3600 * 100 })
-            local rec2 = itemRecord({ timestamp = 3600 * 101 })
+            local rec1 = itemRecord({ timestamp = 3600 * 475100 })
+            local rec2 = itemRecord({ timestamp = 3600 * 475101 })
             GBL:AssignOccurrenceIndices({ rec1, rec2 })
 
             -- Both should get :0 (independent per-slot counters)
@@ -413,8 +413,8 @@ describe("Dedup", function()
 
         it("same-hour duplicates still dedup correctly", function()
             -- Two identical records in the same hour still get :0 and :1
-            local rec1 = itemRecord({ timestamp = 3600 * 100 })
-            local rec2 = itemRecord({ timestamp = 3600 * 100 })
+            local rec1 = itemRecord({ timestamp = 3600 * 475100 })
+            local rec2 = itemRecord({ timestamp = 3600 * 475100 })
 
             GBL:AssignOccurrenceIndices({ rec1, rec2 })
 
@@ -425,8 +425,8 @@ describe("Dedup", function()
             GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
             GBL:MarkSeen(rec2.id, rec2.timestamp, guildData)
 
-            local rescan1 = itemRecord({ timestamp = 3600 * 100 })
-            local rescan2 = itemRecord({ timestamp = 3600 * 100 })
+            local rescan1 = itemRecord({ timestamp = 3600 * 475100 })
+            local rescan2 = itemRecord({ timestamp = 3600 * 475100 })
             GBL:AssignOccurrenceIndices({ rescan1, rescan2 })
 
             assert.is_true(GBL:IsDuplicate(rescan1, guildData))
@@ -439,15 +439,15 @@ describe("Dedup", function()
             -- This was the bug that caused duplicate breastplate entries.
 
             -- Scan 1: one breastplate withdrawal in slot 100
-            local batch1 = { itemRecord({ timestamp = 3600 * 100 }) }
+            local batch1 = { itemRecord({ timestamp = 3600 * 475100 }) }
             GBL:AssignOccurrenceIndices(batch1)
             GBL:MarkSeen(batch1[1].id, batch1[1].timestamp, guildData)
-            -- Stored as prefix|100:0
+            -- Stored as prefix|475100:0
 
             -- Scan 2: new breastplate in slot 102, old one still present
             -- (API returns newest first)
-            local newTx = itemRecord({ timestamp = 3600 * 102 })
-            local oldTx = itemRecord({ timestamp = 3600 * 100 })
+            local newTx = itemRecord({ timestamp = 3600 * 475102 })
+            local oldTx = itemRecord({ timestamp = 3600 * 475100 })
             local batch2 = { newTx, oldTx }
             GBL:AssignOccurrenceIndices(batch2)
 
@@ -465,19 +465,19 @@ describe("Dedup", function()
             -- Two same-slot records stored, then a new different-slot record
             -- appears — old records must still dedup.
             local batch1 = {
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
             }
             GBL:AssignOccurrenceIndices(batch1)
             for _, r in ipairs(batch1) do
                 GBL:MarkSeen(r.id, r.timestamp, guildData)
             end
-            -- Stored: prefix|100:0, prefix|100:1
+            -- Stored: prefix|475100:0, prefix|475100:1
 
             -- Rescan with new record in slot 101 prepended
-            local newTx = itemRecord({ timestamp = 3600 * 101 })
-            local old1 = itemRecord({ timestamp = 3600 * 100 })
-            local old2 = itemRecord({ timestamp = 3600 * 100 })
+            local newTx = itemRecord({ timestamp = 3600 * 475101 })
+            local old1 = itemRecord({ timestamp = 3600 * 475100 })
+            local old2 = itemRecord({ timestamp = 3600 * 475100 })
             local batch2 = { newTx, old1, old2 }
             GBL:AssignOccurrenceIndices(batch2)
 
@@ -491,8 +491,8 @@ describe("Dedup", function()
         it("adjacent-hour events both get :0 but IsDuplicate separates via timestamp", function()
             -- Explicitly verifies the < 3600 timestamp guard prevents
             -- false dedup when both records have occurrence :0
-            local rec1 = itemRecord({ timestamp = 3600 * 100 })
-            local rec2 = itemRecord({ timestamp = 3600 * 101 })
+            local rec1 = itemRecord({ timestamp = 3600 * 475100 })
+            local rec2 = itemRecord({ timestamp = 3600 * 475101 })
             GBL:AssignOccurrenceIndices({ rec1, rec2 })
 
             assert.equals(0, rec1._occurrence)
@@ -508,11 +508,11 @@ describe("Dedup", function()
         it("same event near hour boundary deduped by timestamp proximity", function()
             -- Same event scanned at different times: minute 50 of hour 100
             -- and minute 10 of hour 101 (diff = 1200s < 3600 → same event)
-            local rec1 = itemRecord({ timestamp = 3600 * 100 + 3000 })
+            local rec1 = itemRecord({ timestamp = 3600 * 475100 + 3000 })
             GBL:AssignOccurrenceIndices({ rec1 })
             GBL:MarkSeen(rec1.id, rec1.timestamp, guildData)
 
-            local rec2 = itemRecord({ timestamp = 3600 * 101 + 600 })
+            local rec2 = itemRecord({ timestamp = 3600 * 475101 + 600 })
             GBL:AssignOccurrenceIndices({ rec2 })  -- separate batch (different scan)
 
             assert.equals(0, rec1._occurrence)
@@ -564,28 +564,28 @@ describe("Dedup", function()
 
     describe("CountStoredForHash", function()
         it("finds exact-slot matches first", function()
-            local baseHash = "withdraw|Thrall|12345|5|1|100"
-            guildData.seenTxHashes[baseHash .. ":0"] = 3600 * 100
-            guildData.seenTxHashes[baseHash .. ":1"] = 3600 * 100
-            assert.equals(2, GBL:CountStoredForHash(baseHash, 3600 * 100, guildData))
+            local baseHash = "withdraw|Thrall|12345|5|1|475100"
+            guildData.seenTxHashes[baseHash .. ":0"] = 3600 * 475100
+            guildData.seenTxHashes[baseHash .. ":1"] = 3600 * 475100
+            assert.equals(2, GBL:CountStoredForHash(baseHash, 3600 * 475100, guildData))
         end)
 
         it("finds adjacent-slot matches with timestamp proximity", function()
             -- Stored at slot 100, querying for slot 101 (hour boundary drift)
-            local storedHash = "withdraw|Thrall|12345|5|1|100"
-            local queryHash = "withdraw|Thrall|12345|5|1|101"
-            guildData.seenTxHashes[storedHash .. ":0"] = 3600 * 100 + 3000
-            -- diff = |3600*101 - (3600*100 + 3000)| = |600| < 3600
-            assert.equals(1, GBL:CountStoredForHash(queryHash, 3600 * 101, guildData))
+            local storedHash = "withdraw|Thrall|12345|5|1|475100"
+            local queryHash = "withdraw|Thrall|12345|5|1|475101"
+            guildData.seenTxHashes[storedHash .. ":0"] = 3600 * 475100 + 3000
+            -- diff = |3600*475101 - (3600*475100 + 3000)| = |600| < 3600
+            assert.equals(1, GBL:CountStoredForHash(queryHash, 3600 * 475101, guildData))
         end)
 
         it("rejects adjacent-slot matches with distant timestamps", function()
             -- Stored at slot 99, querying for slot 100 with distant timestamp
-            local storedHash = "withdraw|Thrall|12345|5|1|99"
-            local queryHash = "withdraw|Thrall|12345|5|1|100"
-            guildData.seenTxHashes[storedHash .. ":0"] = 3600 * 99
-            -- diff = |3600*100 + 1800 - 3600*99| = 5400 >= 3600
-            assert.equals(0, GBL:CountStoredForHash(queryHash, 3600 * 100 + 1800, guildData))
+            local storedHash = "withdraw|Thrall|12345|5|1|475099"
+            local queryHash = "withdraw|Thrall|12345|5|1|475100"
+            guildData.seenTxHashes[storedHash .. ":0"] = 3600 * 475099
+            -- diff = |3600*475100 + 1800 - 3600*475099| = 5400 >= 3600
+            assert.equals(0, GBL:CountStoredForHash(queryHash, 3600 * 475100 + 1800, guildData))
         end)
     end)
 
@@ -619,41 +619,42 @@ describe("Dedup", function()
             table.insert(guildData.transactions, {
                 type = "withdraw", player = "Thrall",
                 itemID = 12345, count = 5, tab = 1,
-                timestamp = 3600 * 100,
+                timestamp = 3600 * 475100,
             })
             table.insert(guildData.transactions, {
                 type = "withdraw", player = "Thrall",
                 itemID = 12345, count = 5, tab = 1,
-                timestamp = 3600 * 100 + 1000,  -- same slot
+                timestamp = 3600 * 475100 + 1000,  -- same slot
             })
             local index = GBL:BuildStoredRecordIndex(guildData, "transactions")
-            assert.equals(2, index["withdraw|Thrall|12345|5|1|"][100])
+            assert.equals(2, index["withdraw|Thrall|12345|5|1|"][475100])
         end)
 
         it("tracks different slots independently", function()
             table.insert(guildData.transactions, {
                 type = "withdraw", player = "Thrall",
                 itemID = 12345, count = 5, tab = 1,
-                timestamp = 3600 * 100,
+                timestamp = 3600 * 475100,
             })
             table.insert(guildData.transactions, {
                 type = "withdraw", player = "Thrall",
                 itemID = 12345, count = 5, tab = 1,
-                timestamp = 3600 * 102,  -- different slot
+                timestamp = 3600 * 475102,  -- different slot
             })
             local index = GBL:BuildStoredRecordIndex(guildData, "transactions")
-            assert.equals(1, index["withdraw|Thrall|12345|5|1|"][100])
-            assert.equals(1, index["withdraw|Thrall|12345|5|1|"][102])
+            assert.equals(1, index["withdraw|Thrall|12345|5|1|"][475100])
+            assert.equals(1, index["withdraw|Thrall|12345|5|1|"][475102])
         end)
 
-        it("indexes nil timestamp at slot 0", function()
+        it("indexes nil timestamp at GetServerTime slot", function()
             table.insert(guildData.transactions, {
                 type = "withdraw", player = "Thrall",
                 itemID = 12345, count = 5, tab = 1,
                 timestamp = nil,
             })
             local index = GBL:BuildStoredRecordIndex(guildData, "transactions")
-            assert.equals(1, index["withdraw|Thrall|12345|5|1|"][0])
+            local expectedSlot = math.floor(Helpers.MockWoW.serverTime / 3600)
+            assert.equals(1, index["withdraw|Thrall|12345|5|1|"][expectedSlot])
         end)
 
         it("indexes zero timestamp at slot 0", function()
@@ -720,8 +721,8 @@ describe("Dedup", function()
 
     describe("StoreBatchRecords", function()
         it("stores all records on initial scan (no prevCounts)", function()
-            local r1 = itemRecord({ timestamp = 3600 * 100, player = "Thrall" })
-            local r2 = itemRecord({ timestamp = 3600 * 100, player = "Jaina" })
+            local r1 = itemRecord({ timestamp = 3600 * 475100, player = "Thrall" })
+            local r2 = itemRecord({ timestamp = 3600 * 475100, player = "Jaina" })
             local batch = { r1, r2 }
 
             local stored, counts = GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
@@ -732,15 +733,15 @@ describe("Dedup", function()
 
         it("deduplicates on initial scan against stored records", function()
             -- Pre-populate records array and seenTxHashes (from a previous session)
-            local rec = itemRecord({ timestamp = 3600 * 100 })
+            local rec = itemRecord({ timestamp = 3600 * 475100 })
             local baseHash = rec.id
             rec._occurrence = 0
             rec.id = baseHash .. ":0"
             table.insert(guildData.transactions, rec)
-            guildData.seenTxHashes[rec.id] = 3600 * 100
+            guildData.seenTxHashes[rec.id] = 3600 * 475100
 
             -- Batch with 1 record matching the stored one
-            local batch = { itemRecord({ timestamp = 3600 * 100 }) }
+            local batch = { itemRecord({ timestamp = 3600 * 475100 }) }
 
             local stored = GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
             assert.equals(0, stored)
@@ -749,8 +750,8 @@ describe("Dedup", function()
         it("rescan with same batch produces 0 new records", function()
             -- Initial scan
             local batch1 = {
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 101, player = "Jaina" }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475101, player = "Jaina" }),
             }
             local stored1, prevCounts = GBL:StoreBatchRecords(
                 batch1, guildData, "transactions", nil)
@@ -758,8 +759,8 @@ describe("Dedup", function()
 
             -- Rescan with identical batch
             local batch2 = {
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 101, player = "Jaina" }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475101, player = "Jaina" }),
             }
             local stored2 = GBL:StoreBatchRecords(
                 batch2, guildData, "transactions", prevCounts)
@@ -769,7 +770,7 @@ describe("Dedup", function()
         -- CORE REGRESSION TEST: the bug v0.14.0 failed to fix
         it("rescan with new same-SLOT record does not create duplicates", function()
             -- Scan 1: 1 record at slot 100
-            local batch1 = { itemRecord({ timestamp = 3600 * 100 }) }
+            local batch1 = { itemRecord({ timestamp = 3600 * 475100 }) }
             local stored1, prevCounts = GBL:StoreBatchRecords(
                 batch1, guildData, "transactions", nil)
             assert.equals(1, stored1)
@@ -778,8 +779,8 @@ describe("Dedup", function()
             -- Rescan: 2 records at slot 100 (new one prepended by WoW API)
             -- Both have identical baseHashes — indistinguishable except by count
             local batch2 = {
-                itemRecord({ timestamp = 3600 * 100 }),  -- new (WoW puts newest first)
-                itemRecord({ timestamp = 3600 * 100 }),  -- old
+                itemRecord({ timestamp = 3600 * 475100 }),  -- new (WoW puts newest first)
+                itemRecord({ timestamp = 3600 * 475100 }),  -- old
             }
             local stored2, prevCounts2 = GBL:StoreBatchRecords(
                 batch2, guildData, "transactions", prevCounts)
@@ -794,8 +795,8 @@ describe("Dedup", function()
 
             -- Third rescan with same 2 records: 0 new
             local batch3 = {
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
             }
             local stored3 = GBL:StoreBatchRecords(
                 batch3, guildData, "transactions", prevCounts2)
@@ -805,14 +806,14 @@ describe("Dedup", function()
 
         it("multiple rescans accumulate correctly", function()
             -- Scan 1: 1 record
-            local batch1 = { itemRecord({ timestamp = 3600 * 100 }) }
+            local batch1 = { itemRecord({ timestamp = 3600 * 475100 }) }
             local _, prev1 = GBL:StoreBatchRecords(
                 batch1, guildData, "transactions", nil)
 
             -- Rescan 2: 2 records (1 new)
             local batch2 = {
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
             }
             local stored2, prev2 = GBL:StoreBatchRecords(
                 batch2, guildData, "transactions", prev1)
@@ -820,9 +821,9 @@ describe("Dedup", function()
 
             -- Rescan 3: 3 records (1 more new)
             local batch3 = {
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
             }
             local stored3 = GBL:StoreBatchRecords(
                 batch3, guildData, "transactions", prev2)
@@ -833,12 +834,12 @@ describe("Dedup", function()
 
         it("handles hour-boundary drift during rescan", function()
             -- Scan 1: record at slot 100
-            local batch1 = { itemRecord({ timestamp = 3600 * 100 + 3500 }) }
+            local batch1 = { itemRecord({ timestamp = 3600 * 475100 + 3500 }) }
             local _, prev = GBL:StoreBatchRecords(
                 batch1, guildData, "transactions", nil)
 
             -- Rescan: hour rolled over, same record now computes to slot 101
-            local batch2 = { itemRecord({ timestamp = 3600 * 101 + 100 }) }
+            local batch2 = { itemRecord({ timestamp = 3600 * 475101 + 100 }) }
             -- prevCounts has slot 100, current batch has slot 101
             -- FindDriftedCount should match via adjacent slot
             local stored = GBL:StoreBatchRecords(
@@ -850,9 +851,9 @@ describe("Dedup", function()
         it("handles mixed baseHashes in one batch", function()
             -- 2 different items in same batch
             local batch = {
-                itemRecord({ timestamp = 3600 * 100, itemID = 111 }),
-                itemRecord({ timestamp = 3600 * 100, itemID = 222 }),
-                itemRecord({ timestamp = 3600 * 100, itemID = 111 }),  -- second of same item
+                itemRecord({ timestamp = 3600 * 475100, itemID = 111 }),
+                itemRecord({ timestamp = 3600 * 475100, itemID = 222 }),
+                itemRecord({ timestamp = 3600 * 475100, itemID = 111 }),  -- second of same item
             }
             local stored, prev = GBL:StoreBatchRecords(
                 batch, guildData, "transactions", nil)
@@ -860,10 +861,10 @@ describe("Dedup", function()
 
             -- Rescan: 1 more of item 111
             local batch2 = {
-                itemRecord({ timestamp = 3600 * 100, itemID = 111 }),
-                itemRecord({ timestamp = 3600 * 100, itemID = 222 }),
-                itemRecord({ timestamp = 3600 * 100, itemID = 111 }),
-                itemRecord({ timestamp = 3600 * 100, itemID = 111 }),  -- new
+                itemRecord({ timestamp = 3600 * 475100, itemID = 111 }),
+                itemRecord({ timestamp = 3600 * 475100, itemID = 222 }),
+                itemRecord({ timestamp = 3600 * 475100, itemID = 111 }),
+                itemRecord({ timestamp = 3600 * 475100, itemID = 111 }),  -- new
             }
             local stored2 = GBL:StoreBatchRecords(
                 batch2, guildData, "transactions", prev)
@@ -872,7 +873,7 @@ describe("Dedup", function()
         end)
 
         it("works with money transactions", function()
-            local r1 = moneyRecord({ timestamp = 3600 * 100 })
+            local r1 = moneyRecord({ timestamp = 3600 * 475100 })
             local batch = { r1 }
             local stored, prev = GBL:StoreBatchRecords(
                 batch, guildData, "moneyTransactions", nil)
@@ -881,8 +882,8 @@ describe("Dedup", function()
 
             -- Rescan with new money record prepended
             local batch2 = {
-                moneyRecord({ timestamp = 3600 * 100 }),
-                moneyRecord({ timestamp = 3600 * 100 }),
+                moneyRecord({ timestamp = 3600 * 475100 }),
+                moneyRecord({ timestamp = 3600 * 475100 }),
             }
             local stored2 = GBL:StoreBatchRecords(
                 batch2, guildData, "moneyTransactions", prev)
@@ -891,7 +892,7 @@ describe("Dedup", function()
         end)
 
         it("validates records before storing", function()
-            local bad = { type = "", player = "", timestamp = 3600 * 100, itemID = 1, count = 1, tab = 1 }
+            local bad = { type = "", player = "", timestamp = 3600 * 475100, itemID = 1, count = 1, tab = 1 }
             bad.id = GBL:ComputeTxHash(bad)
             local batch = { bad }
 
@@ -901,9 +902,9 @@ describe("Dedup", function()
 
         -- REGRESSION (money): sync normalization gap
         it("does not duplicate money records when seenTxHashes has gaps", function()
-            local baseHash = "deposit|Thrall|50000|100"
+            local baseHash = "deposit|Thrall|50000|475100"
             for occ = 0, 2 do
-                local rec = moneyRecord({ timestamp = 3600 * 100 })
+                local rec = moneyRecord({ timestamp = 3600 * 475100 })
                 rec._occurrence = occ
                 rec.id = baseHash .. ":" .. occ
                 table.insert(guildData.moneyTransactions, rec)
@@ -911,12 +912,12 @@ describe("Dedup", function()
             end
             -- Gap: normalization removed :1, added slot 101
             guildData.seenTxHashes[baseHash .. ":1"] = nil
-            guildData.seenTxHashes["deposit|Thrall|50000|101:0"] = 3600 * 101
+            guildData.seenTxHashes["deposit|Thrall|50000|475101:0"] = 3600 * 475101
 
             local batch = {
-                moneyRecord({ timestamp = 3600 * 100 }),
-                moneyRecord({ timestamp = 3600 * 100 }),
-                moneyRecord({ timestamp = 3600 * 100 }),
+                moneyRecord({ timestamp = 3600 * 475100 }),
+                moneyRecord({ timestamp = 3600 * 475100 }),
+                moneyRecord({ timestamp = 3600 * 475100 }),
             }
             local stored = GBL:StoreBatchRecords(batch, guildData, "moneyTransactions", nil)
             assert.equals(0, stored)
@@ -925,21 +926,21 @@ describe("Dedup", function()
 
         -- REGRESSION (money): records split across adjacent slots
         it("does not duplicate money records split across adjacent slots", function()
-            local rec99 = moneyRecord({ timestamp = 3600 * 99 + 3500 })
+            local rec99 = moneyRecord({ timestamp = 3600 * 475099 + 3500 })
             rec99._occurrence = 0
             rec99.id = "deposit|Thrall|50000|99:0"
             table.insert(guildData.moneyTransactions, rec99)
             guildData.seenTxHashes[rec99.id] = rec99.timestamp
 
-            local rec101 = moneyRecord({ timestamp = 3600 * 101 + 100 })
+            local rec101 = moneyRecord({ timestamp = 3600 * 475101 + 100 })
             rec101._occurrence = 0
-            rec101.id = "deposit|Thrall|50000|101:0"
+            rec101.id = "deposit|Thrall|50000|475101:0"
             table.insert(guildData.moneyTransactions, rec101)
             guildData.seenTxHashes[rec101.id] = rec101.timestamp
 
             local batch = {
-                moneyRecord({ timestamp = 3600 * 100 + 500 }),
-                moneyRecord({ timestamp = 3600 * 100 + 500 }),
+                moneyRecord({ timestamp = 3600 * 475100 + 500 }),
+                moneyRecord({ timestamp = 3600 * 475100 + 500 }),
             }
             local stored = GBL:StoreBatchRecords(batch, guildData, "moneyTransactions", nil)
             assert.equals(0, stored)
@@ -948,9 +949,9 @@ describe("Dedup", function()
 
         -- REGRESSION (money): occurrence assignment past gaps
         it("assigns money occurrence past gaps", function()
-            local baseHash = "deposit|Thrall|50000|100"
+            local baseHash = "deposit|Thrall|50000|475100"
             for _, occ in ipairs({0, 2}) do
-                local rec = moneyRecord({ timestamp = 3600 * 100 })
+                local rec = moneyRecord({ timestamp = 3600 * 475100 })
                 rec._occurrence = occ
                 rec.id = baseHash .. ":" .. occ
                 table.insert(guildData.moneyTransactions, rec)
@@ -958,9 +959,9 @@ describe("Dedup", function()
             end
 
             local batch = {
-                moneyRecord({ timestamp = 3600 * 100 }),
-                moneyRecord({ timestamp = 3600 * 100 }),
-                moneyRecord({ timestamp = 3600 * 100 }),
+                moneyRecord({ timestamp = 3600 * 475100 }),
+                moneyRecord({ timestamp = 3600 * 475100 }),
+                moneyRecord({ timestamp = 3600 * 475100 }),
             }
             local stored = GBL:StoreBatchRecords(batch, guildData, "moneyTransactions", nil)
             assert.equals(1, stored)
@@ -971,9 +972,9 @@ describe("Dedup", function()
         -- REGRESSION: sync normalization creates gaps in seenTxHashes
         it("does not duplicate when seenTxHashes has gaps from normalization", function()
             -- Simulate: 3 records stored at slot 100 with sequential indices
-            local baseHash = "withdraw|Thrall|12345|5|1|100"
+            local baseHash = "withdraw|Thrall|12345|5|1|475100"
             for occ = 0, 2 do
-                local rec = itemRecord({ timestamp = 3600 * 100 })
+                local rec = itemRecord({ timestamp = 3600 * 475100 })
                 rec._occurrence = occ
                 rec.id = baseHash .. ":" .. occ
                 table.insert(guildData.transactions, rec)
@@ -983,13 +984,13 @@ describe("Dedup", function()
 
             -- Simulate sync normalization: :1 moved to different slot, creating gap
             guildData.seenTxHashes[baseHash .. ":1"] = nil
-            guildData.seenTxHashes["withdraw|Thrall|12345|5|1|101:0"] = 3600 * 101
+            guildData.seenTxHashes["withdraw|Thrall|12345|5|1|475101:0"] = 3600 * 475101
 
             -- Bank reopen: initial scan with 3 records (same events)
             local batch = {
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
             }
             local stored = GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
 
@@ -1001,9 +1002,9 @@ describe("Dedup", function()
         -- Verifies WHY the gap fix works: BuildStoredRecordIndex counts from
         -- the records array (ground truth) rather than seenTxHashes (has gaps).
         it("BuildStoredRecordIndex counts correctly despite seenTxHashes gaps", function()
-            local baseHash = "withdraw|Thrall|12345|5|1|100"
+            local baseHash = "withdraw|Thrall|12345|5|1|475100"
             for occ = 0, 2 do
-                local rec = itemRecord({ timestamp = 3600 * 100 })
+                local rec = itemRecord({ timestamp = 3600 * 475100 })
                 rec._occurrence = occ
                 rec.id = baseHash .. ":" .. occ
                 table.insert(guildData.transactions, rec)
@@ -1022,9 +1023,9 @@ describe("Dedup", function()
 
             -- Therefore StoreBatchRecords stores 0 new (not 2 like the old code)
             local batch = {
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
             }
             local stored = GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
             assert.equals(0, stored)
@@ -1033,22 +1034,22 @@ describe("Dedup", function()
         -- REGRESSION: records split across both adjacent slots
         it("does not duplicate when records are split across adjacent slots", function()
             -- Simulate: 1 record at slot 99, 1 at slot 101 (from normalization)
-            local rec99 = itemRecord({ timestamp = 3600 * 99 + 3500 })
+            local rec99 = itemRecord({ timestamp = 3600 * 475099 + 3500 })
             rec99._occurrence = 0
             rec99.id = "withdraw|Thrall|12345|5|1|99:0"
             table.insert(guildData.transactions, rec99)
             guildData.seenTxHashes[rec99.id] = rec99.timestamp
 
-            local rec101 = itemRecord({ timestamp = 3600 * 101 + 100 })
+            local rec101 = itemRecord({ timestamp = 3600 * 475101 + 100 })
             rec101._occurrence = 0
-            rec101.id = "withdraw|Thrall|12345|5|1|101:0"
+            rec101.id = "withdraw|Thrall|12345|5|1|475101:0"
             table.insert(guildData.transactions, rec101)
             guildData.seenTxHashes[rec101.id] = rec101.timestamp
 
             -- Bank reopen: both events now map to slot 100
             local batch = {
-                itemRecord({ timestamp = 3600 * 100 + 500 }),
-                itemRecord({ timestamp = 3600 * 100 + 500 }),
+                itemRecord({ timestamp = 3600 * 475100 + 500 }),
+                itemRecord({ timestamp = 3600 * 475100 + 500 }),
             }
             local stored = GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
 
@@ -1060,9 +1061,9 @@ describe("Dedup", function()
         -- REGRESSION: occurrence assignment must not collide with existing IDs
         it("assigns occurrence past gaps when storing new records", function()
             -- Stored: :0 and :2 exist (gap at :1 from normalization)
-            local baseHash = "withdraw|Thrall|12345|5|1|100"
+            local baseHash = "withdraw|Thrall|12345|5|1|475100"
             for _, occ in ipairs({0, 2}) do
-                local rec = itemRecord({ timestamp = 3600 * 100 })
+                local rec = itemRecord({ timestamp = 3600 * 475100 })
                 rec._occurrence = occ
                 rec.id = baseHash .. ":" .. occ
                 table.insert(guildData.transactions, rec)
@@ -1071,9 +1072,9 @@ describe("Dedup", function()
 
             -- New batch with 3 records (1 new beyond the 2 stored)
             local batch = {
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
             }
             local stored = GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
 
@@ -1089,12 +1090,12 @@ describe("Dedup", function()
         it("initial scan persists count per baseHash", function()
             -- Two records with the same prefix+hour
             local batch = {
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
             }
             GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
 
-            local baseHash = "withdraw|Thrall|12345|5|1|100"
+            local baseHash = "withdraw|Thrall|12345|5|1|475100"
             assert.is_not_nil(guildData.eventCounts)
             assert.is_not_nil(guildData.eventCounts[baseHash])
             assert.equals(2, guildData.eventCounts[baseHash].count)
@@ -1104,19 +1105,19 @@ describe("Dedup", function()
         it("rescan updates count upward", function()
             -- Initial: 2 records
             local batch1 = {
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
             }
             local _, prevCounts = GBL:StoreBatchRecords(batch1, guildData, "transactions", nil)
 
-            local baseHash = "withdraw|Thrall|12345|5|1|100"
+            local baseHash = "withdraw|Thrall|12345|5|1|475100"
             assert.equals(2, guildData.eventCounts[baseHash].count)
 
             -- Rescan: now 3 records (new event happened)
             local batch2 = {
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
             }
             GBL:StoreBatchRecords(batch2, guildData, "transactions", prevCounts)
 
@@ -1126,19 +1127,19 @@ describe("Dedup", function()
         it("count never decreases on rescan (aged out events)", function()
             -- Initial: 3 records
             local batch1 = {
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
             }
             local _, prevCounts = GBL:StoreBatchRecords(batch1, guildData, "transactions", nil)
 
-            local baseHash = "withdraw|Thrall|12345|5|1|100"
+            local baseHash = "withdraw|Thrall|12345|5|1|475100"
             assert.equals(3, guildData.eventCounts[baseHash].count)
 
             -- Rescan: now only 2 records (1 aged out of API)
             local batch2 = {
-                itemRecord({ timestamp = 3600 * 100 }),
-                itemRecord({ timestamp = 3600 * 100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
+                itemRecord({ timestamp = 3600 * 475100 }),
             }
             GBL:StoreBatchRecords(batch2, guildData, "transactions", prevCounts)
 
@@ -1148,26 +1149,26 @@ describe("Dedup", function()
 
         it("multiple prefixes get independent counts", function()
             local batch = {
-                itemRecord({ timestamp = 3600 * 100, player = "Thrall" }),
-                itemRecord({ timestamp = 3600 * 100, player = "Thrall" }),
-                itemRecord({ timestamp = 3600 * 100, player = "Jaina", itemID = 99999 }),
+                itemRecord({ timestamp = 3600 * 475100, player = "Thrall" }),
+                itemRecord({ timestamp = 3600 * 475100, player = "Thrall" }),
+                itemRecord({ timestamp = 3600 * 475100, player = "Jaina", itemID = 99999 }),
             }
             GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
 
-            local hash1 = "withdraw|Thrall|12345|5|1|100"
-            local hash2 = "withdraw|Jaina|99999|5|1|100"
+            local hash1 = "withdraw|Thrall|12345|5|1|475100"
+            local hash2 = "withdraw|Jaina|99999|5|1|475100"
             assert.equals(2, guildData.eventCounts[hash1].count)
             assert.equals(1, guildData.eventCounts[hash2].count)
         end)
 
         it("works with money transactions", function()
             local batch = {
-                moneyRecord({ timestamp = 3600 * 100 }),
-                moneyRecord({ timestamp = 3600 * 100 }),
+                moneyRecord({ timestamp = 3600 * 475100 }),
+                moneyRecord({ timestamp = 3600 * 475100 }),
             }
             GBL:StoreBatchRecords(batch, guildData, "moneyTransactions", nil)
 
-            local baseHash = "deposit|Thrall|50000|100"
+            local baseHash = "deposit|Thrall|50000|475100"
             assert.is_not_nil(guildData.eventCounts[baseHash])
             assert.equals(2, guildData.eventCounts[baseHash].count)
         end)

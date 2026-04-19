@@ -288,17 +288,17 @@ describe("Data integrity", function()
             table.insert(guildData.transactions, {
                 type = "withdraw", player = "Katorri-TestRealm",
                 itemID = 99999, count = 1, tab = 1,
-                timestamp = 3600 * 100, id = "withdraw|Katorri-TestRealm|99999|1|1|100:0",
+                timestamp = 3600 * 475100, id = "withdraw|Katorri-TestRealm|99999|1|1|100:0",
                 _occurrence = 0,
             })
             table.insert(guildData.transactions, {
                 type = "withdraw", player = "Katorri-TestRealm",
                 itemID = 99999, count = 1, tab = 1,
-                timestamp = 3600 * 102, id = "withdraw|Katorri-TestRealm|99999|1|1|102:1",
+                timestamp = 3600 * 475102, id = "withdraw|Katorri-TestRealm|99999|1|1|102:1",
                 _occurrence = 1,
             })
-            guildData.seenTxHashes["withdraw|Katorri-TestRealm|99999|1|1|100:0"] = 3600 * 100
-            guildData.seenTxHashes["withdraw|Katorri-TestRealm|99999|1|1|102:1"] = 3600 * 102
+            guildData.seenTxHashes["withdraw|Katorri-TestRealm|99999|1|1|100:0"] = 3600 * 475100
+            guildData.seenTxHashes["withdraw|Katorri-TestRealm|99999|1|1|102:1"] = 3600 * 475102
 
             GBL:MigrateOccurrenceToPerSlot(guildData)
 
@@ -313,17 +313,17 @@ describe("Data integrity", function()
             table.insert(guildData.transactions, {
                 type = "withdraw", player = "Thrall-TestRealm",
                 itemID = 12345, count = 5, tab = 1,
-                timestamp = 3600 * 100, id = "withdraw|Thrall-TestRealm|12345|5|1|100:0",
+                timestamp = 3600 * 475100, id = "withdraw|Thrall-TestRealm|12345|5|1|100:0",
                 _occurrence = 0,
             })
             table.insert(guildData.transactions, {
                 type = "withdraw", player = "Thrall-TestRealm",
                 itemID = 12345, count = 5, tab = 1,
-                timestamp = 3600 * 102, id = "withdraw|Thrall-TestRealm|12345|5|1|102:1",
+                timestamp = 3600 * 475102, id = "withdraw|Thrall-TestRealm|12345|5|1|102:1",
                 _occurrence = 1,
             })
-            guildData.seenTxHashes["withdraw|Thrall-TestRealm|12345|5|1|100:0"] = 3600 * 100
-            guildData.seenTxHashes["withdraw|Thrall-TestRealm|12345|5|1|102:1"] = 3600 * 102
+            guildData.seenTxHashes["withdraw|Thrall-TestRealm|12345|5|1|100:0"] = 3600 * 475100
+            guildData.seenTxHashes["withdraw|Thrall-TestRealm|12345|5|1|102:1"] = 3600 * 475102
 
             GBL:MigrateOccurrenceToPerSlot(guildData)
 
@@ -340,17 +340,17 @@ describe("Data integrity", function()
             table.insert(guildData.transactions, {
                 type = "withdraw", player = "Alice-TestRealm",
                 itemID = 55555, count = 1, tab = 1,
-                timestamp = 3600 * 100, id = "withdraw|Alice-TestRealm|55555|1|1|100:0",
+                timestamp = 3600 * 475100, id = "withdraw|Alice-TestRealm|55555|1|1|100:0",
                 _occurrence = 0,
             })
             table.insert(guildData.transactions, {
                 type = "withdraw", player = "Alice-TestRealm",
                 itemID = 55555, count = 1, tab = 1,
-                timestamp = 3600 * 100, id = "withdraw|Alice-TestRealm|55555|1|1|100:1",
+                timestamp = 3600 * 475100, id = "withdraw|Alice-TestRealm|55555|1|1|100:1",
                 _occurrence = 1,
             })
-            guildData.seenTxHashes["withdraw|Alice-TestRealm|55555|1|1|100:0"] = 3600 * 100
-            guildData.seenTxHashes["withdraw|Alice-TestRealm|55555|1|1|100:1"] = 3600 * 100
+            guildData.seenTxHashes["withdraw|Alice-TestRealm|55555|1|1|100:0"] = 3600 * 475100
+            guildData.seenTxHashes["withdraw|Alice-TestRealm|55555|1|1|100:1"] = 3600 * 475100
 
             GBL:MigrateOccurrenceToPerSlot(guildData)
 
@@ -390,17 +390,17 @@ describe("Data integrity", function()
             table.insert(guildData.moneyTransactions, {
                 type = "repair", player = "Tank-TestRealm",
                 amount = 50000,
-                timestamp = 3600 * 100, id = "repair|Tank-TestRealm|50000|100:0",
+                timestamp = 3600 * 475100, id = "repair|Tank-TestRealm|50000|100:0",
                 _occurrence = 0,
             })
             table.insert(guildData.moneyTransactions, {
                 type = "repair", player = "Tank-TestRealm",
                 amount = 50000,
-                timestamp = 3600 * 102, id = "repair|Tank-TestRealm|50000|102:1",
+                timestamp = 3600 * 475102, id = "repair|Tank-TestRealm|50000|102:1",
                 _occurrence = 1,
             })
-            guildData.seenTxHashes["repair|Tank-TestRealm|50000|100:0"] = 3600 * 100
-            guildData.seenTxHashes["repair|Tank-TestRealm|50000|102:1"] = 3600 * 102
+            guildData.seenTxHashes["repair|Tank-TestRealm|50000|100:0"] = 3600 * 475100
+            guildData.seenTxHashes["repair|Tank-TestRealm|50000|102:1"] = 3600 * 475102
 
             GBL:MigrateOccurrenceToPerSlot(guildData)
 
@@ -564,7 +564,7 @@ describe("Data integrity", function()
                 itemID = opts.itemID or 99999,
                 count = opts.count or 1,
                 tab = opts.tab or 1,
-                timestamp = opts.timestamp or (3600 * 100),
+                timestamp = opts.timestamp or (3600 * 475100),
                 scanTime = opts.scanTime or MockWoW.serverTime,
                 scannedBy = opts.scannedBy or "Katorri-TestRealm",
             }
@@ -577,7 +577,7 @@ describe("Data integrity", function()
                 type = opts.type or "deposit",
                 player = opts.player or "Katorri-TestRealm",
                 amount = opts.amount or 50000,
-                timestamp = opts.timestamp or (3600 * 100),
+                timestamp = opts.timestamp or (3600 * 475100),
                 scanTime = opts.scanTime or MockWoW.serverTime,
                 scannedBy = opts.scannedBy or "Katorri-TestRealm",
             }
@@ -599,8 +599,8 @@ describe("Data integrity", function()
             -- Original record from first scan
             local r1 = makeRecord({ scanTime = 1000 })
             -- Bug duplicates from later rescans
-            local r2 = makeRecord({ scanTime = 1003, timestamp = 3600 * 100 + 3 })
-            local r3 = makeRecord({ scanTime = 1006, timestamp = 3600 * 100 + 6 })
+            local r2 = makeRecord({ scanTime = 1003, timestamp = 3600 * 475100 + 3 })
+            local r3 = makeRecord({ scanTime = 1006, timestamp = 3600 * 475100 + 6 })
             assignAndStore({ r1, r2, r3 }, guildData, "transactions")
 
             local removed = GBL:MigrateDeduplicateRecords(guildData)
@@ -768,7 +768,7 @@ describe("Data integrity", function()
                 itemID = opts.itemID or 99999,
                 count = opts.count or 1,
                 tab = opts.tab or 1,
-                timestamp = opts.timestamp or (3600 * 100),
+                timestamp = opts.timestamp or (3600 * 475100),
                 scanTime = opts.scanTime or MockWoW.serverTime,
                 scannedBy = opts.scannedBy or "Katorri-TestRealm",
             }
@@ -787,7 +787,7 @@ describe("Data integrity", function()
         it("removes cross-slot duplicates missed by v4→v5 migration", function()
             guildData.schemaVersion = 5
             -- Original record at slot 100
-            local r1 = makeRecord({ timestamp = 3600 * 100, scanTime = 1000 })
+            local r1 = makeRecord({ timestamp = 3600 * 475100, scanTime = 1000 })
             r1.id = GBL:ComputeTxHash(r1)
             r1._occurrence = 0
             r1.id = r1.id .. ":0"
@@ -798,7 +798,7 @@ describe("Data integrity", function()
             -- ID and occurrence set manually (not via AssignOccurrenceIndices)
             -- because cross-slot duplicates have different baseHashes — they
             -- were independently scanned at different times, each getting :0.
-            local r2 = makeRecord({ timestamp = 3600 * 100 + 200, scanTime = 1005 })
+            local r2 = makeRecord({ timestamp = 3600 * 475100 + 200, scanTime = 1005 })
             r2.id = "withdraw|Katorri-TestRealm|99999|1|1|101:0"
             r2._occurrence = 0
             table.insert(guildData.transactions, r2)
@@ -814,10 +814,10 @@ describe("Data integrity", function()
         it("preserves genuinely different events in non-adjacent hours", function()
             guildData.schemaVersion = 5
             -- Event A at hour 100
-            local r1 = makeRecord({ timestamp = 3600 * 100, scanTime = 1000 })
+            local r1 = makeRecord({ timestamp = 3600 * 475100, scanTime = 1000 })
             assignAndStore({ r1 }, guildData, "transactions")
             -- Event B at hour 105 (well separated, genuinely different)
-            local r2 = makeRecord({ timestamp = 3600 * 105, scanTime = 1000 })
+            local r2 = makeRecord({ timestamp = 3600 * 475105, scanTime = 1000 })
             assignAndStore({ r2 }, guildData, "transactions")
 
             local removed = GBL:MigrateCrossSlotDedup(guildData)
@@ -829,10 +829,10 @@ describe("Data integrity", function()
         it("handles multiple clusters within same prefix", function()
             guildData.schemaVersion = 5
             -- Cluster A: hour 100 (1 genuine + 1 dup)
-            local a1 = makeRecord({ timestamp = 3600 * 100, scanTime = 1000 })
-            local a2 = makeRecord({ timestamp = 3600 * 100 + 100, scanTime = 1005 })
+            local a1 = makeRecord({ timestamp = 3600 * 475100, scanTime = 1000 })
+            local a2 = makeRecord({ timestamp = 3600 * 475100 + 100, scanTime = 1005 })
             -- Cluster B: hour 200 (1 genuine, no dup)
-            local b1 = makeRecord({ timestamp = 3600 * 200, scanTime = 1000 })
+            local b1 = makeRecord({ timestamp = 3600 * 475200, scanTime = 1000 })
 
             assignAndStore({ a1, a2, b1 }, guildData, "transactions")
 
@@ -844,8 +844,8 @@ describe("Data integrity", function()
 
         it("rebuilds seenTxHashes and playerStats", function()
             guildData.schemaVersion = 5
-            local r1 = makeRecord({ timestamp = 3600 * 100, scanTime = 1000, count = 5 })
-            local r2 = makeRecord({ timestamp = 3600 * 100 + 50, scanTime = 1003, count = 5 })
+            local r1 = makeRecord({ timestamp = 3600 * 475100, scanTime = 1000, count = 5 })
+            local r2 = makeRecord({ timestamp = 3600 * 475100 + 50, scanTime = 1003, count = 5 })
             assignAndStore({ r1, r2 }, guildData, "transactions")
 
             GBL:MigrateCrossSlotDedup(guildData)
@@ -891,7 +891,7 @@ describe("Data integrity", function()
                     type = opts.type or "deposit",
                     player = opts.player or "Katorri-TestRealm",
                     amount = opts.amount or 50000,
-                    timestamp = opts.timestamp or (3600 * 100),
+                    timestamp = opts.timestamp or (3600 * 475100),
                     scanTime = opts.scanTime or MockWoW.serverTime,
                     scannedBy = opts.scannedBy or "Katorri-TestRealm",
                 }
@@ -907,7 +907,7 @@ describe("Data integrity", function()
             guildData.seenTxHashes[m1.id] = m1.timestamp
 
             -- Cross-slot duplicate at slot 101
-            local m2 = makeMoneyRec({ timestamp = 3600 * 100 + 200, scanTime = 1005 })
+            local m2 = makeMoneyRec({ timestamp = 3600 * 475100 + 200, scanTime = 1005 })
             m2.id = "deposit|Katorri-TestRealm|50000|101:0"
             m2._occurrence = 0
             table.insert(guildData.moneyTransactions, m2)
@@ -930,7 +930,7 @@ describe("Data integrity", function()
             table.insert(guildData.transactions, i1)
             guildData.seenTxHashes[i1.id] = i1.timestamp
 
-            local i2 = makeRecord({ timestamp = 3600 * 100 + 100, scanTime = 1005 })
+            local i2 = makeRecord({ timestamp = 3600 * 475100 + 100, scanTime = 1005 })
             i2.id = "withdraw|Katorri-TestRealm|99999|1|1|101:0"
             i2._occurrence = 0
             table.insert(guildData.transactions, i2)
@@ -939,7 +939,7 @@ describe("Data integrity", function()
             -- Money: original + cross-slot dup
             local m1 = {
                 type = "deposit", player = "Katorri-TestRealm",
-                amount = 50000, timestamp = 3600 * 200,
+                amount = 50000, timestamp = 3600 * 475200,
                 scanTime = 1000, scannedBy = "Katorri-TestRealm",
             }
             m1.id = GBL:ComputeTxHash(m1) .. ":0"
@@ -949,7 +949,7 @@ describe("Data integrity", function()
 
             local m2 = {
                 type = "deposit", player = "Katorri-TestRealm",
-                amount = 50000, timestamp = 3600 * 200 + 100,
+                amount = 50000, timestamp = 3600 * 475200 + 100,
                 scanTime = 1005, scannedBy = "Katorri-TestRealm",
             }
             m2.id = "deposit|Katorri-TestRealm|50000|201:0"
@@ -977,7 +977,7 @@ describe("Data integrity", function()
                 itemID = opts.itemID or 99999,
                 count = opts.count or 1,
                 tab = opts.tab or 1,
-                timestamp = opts.timestamp or (3600 * 100),
+                timestamp = opts.timestamp or (3600 * 475100),
                 scanTime = opts.scanTime or MockWoW.serverTime,
                 scannedBy = opts.scannedBy or "Katorri-TestRealm",
             }
@@ -1025,7 +1025,7 @@ describe("Data integrity", function()
             -- Sync brought in: same event but peer had it as :1
             -- (IsDuplicate didn't catch it because :1 != :0)
             local synced = makeRecord({
-                timestamp = 3600 * 100 + 50,  -- same event, slight ts diff
+                timestamp = 3600 * 475100 + 50,  -- same event, slight ts diff
                 scanTime = 2000,
                 scannedBy = "sync:Voxle-TestRealm",
             })
@@ -1068,7 +1068,7 @@ describe("Data integrity", function()
             -- Sync: GENUINE second event from peer (different withdrawal
             -- in same hour that local client hadn't scanned yet)
             local synced = makeRecord({
-                timestamp = 3600 * 100 + 50,
+                timestamp = 3600 * 475100 + 50,
                 scanTime = 2000,
                 scannedBy = "sync:Voxle-TestRealm",
             })
@@ -1224,14 +1224,14 @@ describe("Data integrity", function()
         it("cross-slot cleanup checks adjacent eventCounts", function()
             guildData.schemaVersion = 7
             -- Two records with timestamps at adjacent hour boundaries
-            local r1 = makeRecord({ timestamp = 3600 * 100 + 3500, scanTime = 1000 })
+            local r1 = makeRecord({ timestamp = 3600 * 475100 + 3500, scanTime = 1000 })
             r1._occurrence = 0
             r1.id = GBL:ComputeTxHash(r1) .. ":0"
             table.insert(guildData.transactions, r1)
             guildData.seenTxHashes[r1.id] = r1.timestamp
 
             local r2 = makeRecord({
-                timestamp = 3600 * 100 + 100,
+                timestamp = 3600 * 475100 + 100,
                 scanTime = 2000, scannedBy = "sync:Voxle",
             })
             r2._occurrence = 1

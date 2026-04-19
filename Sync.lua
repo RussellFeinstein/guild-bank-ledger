@@ -108,6 +108,7 @@ local syncState = {
     sendRetryCount = 0,
     sendStartTime = 0,
     sendTotalRecords = 0,
+    sendChunkSentAt = 0,
 
     receiving = false,
     receiveSource = nil,
@@ -163,18 +164,6 @@ local recentWhisperTargets = {}  -- stripped_name → GetServerTime()
 
 -- Expose for testing
 GBL._recentWhisperTargets = recentWhisperTargets
-
-------------------------------------------------------------------------
--- Chat logging
-------------------------------------------------------------------------
-
---- Print a sync message to chat if chatLog is enabled.
--- @param ... Arguments passed to self:Print()
-function GBL:SyncLog(...)
-    if self.db and self.db.profile.sync.chatLog then
-        self:Print(...)
-    end
-end
 
 ------------------------------------------------------------------------
 -- Safe whisper wrapper
@@ -832,6 +821,10 @@ local function reconstructSyncRecord(record, sender)
     if not record.timestamp then
         record.timestamp = GetServerTime()
     end
+    -- Guard against epoch-0 from ID recovery (timeSlot 0 * 3600 = 0)
+    if not GBL:IsValidTimestamp(record.timestamp) then
+        record.timestamp = GetServerTime()
+    end
 
     -- 2. Ensure id exists (needed for dedup)
     --    Priority: explicit id → compute from fields
@@ -908,7 +901,6 @@ function GBL:RequestSync(target, sinceTimestamp)
         self:FinishReceiving(target)
         return
     end
-    self:SyncLog("Sync: requesting data from " .. target .. "...")
     self:AddAuditEntry("Requesting sync from " .. target
         .. " (since " .. sinceTimestamp
         .. ", " .. bucketCount .. " bucket days"
@@ -925,8 +917,6 @@ end
 -- @param data table Deserialized request payload
 function GBL:HandleSyncRequest(sender, data)
     if syncState.sending then
-        self:SyncLog("Sync: declined request from " .. sender
-            .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
         self:AddAuditEntry("Declined sync from " .. sender
             .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
         -- Send BUSY so requester doesn't wait 60s for data that will never come
@@ -1063,8 +1053,6 @@ function GBL:HandleSyncRequest(sender, data)
     self:StartFpsMonitor()
 
     local totalTx = #txToSend + #moneyToSend
-    self:SyncLog("Sync: sending " .. totalTx .. " records to " .. sender
-        .. " in " .. #chunks .. " chunk(s)")
     self:AddAuditEntry("Sending " .. totalTx
         .. " tx to " .. sender .. " in " .. #chunks .. " chunk(s)")
 
@@ -1170,6 +1158,7 @@ function GBL:SendNextChunk()
 
     -- ChatThrottleLib awareness — defer if other addons are using bandwidth
     if not self:HasSyncBandwidth() then
+        self:AddAuditEntry("CTL bandwidth low — deferring " .. CTL_BACKOFF_DELAY .. "s")
         C_Timer.After(CTL_BACKOFF_DELAY, function()
             self:SendNextChunk()
         end)
@@ -1203,14 +1192,14 @@ function GBL:SendNextChunk()
     local msgLen = #msg
     local chunkRecords = #chunk.transactions + #chunk.moneyTransactions
     local total = #syncState.sendChunks
-    self:SyncLog("Sync: sending chunk " .. idx .. "/" .. total
+    local chunkMsg = "Sending chunk " .. idx .. "/" .. total
         .. " to " .. (syncState.sendTarget or "?")
-        .. " (" .. chunkRecords .. " records, " .. rawLen .. "b→" .. msgLen .. "b)")
-    -- Only audit-log every 10th chunk and the last one to avoid flooding the trail
+        .. " (" .. chunkRecords .. " records, " .. rawLen .. "→" .. msgLen .. " bytes"
+        .. ", " .. math.floor((1 - msgLen / math.max(rawLen, 1)) * 100) .. "% compressed)"
+    -- Chat: every chunk; audit trail: 1st, every 10th, and last
+    self:AddAuditEntry(chunkMsg, true)
     if idx == 1 or idx == total or idx % 10 == 0 then
-        self:AddAuditEntry("Sending chunk " .. idx .. "/" .. total
-            .. " to " .. (syncState.sendTarget or "?")
-            .. " (" .. chunkRecords .. " records, " .. rawLen .. "→" .. msgLen .. " bytes)")
+        self:AddAuditEntry(chunkMsg)
     end
 
     if msgLen > WHISPER_SAFE_BYTES then
@@ -1229,11 +1218,13 @@ function GBL:SendNextChunk()
     end
     syncState.sendHardTimer = C_Timer.NewTicker(120, function()
         if syncState.sending then
-            self:SyncLog("Sync: hard timeout (120s) — AceComm never finished transmitting, aborting")
-            self:AddAuditEntry("Send hard timeout — aborting")
+            self:AddAuditEntry("Send hard timeout (120s) — AceComm never finished, aborting")
             self:FinishSending()
         end
     end, 1)
+
+    -- Record send time for RTT measurement
+    syncState.sendChunkSentAt = GetTime()
 
     -- ACK timer deferred until message fully transmitted via AceComm callback.
     -- AceComm calls callbackFn(callbackArg, bytesSent, totalLen) per CTL piece.
@@ -1250,17 +1241,11 @@ function GBL:SendNextChunk()
                     syncState.sendRetryCount = syncState.sendRetryCount + 1
                     syncState.sendChunkIndex = syncState.sendChunkIndex - 1
                     local retryChunk = syncState.sendChunkIndex + 1
-                    self:SyncLog("Sync: ACK timeout, retrying chunk " .. retryChunk
-                        .. " (attempt " .. (syncState.sendRetryCount + 1)
-                        .. "/" .. (MAX_RETRIES + 1) .. ")")
-                    self:AddAuditEntry("Retrying chunk " .. retryChunk
+                    self:AddAuditEntry("ACK timeout — retrying chunk " .. retryChunk
                         .. " (attempt " .. (syncState.sendRetryCount + 1) .. "/"
                         .. (MAX_RETRIES + 1) .. ")")
                     self:SendNextChunk()
                 else
-                    self:SyncLog("Sync: ACK timeout from "
-                        .. (syncState.sendTarget or "?")
-                        .. " after " .. (MAX_RETRIES + 1) .. " attempts — aborting")
                     self:AddAuditEntry("ACK timeout from "
                         .. (syncState.sendTarget or "unknown")
                         .. " after " .. (MAX_RETRIES + 1) .. " attempts — aborting")
@@ -1282,8 +1267,6 @@ function GBL:FinishSending()
     local total = #syncState.sendChunks
     local elapsed = GetServerTime() - syncState.sendStartTime
 
-    self:SyncLog("Sync: send complete to " .. target
-        .. " (" .. sent .. "/" .. total .. " chunks, " .. elapsed .. "s)")
     self:AddAuditEntry("Send complete to " .. target
         .. " — " .. sent .. "/" .. total .. " chunks"
         .. ", " .. syncState.sendTotalRecords .. " records, " .. elapsed .. "s")
@@ -1295,6 +1278,7 @@ function GBL:FinishSending()
     syncState.sendRetryCount = 0
     syncState.sendStartTime = 0
     syncState.sendTotalRecords = 0
+    syncState.sendChunkSentAt = 0
     syncState.sendEventCountBatches = nil
     if syncState.sendTimer then
         syncState.sendTimer:Cancel()
@@ -1378,7 +1362,8 @@ function GBL:NormalizeRecordId(incomingRecord, matchedKey, guildData, idIndex)
     -- Sender-wins: always adopt the incoming ID so the receiver fully
     -- converges with the sender in one cycle. The sync protocol serializes
     -- direction (one side sends per cycle), preventing oscillation.
-    local newTs = incomingRecord.timestamp or 0
+    local newTs = GBL:IsValidTimestamp(incomingRecord.timestamp)
+        and incomingRecord.timestamp or GetServerTime()
 
     -- Find local record via pre-built index
     local localRecord = idIndex and idIndex[matchedKey] or nil
@@ -1542,16 +1527,12 @@ function GBL:HandleSyncData(sender, data)
     ackMsg = compressMessage(ackMsg)
     self:SendSyncWhisper(PREFIX, ackMsg, sender, "ALERT")
 
-    self:SyncLog("Sync: chunk " .. (data.chunk or "?") .. "/"
-        .. (data.totalChunks or "?") .. " from " .. sender
-        .. " — " .. stored .. " new, " .. duped .. " duped"
-        .. " (total so far: " .. syncState.receiveStored .. " new)")
-
     self:AddAuditEntry("Received chunk " .. (data.chunk or "?") .. "/"
         .. (data.totalChunks or "?") .. " from " .. sender
         .. " (" .. chunkTotal .. " records: "
         .. itemStored .. " item new, " .. itemDuped .. " item duped, "
-        .. moneyStored .. " money new, " .. moneyDuped .. " money duped)")
+        .. moneyStored .. " money new, " .. moneyDuped .. " money duped"
+        .. " | total so far: " .. syncState.receiveStored .. " new)")
 
     self:SendMessage("GBL_SYNC_PROGRESS", sender,
         data.chunk or 0, data.totalChunks or 0, stored)
@@ -1585,8 +1566,9 @@ function GBL:HandleAck(sender, data)
     local total = #syncState.sendChunks
     -- Only audit-log every 10th ACK and the last one
     if ackedChunk == 1 or ackedChunk == total or ackedChunk % 10 == 0 then
+        local rtt = string.format(", %.1fs RTT", GetTime() - (syncState.sendChunkSentAt or GetTime()))
         self:AddAuditEntry("ACK from " .. sender .. " for chunk " .. ackedChunk
-            .. "/" .. total)
+            .. "/" .. total .. rtt)
     end
 
     syncState.sendRetryCount = 0
@@ -1644,12 +1626,6 @@ function GBL:FinishReceiving(sender)
         and (#guildData.transactions + #guildData.moneyTransactions) or 0
     local newHash = guildData and self:GetDataHash(guildData) or 0
 
-    local normalizedMsg = totalNormalized > 0
-        and (", " .. totalNormalized .. " IDs converged") or ""
-    self:SyncLog("Sync complete from " .. (sender or "?") .. ": "
-        .. totalStored .. " new, " .. totalDuped .. " duped"
-        .. normalizedMsg
-        .. " (" .. chunksGot .. " chunks, " .. elapsed .. "s)")
     self:AddAuditEntry("Sync complete from " .. (sender or "unknown")
         .. " — " .. totalStored .. " new, " .. totalDuped .. " duped"
         .. ", " .. totalNormalized .. " normalized"
@@ -1850,13 +1826,16 @@ function GBL:PopPendingPeer()
         syncState.pendingPeersCount = syncState.pendingPeersCount - 1
     end
 
-    -- Remove the selected peer from the queue
+    -- Remove the selected peer from the queue (preserve addedAt for diagnostics)
+    local addedAt
     if bestName then
+        addedAt = syncState.pendingPeers[bestName]
+            and syncState.pendingPeers[bestName].addedAt or nil
         syncState.pendingPeers[bestName] = nil
         syncState.pendingPeersCount = syncState.pendingPeersCount - 1
     end
 
-    return bestName
+    return bestName, addedAt
 end
 
 --- Process the next peer in the pending sync queue.
@@ -1868,7 +1847,7 @@ function GBL:ProcessPendingPeers()
     if not self.db.profile.sync.enabled then return end
     if not self.db.profile.sync.autoSync then return end
 
-    local peer = self:PopPendingPeer()
+    local peer, peerAddedAt = self:PopPendingPeer()
     if not peer then return end
 
     local guildData = self:GetGuildData()
@@ -1888,7 +1867,8 @@ function GBL:ProcessPendingPeers()
         end
     end
 
-    self:AddAuditEntry("Processing queued peer: " .. peer)
+    local queueTime = peerAddedAt and (GetServerTime() - peerAddedAt) or 0
+    self:AddAuditEntry("Processing queued peer: " .. peer .. " (queued " .. queueTime .. "s)")
     local sinceTimestamp = guildData.syncState.lastSyncTimestamp or 0
     self:RequestSync(peer, sinceTimestamp)
 end
@@ -1899,7 +1879,11 @@ end
 
 --- Append an entry to the session audit trail (capped at 200).
 -- @param message string Human-readable log entry
-function GBL:AddAuditEntry(message)
+function GBL:AddAuditEntry(message, chatOnly)
+    if self.db and self.db.profile.sync.chatLog then
+        self:Print("Sync: " .. message)
+    end
+    if chatOnly then return end
     table.insert(syncState.auditTrail, 1, {
         timestamp = GetServerTime(),
         message = message,
@@ -2038,6 +2022,7 @@ function GBL:ResetSyncState()
     syncState.sendRetryCount = 0
     syncState.sendStartTime = 0
     syncState.sendTotalRecords = 0
+    syncState.sendChunkSentAt = 0
     syncState.sendEventCountBatches = nil
     syncState.receiving = false
     syncState.receiveSource = nil
@@ -2114,8 +2099,6 @@ function GBL:ScheduleReceiveTimeout()
         -- Check if sender went offline (abort early instead of wasting NACKs)
         local online = self:IsGuildMemberOnline(syncState.receiveSource)
         if online == false then
-            self:SyncLog("Sync: " .. (syncState.receiveSource or "?")
-                .. " went offline — aborting")
             self:AddAuditEntry("Sender " .. (syncState.receiveSource or "?")
                 .. " offline — aborting receive")
             self:FinishReceiving(syncState.receiveSource)
@@ -2123,9 +2106,6 @@ function GBL:ScheduleReceiveTimeout()
         end
 
         if syncState.receiveNackCount >= MAX_NACK_RETRIES then
-            self:SyncLog("Sync: chunk " .. (syncState.receiveGot + 1) .. "/"
-                .. syncState.receiveExpected .. " failed after "
-                .. MAX_NACK_RETRIES .. " retries — aborting")
             self:AddAuditEntry("NACK limit reached for chunk "
                 .. (syncState.receiveGot + 1) .. " from "
                 .. (syncState.receiveSource or "unknown") .. " — aborting")
@@ -2155,11 +2135,9 @@ function GBL:SendNack(target, chunkIndex)
     })
     msg = compressMessage(msg)
     if not self:SendSyncWhisper(PREFIX, msg, target, "ALERT") then return end
-    self:SyncLog("Sync: requesting re-send of chunk " .. chunkIndex
-        .. " from " .. target .. " (attempt " .. syncState.receiveNackCount
-        .. "/" .. MAX_NACK_RETRIES .. ")")
     self:AddAuditEntry("Sent NACK for chunk " .. chunkIndex
-        .. " to " .. target .. " (attempt " .. syncState.receiveNackCount .. ")")
+        .. " to " .. target .. " (attempt " .. syncState.receiveNackCount
+        .. "/" .. MAX_NACK_RETRIES .. ")")
 end
 
 --- Handle an incoming NACK — re-transmit the requested chunk.
@@ -2224,7 +2202,7 @@ function GBL:HandleBusy(sender, data) -- luacheck: ignore 212/data
         syncState.receiveNackCount = 0
         self._syncReceiving = false
 
-        self:SyncLog("Sync: " .. cleanSender .. " is busy — will retry later")
+        self:AddAuditEntry(cleanSender .. " busy — cleared receive state, will retry later")
     end
 
     -- Also abort sending if BUSY came from our send target
@@ -2249,7 +2227,7 @@ function GBL:HandleBusy(sender, data) -- luacheck: ignore 212/data
         syncState.sendEventCountBatches = nil
         self:StopFpsMonitor()
 
-        self:SyncLog("Sync: " .. cleanSender .. " is busy — aborting send")
+        self:AddAuditEntry(cleanSender .. " busy — aborting send")
     end
 
     -- Queue for retry regardless of whether we cleared state

@@ -112,7 +112,7 @@ local function bucketKeyForRecord(tx)
         end
     end
     -- Fallback for records without parseable IDs
-    return math.floor((tx.timestamp or 0) / BUCKET_SECONDS)
+    return math.floor((tx.timestamp or GetServerTime()) / BUCKET_SECONDS)
 end
 
 --- Exposed for use by Sync.lua bucket filtering.

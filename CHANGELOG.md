@@ -5,6 +5,22 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0] — 2026-04-19
+
+### Fixed
+- Records with Unix epoch 0 timestamps repaired — multiple `or 0` fallbacks replaced with validated timestamps across Dedup, Sync, Ledger, Core, Fingerprint, and ConsumptionView.
+- Schema migration 7→8 repairs existing epoch-0 records (recovers timestamps from ID when possible) and cleans up bogus 1970-01-01 compacted summaries.
+
+### Added
+- "Open Sync Log" button in Sync tab for quick access to the copy-pastable sync log.
+- Bottleneck diagnostics in audit trail: per-chunk RTT, CTL bandwidth backoff, compression ratio, pending peer queue time.
+- `IsValidTimestamp` validation helper prevents future epoch-0 writes at all storage boundaries (StoreTx, StoreMoneyTx, MarkSeen).
+
+### Changed
+- Sync logging unified into single `AddAuditEntry` system — `SyncLog` function removed; chat and audit trail now report identical information via `chatOnly` parameter.
+- Enriched audit messages: hard timeout includes duration, ACK retry includes "ACK timeout" prefix, NACK includes retry limit, received chunks include running totals.
+- BUSY abort-send and BUSY clear-receive now create audit entries (previously chat-only).
+
 ## [0.26.0] — 2026-04-17
 
 ### Added
