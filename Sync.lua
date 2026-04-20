@@ -9,8 +9,8 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 -- Protocol constants
 local PREFIX = "GBLSync"
 local PROTOCOL_VERSION = 4
-local MAX_RECORDS_PER_CHUNK = 25
-local CHUNK_BYTE_BUDGET = 3200
+local MAX_RECORDS_PER_CHUNK = 35
+local CHUNK_BYTE_BUDGET = 5000
 local MAX_RETRIES = 5
 local ACK_TIMEOUT = 8
 local RECEIVE_CHUNK_TIMEOUT = 20
@@ -24,8 +24,8 @@ local INTER_CHUNK_DELAY_SLOW = 0.5
 local FPS_THRESHOLD_LOW = 20
 local FPS_THRESHOLD_RECOVER = 25
 local FPS_SAMPLE_INTERVAL = 1.0
-local CTL_BANDWIDTH_MIN = 400
-local CTL_BACKOFF_DELAY = 1.0
+local CTL_BANDWIDTH_MIN = 200
+local CTL_BACKOFF_DELAY = 0.25
 local PEER_STALE_SECONDS = 300
 local HELLO_HEARTBEAT_INTERVAL = 120
 local EVENTCOUNTS_PER_BATCH = 10
@@ -361,6 +361,14 @@ function GBL:BroadcastHello(force)
     local now = GetServerTime()
     if not force and now - syncState.lastHelloTime < HELLO_COOLDOWN then return end
 
+    -- During sync: suppress heartbeat broadcasts, but send a keepalive
+    -- every ~280s to prevent peer staleness (PEER_STALE_SECONDS = 300).
+    -- Forced HELLOs (post-sync, epidemic) bypass this guard.
+    if not force and (syncState.sending or syncState.receiving) then
+        if now - syncState.lastHelloTime < (PEER_STALE_SECONDS - 20) then return end
+        -- Fall through to send keepalive HELLO
+    end
+
     -- Rate-limit forced HELLOs to prevent storms during epidemic propagation
     if force then
         if now - syncState.lastForcedHelloTime < FORCED_HELLO_COOLDOWN then return end
@@ -407,6 +415,9 @@ end
 -- Only broadcasts if our data has changed since the last manifest.
 function GBL:BroadcastManifest()
     if not self.db.profile.sync.enabled then return end
+
+    -- Suppress manifests during active sync to preserve CTL bandwidth
+    if syncState.sending or syncState.receiving then return end
 
     local guildData = self:GetGuildData()
     if not guildData then return end

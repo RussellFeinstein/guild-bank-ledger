@@ -5,6 +5,12 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.0] — 2026-04-19
+
+### Changed
+- Sync throughput optimized: HELLO and MANIFEST broadcasts suppressed during active sync (keepalive every ~280s prevents peer staleness), CTL backoff delay reduced from 1.0s to 0.25s, CTL bandwidth threshold lowered from 400 to 200 bytes.
+- Chunk density increased: byte budget raised from 3200 to 5000 and record cap from 25 to 35, reducing chunk count by ~36% for large syncs.
+
 ## [0.27.0] — 2026-04-19
 
 ### Fixed

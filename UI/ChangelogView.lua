@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.28.0
+    {"0.28.0", "2026-04-19", {
+        Changed = {
+            "Sync throughput optimized: broadcasts suppressed during active sync with keepalive every ~280s, CTL backoff reduced to 0.25s, bandwidth threshold lowered to 200",
+            "Chunk density increased: byte budget 3200→5000, record cap 25→35, reducing chunk count by ~36% for large syncs",
+        },
+    }},
     -- v0.27.0
     {"0.27.0", "2026-04-19", {
         Fixed = {

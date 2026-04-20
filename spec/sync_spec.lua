@@ -129,6 +129,107 @@ describe("Sync", function()
             GBL:BroadcastHello(true)
             assert.equals(2, #MockAce.sentCommMessages)
         end)
+
+        it("suppresses heartbeat during active send", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            -- Send initial HELLO to establish lastHelloTime
+            GBL:BroadcastHello()
+            assert.equals(1, #MockAce.sentCommMessages)
+
+            -- Add records and enter sending state
+            for i = 1, 40 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "P", timestamp = 3600 * 475100 + i,
+                    scanTime = 3600 * 475100 + i, id = "bh:supptest:" .. i,
+                })
+            end
+            guildData.seenTxHashes = guildData.seenTxHashes or {}
+            for i = 1, 40 do
+                guildData.seenTxHashes["bh:supptest:" .. i] = 3600 * 475100 + i
+            end
+            GBL:ResetHashCache()
+            MockAce.sentCommMessages = {}
+            GBL:HandleSyncRequest("PeerA", { sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending)
+
+            -- Advance time past cooldown but before keepalive threshold (280s)
+            MockWoW.serverTime = MockWoW.serverTime + 120
+            MockAce.sentCommMessages = {}
+            GBL:BroadcastHello()
+
+            -- Should be suppressed — no new GUILD messages
+            local guildMsgs = 0
+            for _, m in ipairs(MockAce.sentCommMessages) do
+                if m.distribution == "GUILD" then guildMsgs = guildMsgs + 1 end
+            end
+            assert.equals(0, guildMsgs, "BroadcastHello should be suppressed during active send")
+        end)
+
+        it("sends keepalive HELLO during sync after 280s", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:BroadcastHello()
+
+            -- Enter sending state
+            for i = 1, 40 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "P", timestamp = 3600 * 475100 + i,
+                    scanTime = 3600 * 475100 + i, id = "bh:keepalive:" .. i,
+                })
+            end
+            guildData.seenTxHashes = guildData.seenTxHashes or {}
+            for i = 1, 40 do
+                guildData.seenTxHashes["bh:keepalive:" .. i] = 3600 * 475100 + i
+            end
+            GBL:ResetHashCache()
+            MockAce.sentCommMessages = {}
+            GBL:HandleSyncRequest("PeerA", { sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending)
+
+            -- Advance time past keepalive threshold (280s)
+            MockWoW.serverTime = MockWoW.serverTime + 290
+            MockAce.sentCommMessages = {}
+            GBL:BroadcastHello()
+
+            -- Should send keepalive HELLO on GUILD
+            local guildMsgs = 0
+            for _, m in ipairs(MockAce.sentCommMessages) do
+                if m.distribution == "GUILD" then guildMsgs = guildMsgs + 1 end
+            end
+            assert.equals(1, guildMsgs, "BroadcastHello should send keepalive after 280s")
+        end)
+
+        it("force=true bypasses sync suppression", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:BroadcastHello()
+
+            -- Enter sending state
+            for i = 1, 40 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "P", timestamp = 3600 * 475100 + i,
+                    scanTime = 3600 * 475100 + i, id = "bh:forcetest:" .. i,
+                })
+            end
+            guildData.seenTxHashes = guildData.seenTxHashes or {}
+            for i = 1, 40 do
+                guildData.seenTxHashes["bh:forcetest:" .. i] = 3600 * 475100 + i
+            end
+            GBL:ResetHashCache()
+            MockAce.sentCommMessages = {}
+            GBL:HandleSyncRequest("PeerA", { sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending)
+
+            -- Advance time past cooldown but before keepalive
+            MockWoW.serverTime = MockWoW.serverTime + 120
+            MockAce.sentCommMessages = {}
+            GBL:BroadcastHello(true)
+
+            -- Force should bypass sync suppression
+            local guildMsgs = 0
+            for _, m in ipairs(MockAce.sentCommMessages) do
+                if m.distribution == "GUILD" then guildMsgs = guildMsgs + 1 end
+            end
+            assert.equals(1, guildMsgs, "force=true should bypass sync suppression")
+        end)
     end)
 
     ---------------------------------------------------------------------------
@@ -636,30 +737,30 @@ describe("Sync", function()
 
         it("distributes item and money transactions across chunks", function()
             local txList = {}
-            for i = 1, 15 do
+            for i = 1, 20 do
                 txList[i] = { type = "deposit", player = "P", timestamp = i }
             end
             local moneyList = {}
-            for i = 1, 15 do
+            for i = 1, 20 do
                 moneyList[i] = { type = "deposit", player = "P", amount = i * 100, timestamp = i }
             end
 
             local chunks = GBL:PrepareChunks(txList, moneyList)
-            assert.is_true(#chunks >= 2, "30 records should produce multiple chunks")
+            assert.is_true(#chunks >= 2, "40 records should produce multiple chunks")
             -- All records accounted for
             local totalTx, totalMoney = 0, 0
             for _, chunk in ipairs(chunks) do
                 totalTx = totalTx + #chunk.transactions
                 totalMoney = totalMoney + #chunk.moneyTransactions
             end
-            assert.equals(15, totalTx)
-            assert.equals(15, totalMoney)
+            assert.equals(20, totalTx)
+            assert.equals(20, totalMoney)
         end)
 
         it("splits by estimated size when records have large fields", function()
             local txList = {}
             -- Each record ~180 bytes estimated (long strings push size)
-            for i = 1, 25 do
+            for i = 1, 35 do
                 txList[i] = {
                     type = "withdrawal",
                     player = "Verylongnamecharacter",
@@ -674,8 +775,8 @@ describe("Sync", function()
                 }
             end
             local chunks = GBL:PrepareChunks(txList, {})
-            -- With ~180 bytes/record and 3200 byte budget,
-            -- should split before hitting 25-record hard cap
+            -- With ~180 bytes/record and 5000 byte budget,
+            -- should split before hitting 35-record hard cap
             assert.is_true(#chunks >= 2,
                 "should produce multiple chunks from size limit")
             for _, chunk in ipairs(chunks) do
@@ -685,7 +786,7 @@ describe("Sync", function()
         end)
 
         it("places a single oversized record in its own chunk", function()
-            local bigId = string.rep("x", 4000)
+            local bigId = string.rep("x", 6000)
             local txList = {
                 { type = "deposit", player = "P", timestamp = 1, id = bigId },
                 { type = "deposit", player = "P", timestamp = 2, id = "small" },
@@ -1676,8 +1777,8 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
 
     describe("ACK timer callback", function()
-        it("MAX_RECORDS_PER_CHUNK constant is 25", function()
-            assert.equals(25, GBL.SYNC_CHUNK_SIZE)
+        it("MAX_RECORDS_PER_CHUNK constant is 35", function()
+            assert.equals(35, GBL.SYNC_CHUNK_SIZE)
         end)
 
         it("ACK timer starts after send callback, not immediately", function()
@@ -1950,8 +2051,9 @@ describe("Sync", function()
             local payload = MockAce.sentCommMessages[1].text
             -- Mock LibDeflate is identity (no compression). In production, LibDeflate
             -- compresses ~60-80%, keeping wire size well under WHISPER_SAFE_BYTES (2000).
-            -- Here we verify raw serialized size stays within the chunk byte budget.
-            assert.is_true(#payload < 4000,
+            -- Here we verify raw serialized size stays within a reasonable bound.
+            -- Budget is 5000 bytes for record estimates; full SYNC_DATA wrapper adds overhead.
+            assert.is_true(#payload < 7000,
                 "Raw serialized chunk (" .. #payload .. " bytes) exceeds byte budget + overhead")
         end)
 
@@ -3295,6 +3397,33 @@ describe("Sync", function()
         it("graceful fallback when CTL has no avail field", function()
             _G.ChatThrottleLib = {}
             assert.is_true(GBL:HasSyncBandwidth())
+            _G.ChatThrottleLib = nil
+        end)
+
+        it("sends at avail=300 (above lowered threshold of 200)", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- avail=300 is above new CTL_BANDWIDTH_MIN=200 (was 400)
+            _G.ChatThrottleLib = { avail = 300 }
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "ctl_thresh:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            -- Should have sent normally (300 > 200 threshold)
+            local trail = GBL:GetAuditTrail()
+            local ctlDeferred = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("CTL bandwidth low") then
+                    ctlDeferred = true
+                    break
+                end
+            end
+            assert.is_false(ctlDeferred,
+                "avail=300 should not trigger deferral (threshold is 200)")
+
             _G.ChatThrottleLib = nil
         end)
     end)
@@ -6947,6 +7076,51 @@ describe("Sync", function()
             GBL:EnableSync()
             -- After disable+enable, manifests should be cleared
             -- The peer manifests are cleared in DisableSync
+        end)
+
+        it("BroadcastManifest suppressed during active sync", function()
+            -- Add data so we have buckets
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P1", tab = 1, itemID = 456,
+                classID = 0, subclassID = 0, count = 1,
+                timestamp = 3600 * 475100, id = "mfst:supp:0", _occurrence = 0,
+                scanTime = 3600 * 475100, scannedBy = "Me",
+            })
+            guildData.seenTxHashes["mfst:supp:0"] = 3600 * 475100
+            GBL:ResetHashCache()
+
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Verify it sends normally when not syncing
+            MockAce.sentCommMessages = {}
+            GBL:BroadcastManifest()
+            local normalCount = 0
+            for _, m in ipairs(MockAce.sentCommMessages) do
+                if m.distribution == "GUILD" then normalCount = normalCount + 1 end
+            end
+            assert.equals(1, normalCount, "should send manifest when not syncing")
+
+            -- Enter sending state: add enough records and trigger HandleSyncRequest
+            for i = 1, 40 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "P", timestamp = 3600 * 475100 + i,
+                    scanTime = 3600 * 475100 + i, id = "mfst:supp:" .. i,
+                })
+                guildData.seenTxHashes["mfst:supp:" .. i] = 3600 * 475100 + i
+            end
+            GBL:ResetHashCache()
+            MockAce.sentCommMessages = {}
+            GBL:HandleSyncRequest("PeerA", { sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending)
+
+            -- Now try BroadcastManifest — should be suppressed
+            MockAce.sentCommMessages = {}
+            GBL:BroadcastManifest()
+            local guildMsgs = 0
+            for _, m in ipairs(MockAce.sentCommMessages) do
+                if m.distribution == "GUILD" then guildMsgs = guildMsgs + 1 end
+            end
+            assert.equals(0, guildMsgs, "BroadcastManifest should be suppressed during active send")
         end)
     end)
 
