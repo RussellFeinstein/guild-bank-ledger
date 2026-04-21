@@ -3400,10 +3400,9 @@ describe("Sync", function()
             _G.ChatThrottleLib = nil
         end)
 
-        it("sends at avail=300 (above lowered threshold of 200)", function()
+        it("defers at avail=300 (below floor threshold of 400)", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- avail=300 is above new CTL_BANDWIDTH_MIN=200 (was 400)
             _G.ChatThrottleLib = { avail = 300 }
 
             table.insert(guildData.transactions, {
@@ -3412,18 +3411,37 @@ describe("Sync", function()
             })
             GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
 
-            -- Should have sent normally (300 > 200 threshold)
-            local trail = GBL:GetAuditTrail()
-            local ctlDeferred = false
-            for _, entry in ipairs(trail) do
-                if entry.message:find("CTL bandwidth low") then
-                    ctlDeferred = true
-                    break
+            -- avail=300 < CTL_BANDWIDTH_MIN=400 floor → should defer
+            local foundSyncData = false
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "SYNC_DATA" then
+                    foundSyncData = true
                 end
             end
-            assert.is_false(ctlDeferred,
-                "avail=300 should not trigger deferral (threshold is 200)")
+            assert.is_false(foundSyncData,
+                "avail=300 should defer (below 400 floor)")
 
+            _G.ChatThrottleLib = nil
+        end)
+
+        it("uses dynamic threshold based on last chunk size", function()
+            _G.ChatThrottleLib = { avail = 500 }
+
+            -- Before any chunk sent, lastChunkBytes=0, threshold=max(400,0)=400
+            assert.is_true(GBL:HasSyncBandwidth(),
+                "avail=500 > floor=400 → should allow")
+
+            -- Simulate a previous chunk being 800 bytes
+            GBL._syncState_setLastChunkBytes(800)
+            assert.is_false(GBL:HasSyncBandwidth(),
+                "avail=500 < dynamic threshold 800 → should defer")
+
+            _G.ChatThrottleLib = { avail = 900 }
+            assert.is_true(GBL:HasSyncBandwidth(),
+                "avail=900 > dynamic threshold 800 → should allow")
+
+            GBL._syncState_setLastChunkBytes(0)
             _G.ChatThrottleLib = nil
         end)
 
@@ -3474,15 +3492,17 @@ describe("Sync", function()
             _G.ChatThrottleLib = nil
         end)
 
-        it("tracks HELLO replies during sync", function()
+        it("suppresses HELLO replies during sync", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
-            _G.ChatThrottleLib = { avail = 1000 }
+            _G.ChatThrottleLib = { avail = 5000 }
 
             table.insert(guildData.transactions, {
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "ctl_hellotag:0",
             })
             GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            local msgsBefore = #MockAce.sentCommMessages
 
             -- Simulate receiving a HELLO while sending
             GBL:HandleHello("ThirdPartyPeer", {
@@ -3493,16 +3513,28 @@ describe("Sync", function()
                 dataHash = 999,
             })
 
+            -- No reply whisper should have been sent
+            local replyCount = 0
+            for i = msgsBefore + 1, #MockAce.sentCommMessages do
+                local ok, data = GBL:Deserialize(MockAce.sentCommMessages[i].text)
+                if ok and data.type == "HELLO" and data.isReply then
+                    replyCount = replyCount + 1
+                end
+            end
+            assert.equals(0, replyCount,
+                "HELLO reply should be suppressed during sync")
+
+            -- But suppression should be logged
             local trail = GBL:GetAuditTrail()
-            local foundTag = false
+            local foundSuppressed = false
             for _, entry in ipairs(trail) do
-                if entry.message:find("%[DURING SYNC") then
-                    foundTag = true
+                if entry.message:find("Suppressed HELLO reply") then
+                    foundSuppressed = true
                     break
                 end
             end
-            assert.is_true(foundTag,
-                "HELLO reply during sync should be tagged [DURING SYNC]")
+            assert.is_true(foundSuppressed,
+                "Suppressed HELLO reply should be logged")
 
             _G.ChatThrottleLib = nil
         end)

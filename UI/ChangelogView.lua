@@ -29,6 +29,14 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.28.2
+    {"0.28.2", "2026-04-21", {
+        Fixed = {
+            "Sync send pacing: dynamic CTL threshold based on chunk size eliminates burst-stall pattern",
+            "HELLO replies suppressed during active sync to preserve CTL bandwidth for data transfer",
+            "CTL backoff delay increased to 1.0s for efficient polling during bandwidth recovery",
+        },
+    }},
     -- v0.28.1
     {"0.28.1", "2026-04-20", {
         Added = {

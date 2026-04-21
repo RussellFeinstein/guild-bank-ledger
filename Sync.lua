@@ -24,8 +24,8 @@ local INTER_CHUNK_DELAY_SLOW = 0.5
 local FPS_THRESHOLD_LOW = 20
 local FPS_THRESHOLD_RECOVER = 25
 local FPS_SAMPLE_INTERVAL = 1.0
-local CTL_BANDWIDTH_MIN = 200
-local CTL_BACKOFF_DELAY = 0.25
+local CTL_BANDWIDTH_MIN = 400
+local CTL_BACKOFF_DELAY = 1.0
 local PEER_STALE_SECONDS = 300
 local HELLO_HEARTBEAT_INTERVAL = 120
 local EVENTCOUNTS_PER_BATCH = 10
@@ -157,6 +157,9 @@ local syncState = {
     -- Diagnostic counters (per-sync session)
     helloRepliesDuringSync = 0,
     nacksReceivedDuringSync = 0,
+
+    -- CTL pacing: last known chunk compressed size (for dynamic threshold)
+    lastChunkBytes = 0,
 }
 
 --- Check if sync is paused due to zone change or combat.
@@ -521,13 +524,8 @@ function GBL:SendHelloReply(target)
     msg = compressMessage(msg)
 
     if not self:SendSyncWhisper(PREFIX, msg, target) then return end
-    local syncTag = ""
-    if syncState.sending or syncState.receiving then
-        syncTag = " [DURING SYNC — CTL cost]"
-        syncState.helloRepliesDuringSync = (syncState.helloRepliesDuringSync or 0) + 1
-    end
     self:AddAuditEntry("Sent HELLO reply to " .. target
-        .. " (tx: " .. txCount .. ", hash: " .. dataHash .. ")" .. syncTag)
+        .. " (tx: " .. txCount .. ", hash: " .. dataHash .. ")")
 end
 
 ------------------------------------------------------------------------
@@ -674,7 +672,14 @@ function GBL:HandleHello(sender, data)
         local currentHash = gd and self:GetDataHash(gd) or 0
         local lastHash = syncState.lastHelloReplyHash[cleanSenderReply]
         if lastHash == nil or currentHash ~= lastHash then
-            self:SendHelloReply(sender)
+            if syncState.sending or syncState.receiving then
+                syncState.helloRepliesDuringSync =
+                    (syncState.helloRepliesDuringSync or 0) + 1
+                self:AddAuditEntry("Suppressed HELLO reply to "
+                    .. cleanSenderReply .. " [sync active]")
+            else
+                self:SendHelloReply(sender)
+            end
             syncState.lastHelloReplyHash[cleanSenderReply] = currentHash
         end
     end
@@ -1189,11 +1194,13 @@ function GBL:SendNextChunk()
         if ctlDeferTotal <= 10 or ctlDeferTotal % 20 == 0 then
             local CTL = _G.ChatThrottleLib
             local availStr = CTL and CTL.avail and string.format("%.0f", CTL.avail) or "?"
+            local threshold = math.max(CTL_BANDWIDTH_MIN, syncState.lastChunkBytes or 0)
             local suffix = ""
             if ctlDeferTotal > 10 then
                 suffix = ", " .. ctlDeferTotal .. " total"
             end
             self:AddAuditEntry("CTL low (avail=" .. availStr
+                .. ", need=" .. threshold
                 .. ", #" .. ctlDeferTotal
                 .. ", t=" .. string.format("%.3f", GetTime())
                 .. suffix
@@ -1227,6 +1234,7 @@ function GBL:SendNextChunk()
         guild = self:GetGuildName(),
     })
     local msg = compressMessage(serialized)
+    syncState.lastChunkBytes = #msg
 
     local rawLen = #serialized
     local msgLen = #msg
@@ -1326,7 +1334,7 @@ function GBL:FinishSending()
         .. " — " .. sent .. "/" .. total .. " chunks"
         .. ", " .. syncState.sendTotalRecords .. " records, " .. elapsed .. "s")
     self:AddAuditEntry("Sync stats: " .. ctlDeferTotal .. " CTL deferrals"
-        .. ", " .. (syncState.helloRepliesDuringSync or 0) .. " HELLO replies during sync"
+        .. ", " .. (syncState.helloRepliesDuringSync or 0) .. " HELLO replies suppressed"
         .. ", " .. (syncState.nacksReceivedDuringSync or 0) .. " NACKs received")
 
     syncState.sending = false
@@ -1338,6 +1346,7 @@ function GBL:FinishSending()
     syncState.sendTotalRecords = 0
     syncState.sendChunkSentAt = 0
     syncState.sendEventCountBatches = nil
+    syncState.lastChunkBytes = 0
     if syncState.sendTimer then
         syncState.sendTimer:Cancel()
         syncState.sendTimer = nil
@@ -2121,6 +2130,7 @@ function GBL:ResetSyncState()
     end
     syncState.helloRepliesDuringSync = 0
     syncState.nacksReceivedDuringSync = 0
+    syncState.lastChunkBytes = 0
     ctlDeferTotal = 0
     for k in pairs(recentWhisperTargets) do
         recentWhisperTargets[k] = nil
@@ -2131,6 +2141,12 @@ end
 -- @return number Total CTL deferrals since last sync start
 function GBL:GetCtlDeferTotal()
     return ctlDeferTotal
+end
+
+--- Set lastChunkBytes directly. Exposed for testing only.
+-- @param n number Compressed chunk size in bytes
+function GBL._syncState_setLastChunkBytes(n)
+    syncState.lastChunkBytes = n
 end
 
 --- Set receiveStartTime directly. Exposed for testing only.
@@ -2531,7 +2547,11 @@ end
 function GBL:HasSyncBandwidth()
     local CTL = _G.ChatThrottleLib
     if not CTL then return true end
-    if CTL.avail and CTL.avail < CTL_BANDWIDTH_MIN then
+    if not CTL.avail then return true end
+    -- Require enough headroom for a full chunk, not just a fixed minimum.
+    -- This prevents burst-queuing multiple chunks when CTL is high.
+    local threshold = math.max(CTL_BANDWIDTH_MIN, syncState.lastChunkBytes or 0)
+    if CTL.avail < threshold then
         return false
     end
     return true
