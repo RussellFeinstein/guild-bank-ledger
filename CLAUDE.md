@@ -48,6 +48,7 @@ luacheck .                 # lint production code
 - All mocks are in `spec/mock_wow.lua` and `spec/mock_ace.lua`
 - Test helper: `spec/helpers.lua`
 - Pattern: `*_spec.lua`
+- **Windows/MSYS2:** bare `busted`/`luacheck` require shim scripts in `~/bin/` (see `~/bin/busted`). Fallback: `bash run_tests.sh --verbose` (or `--lint` for luacheck).
 
 ## Conventions
 
@@ -62,4 +63,4 @@ luacheck .                 # lint production code
 
 ## Version
 
-Current: 0.28.0 (see `VERSION` file)
+Current: 0.28.1 (see `VERSION` file)

@@ -1248,14 +1248,14 @@ describe("Sync", function()
             assert.equals("Test event 1", trail[2].message)
         end)
 
-        it("caps at 200 entries", function()
-            for i = 1, 210 do
+        it("caps at 2000 entries", function()
+            for i = 1, 2010 do
                 GBL:AddAuditEntry("Event " .. i)
             end
 
             local trail = GBL:GetAuditTrail()
-            assert.equals(200, #trail)
-            assert.equals("Event 210", trail[1].message)
+            assert.equals(2000, #trail)
+            assert.equals("Event 2010", trail[1].message)
         end)
     end)
 
@@ -3423,6 +3423,86 @@ describe("Sync", function()
             end
             assert.is_false(ctlDeferred,
                 "avail=300 should not trigger deferral (threshold is 200)")
+
+            _G.ChatThrottleLib = nil
+        end)
+
+        it("increments ctlDeferTotal on each deferral", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            _G.ChatThrottleLib = { avail = 100 }
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "ctl_counter:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            assert.is_true(GBL:GetCtlDeferTotal() >= 1,
+                "ctlDeferTotal should increment on CTL deferral")
+
+            _G.ChatThrottleLib = nil
+        end)
+
+        it("rate-limits CTL deferral audit entries", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            _G.ChatThrottleLib = { avail = 100 }
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "ctl_ratelimit:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            -- Fire timers repeatedly to simulate multiple deferrals
+            for _ = 1, 25 do
+                MockWoW.fireTimers()
+            end
+
+            -- Count CTL audit entries
+            local trail = GBL:GetAuditTrail()
+            local ctlEntries = 0
+            for _, entry in ipairs(trail) do
+                if entry.message:find("CTL low") then
+                    ctlEntries = ctlEntries + 1
+                end
+            end
+
+            -- Should have first 10 verbose + 20th = 11, NOT all 25+
+            assert.is_true(ctlEntries <= 15,
+                "CTL deferral entries should be rate-limited (got " .. ctlEntries .. ")")
+
+            _G.ChatThrottleLib = nil
+        end)
+
+        it("tracks HELLO replies during sync", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            _G.ChatThrottleLib = { avail = 1000 }
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "ctl_hellotag:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            -- Simulate receiving a HELLO while sending
+            GBL:HandleHello("ThirdPartyPeer", {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = GBL:GetGuildName(),
+                txCount = 1,
+                dataHash = 999,
+            })
+
+            local trail = GBL:GetAuditTrail()
+            local foundTag = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("%[DURING SYNC") then
+                    foundTag = true
+                    break
+                end
+            end
+            assert.is_true(foundTag,
+                "HELLO reply during sync should be tagged [DURING SYNC]")
 
             _G.ChatThrottleLib = nil
         end)

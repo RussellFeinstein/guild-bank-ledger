@@ -5,6 +5,21 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.1] — 2026-04-20
+
+### Added
+- Sync diagnostic logging to identify two observed failure modes: CTL deferral death spiral (Mode A) and AceComm message loss (Mode B).
+- CTL deferral entries now include `CTL.avail` value, monotonic counter, and `GetTime()` precision timestamps for chain analysis.
+- CTL deferral audit entries rate-limited: first 10 verbose, then every 20th — prevents eviction of protocol events in long syncs.
+- "Sending chunk" entries now include `CTL.avail` at send time (headroom diagnostic).
+- AceComm transmit callback logged ("Chunk X transmitted") with queue-to-wire duration and post-transmit CTL.avail — absence between send and ACK timeout proves message stuck in queue.
+- HELLO replies during active sync tagged `[DURING SYNC — CTL cost]` with per-session counter.
+- NACK receipt entries include `CTL.avail` to prove sender-stuck-in-deferral feedback loop.
+- Per-sync summary at FinishSending: CTL deferrals, HELLO replies during sync, NACKs received.
+
+### Changed
+- Audit trail cap increased from 200 to 2000 entries to capture full sync lifecycle.
+
 ## [0.28.0] — 2026-04-19
 
 ### Changed

@@ -29,6 +29,16 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.28.1
+    {"0.28.1", "2026-04-20", {
+        Added = {
+            "Sync diagnostic logging: CTL.avail values, deferral counters with GetTime() precision, transmit callback timing, HELLO reply during-sync tags, NACK CTL state, per-sync summary stats",
+        },
+        Changed = {
+            "Audit trail cap increased from 200 to 2000 entries to capture full sync lifecycle",
+            "CTL deferral entries rate-limited: first 10 verbose, then every 20th — prevents audit eviction",
+        },
+    }},
     -- v0.28.0
     {"0.28.0", "2026-04-19", {
         Changed = {

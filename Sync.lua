@@ -60,6 +60,9 @@ GBL.SYNC_MANIFEST_INTERVAL = MANIFEST_INTERVAL
 GBL.SYNC_MANIFEST_MAX_BUCKETS = MANIFEST_MAX_BUCKETS
 GBL.SYNC_COMBAT_COOLDOWN = COMBAT_COOLDOWN
 
+-- Diagnostic: CTL deferral tracking (module-level, survives state resets)
+local ctlDeferTotal = 0  -- monotonic count per sync session
+
 ------------------------------------------------------------------------
 -- Compression (LibDeflate)
 ------------------------------------------------------------------------
@@ -150,6 +153,10 @@ local syncState = {
     lastManifestHash = 0,
     lastManifestTime = 0,
     manifestTimer = nil,
+
+    -- Diagnostic counters (per-sync session)
+    helloRepliesDuringSync = 0,
+    nacksReceivedDuringSync = 0,
 }
 
 --- Check if sync is paused due to zone change or combat.
@@ -514,8 +521,13 @@ function GBL:SendHelloReply(target)
     msg = compressMessage(msg)
 
     if not self:SendSyncWhisper(PREFIX, msg, target) then return end
+    local syncTag = ""
+    if syncState.sending or syncState.receiving then
+        syncTag = " [DURING SYNC — CTL cost]"
+        syncState.helloRepliesDuringSync = (syncState.helloRepliesDuringSync or 0) + 1
+    end
     self:AddAuditEntry("Sent HELLO reply to " .. target
-        .. " (tx: " .. txCount .. ", hash: " .. dataHash .. ")")
+        .. " (tx: " .. txCount .. ", hash: " .. dataHash .. ")" .. syncTag)
 end
 
 ------------------------------------------------------------------------
@@ -1067,6 +1079,9 @@ function GBL:HandleSyncRequest(sender, data)
     self:AddAuditEntry("Sending " .. totalTx
         .. " tx to " .. sender .. " in " .. #chunks .. " chunk(s)")
 
+    ctlDeferTotal = 0
+    syncState.helloRepliesDuringSync = 0
+    syncState.nacksReceivedDuringSync = 0
     self:SendNextChunk()
 end
 
@@ -1169,7 +1184,21 @@ function GBL:SendNextChunk()
 
     -- ChatThrottleLib awareness — defer if other addons are using bandwidth
     if not self:HasSyncBandwidth() then
-        self:AddAuditEntry("CTL bandwidth low — deferring " .. CTL_BACKOFF_DELAY .. "s")
+        ctlDeferTotal = ctlDeferTotal + 1
+        -- Rate limit: first 10 verbose, then every 20th
+        if ctlDeferTotal <= 10 or ctlDeferTotal % 20 == 0 then
+            local CTL = _G.ChatThrottleLib
+            local availStr = CTL and CTL.avail and string.format("%.0f", CTL.avail) or "?"
+            local suffix = ""
+            if ctlDeferTotal > 10 then
+                suffix = ", " .. ctlDeferTotal .. " total"
+            end
+            self:AddAuditEntry("CTL low (avail=" .. availStr
+                .. ", #" .. ctlDeferTotal
+                .. ", t=" .. string.format("%.3f", GetTime())
+                .. suffix
+                .. ") — deferring " .. CTL_BACKOFF_DELAY .. "s")
+        end
         C_Timer.After(CTL_BACKOFF_DELAY, function()
             self:SendNextChunk()
         end)
@@ -1203,10 +1232,18 @@ function GBL:SendNextChunk()
     local msgLen = #msg
     local chunkRecords = #chunk.transactions + #chunk.moneyTransactions
     local total = #syncState.sendChunks
+    local ctlAvailAtSend = ""
+    do
+        local CTL = _G.ChatThrottleLib
+        if CTL and CTL.avail then
+            ctlAvailAtSend = ", CTL.avail=" .. string.format("%.0f", CTL.avail)
+        end
+    end
     local chunkMsg = "Sending chunk " .. idx .. "/" .. total
         .. " to " .. (syncState.sendTarget or "?")
         .. " (" .. chunkRecords .. " records, " .. rawLen .. "→" .. msgLen .. " bytes"
-        .. ", " .. math.floor((1 - msgLen / math.max(rawLen, 1)) * 100) .. "% compressed)"
+        .. ", " .. math.floor((1 - msgLen / math.max(rawLen, 1)) * 100) .. "% compressed"
+        .. ctlAvailAtSend .. ")"
     -- Chat: every chunk; audit trail: 1st, every 10th, and last
     self:AddAuditEntry(chunkMsg, true)
     if idx == 1 or idx == total or idx % 10 == 0 then
@@ -1242,6 +1279,13 @@ function GBL:SendNextChunk()
     if not self:SendSyncWhisper(PREFIX, msg, syncState.sendTarget, "NORMAL",
         function(_cbArg, sent, totalBytes)
             if sent < totalBytes then return end
+            -- Diagnostic: log transmit completion timing
+            local queueDuration = string.format("%.2f",
+                GetTime() - (syncState.sendChunkSentAt or GetTime()))
+            local postAvail = _G.ChatThrottleLib and _G.ChatThrottleLib.avail
+                and string.format("%.0f", _G.ChatThrottleLib.avail) or "?"
+            self:AddAuditEntry("Chunk " .. idx .. " transmitted ("
+                .. queueDuration .. "s queue-to-wire, CTL.avail=" .. postAvail .. ")")
             -- Message fully transmitted — now start ACK timer
             if syncState.sendTimer then
                 syncState.sendTimer:Cancel()
@@ -1281,6 +1325,9 @@ function GBL:FinishSending()
     self:AddAuditEntry("Send complete to " .. target
         .. " — " .. sent .. "/" .. total .. " chunks"
         .. ", " .. syncState.sendTotalRecords .. " records, " .. elapsed .. "s")
+    self:AddAuditEntry("Sync stats: " .. ctlDeferTotal .. " CTL deferrals"
+        .. ", " .. (syncState.helloRepliesDuringSync or 0) .. " HELLO replies during sync"
+        .. ", " .. (syncState.nacksReceivedDuringSync or 0) .. " NACKs received")
 
     syncState.sending = false
     syncState.sendTarget = nil
@@ -1899,7 +1946,7 @@ function GBL:AddAuditEntry(message, chatOnly)
         timestamp = GetServerTime(),
         message = message,
     })
-    while #syncState.auditTrail > 200 do
+    while #syncState.auditTrail > 2000 do
         table.remove(syncState.auditTrail)
     end
 end
@@ -2072,9 +2119,18 @@ function GBL:ResetSyncState()
         syncState.manifestTimer:Cancel()
         syncState.manifestTimer = nil
     end
+    syncState.helloRepliesDuringSync = 0
+    syncState.nacksReceivedDuringSync = 0
+    ctlDeferTotal = 0
     for k in pairs(recentWhisperTargets) do
         recentWhisperTargets[k] = nil
     end
+end
+
+--- Get CTL deferral total. Exposed for testing only.
+-- @return number Total CTL deferrals since last sync start
+function GBL:GetCtlDeferTotal()
+    return ctlDeferTotal
 end
 
 --- Set receiveStartTime directly. Exposed for testing only.
@@ -2171,8 +2227,16 @@ function GBL:HandleNack(sender, data)
         syncState.sendTimer = nil
     end
 
+    local ctlState = ""
+    do
+        local CTL = _G.ChatThrottleLib
+        if CTL and CTL.avail then
+            ctlState = ", CTL.avail=" .. string.format("%.0f", CTL.avail)
+        end
+    end
+    syncState.nacksReceivedDuringSync = (syncState.nacksReceivedDuringSync or 0) + 1
     self:AddAuditEntry("NACK from " .. sender .. " for chunk " .. requestedChunk
-        .. " — re-transmitting")
+        .. " — re-transmitting" .. ctlState)
 
     -- Rewind to the requested chunk and re-send after a brief delay
     syncState.sendChunkIndex = requestedChunk - 1
