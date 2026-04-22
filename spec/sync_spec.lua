@@ -1777,8 +1777,8 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
 
     describe("ACK timer callback", function()
-        it("MAX_RECORDS_PER_CHUNK constant is 35", function()
-            assert.equals(35, GBL.SYNC_CHUNK_SIZE)
+        it("MAX_RECORDS_PER_CHUNK constant is 25", function()
+            assert.equals(25, GBL.SYNC_CHUNK_SIZE)
         end)
 
         it("ACK timer starts after send callback, not immediately", function()
@@ -1970,6 +1970,10 @@ describe("Sync", function()
             assert.is_true(GBL:GetSyncStatus().sending)
             local sentBefore = #MockAce.sentCommMessages
 
+            -- Advance time past the inter-chunk gap floor so the retry fires
+            -- immediately (in production, retries fire 8s after the last send).
+            MockWoW.serverTime = MockWoW.serverTime + 10
+
             -- Fire ACK timeout — should retry, not abort
             for _, timer in ipairs(MockWoW.pendingTimers) do
                 if timer.delay == 8 and not timer.cancelled then
@@ -2004,8 +2008,11 @@ describe("Sync", function()
             GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
-            -- Fire ACK timeout MAX_RETRIES times (should keep retrying)
+            -- Fire ACK timeout MAX_RETRIES times (should keep retrying).
+            -- Advance time between firings so the inter-chunk gap floor is
+            -- satisfied for each retry (production gap is 8s per ACK_TIMEOUT).
             for attempt = 1, GBL.SYNC_MAX_RETRIES do
+                MockWoW.serverTime = MockWoW.serverTime + 10
                 for _, timer in ipairs(MockWoW.pendingTimers) do
                     if timer.delay == 8 and not timer.cancelled then
                         timer.callback()
@@ -2017,6 +2024,7 @@ describe("Sync", function()
             end
 
             -- One more timeout — should abort
+            MockWoW.serverTime = MockWoW.serverTime + 10
             for _, timer in ipairs(MockWoW.pendingTimers) do
                 if timer.delay == 8 and not timer.cancelled then
                     timer.callback()
@@ -2042,6 +2050,9 @@ describe("Sync", function()
             GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
+            -- Advance past gap floor so each retry fires (production 8s gap).
+            MockWoW.serverTime = MockWoW.serverTime + 10
+
             -- Fire one ACK timeout (retry attempt 1)
             for _, timer in ipairs(MockWoW.pendingTimers) do
                 if timer.delay == 8 and not timer.cancelled then
@@ -2053,6 +2064,9 @@ describe("Sync", function()
             -- Now simulate successful ACK for chunk 1
             GBL:HandleAck("OfficerB", { chunk = 1 })
 
+            -- Advance past gap floor again for the chunk 2 retry.
+            MockWoW.serverTime = MockWoW.serverTime + 10
+
             -- Fire ACK timeout for chunk 2 — retry counter should be reset,
             -- so this should retry (not abort)
             for _, timer in ipairs(MockWoW.pendingTimers) do
@@ -2063,6 +2077,140 @@ describe("Sync", function()
             end
             assert.is_true(GBL:GetSyncStatus().sending,
                 "retry counter should have reset — still sending")
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Inter-chunk gap floor (v0.28.5)
+    ---------------------------------------------------------------------------
+
+    describe("inter-chunk gap floor", function()
+        it("exposes SYNC_INTER_CHUNK_GAP_FLOOR constant as 1.0", function()
+            assert.equals(1.0, GBL.SYNC_INTER_CHUNK_GAP_FLOOR)
+        end)
+
+        it("first chunk is not deferred by gap floor", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "gapfloor_first:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            -- First chunk should have gone out immediately (no prior
+            -- lastSendIssuedAt means gap check short-circuits on the > 0 guard).
+            local foundSyncData = false
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "SYNC_DATA" and data.chunk == 1 then
+                    foundSyncData = true
+                    break
+                end
+            end
+            assert.is_true(foundSyncData,
+                "first chunk should send immediately without gap-floor deferral")
+        end)
+
+        it("second chunk issued inside the gap window defers until floor", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            MockWoW.serverTime = 1000
+
+            -- Enough records to need at least 2 chunks at 25/chunk
+            for i = 1, 30 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000 + i,
+                    id = "gapfloor_second_" .. i .. ":0",
+                })
+            end
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            local function countSyncData()
+                local c = 0
+                for _, msg in ipairs(MockAce.sentCommMessages) do
+                    local ok, data = GBL:Deserialize(msg.text)
+                    if ok and data.type == "SYNC_DATA" then c = c + 1 end
+                end
+                return c
+            end
+            local function fireFirstShortTimer(maxDelay)
+                for _, timer in ipairs(MockWoW.pendingTimers) do
+                    if not timer.cancelled and not timer.fired
+                        and timer.delay and timer.delay <= maxDelay
+                        and timer.delay > 0 then
+                        timer.callback()
+                        timer.fired = true
+                        return timer.delay
+                    end
+                end
+                return nil
+            end
+
+            local afterChunk1 = countSyncData()
+            assert.is_true(afterChunk1 >= 1, "chunk 1 should have been sent")
+
+            -- Acknowledge chunk 1 — this schedules a post-ACK SendNextChunk via
+            -- GetSyncDelay(). Fire only that timer (not the 120s hard timer)
+            -- so we isolate the gap-floor behavior.
+            GBL:HandleAck("OfficerB", { chunk = 1 })
+            local firedDelay = fireFirstShortTimer(1.0)
+            assert.is_not_nil(firedDelay,
+                "should have found the post-ACK SendNextChunk timer to fire")
+
+            -- With no time advancement, the deferred timer is still pending
+            -- and chunk 2 is NOT yet sent.
+            assert.equals(afterChunk1, countSyncData(),
+                "chunk 2 should NOT send while still inside the gap window")
+
+            -- Advance past the gap floor and fire the deferred SendNextChunk.
+            MockWoW.serverTime = MockWoW.serverTime + 2.0
+            local firedDefer = fireFirstShortTimer(1.0)
+            assert.is_not_nil(firedDefer,
+                "should have found the gap-floor deferral timer to fire")
+            assert.is_true(countSyncData() > afterChunk1,
+                "chunk 2 should send once gap floor has elapsed")
+        end)
+
+        it("ACK-timeout retry does not defer when gap already exceeds floor", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            MockWoW.serverTime = 1000
+
+            -- Suppress auto-callback so we control the ACK timer manually.
+            local origSend = GBL.SendCommMessage
+            local savedCb, savedArg
+            GBL.SendCommMessage = function(_self, prefix, text, dist, target, _prio, cbFn, cbArg)
+                table.insert(MockAce.sentCommMessages, {
+                    prefix = prefix, text = text, distribution = dist, target = target,
+                })
+                savedCb, savedArg = cbFn, cbArg
+            end
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "gapfloor_acktimeout:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            -- Complete the send so the ACK timer is scheduled.
+            assert.is_not_nil(savedCb)
+            savedCb(savedArg, 100, 100)
+
+            -- Advance past ACK_TIMEOUT; retries from here satisfy gap ≥ floor.
+            MockWoW.serverTime = MockWoW.serverTime + 10
+
+            local sentBefore = #MockAce.sentCommMessages
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 8 and not timer.cancelled then
+                    timer.callback()
+                    break
+                end
+            end
+            local sentAfter = #MockAce.sentCommMessages
+            assert.is_true(sentAfter > sentBefore,
+                "ACK-timeout retry should fire immediately when gap > floor")
+
+            GBL.SendCommMessage = origSend
         end)
     end)
 
@@ -2870,6 +3018,11 @@ describe("Sync", function()
 
             -- Send NACK for chunk 1
             GBL:HandleNack("OfficerB", { chunk = 1 })
+
+            -- Advance past the inter-chunk gap floor so the NACK retransmit
+            -- satisfies gap >= 1.0s (production NACKs arrive several seconds
+            -- after the failed send).
+            MockWoW.serverTime = MockWoW.serverTime + 2
 
             -- Fire the 0.5s delayed re-send
             for _, timer in ipairs(MockWoW.pendingTimers) do
@@ -7468,6 +7621,10 @@ describe("Sync", function()
                 { name = "OnlinePeer-TestRealm", isOnline = false },
             }
             MockAce.sentCommMessages = {}
+
+            -- Advance past the inter-chunk gap floor so SendNextChunk proceeds
+            -- to the offline check instead of deferring.
+            MockWoW.serverTime = MockWoW.serverTime + 2
 
             -- Fire the ACK-triggered timer to attempt next chunk
             -- Since the first chunk was sent while online, we need to simulate

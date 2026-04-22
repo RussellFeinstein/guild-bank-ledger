@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.28.5
+    {"0.28.5", "2026-04-22", {
+        Fixed = {
+            "Sync reliability: 1.0s inter-chunk gap floor avoids WoW's server-side whisper throttle that was silently dropping the 3rd rapid-succession message",
+            "Chunk density reverted to v0.27.0 values (25 records / 3200 byte budget) to reduce fragment count per chunk",
+        },
+    }},
     -- v0.28.4
     {"0.28.4", "2026-04-22", {
         Added = {

@@ -5,6 +5,12 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.5] — 2026-04-22
+
+### Fixed
+- Sync reliability: inter-chunk gap floor of 1.0s added between chunk transmissions to avoid WoW's server-side per-recipient whisper throttle, which silently drops the 3rd+ rapid-succession addon message to a single peer. Paired sender/receiver logs captured with v0.28.4 instrumentation confirmed this was the dominant failure mode — chunk 3 vanished deterministically across 6 ACK-timeout retries plus 2 NACK retransmits, while CTL and client-side pacing reported healthy. The floor is independent of `CTL_BACKOFF_DELAY` and the post-ACK `GetSyncDelay()`; the first chunk is exempt, zone/combat pause resumes already exceed it, and ACK-timeout retries naturally satisfy it.
+- Chunk density reverted from v0.28.0's aggressive tuning back to v0.27.0 values (`MAX_RECORDS_PER_CHUNK`: 35→25, `CHUNK_BYTE_BUDGET`: 5000→3200). Compressed chunks drop from ~4 AceComm wire fragments to ~3, making each chunk cheaper in the throttle budget and more resilient to residual fragment-level loss. Trade-off accepted: ~40% more chunks per sync, but total sync time is longer only because syncs now complete instead of aborting.
+
 ## [0.28.4] — 2026-04-22
 
 ### Added

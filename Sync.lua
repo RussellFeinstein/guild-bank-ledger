@@ -9,8 +9,8 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 -- Protocol constants
 local PREFIX = "GBLSync"
 local PROTOCOL_VERSION = 4
-local MAX_RECORDS_PER_CHUNK = 35
-local CHUNK_BYTE_BUDGET = 5000
+local MAX_RECORDS_PER_CHUNK = 25     -- v0.28.0 raised to 35; reverted in v0.28.5
+local CHUNK_BYTE_BUDGET = 3200        -- v0.28.0 raised to 5000; reverted in v0.28.5
 local MAX_RETRIES = 5
 local ACK_TIMEOUT = 8
 local RECEIVE_CHUNK_TIMEOUT = 20
@@ -26,6 +26,8 @@ local FPS_THRESHOLD_RECOVER = 25
 local FPS_SAMPLE_INTERVAL = 1.0
 local CTL_BANDWIDTH_MIN = 400
 local CTL_BACKOFF_DELAY = 1.0
+local INTER_CHUNK_GAP_FLOOR = 1.0     -- v0.28.5: min seconds between chunk issues
+                                       -- (server-side per-recipient whisper throttle)
 local PEER_STALE_SECONDS = 300
 local HELLO_HEARTBEAT_INTERVAL = 120
 local EVENTCOUNTS_PER_BATCH = 10
@@ -59,6 +61,7 @@ GBL.SYNC_FORCED_HELLO_COOLDOWN = FORCED_HELLO_COOLDOWN
 GBL.SYNC_MANIFEST_INTERVAL = MANIFEST_INTERVAL
 GBL.SYNC_MANIFEST_MAX_BUCKETS = MANIFEST_MAX_BUCKETS
 GBL.SYNC_COMBAT_COOLDOWN = COMBAT_COOLDOWN
+GBL.SYNC_INTER_CHUNK_GAP_FLOOR = INTER_CHUNK_GAP_FLOOR
 
 -- Diagnostic: CTL deferral tracking (module-level, survives state resets)
 local ctlDeferTotal = 0  -- monotonic count per sync session
@@ -1220,6 +1223,20 @@ function GBL:SendNextChunk()
             self:SendNextChunk()
         end)
         return
+    end
+
+    -- v0.28.5: inter-chunk gap floor. WoW's chat server applies a per-recipient
+    -- addon-whisper throttle independent of CTL's client-side meter, and drops
+    -- the 3rd+ rapid-succession message. Enforce a minimum gap between chunk
+    -- issues. First chunk (lastSendIssuedAt == 0) is exempt via the > 0 guard.
+    if syncState.lastSendIssuedAt and syncState.lastSendIssuedAt > 0 then
+        local gap = GetTime() - syncState.lastSendIssuedAt
+        if gap < INTER_CHUNK_GAP_FLOOR then
+            C_Timer.After(INTER_CHUNK_GAP_FLOOR - gap, function()
+                self:SendNextChunk()
+            end)
+            return
+        end
     end
 
     syncState.sendChunkIndex = syncState.sendChunkIndex + 1
