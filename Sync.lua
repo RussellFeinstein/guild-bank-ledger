@@ -9,8 +9,18 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 -- Protocol constants
 local PREFIX = "GBLSync"
 local PROTOCOL_VERSION = 4
-local MAX_RECORDS_PER_CHUNK = 25     -- v0.28.0 raised to 35; reverted in v0.28.5
-local CHUNK_BYTE_BUDGET = 3200        -- v0.28.0 raised to 5000; reverted in v0.28.5
+-- Chunk size tuning (v0.28.6 — moderate 2-fragment target)
+-- Compressed payload targets ~450–510 bytes so each chunk is 2 AceComm wire
+-- fragments (255 B each). Per-chunk loss per attempt drops from ~67% (4-fragment
+-- chunks in v0.28.5) to ~42% at ~24% per-fragment drop observed on cross-realm
+-- whispers, giving <1% 6-retry failure per chunk.
+--
+-- Conservative 1-fragment fallback (if v0.28.6 still aborts):
+--     local MAX_RECORDS_PER_CHUNK = 5
+--     local CHUNK_BYTE_BUDGET = 1500
+-- See CLAUDE.md "Sync subsystem notes" for when/why to flip.
+local MAX_RECORDS_PER_CHUNK = 10
+local CHUNK_BYTE_BUDGET = 2500
 local MAX_RETRIES = 5
 local ACK_TIMEOUT = 8
 local RECEIVE_CHUNK_TIMEOUT = 20

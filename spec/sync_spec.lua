@@ -775,8 +775,9 @@ describe("Sync", function()
                 }
             end
             local chunks = GBL:PrepareChunks(txList, {})
-            -- With ~180 bytes/record and 5000 byte budget,
-            -- should split before hitting 35-record hard cap
+            -- Splits on either the byte budget or the record cap, whichever
+            -- triggers first. With 35 records and any reasonable per-record
+            -- size, this should always produce multiple chunks.
             assert.is_true(#chunks >= 2,
                 "should produce multiple chunks from size limit")
             for _, chunk in ipairs(chunks) do
@@ -1777,8 +1778,8 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
 
     describe("ACK timer callback", function()
-        it("MAX_RECORDS_PER_CHUNK constant is 25", function()
-            assert.equals(25, GBL.SYNC_CHUNK_SIZE)
+        it("MAX_RECORDS_PER_CHUNK constant is 10", function()
+            assert.equals(10, GBL.SYNC_CHUNK_SIZE)
         end)
 
         it("ACK timer starts after send callback, not immediately", function()

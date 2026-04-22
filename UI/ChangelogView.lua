@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.28.6
+    {"0.28.6", "2026-04-22", {
+        Fixed = {
+            "Sync reliability: chunks shrunk to 2 AceComm wire fragments (10 records / 2500 byte budget) so cross-realm whisper delivery succeeds within 6 retries",
+        },
+    }},
     -- v0.28.5
     {"0.28.5", "2026-04-22", {
         Fixed = {

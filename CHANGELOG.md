@@ -5,6 +5,12 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.6] — 2026-04-22
+
+### Fixed
+- Sync reliability: chunk density reduced further (`MAX_RECORDS_PER_CHUNK`: 25→10, `CHUNK_BYTE_BUDGET`: 3200→2500) so compressed chunks fit in 2 AceComm wire fragments instead of 4. v0.28.5 logs showed the v0.28.5 chunk revert (25/3200) did not actually cross the 3-fragment threshold — compressed payload stayed at ~836 bytes, still 4 fragments. Observed per-attempt chunk-loss rate on cross-realm whispers was ~67%, implying ~24% per-fragment drop. Halving the fragment count per chunk cuts per-attempt loss to ~42% and the 6-retry failure probability to under 1% per chunk. Total sync time roughly doubles in chunk count but actually completes instead of aborting.
+- A conservative 1-fragment fallback (5 records / 1500 byte budget) is pinned as a commented block in `Sync.lua` and documented in `CLAUDE.md` — flip to it if v0.28.6 still aborts on cross-realm syncs.
+
 ## [0.28.5] — 2026-04-22
 
 ### Fixed

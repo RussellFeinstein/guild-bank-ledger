@@ -86,6 +86,13 @@ luacheck .                 # lint production code
 - **Correct in isolation, amplifier in practice:** v0.25.4 superset-skip interacts poorly with failed sends (covers the symmetric pair so neither side retries).
 - **Intentionally not a fix:** v0.28.1 and v0.28.4 added diagnostic logging because the root cause was uncertain.
 
+### Chunk sizing — moderate vs. conservative
+
+- **Moderate (shipped, v0.28.6):** `MAX_RECORDS_PER_CHUNK = 10`, `CHUNK_BYTE_BUDGET = 2500`. Compressed chunks land around 450–510 bytes → 2 AceComm wire fragments per chunk. At the observed ~24% per-fragment drop on cross-realm whispers this gives ~42% per-attempt chunk loss and <1% 6-retry failure per chunk. Sync of ~4000 records ≈ 7 minutes at the 1.0s gap floor.
+- **Conservative (pinned as a commented block in `Sync.lua`):** `MAX_RECORDS_PER_CHUNK = 5`, `CHUNK_BYTE_BUDGET = 1500`. Compressed chunks ≤ 255 bytes → 1 fragment per chunk. Per-attempt loss equals per-fragment loss (~24%). 6-retry failure per chunk is ~0.02%. Sync time roughly doubles to ~14 minutes.
+- **When to flip to conservative:** if a v0.28.6 sync still aborts mid-stream on cross-realm peers (particularly chunk 1 failing all 6 retries from a fresh `Send complete to X — 1/N chunks` line), or `Sync outcomes` reports `p_frag_est > 15%` after multiple attempts. Flip by editing `Sync.lua:12-13` to the values in the commented alternative, bump patch version, ship.
+- **What NOT to do:** do not go *above* 10 records / 2500 byte budget without new diagnostic data — the v0.28.4→v0.28.5 evidence shows 4-fragment chunks have unrecoverable per-attempt loss on at least some cross-realm routes.
+
 ### Diagnosis discipline
 
 - Do not lower a pacing constant without an independent reliability measurement — "more aggressive" is not the same as "better."
@@ -94,4 +101,4 @@ luacheck .                 # lint production code
 
 ## Version
 
-Current: 0.28.5 (see `VERSION` file)
+Current: 0.28.6 (see `VERSION` file)
