@@ -61,6 +61,37 @@ luacheck .                 # lint production code
 - Saved variables: `GuildBankLedgerDB` (AceDB), data keyed per guild name
 - **Sync is guild-wide** — all members participate in HELLO/sync, not just officers. Officer rank only gates UI visibility (settings, admin features). Never add rank checks to the sync protocol.
 
+## Sync subsystem notes
+
+### Protocol / transport
+
+- Sync transport stack is **AceSerializer → LibDeflate → AceComm → ChatThrottleLib → `C_ChatInfo.SendAddonMessage`**. AceComm splits payloads into 255 B wire fragments; a 980 B compressed chunk is ~4 fragments. Whole-chunk loss compounds: at per-fragment drop probability `p`, chunk loss is `1 - (1-p)^n`. Moving from 3 to 4 fragments at p=5% raises chunk loss from 14% to 19%.
+- AceComm WHISPER has an empirically ~2000 B reliability ceiling (`WHISPER_SAFE_BYTES` in `Sync.lua`). Staying under it is necessary but not sufficient — fragment *count* is an independent reliability factor.
+- `ChatThrottleLib.avail` is the **client-side** bandwidth meter only. It does not model server-side per-recipient addon-message throttling that Blizzard's chat server applies to `SendAddonMessage` independent of CTL. A healthy `CTL.avail` can still coincide with server-dropped messages when chunks are issued <1s apart.
+- `C_ChatInfo.SendAddonMessage` via `AceComm:SendCommMessage` does not return a useful delivery status — reliability is observed only via ACK/NACK/timeout at the protocol layer. Do not branch on its return value.
+- AceComm's progress callback fires per CTL piece; only `sent == totalBytes` indicates "handed to the wire," and only then should the ACK timer start. This is the v0.23.0 contract codified in `SendNextChunk`.
+
+### Code invariants to preserve
+
+- All sync diagnostics go through `GBL:AddAuditEntry`. Use `chatOnly=true` for high-frequency per-chunk chat spam and plain calls for the audit trail. The trail is capped at 2000 entries — new per-chunk entries must be additive/terse, not verbose.
+- `syncState.lastChunkBytes` is the canonical compressed chunk size. Reuse it for fragment-count estimates (`ceil(lastChunkBytes/255)`) rather than re-measuring.
+- `HasSyncBandwidth()` uses a **dynamic** threshold `max(CTL_BANDWIDTH_MIN, lastChunkBytes)` — this is the v0.28.2 fix for the burst-stall regression from v0.28.0. Do not regress to a fixed threshold.
+- The superset skip in `HandleHello` and again in the bidirectional check after `FinishSending` is load-bearing for convergence but lacks a "tried and failed, back off" state — when sends fail, both sides' bidirectional checks short-circuit on "likely superset" and the protocol re-enters the same failing pattern. Flagged as a candidate amplifier, not fixed in v0.28.4.
+- Stale-ACK discard in `HandleAck` (v0.23.0) and `ScheduleReceiveTimeout` rescheduling (v0.25.3) are real defect fixes, not patches — do not remove during refactors.
+
+### Historical patch verdicts
+
+- **Genuine root-cause fixes:** v0.11.x (ID normalization), v0.22.0 (BUSY + pending queue), v0.23.0 (stale-ACK + callback-timed ACK timer), v0.25.0 (epidemic gossip + MANIFEST), v0.25.3 (receive-timer reschedule), v0.27.0 (epoch-0 migration + unified audit), v0.28.2 (dynamic CTL threshold).
+- **Regression + partial rollback:** v0.28.0 raised chunk size 25→35 / 3200→5000 and tightened CTL 400→200 / 1.0s→0.25s — introduced burst-stall (Mode A) and increased fragment-loss exposure (Mode B). Only Mode A was fixed in v0.28.2; chunk size was not reverted.
+- **Correct in isolation, amplifier in practice:** v0.25.4 superset-skip interacts poorly with failed sends (covers the symmetric pair so neither side retries).
+- **Intentionally not a fix:** v0.28.1 and v0.28.4 added diagnostic logging because the root cause was uncertain.
+
+### Diagnosis discipline
+
+- Do not lower a pacing constant without an independent reliability measurement — "more aggressive" is not the same as "better."
+- Per-chunk audit outcomes (attempt count, wire-to-ACK latency, gap since prior chunk, estimated fragments) are the minimum signal needed to discriminate fragment loss from server throttle from callback-timing bugs. Add these before changing behavior.
+- `sendChunkIndex` in the "Send complete X/Y chunks" line is the index of the **last attempted** chunk, not the count acknowledged. When writing future diagnostics or UI strings, prefer an explicit "N ok / M aborted" framing.
+
 ## Version
 
-Current: 0.28.3 (see `VERSION` file)
+Current: 0.28.4 (see `VERSION` file)

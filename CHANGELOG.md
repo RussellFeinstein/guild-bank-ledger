@@ -5,6 +5,16 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.4] — 2026-04-22
+
+### Added
+- Sync diagnostic instrumentation — additive audit-log fields to distinguish between four competing failure hypotheses (fragment loss, server-side throttle, receiver-buffer contention, wire-vs-ACK timing) without changing protocol behavior:
+  - `Sending chunk` entries now include `CTLq=A/N/B` — ChatThrottleLib priority-queue depths (ALERT/NORMAL/BULK) — when `ChatThrottleLib.Prio` is exposed. Distinguishes "CTL clear" from "CTL has bandwidth but other addons have queued traffic ahead of us."
+  - `Sending chunk` entries now include `gap=X.XXs` — wall-clock delta since the previous chunk was issued. Directly tests the server-side per-recipient throttle hypothesis by correlating failures with sub-second inter-chunk spacing.
+  - Successful ACK entries (first, every 10th, last) now include `wire-to-ACK=X.XXs` — elapsed time from AceComm wire-completion callback to ACK receipt. Discriminates "AceComm callback fires before wire transmission actually completes" from genuine peer/network latency.
+  - ACK timeout entries now include `fragments~=N`, `gapSinceWire=X.XXs`, and `nacksThisChunk=N` — converts the previously terse timeout line into the primary forensic row for every failed chunk.
+  - `FinishSending` now emits `Sync outcomes: a on 1st, b on 2nd, c on 3rd+, d aborted, p_frag_est=X.X%` — per-sync retry histogram with a rough fragment-loss-probability estimate (clamped to [0, 50%], reported `n/a` when fewer than 3 chunks are observed). Quantifies the fragment-loss hypothesis directly.
+
 ## [0.28.3] — 2026-04-21
 
 ### Changed

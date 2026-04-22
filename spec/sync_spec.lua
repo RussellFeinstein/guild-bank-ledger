@@ -1870,6 +1870,48 @@ describe("Sync", function()
             GBL.SendCommMessage = origSend
         end)
 
+        it("ACK entry includes wire-to-ACK latency when wire anchor is set", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Capture + invoke AceComm progress callback so wire anchor is set.
+            local storedCallback, storedArg
+            local origSend = GBL.SendCommMessage
+            GBL.SendCommMessage = function(self, prefix, text, dist, target, prio, cbFn, cbArg)
+                table.insert(MockAce.sentCommMessages, {
+                    prefix = prefix, text = text, distribution = dist, target = target,
+                })
+                storedCallback = cbFn
+                storedArg = cbArg
+            end
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "wireack1:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            -- Complete the send so sendChunkTransmittedAt is stamped
+            assert.is_not_nil(storedCallback)
+            storedCallback(storedArg, 100, 100)
+
+            -- Send the ACK for chunk 1 (which is always logged: first chunk)
+            GBL:HandleAck("OfficerB", { chunk = 1 })
+
+            local trail = GBL:GetAuditTrail()
+            local ackEntry
+            for _, entry in ipairs(trail) do
+                if entry.message:find("ACK from") and entry.message:find("chunk 1/") then
+                    ackEntry = entry.message
+                    break
+                end
+            end
+            assert.is_not_nil(ackEntry, "chunk 1 ACK entry should be logged")
+            assert.is_not_nil(ackEntry:find("wire%-to%-ACK="),
+                "ACK entry should include wire-to-ACK=: " .. tostring(ackEntry))
+
+            GBL.SendCommMessage = origSend
+        end)
+
         it("hard timeout fires if callback never completes", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
@@ -3327,6 +3369,66 @@ describe("Sync", function()
         end)
     end)
 
+    ---------------------------------------------------------------------------
+    -- Per-sync retry histogram (v0.28.4 diagnostics)
+    ---------------------------------------------------------------------------
+
+    describe("FinishSending outcomes histogram", function()
+        it("emits Sync outcomes entry after Sync stats", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "hist_basic:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleAck("OfficerB", { chunk = 1 })
+            -- Fire the post-ACK inter-chunk timer → SendNextChunk → FinishSending
+            MockWoW.fireTimers()
+
+            local trail = GBL:GetAuditTrail()
+            local foundOutcomes = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("Sync outcomes:")
+                    and entry.message:find("on 1st")
+                    and entry.message:find("on 2nd")
+                    and entry.message:find("on 3rd%+")
+                    and entry.message:find("aborted")
+                    and entry.message:find("p_frag_est=") then
+                    foundOutcomes = true
+                    break
+                end
+            end
+            assert.is_true(foundOutcomes,
+                "FinishSending should emit a Sync outcomes histogram with all fields")
+        end)
+
+        it("reports p_frag_est=n/a when fewer than 3 chunks observed", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "hist_nacount:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleAck("OfficerB", { chunk = 1 })
+            MockWoW.fireTimers()
+
+            local trail = GBL:GetAuditTrail()
+            local outcomesEntry
+            for _, entry in ipairs(trail) do
+                if entry.message:find("Sync outcomes:") then
+                    outcomesEntry = entry.message
+                    break
+                end
+            end
+            assert.is_not_nil(outcomesEntry, "outcomes entry should exist")
+            assert.is_not_nil(outcomesEntry:find("p_frag_est=n/a"),
+                "single-chunk sync should report p_frag_est=n/a, got: "
+                    .. tostring(outcomesEntry))
+        end)
+    end)
+
     describe("ChatThrottleLib awareness", function()
         it("defers SendNextChunk when CTL bandwidth is low", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
@@ -3488,6 +3590,37 @@ describe("Sync", function()
             -- Should have first 10 verbose + 20th = 11, NOT all 25+
             assert.is_true(ctlEntries <= 15,
                 "CTL deferral entries should be rate-limited (got " .. ctlEntries .. ")")
+
+            _G.ChatThrottleLib = nil
+        end)
+
+        it("Sending chunk entry includes CTLq= when CTL.Prio is present", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            _G.ChatThrottleLib = {
+                avail = 5000,
+                Prio = {
+                    ALERT  = { nSize = 0 },
+                    NORMAL = { nSize = 2 },
+                    BULK   = { nSize = 0 },
+                },
+            }
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "ctlq1:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            local trail = GBL:GetAuditTrail()
+            local foundCtlq = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("Sending chunk") and entry.message:find("CTLq=") then
+                    foundCtlq = true
+                    break
+                end
+            end
+            assert.is_true(foundCtlq,
+                "Sending chunk entry should include CTLq= when CTL.Prio is present")
 
             _G.ChatThrottleLib = nil
         end)

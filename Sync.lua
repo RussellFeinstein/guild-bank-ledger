@@ -160,6 +160,12 @@ local syncState = {
 
     -- CTL pacing: last known chunk compressed size (for dynamic threshold)
     lastChunkBytes = 0,
+
+    -- Per-chunk instrumentation (v0.28.4)
+    lastSendIssuedAt = 0,         -- GetTime() when the previous SendNextChunk issued a send
+    sendChunkTransmittedAt = 0,   -- GetTime() when the AceComm callback fired sent==totalBytes
+    nacksForCurrentChunk = 0,     -- NACKs received while retrying the current chunk
+    chunkOutcomes = {},           -- [chunk] = { attempts, wireToAck, outcome }
 }
 
 --- Check if sync is paused due to zone change or combat.
@@ -1087,6 +1093,10 @@ function GBL:HandleSyncRequest(sender, data)
     ctlDeferTotal = 0
     syncState.helloRepliesDuringSync = 0
     syncState.nacksReceivedDuringSync = 0
+    syncState.lastSendIssuedAt = 0
+    syncState.sendChunkTransmittedAt = 0
+    syncState.nacksForCurrentChunk = 0
+    syncState.chunkOutcomes = {}
     self:SendNextChunk()
 end
 
@@ -1222,6 +1232,17 @@ function GBL:SendNextChunk()
         return
     end
 
+    -- v0.28.4: record send attempt and inter-chunk gap for H2 diagnostics
+    local nowTime = GetTime()
+    local interChunkGap = (syncState.lastSendIssuedAt and syncState.lastSendIssuedAt > 0)
+        and (nowTime - syncState.lastSendIssuedAt) or nil
+    syncState.lastSendIssuedAt = nowTime
+    syncState.chunkOutcomes = syncState.chunkOutcomes or {}
+    if not syncState.chunkOutcomes[idx] then
+        syncState.chunkOutcomes[idx] = { attempts = 0, outcome = "pending" }
+    end
+    syncState.chunkOutcomes[idx].attempts = syncState.chunkOutcomes[idx].attempts + 1
+
     local serialized = self:Serialize({
         type = "SYNC_DATA",
         chunk = idx,
@@ -1245,13 +1266,21 @@ function GBL:SendNextChunk()
         local CTL = _G.ChatThrottleLib
         if CTL and CTL.avail then
             ctlAvailAtSend = ", CTL.avail=" .. string.format("%.0f", CTL.avail)
+            -- v0.28.4: also capture priority-queue depths (ALERT/NORMAL/BULK)
+            if CTL.Prio then
+                local qA = (CTL.Prio.ALERT and CTL.Prio.ALERT.nSize) or 0
+                local qN = (CTL.Prio.NORMAL and CTL.Prio.NORMAL.nSize) or 0
+                local qB = (CTL.Prio.BULK and CTL.Prio.BULK.nSize) or 0
+                ctlAvailAtSend = ctlAvailAtSend .. ", CTLq=" .. qA .. "/" .. qN .. "/" .. qB
+            end
         end
     end
+    local gapStr = interChunkGap and string.format(", gap=%.2fs", interChunkGap) or ""
     local chunkMsg = "Sending chunk " .. idx .. "/" .. total
         .. " to " .. (syncState.sendTarget or "?")
         .. " (" .. chunkRecords .. " records, " .. rawLen .. "→" .. msgLen .. " bytes"
         .. ", " .. math.floor((1 - msgLen / math.max(rawLen, 1)) * 100) .. "% compressed"
-        .. ctlAvailAtSend .. ")"
+        .. ctlAvailAtSend .. gapStr .. ")"
     -- Chat: every chunk; audit trail: 1st, every 10th, and last
     self:AddAuditEntry(chunkMsg, true)
     if idx == 1 or idx == total or idx % 10 == 0 then
@@ -1287,6 +1316,8 @@ function GBL:SendNextChunk()
     if not self:SendSyncWhisper(PREFIX, msg, syncState.sendTarget, "NORMAL",
         function(_cbArg, sent, totalBytes)
             if sent < totalBytes then return end
+            -- v0.28.4: record wire-completion time — anchor for wire-to-ACK latency
+            syncState.sendChunkTransmittedAt = GetTime()
             -- Diagnostic: log transmit completion timing
             local queueDuration = string.format("%.2f",
                 GetTime() - (syncState.sendChunkSentAt or GetTime()))
@@ -1304,11 +1335,23 @@ function GBL:SendNextChunk()
                     syncState.sendRetryCount = syncState.sendRetryCount + 1
                     syncState.sendChunkIndex = syncState.sendChunkIndex - 1
                     local retryChunk = syncState.sendChunkIndex + 1
+                    -- v0.28.4: enriched diagnostic context (H1/H2/H3 discriminators)
+                    local fragments = math.ceil((syncState.lastChunkBytes or 0) / 255)
+                    local wireAnchor = syncState.sendChunkTransmittedAt or 0
+                    local gapSinceWire = (wireAnchor > 0)
+                        and string.format("%.2fs", GetTime() - wireAnchor) or "?"
                     self:AddAuditEntry("ACK timeout — retrying chunk " .. retryChunk
                         .. " (attempt " .. (syncState.sendRetryCount + 1) .. "/"
-                        .. (MAX_RETRIES + 1) .. ")")
+                        .. (MAX_RETRIES + 1) .. ")"
+                        .. ", fragments~=" .. fragments
+                        .. ", gapSinceWire=" .. gapSinceWire
+                        .. ", nacksThisChunk=" .. (syncState.nacksForCurrentChunk or 0))
                     self:SendNextChunk()
                 else
+                    -- v0.28.4: record abort outcome for this chunk
+                    if syncState.chunkOutcomes and syncState.chunkOutcomes[idx] then
+                        syncState.chunkOutcomes[idx].outcome = "aborted"
+                    end
                     self:AddAuditEntry("ACK timeout from "
                         .. (syncState.sendTarget or "unknown")
                         .. " after " .. (MAX_RETRIES + 1) .. " attempts — aborting")
@@ -1337,6 +1380,38 @@ function GBL:FinishSending()
         .. ", " .. (syncState.helloRepliesDuringSync or 0) .. " HELLO replies suppressed"
         .. ", " .. (syncState.nacksReceivedDuringSync or 0) .. " NACKs received")
 
+    -- v0.28.4: per-chunk outcomes histogram + rough fragment-loss estimate
+    local on1, on2, on3plus, aborted, chunksSeen = 0, 0, 0, 0, 0
+    local totalFragSends, failedFragSends = 0, 0
+    local fragmentsPerAttempt = math.ceil((syncState.lastChunkBytes or 0) / 255)
+    for _, outcome in pairs(syncState.chunkOutcomes or {}) do
+        chunksSeen = chunksSeen + 1
+        local attempts = outcome.attempts or 0
+        if outcome.outcome == "aborted" then
+            aborted = aborted + 1
+        elseif attempts <= 1 then
+            on1 = on1 + 1
+        elseif attempts == 2 then
+            on2 = on2 + 1
+        else
+            on3plus = on3plus + 1
+        end
+        if fragmentsPerAttempt > 0 and attempts > 0 then
+            totalFragSends = totalFragSends + attempts * fragmentsPerAttempt
+            failedFragSends = failedFragSends
+                + math.max(0, attempts - 1) * fragmentsPerAttempt
+        end
+    end
+    local pFragEst = "n/a"
+    if chunksSeen >= 3 and totalFragSends > 0 then
+        local p = failedFragSends / totalFragSends
+        if p > 0.5 then p = 0.5 end
+        pFragEst = string.format("%.1f%%", p * 100)
+    end
+    self:AddAuditEntry("Sync outcomes: " .. on1 .. " on 1st, "
+        .. on2 .. " on 2nd, " .. on3plus .. " on 3rd+, "
+        .. aborted .. " aborted, p_frag_est=" .. pFragEst)
+
     syncState.sending = false
     syncState.sendTarget = nil
     syncState.sendChunks = {}
@@ -1347,6 +1422,10 @@ function GBL:FinishSending()
     syncState.sendChunkSentAt = 0
     syncState.sendEventCountBatches = nil
     syncState.lastChunkBytes = 0
+    syncState.lastSendIssuedAt = 0
+    syncState.sendChunkTransmittedAt = 0
+    syncState.nacksForCurrentChunk = 0
+    syncState.chunkOutcomes = {}
     if syncState.sendTimer then
         syncState.sendTimer:Cancel()
         syncState.sendTimer = nil
@@ -1630,15 +1709,25 @@ function GBL:HandleAck(sender, data)
         syncState.sendTimer = nil
     end
 
+    -- v0.28.4: record outcome + wire-to-ACK latency for this chunk (H4 diagnostic)
+    local wireAnchor = syncState.sendChunkTransmittedAt or 0
+    local wireToAck = (wireAnchor > 0) and (GetTime() - wireAnchor) or nil
+    if syncState.chunkOutcomes and syncState.chunkOutcomes[ackedChunk] then
+        syncState.chunkOutcomes[ackedChunk].outcome = "ok"
+        syncState.chunkOutcomes[ackedChunk].wireToAck = wireToAck
+    end
+
     local total = #syncState.sendChunks
     -- Only audit-log every 10th ACK and the last one
     if ackedChunk == 1 or ackedChunk == total or ackedChunk % 10 == 0 then
         local rtt = string.format(", %.1fs RTT", GetTime() - (syncState.sendChunkSentAt or GetTime()))
+        local wireStr = wireToAck and string.format(", wire-to-ACK=%.2fs", wireToAck) or ""
         self:AddAuditEntry("ACK from " .. sender .. " for chunk " .. ackedChunk
-            .. "/" .. total .. rtt)
+            .. "/" .. total .. rtt .. wireStr)
     end
 
     syncState.sendRetryCount = 0
+    syncState.nacksForCurrentChunk = 0  -- v0.28.4: advancing to next chunk
 
     -- Adaptive delay between chunks (slows down when FPS is low)
     C_Timer.After(self:GetSyncDelay(), function()
@@ -2131,6 +2220,10 @@ function GBL:ResetSyncState()
     syncState.helloRepliesDuringSync = 0
     syncState.nacksReceivedDuringSync = 0
     syncState.lastChunkBytes = 0
+    syncState.lastSendIssuedAt = 0
+    syncState.sendChunkTransmittedAt = 0
+    syncState.nacksForCurrentChunk = 0
+    syncState.chunkOutcomes = {}
     ctlDeferTotal = 0
     for k in pairs(recentWhisperTargets) do
         recentWhisperTargets[k] = nil
@@ -2251,6 +2344,7 @@ function GBL:HandleNack(sender, data)
         end
     end
     syncState.nacksReceivedDuringSync = (syncState.nacksReceivedDuringSync or 0) + 1
+    syncState.nacksForCurrentChunk = (syncState.nacksForCurrentChunk or 0) + 1
     self:AddAuditEntry("NACK from " .. sender .. " for chunk " .. requestedChunk
         .. " — re-transmitting" .. ctlState)
 

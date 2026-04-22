@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.28.4
+    {"0.28.4", "2026-04-22", {
+        Added = {
+            "Sync diagnostics: CTL queue depth, inter-chunk gap, wire-to-ACK latency, enriched ACK-timeout context, and per-sync retry histogram with p_frag_est",
+        },
+    }},
     -- v0.28.3
     {"0.28.3", "2026-04-21", {
         Changed = {
