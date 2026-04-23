@@ -8057,4 +8057,166 @@ describe("Sync", function()
             assert.is_true(found, "Received chunk audit should include running totals")
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- v0.28.8: receiver-side redundancy metric
+    ---------------------------------------------------------------------------
+    describe("v0.28.8 redundancy metric", function()
+        local function findRedundancyLine()
+            local trail = GBL:GetAuditTrail()
+            for _, entry in ipairs(trail) do
+                if entry.message:find("Redundancy from") then
+                    return entry.message
+                end
+            end
+            return nil
+        end
+
+        local function makeItemTx(idSuffix)
+            return {
+                type = "deposit", player = "Thrall",
+                itemID = 12345, classID = 0, subclassID = 5,
+                count = 5, tab = 1,
+                timestamp = 3600 * 475100,
+                id = "deposit|Thrall|12345|5|1|475100:" .. idSuffix,
+            }
+        end
+
+        local function makeMoneyTx(idSuffix)
+            return {
+                type = "deposit", player = "Thrall",
+                amount = 10000,
+                timestamp = 3600 * 475100,
+                id = "money|Thrall|deposit|10000|" .. idSuffix,
+            }
+        end
+
+        it("emits items+money split with mixed dupes (50% items, 75% money)", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Pre-mark 2 of 4 items + 3 of 4 money tx as already seen
+            guildData.seenTxHashes[makeItemTx("a").id] = 3600 * 475100
+            guildData.seenTxHashes[makeItemTx("b").id] = 3600 * 475100
+            guildData.seenTxHashes[makeMoneyTx("a").id] = 3600 * 475100
+            guildData.seenTxHashes[makeMoneyTx("b").id] = 3600 * 475100
+            guildData.seenTxHashes[makeMoneyTx("c").id] = 3600 * 475100
+
+            GBL:RequestSync("OfficerB", 0)
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 1,
+                transactions = {
+                    makeItemTx("a"), makeItemTx("b"),  -- dupes
+                    makeItemTx("c"), makeItemTx("d"),  -- new
+                },
+                moneyTransactions = {
+                    makeMoneyTx("a"), makeMoneyTx("b"), makeMoneyTx("c"),  -- dupes
+                    makeMoneyTx("d"),  -- new
+                },
+            })
+
+            local line = findRedundancyLine()
+            assert.is_not_nil(line, "Redundancy line should be emitted")
+            assert.is_truthy(line:find("Redundancy from OfficerB"))
+            -- 5 dupes / 8 received = 62.5% → rounds to 63%
+            assert.is_truthy(line:find("63%% duped %(5/8 received%)"),
+                "expected '63% duped (5/8 received)', got: " .. line)
+            assert.is_truthy(line:find("items: 50%% %(2/4%)"),
+                "expected 'items: 50% (2/4)', got: " .. line)
+            assert.is_truthy(line:find("money: 75%% %(3/4%)"),
+                "expected 'money: 75% (3/4)', got: " .. line)
+        end)
+
+        it("emits 100% duped when all records are duplicates", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            guildData.seenTxHashes[makeItemTx("a").id] = 3600 * 475100
+            guildData.seenTxHashes[makeMoneyTx("a").id] = 3600 * 475100
+
+            GBL:RequestSync("OfficerB", 0)
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 1,
+                transactions = { makeItemTx("a") },
+                moneyTransactions = { makeMoneyTx("a") },
+            })
+
+            local line = findRedundancyLine()
+            assert.is_not_nil(line)
+            assert.is_truthy(line:find("100%% duped %(2/2 received%)"),
+                "expected '100% duped (2/2 received)', got: " .. line)
+        end)
+
+        it("emits 0% duped when all records are new", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:RequestSync("OfficerB", 0)
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 1,
+                transactions = { makeItemTx("a"), makeItemTx("b") },
+                moneyTransactions = { makeMoneyTx("a") },
+            })
+
+            local line = findRedundancyLine()
+            assert.is_not_nil(line)
+            assert.is_truthy(line:find("0%% duped %(0/3 received%)"),
+                "expected '0% duped (0/3 received)', got: " .. line)
+        end)
+
+        it("suppresses redundancy line entirely on empty sync", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:RequestSync("OfficerB", 0)
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 1,
+                transactions = {},
+                moneyTransactions = {},
+            })
+
+            local line = findRedundancyLine()
+            assert.is_nil(line, "Redundancy line should NOT appear for empty sync")
+        end)
+
+        it("omits items segment when only money records received", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:RequestSync("OfficerB", 0)
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 1,
+                transactions = {},
+                moneyTransactions = { makeMoneyTx("a") },
+            })
+
+            local line = findRedundancyLine()
+            assert.is_not_nil(line)
+            assert.is_nil(line:find("items:"),
+                "items segment should be omitted, got: " .. line)
+            assert.is_truthy(line:find("money: 0%% %(0/1%)"),
+                "expected 'money: 0% (0/1)', got: " .. line)
+        end)
+
+        it("per-chunk audit includes running dup percentage", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            guildData.seenTxHashes[makeItemTx("a").id] = 3600 * 475100
+
+            GBL:RequestSync("OfficerB", 0)
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 2,
+                transactions = { makeItemTx("a"), makeItemTx("b") },
+                moneyTransactions = {},
+            })
+
+            local trail = GBL:GetAuditTrail()
+            local chunkLine = nil
+            for _, entry in ipairs(trail) do
+                if entry.message:find("Received chunk 1/2") then
+                    chunkLine = entry.message
+                    break
+                end
+            end
+            assert.is_not_nil(chunkLine)
+            -- 1 dupe / 2 received = 50%
+            assert.is_truthy(chunkLine:find("50%% dup"),
+                "expected '50% dup' in per-chunk line, got: " .. chunkLine)
+        end)
+    end)
 end)

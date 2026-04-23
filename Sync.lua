@@ -919,6 +919,10 @@ function GBL:RequestSync(target, sinceTimestamp)
     syncState.receiveGot = 0
     syncState.receiveStored = 0
     syncState.receiveDuped = 0
+    syncState.receiveItemStored = 0
+    syncState.receiveItemDuped = 0
+    syncState.receiveMoneyStored = 0
+    syncState.receiveMoneyDuped = 0
     syncState.receiveNormalized = 0
     syncState.receiveExpected = 0
     syncState.receiveStartTime = GetServerTime()
@@ -1739,6 +1743,10 @@ function GBL:HandleSyncData(sender, data)
     syncState.receiveGot = syncState.receiveGot + 1
     syncState.receiveStored = syncState.receiveStored + stored
     syncState.receiveDuped = syncState.receiveDuped + duped
+    syncState.receiveItemStored = (syncState.receiveItemStored or 0) + itemStored
+    syncState.receiveItemDuped = (syncState.receiveItemDuped or 0) + itemDuped
+    syncState.receiveMoneyStored = (syncState.receiveMoneyStored or 0) + moneyStored
+    syncState.receiveMoneyDuped = (syncState.receiveMoneyDuped or 0) + moneyDuped
     syncState.receiveExpected = data.totalChunks or 1
 
     -- Reset receive timeout — NACK with backoff for missing chunk
@@ -1763,12 +1771,18 @@ function GBL:HandleSyncData(sender, data)
     ackMsg = compressMessage(ackMsg)
     self:SendSyncWhisper(PREFIX, ackMsg, sender, "ALERT")
 
+    local runningTotal = syncState.receiveStored + syncState.receiveDuped
+    local dupPctSuffix = ""
+    if runningTotal > 0 then
+        local dupPct = math.floor(100 * syncState.receiveDuped / runningTotal + 0.5)
+        dupPctSuffix = ", " .. dupPct .. "% dup"
+    end
     self:AddAuditEntry("Received chunk " .. (data.chunk or "?") .. "/"
         .. (data.totalChunks or "?") .. " from " .. sender
         .. " (" .. chunkTotal .. " records: "
         .. itemStored .. " item new, " .. itemDuped .. " item duped, "
         .. moneyStored .. " money new, " .. moneyDuped .. " money duped"
-        .. " | total so far: " .. syncState.receiveStored .. " new)")
+        .. " | total so far: " .. syncState.receiveStored .. " new" .. dupPctSuffix .. ")")
 
     self:SendMessage("GBL_SYNC_PROGRESS", sender,
         data.chunk or 0, data.totalChunks or 0, stored)
@@ -1878,6 +1892,36 @@ function GBL:FinishReceiving(sender)
         .. ", " .. chunksGot .. " chunks, " .. elapsed .. "s"
         .. " | total tx now: " .. totalTxAfter .. ", hash: " .. newHash)
 
+    -- v0.28.8: redundancy metric — measures bucket-granularity inefficiency.
+    -- Suppressed if zero records received (empty sync).
+    local itemStored_s = syncState.receiveItemStored or 0
+    local itemDuped_s = syncState.receiveItemDuped or 0
+    local moneyStored_s = syncState.receiveMoneyStored or 0
+    local moneyDuped_s = syncState.receiveMoneyDuped or 0
+    local totalGot = totalStored + totalDuped
+    if totalGot > 0 then
+        local totalDupPct = math.floor(100 * totalDuped / totalGot + 0.5)
+        local segments = {}
+        local itemTotal = itemStored_s + itemDuped_s
+        if itemTotal > 0 then
+            local itemPct = math.floor(100 * itemDuped_s / itemTotal + 0.5)
+            segments[#segments + 1] = "items: " .. itemPct
+                .. "% (" .. itemDuped_s .. "/" .. itemTotal .. ")"
+        end
+        local moneyTotal = moneyStored_s + moneyDuped_s
+        if moneyTotal > 0 then
+            local moneyPct = math.floor(100 * moneyDuped_s / moneyTotal + 0.5)
+            segments[#segments + 1] = "money: " .. moneyPct
+                .. "% (" .. moneyDuped_s .. "/" .. moneyTotal .. ")"
+        end
+        local line = "Redundancy from " .. (sender or "unknown") .. ": "
+            .. totalDupPct .. "% duped (" .. totalDuped .. "/" .. totalGot .. " received)"
+        if #segments > 0 then
+            line = line .. " — " .. table.concat(segments, ", ")
+        end
+        self:AddAuditEntry(line)
+    end
+
     if syncState.receiveTimer then
         syncState.receiveTimer:Cancel()
         syncState.receiveTimer = nil
@@ -1889,6 +1933,10 @@ function GBL:FinishReceiving(sender)
     syncState.receiveGot = 0
     syncState.receiveStored = 0
     syncState.receiveDuped = 0
+    syncState.receiveItemStored = 0
+    syncState.receiveItemDuped = 0
+    syncState.receiveMoneyStored = 0
+    syncState.receiveMoneyDuped = 0
     syncState.receiveNormalized = 0
     syncState.receiveStartTime = 0
     syncState.receiveNackCount = 0

@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.8] — 2026-04-23
+
+### Added
+- Receiver-side redundancy metric in sync audit. New `Redundancy from <peer>` line in `FinishReceiving` reports total dupes/received plus item-vs-money split (e.g., `Redundancy from PeerX: 78% duped (1023/1314 received) — items: 65% (412/635), money: 90% (611/679)`). Per-chunk audit lines also gain a running `X% dup` annotation in the "total so far" segment. Diagnostics-only — no protocol or behavior change. Suppression rules: line omitted entirely when no records were received; items/money segments individually omitted when their record type is absent. Purpose: measure how often the bucket-filtered sync ships records the receiver already has, to inform whether a future manifest-exchange protocol change is justified by observed redundancy in real syncs.
+
 ## [0.28.7] — 2026-04-22
 
 ### Fixed

@@ -29,6 +29,18 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.28.8
+    {"0.28.8", "2026-04-23", {
+        Added = {
+            "Receiver-side redundancy metric in sync audit. New "
+                .. "\"Redundancy from <peer>\" line reports total dupes/received "
+                .. "with item-vs-money split; per-chunk audit gains a running "
+                .. "\"X% dup\" annotation. Diagnostics-only — no protocol or "
+                .. "behavior change. Informs whether bucket-granularity "
+                .. "redundancy justifies a future manifest-exchange protocol change.",
+        },
+    }},
+
     -- v0.28.7
     {"0.28.7", "2026-04-22", {
         Fixed = {
