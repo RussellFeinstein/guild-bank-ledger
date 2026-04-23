@@ -29,6 +29,14 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.4
+    {"0.29.4", "2026-04-23", {
+        Fixed = {
+            "Layout tab dropdowns (mode + per-item Slots/Per-slot) now accept edits. The draft state was being wiped on every refresh, so changes applied then immediately reverted.",
+            "Sort Access rank dropdown now shows all options including 'None (GM only)' as the default. It was previously rendering blank entries due to an array-vs-hash mismatch in the AceGUI dropdown call.",
+        },
+    }},
+
     -- v0.29.3
     {"0.29.3", "2026-04-23", {
         Added = {

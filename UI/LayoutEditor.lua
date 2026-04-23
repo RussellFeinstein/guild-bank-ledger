@@ -105,8 +105,12 @@ function GBL:BuildLayoutTab(container)
     end
     scroll:AddChild(banner)
 
-    -- Draft state attached to the widget so OnSave reads the latest.
-    self._layoutDraft = freshDraft(self)
+    -- Draft state — initialize from storage only if we don't already have
+    -- one in progress. Refresh-on-mode-change must not wipe pending edits.
+    -- Save and Revert both explicitly reset the draft.
+    if not self._layoutDraft then
+        self._layoutDraft = freshDraft(self)
+    end
 
     -- ------------------------------------------------------------------
     -- Per-tab rows: mode picker + (if display) item template editor.
@@ -135,7 +139,7 @@ function GBL:BuildLayoutTab(container)
             self:Print("Layout saved (v" .. self:GetBankLayout().version .. ").")
             self:AddAuditEntry("Layout: saved by " ..
                 (UnitName("player") or "?") .. " (v" .. self:GetBankLayout().version .. ")")
-            self._layoutDraft = freshDraft(self)
+            self._layoutDraft = nil  -- force re-init from storage on next render
             self:RefreshLayoutTab()
         else
             self:Print("|cffff5555Layout save failed:|r " .. tostring(err))
@@ -148,7 +152,7 @@ function GBL:BuildLayoutTab(container)
     revertBtn:SetWidth(120)
     revertBtn:SetDisabled(not writable)
     revertBtn:SetCallback("OnClick", function()
-        self._layoutDraft = freshDraft(self)
+        self._layoutDraft = nil  -- force re-init from storage on next render
         self:RefreshLayoutTab()
     end)
     saveRow:AddChild(revertBtn)
@@ -448,19 +452,23 @@ function GBL:_LayoutEditor_RenderSortAccess(parent, isGM)
         -- Still render the delegate list read-only so delegates can see themselves.
     end
 
-    -- Rank threshold picker
+    -- Rank threshold picker.
+    -- AceGUI Dropdown:SetList(items, order) expects `items` to be a HASH
+    -- keyed by the option value (the thing passed to SetValue / OnValueChanged).
+    -- We use -1 as the sentinel for "no rank-based access, GM only".
     local rankRow = AceGUI:Create("SimpleGroup")
     rankRow:SetFullWidth(true)
     rankRow:SetLayout("Flow")
     parent:AddChild(rankRow)
 
-    local rankList = { "GM only" }
+    local rankList = { [-1] = "None (GM only)" }
     local rankOrder = { -1 }
     for i = 0, math.max(0, numRanks - 1) do
         local rankName = GuildControlGetRankName and GuildControlGetRankName(i + 1) or ("Rank " .. i)
-        rankList[#rankList + 1] = format("Rank %d and above (%s)", i, rankName)
+        rankList[i] = format("Rank %d and above (%s)", i, rankName)
         rankOrder[#rankOrder + 1] = i
     end
+
     local rankDD = AceGUI:Create("Dropdown")
     rankDD:SetLabel("Grant to rank and above")
     rankDD:SetWidth(360)

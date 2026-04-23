@@ -5,6 +5,12 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.4] — 2026-04-23
+
+### Fixed
+- **Layout tab dropdowns are now interactive.** Mode changes (display / overflow / ignore) were being wiped immediately on refresh because `BuildLayoutTab` re-initialized the in-progress draft from saved storage on every render. The draft now persists across rebuilds and is only reset explicitly on Save or Revert.
+- **Sort Access rank dropdown now shows all options and defaults correctly.** It was built as an array instead of a hash keyed by option value, so AceGUI rendered the first two entries as blank. The dropdown now shows "None (GM only)" followed by "Rank N and above (rankname)" for each guild rank.
+
 ## [0.29.3] — 2026-04-23
 
 **Milestone M-sort-2 (UI): Layout editor + Sort tab**
