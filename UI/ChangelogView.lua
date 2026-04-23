@@ -29,6 +29,15 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.3
+    {"0.29.3", "2026-04-23", {
+        Added = {
+            "Layout tab — per-tab mode picker (display/overflow/ignore), item template rows with Slots + Per-slot inputs, live slot-budget readout, Capture-current-layout button, and Add-item input that takes an itemID or a pasted item link.",
+            "Sort tab — Preview builds and displays the planned moves with human-readable item names, deficits, and unplaced items. Execute runs the plan through SortExecutor with progress prints. Cancel aborts.",
+            "Sort Access section (on the Layout tab) — GM sets a rank threshold and named delegates. Non-GMs see the policy read-only. Layout tab visibility itself now depends on sort access.",
+        },
+    }, milestone = "M-sort-2 (UI): Layout editor + Sort tab"},
+
     -- v0.29.2
     {"0.29.2", "2026-04-23", {
         Added = {

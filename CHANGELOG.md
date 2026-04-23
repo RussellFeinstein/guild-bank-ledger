@@ -5,6 +5,19 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.3] — 2026-04-23
+
+**Milestone M-sort-2 (UI): Layout editor + Sort tab**
+
+### Added
+- **Layout tab** — one section per guild-bank tab with a Mode dropdown (Display / Overflow / Ignore). Display tabs gain an item-template editor: a row per item with Slots / Per-slot inputs and a live slot-budget readout; a "Capture current layout" button that snapshots a hand-arranged tab into the template; and an Add-item input that accepts either a numeric itemID or a pasted item link. Save / Revert buttons on the bottom. Tab is only visible to characters with sort access; all controls are read-only when viewed without access.
+- **Sort tab** — Preview button builds a plan from the latest scan and renders the planned moves, deficits, and unplaced items with human-readable item names. Execute button runs the plan through `SortExecutor` (gated by `HasSortAccess()`), Cancel button aborts. A Scan-bank shortcut is included so you don't have to leave the tab to refresh.
+- **Sort Access** sub-section inside the Layout tab — GM-only rank-threshold dropdown (populated from guild ranks) + delegate add/remove. Non-GMs see the current policy read-only.
+- Tab visibility is now access-aware: the Layout tab only appears for characters with sort access. Others still see Sort for read-only preview.
+
+### Notes
+- This completes M-sort-2. Next milestone (M-sort-3) adds the Stock tab + bag restocker.
+
 ## [0.29.2] — 2026-04-23
 
 **Milestone M-sort-2 (backbone): Sort executor + sort-access policy**
