@@ -15,6 +15,8 @@ WoW addon that persistently logs guild bank transactions. Lua 5.1 + Ace3 stack. 
 - **Fingerprint.lua** — Dataset fingerprinting (djb2 hash, XOR aggregation, 6-hour bucket hashes)
 - **ItemCache.lua** — Lazy async item info cache (GetItemInfo + GET_ITEM_INFO_RECEIVED for synced records)
 - **Sync.lua** — Guild-wide sync via AceComm (HELLO/SYNC_REQUEST/SYNC_DATA/ACK/BUSY/MANIFEST protocol, epidemic gossip propagation, concurrent send+receive, smart peer selection, hash-gated HELLO reply suppression, fingerprint-based delta sync, pending peers queue, NACK backoff, combat/zone guards, bidirectional sync, jitter)
+- **BankLayout.lua** — Per-guild saved bank layout templates (display/overflow/ignore tab modes with per-item slot counts and stack sizes); validation (exactly one overflow, no duplicate items across display tabs, ≤98 slots); capture-from-snapshot; stock reserves storage
+- **SortPlanner.lua** — Pure-function move planner: given a bank snapshot + layout, produces deterministic ordered op list (split/move) to reshape bank. Three-pass algorithm (evict wrong items, fill template slots with keep-slot harvest protection, sweep stragglers). Reports deficits and unplaced items.
 - **UI/Accessibility.lua** — Colorblind-safe palettes, font scaling, keyboard nav, triple encoding
 - **UI/FilterBar.lua** — Transaction filter logic and AceGUI filter widgets
 - **UI/ConsumptionView.lua** — Consumption aggregation: guild totals, per-player summaries, guild-wide item usage with time buckets
@@ -106,4 +108,4 @@ luacheck .                 # lint production code
 
 ## Version
 
-Current: 0.29.0 (see `VERSION` file)
+Current: 0.29.1 (see `VERSION` file)

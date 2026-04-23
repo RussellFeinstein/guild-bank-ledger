@@ -197,6 +197,10 @@ function GBL:PlanSort(snapshot, layout)
                             tabIndex = tabIndex, slotIndex = slotIndex,
                             itemID = slot.itemID, count = slot.count,
                         })
+                        -- Drop from working bank so later passes don't re-process
+                        -- this same slot and emit duplicate unplaced entries or
+                        -- try to write into a slot already occupied by a foreign.
+                        bank[tabIndex][slotIndex] = nil
                     end
                 elseif not isCorrectItem and hasRow then
                     -- Item belongs in *this* tab but the slot belongs to a
@@ -212,6 +216,7 @@ function GBL:PlanSort(snapshot, layout)
                             tabIndex = tabIndex, slotIndex = slotIndex,
                             itemID = slot.itemID, count = slot.count,
                         })
+                        bank[tabIndex][slotIndex] = nil
                     end
                 elseif isCorrectItem and itemRow and slot.count > itemRow.perSlot then
                     -- Slot has the right item but oversize: split off the excess.

@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.29.0"
+local VERSION = "0.29.1"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -61,6 +61,9 @@ local defaults = {
                 },
                 teams = {},
                 altLinks = {},
+                -- stockAlerts: reserved for planned v1.3.0 low-stock alerts feature
+                -- (threshold-based chat pings). Semantically distinct from stockReserves
+                -- below (which holds sort/restock target counts). Do not repurpose.
                 stockAlerts = {},
                 seenTxHashes = {},
                 playerRealms = {},

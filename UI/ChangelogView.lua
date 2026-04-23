@@ -29,6 +29,17 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.1
+    {"0.29.1", "2026-04-23", {
+        Added = {
+            "CLAUDE.md architecture list now includes BankLayout and SortPlanner.",
+            "Four sort-planner regression tests: ignore-tab invisibility, keep-slot protection, multi-tab orphan routing, and no-duplicate-unplaced under overflow saturation.",
+        },
+        Fixed = {
+            "SortPlanner no longer produces duplicate unplaced entries when the overflow tab is full — Pass 1 now drops the working-bank copy of any slot it records as unplaced so later passes don't re-process it.",
+        },
+    }, milestone = "M-sort-1.1: Audit cleanup"},
+
     -- v0.29.0
     {"0.29.0", "2026-04-23", {
         Added = {

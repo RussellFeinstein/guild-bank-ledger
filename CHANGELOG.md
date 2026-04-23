@@ -5,6 +5,24 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.1] — 2026-04-23
+
+**Milestone M-sort-1.1: Audit cleanup for M-sort-1**
+
+### Added
+- CLAUDE.md Architecture section now lists `BankLayout` and `SortPlanner` alongside the existing modules, per the mandatory doc-sync-on-every-commit policy.
+- Four regression tests in `spec/sortplanner_spec.lua`:
+  - Ignore tabs are invisible to sort even when they hold an item the template wants — planner reports a deficit rather than pulling from ignore.
+  - Keep-slot harvest protection: an already-correct slot is never cannibalized to fill another slot, even if it is the only source for that item. Pins the bug caught during M-sort-1 development.
+  - Multiple display tabs: orphan items in a non-claiming display tab are evicted to overflow, then pulled into the claiming tab.
+  - Overflow-full scenarios produce exactly one unplaced entry per stuck slot (no duplicates across passes).
+
+### Fixed
+- `SortPlanner` no longer emits duplicate `unplaced` entries when the overflow tab is full. Pass 1 now clears the working-bank copy of a slot it has recorded as unplaced so later passes don't re-process it. No effect on well-formed scenarios; only affects the overflow-saturated edge case.
+
+### Notes
+- No user-visible behavior change outside the overflow-full edge case. Pure audit follow-up.
+
 ## [0.29.0] — 2026-04-23
 
 **Milestone M-sort-1: Bank sorting foundation (data + planner)**

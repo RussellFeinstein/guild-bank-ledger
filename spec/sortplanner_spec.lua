@@ -264,6 +264,145 @@ describe("SortPlanner", function()
         end
     end)
 
+    ------------------------------------------------------------------
+    -- M-sort-1.1 audit-driven regression tests.
+    ------------------------------------------------------------------
+
+    it("does not harvest from or evict to ignore tabs even when item matches a template", function()
+        -- Display wants item 100, but item 100 is ONLY in an ignore tab.
+        -- Planner must report a deficit — not pull from ignore.
+        local snap = snapshot({
+            [1] = {},                                           -- display target
+            [2] = {},                                           -- overflow
+            [3] = { [1] = { itemID = 100, count = 50 } },       -- ignore tab holds 100
+        })
+        local layout = {
+            tabs = {
+                [1] = displayTab(
+                    { [100] = { slots = 1, perSlot = 20 } },
+                    { [1] = 100 }
+                ),
+                [2] = overflow(),
+                [3] = { mode = "ignore" },
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        assert.equals(20, plan.deficits[100])
+        for _, op in ipairs(plan.ops) do
+            assert.is_not_equal(3, op.srcTab, "sort sourced from ignore tab")
+            assert.is_not_equal(3, op.dstTab, "sort wrote to ignore tab")
+        end
+    end)
+
+    it("protects already-correct slots from being harvested as sources (keep-slot invariant)", function()
+        -- Template wants 2 slots of item 100 at perSlot=20.
+        -- Bank has item 100 x 20 in slot 1 (matches slotOrder[1] exactly).
+        -- No other source for 100 anywhere. Expected result:
+        --   deficit[100] = 20 (slot 2 can't be filled)
+        --   NO op moves item 100 out of slot 1 (would be a regression — the
+        --   v0.29.0-dev bug did exactly this, shuffling the correct stack
+        --   and swallowing the deficit).
+        local snap = snapshot({
+            [1] = {
+                [1] = { itemID = 100, count = 20 },  -- matches template exactly
+            },
+            [2] = {},                                -- overflow empty
+        })
+        local layout = {
+            tabs = {
+                [1] = displayTab(
+                    { [100] = { slots = 2, perSlot = 20 } },
+                    { [1] = 100, [2] = 100 }
+                ),
+                [2] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        assert.equals(20, plan.deficits[100])
+        for _, op in ipairs(plan.ops) do
+            assert.is_false(
+                op.srcTab == 1 and op.srcSlot == 1,
+                "planner harvested from the correct slot; keep-slot protection regressed"
+            )
+        end
+    end)
+
+    it("evicts an orphan from a non-claiming display tab to overflow, then pulls to the claiming tab", function()
+        -- Tab 1 display claims item 100. Tab 2 display claims items 200/201
+        -- (NOT 100). Tab 2 slot 1 has an orphan 100×20. Tab 3 is overflow (empty).
+        -- Planner should:
+        --   1) evict 100 from tab 2 to overflow (tab 3)
+        --   2) pull 100 from overflow (tab 3) into tab 1 slot 1
+        -- This exercises the multi-tab source-priority path.
+        local snap = snapshot({
+            [1] = {},
+            [2] = {
+                [1] = { itemID = 100, count = 20 },  -- orphan: tab 2 doesn't claim 100
+            },
+            [3] = {},
+        })
+        local layout = {
+            tabs = {
+                [1] = displayTab(
+                    { [100] = { slots = 1, perSlot = 20 } },
+                    { [1] = 100 }
+                ),
+                [2] = displayTab(
+                    { [200] = { slots = 1, perSlot = 5 }, [201] = { slots = 1, perSlot = 5 } },
+                    { [1] = 200, [2] = 201 }
+                ),
+                [3] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        local final = applyPlan(snap, plan)
+        -- Tab 1 slot 1 should now hold item 100 x 20.
+        assert.is_not_nil(final[1][1])
+        assert.equals(100, final[1][1].itemID)
+        assert.equals(20, final[1][1].count)
+        -- Tab 2 slot 1 should no longer hold item 100.
+        if final[2][1] then
+            assert.is_not_equal(100, final[2][1].itemID)
+        end
+        -- No deficit: we successfully relocated the 20.
+        assert.is_nil(plan.deficits[100])
+    end)
+
+    it("does not create duplicate unplaced entries when overflow is full", function()
+        -- Regression for a bug where Pass 1 would record an unplaced entry
+        -- but leave the item in the working bank, letting Pass 3 record a
+        -- duplicate unplaced entry for the same slot+item.
+        local snap = snapshot({
+            [1] = {
+                [1] = { itemID = 200, count = 5 }, -- foreign, display tab
+            },
+            [2] = (function()
+                local slots = {}
+                for i = 1, 98 do
+                    slots[i] = { itemID = 999, count = 1 }
+                end
+                return slots
+            end)(),
+        })
+        local layout = {
+            tabs = {
+                [1] = displayTab(
+                    { [100] = { slots = 1, perSlot = 20 } },
+                    { [1] = 100 }
+                ),
+                [2] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        local count = 0
+        for _, u in ipairs(plan.unplaced) do
+            if u.itemID == 200 and u.tabIndex == 1 and u.slotIndex == 1 then
+                count = count + 1
+            end
+        end
+        assert.equals(1, count, "unplaced should contain exactly one entry for the stuck foreign item")
+    end)
+
     it("summarizes a plan into human-readable lines", function()
         local snap = snapshot({
             [1] = { [1] = { itemID = 100, count = 20 } },
