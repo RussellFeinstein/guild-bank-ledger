@@ -29,6 +29,18 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.8
+    {"0.29.8", "2026-04-23", {
+        Fixed = {
+            "Sort planner now honors items[id].slots as the authoritative demand count. Before, if you captured a layout with 3 slots of an item then edited Slots to 5 in the Layout UI, the 2 extra slots were silently dropped and sort saw 'no discrepancy' even when the bank was obviously off. The planner now emits demands up to items[id].slots, adding extras at the first unclaimed slot indices.",
+            "Layout editor's Slots input now syncs slotOrder on edit so the mismatch above can't reappear. Increasing Slots pins new positions at the first unclaimed indices; decreasing Slots trims from the highest slot index down.",
+            "Phase 3 sweep no longer mis-evicts items placed by dynamically-added demands (was a consequence of the above fix — discovered via the regression tests).",
+        },
+        Added = {
+            "/gbl sortpreview now prints a diagnostic breakdown: per-display-tab demand counts, overflow/ignore tab indices, scan contents by tab, and a plain-English reason when the plan is empty. Tells you whether a 0-op result is a config issue (no demands) or the bank genuinely matches the layout.",
+        },
+    }},
+
     -- v0.29.7
     {"0.29.7", "2026-04-23", {
         Changed = {

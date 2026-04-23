@@ -444,7 +444,33 @@ function GBL:_LayoutEditor_RenderItemRow(parent, tabIndex, itemID, writable)
     slotsInput:SetCallback("OnEnterPressed", function(_w, _e, value)
         local n = tonumber(value)
         if n and n >= 1 then
+            local old = row.slots or 0
             row.slots = n
+            -- Keep slotOrder in sync with slots count so the planner's pinned
+            -- positions match what the user sees. Add entries at the first
+            -- unclaimed slot indices on increase; trim from the highest slot
+            -- index downward on decrease.
+            if n > old then
+                local taken = {}
+                for s, _ in pairs(tab.slotOrder) do taken[s] = true end
+                local toAdd = n - old
+                for s = 1, MAX_SLOTS do
+                    if toAdd <= 0 then break end
+                    if not taken[s] then
+                        tab.slotOrder[s] = itemID
+                        toAdd = toAdd - 1
+                    end
+                end
+            elseif n < old then
+                local toRemove = old - n
+                for s = MAX_SLOTS, 1, -1 do
+                    if toRemove <= 0 then break end
+                    if tab.slotOrder[s] == itemID then
+                        tab.slotOrder[s] = nil
+                        toRemove = toRemove - 1
+                    end
+                end
+            end
             self._layoutDirty = true
             self:RefreshLayoutTab()
         end

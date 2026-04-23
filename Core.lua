@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.29.7"
+local VERSION = "0.29.8"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -1708,6 +1708,9 @@ function GBL:RunSortExec()
 end
 
 --- Debug helper: print the current planned sort moves to chat.
+-- Also prints a diagnostic breakdown (tab modes, demand/supply counts, keep
+-- slots) so "no moves needed" outcomes can be distinguished between "bank
+-- genuinely matches layout" vs. "layout has no demands" vs. "scan is stale."
 function GBL:PrintSortPreview()
     if not self.PlanSort then
         self:Print("SortPlanner not loaded.")
@@ -1723,9 +1726,92 @@ function GBL:PrintSortPreview()
         self:Print("No bank layout configured yet. Nothing to sort.")
         return
     end
+
+    -- Layout breakdown.
+    local displayTabs, overflowTab, ignoreTabs = {}, nil, {}
+    local totalDemands = 0
+    for tabIndex, tab in pairs(layout.tabs) do
+        if tab.mode == "display" then
+            -- Count demands by items[id].slots (authoritative); this matches
+            -- what the planner actually uses.
+            local dCount = 0
+            if tab.items then
+                for _, row in pairs(tab.items) do
+                    if type(row) == "table" and type(row.slots) == "number" then
+                        dCount = dCount + row.slots
+                    end
+                end
+            end
+            totalDemands = totalDemands + dCount
+            table.insert(displayTabs, { tabIndex = tabIndex, demands = dCount })
+        elseif tab.mode == "overflow" then
+            overflowTab = tabIndex
+        elseif tab.mode == "ignore" then
+            table.insert(ignoreTabs, tabIndex)
+        end
+    end
+    table.sort(displayTabs, function(a, b) return a.tabIndex < b.tabIndex end)
+    table.sort(ignoreTabs)
+
+    -- Snapshot breakdown.
+    local snapshotStr = {}
+    local totalSupplies = 0
+    for tabIndex, tabResult in pairs(snapshot) do
+        local n = 0
+        if tabResult and tabResult.slots then
+            for _, _slot in pairs(tabResult.slots) do
+                n = n + 1
+            end
+        end
+        totalSupplies = totalSupplies + n
+        table.insert(snapshotStr, { tabIndex = tabIndex, n = n })
+    end
+    table.sort(snapshotStr, function(a, b) return a.tabIndex < b.tabIndex end)
+
+    local lastScan = "Never"
+    if self.lastScanTime and self.lastScanTime > 0 then
+        lastScan = date("%H:%M:%S", self.lastScanTime)
+    end
+
+    self:Print("|cffffcc00Sort diagnostic:|r")
+    self:Print(format("  Layout v%s, last scan %s",
+        tostring(layout.version or "?"), lastScan))
+    local displaySummary = {}
+    for _, e in ipairs(displayTabs) do
+        table.insert(displaySummary, format("T%d=%d", e.tabIndex, e.demands))
+    end
+    self:Print(format("  Display tabs: [%s] (%d demands total)",
+        table.concat(displaySummary, ", "), totalDemands))
+    self:Print(format("  Overflow tab: %s", tostring(overflowTab or "none")))
+    if #ignoreTabs > 0 then
+        self:Print(format("  Ignore tabs: [%s]",
+            table.concat(ignoreTabs, ", ")))
+    end
+    local snapSummary = {}
+    for _, e in ipairs(snapshotStr) do
+        table.insert(snapSummary, format("T%d=%d", e.tabIndex, e.n))
+    end
+    self:Print(format("  Scan contents: [%s] (%d occupied slots total)",
+        table.concat(snapSummary, ", "), totalSupplies))
+
     local plan = self:PlanSort(snapshot, layout)
+    local opsN = #(plan.ops or {})
+    local defN = 0; for _ in pairs(plan.deficits or {}) do defN = defN + 1 end
+    local unpN = #(plan.unplaced or {})
+    self:Print(format("  Plan: %d moves, %d deficits, %d unplaced",
+        opsN, defN, unpN))
+    if opsN == 0 and defN == 0 and unpN == 0 then
+        if totalDemands == 0 then
+            self:Print("  |cffffaa55Reason: layout has no display-tab demands — no template to sort toward. " ..
+                       "Use Capture or Add Item on the Layout tab.|r")
+        else
+            self:Print("  |cff00ff88Reason: every demand is already satisfied by a slot at the correct count.|r")
+        end
+        return
+    end
+
     local lines = self:SummarizeSortPlan(plan)
-    self:Print("|cffffcc00Sort preview (" .. #lines .. " lines):|r")
+    self:Print("|cffffcc00Planned moves (" .. #lines .. " lines):|r")
     for _, line in ipairs(lines) do
         self:Print("  " .. line)
     end

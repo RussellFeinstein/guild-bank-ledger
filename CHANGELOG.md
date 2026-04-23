@@ -5,6 +5,17 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.8] — 2026-04-23
+
+### Fixed
+- **Sort planner now honors `items[id].slots` as the authoritative demand count.** Before, the planner counted demands from `slotOrder` entries only — so if you captured a layout with 3 slots of an item and then edited the Slots field in the Layout UI to 5, the 2 extra slots were silently dropped from the plan (reported as "no discrepancy"). The planner now emits demands up to `items[id].slots`, adding extras at the first unclaimed slot indices. Both directions are handled: increasing Slots adds demands at new positions; decreasing Slots caps demands at the new count and routes the surplus to overflow.
+- **Phase 3 sweep no longer mis-evicts items placed by dynamically-added demands.** The sweep consulted raw `slotOrder` rather than the effective demand set, so items placed at Pass 2's extended positions were treated as stragglers and routed to overflow on the next op. Fixed by checking the effective demand map.
+- **Layout editor's Slots input now keeps `slotOrder` in sync.** Increasing Slots adds slot-order entries at the first unclaimed indices; decreasing Slots trims from the highest slot index down. Prevents the mismatch above from ever being saved again.
+
+### Added
+- **`/gbl sortpreview` now prints a diagnostic breakdown.** Shows per-display-tab demand counts, overflow/ignore tab assignments, scan contents by tab, and an explicit reason when the plan is empty ("layout has no display-tab demands" vs. "every demand is already satisfied") — makes it obvious whether a 0-op result is a config issue or the bank truly matches.
+- Two new regression tests in `spec/sortplanner_spec.lua`: `items[id].slots` exceeds `slotOrder` count (pass extras into unclaimed slots) and `slotOrder` exceeds `items[id].slots` (cap at items count and send surplus to overflow).
+
 ## [0.29.7] — 2026-04-23
 
 **Milestone M-sort-2.5: Planner algorithm upgrade**

@@ -178,7 +178,11 @@ function GBL:PlanSort(snapshot, layout)
     -- PHASE 1: Assignment
     -- --------------------------------------------------------------
 
-    -- Demands: one per slotOrder-claimed display slot.
+    -- Demands: items[id].slots is the authoritative count. slotOrder pins
+    -- specific positions (one entry = one slot). When a user edits Slots
+    -- up via the Layout UI, slotOrder may fall behind; the second pass
+    -- below fills the gap by emitting demands at the first unclaimed slot
+    -- indices so items[id].slots is always honored.
     local demands = {}
     local demandOfSlot = {}  -- demandOfSlot[t][s] -> demand | nil
     for _, entry in ipairs(displayTabs) do
@@ -186,16 +190,57 @@ function GBL:PlanSort(snapshot, layout)
         local items = entry.tab.items or {}
         local slotOrder = entry.tab.slotOrder or {}
         demandOfSlot[tabIndex] = demandOfSlot[tabIndex] or {}
+
+        -- Pass 1: emit demands from slotOrder positions, capped per item at
+        -- items[id].slots (ignore surplus slotOrder entries if the user
+        -- reduced Slots below the captured count).
+        local emitted = {}
         for slotIndex = 1, MAX_SLOTS do
             local itemID = slotOrder[slotIndex]
             local row = itemID and items[itemID] or nil
-            if row then
+            if row and (emitted[itemID] or 0) < row.slots then
                 local dem = {
                     tabIndex = tabIndex, slotIndex = slotIndex,
                     itemID = itemID, perSlot = row.perSlot, filled = 0,
                 }
                 table.insert(demands, dem)
                 demandOfSlot[tabIndex][slotIndex] = dem
+                emitted[itemID] = (emitted[itemID] or 0) + 1
+            end
+        end
+
+        -- Pass 2: for any items[id].slots that exceeds emitted count (user
+        -- increased Slots via the UI but slotOrder wasn't extended), add
+        -- extra demands at the first unclaimed slot indices. Deterministic
+        -- iteration over sorted itemIDs so the resulting positions are
+        -- stable across planner runs.
+        local usedSlots = {}
+        for s = 1, MAX_SLOTS do
+            if demandOfSlot[tabIndex][s] then usedSlots[s] = true end
+        end
+        local sortedIDs = {}
+        for id in pairs(items) do table.insert(sortedIDs, id) end
+        table.sort(sortedIDs)
+        for _, itemID in ipairs(sortedIDs) do
+            local row = items[itemID]
+            if type(row) == "table" and type(row.slots) == "number" then
+                local need = row.slots - (emitted[itemID] or 0)
+                if need > 0 then
+                    for s = 1, MAX_SLOTS do
+                        if need <= 0 then break end
+                        if not usedSlots[s] then
+                            local dem = {
+                                tabIndex = tabIndex, slotIndex = s,
+                                itemID = itemID, perSlot = row.perSlot, filled = 0,
+                            }
+                            table.insert(demands, dem)
+                            demandOfSlot[tabIndex][s] = dem
+                            usedSlots[s] = true
+                            emitted[itemID] = (emitted[itemID] or 0) + 1
+                            need = need - 1
+                        end
+                    end
+                end
             end
         end
     end
@@ -497,15 +542,17 @@ function GBL:PlanSort(snapshot, layout)
     -- --------------------------------------------------------------
     for _, entry in ipairs(displayTabs) do
         local tabIndex = entry.tabIndex
-        local slotOrder = entry.tab.slotOrder or {}
-        local items = entry.tab.items or {}
         for slotIndex = 1, MAX_SLOTS do
             local slot = state[tabIndex] and state[tabIndex][slotIndex]
             local isUnplaced = unplacedSlots[tabIndex]
                 and unplacedSlots[tabIndex][slotIndex]
             if slot and not isUnplaced then
-                local expected = slotOrder[slotIndex]
-                local fits = (expected == slot.itemID and items[expected])
+                -- A slot "fits" if it matches a demand for this tab+slot —
+                -- using demandOfSlot (which includes both slotOrder-pinned
+                -- and items.slots-extended demands) rather than raw slotOrder.
+                local dem = demandOfSlot[tabIndex]
+                    and demandOfSlot[tabIndex][slotIndex]
+                local fits = (dem and dem.itemID == slot.itemID)
                 if not fits then
                     if overflowTab and #overflowEmpties > 0 then
                         local ovSlot = table.remove(overflowEmpties, 1)

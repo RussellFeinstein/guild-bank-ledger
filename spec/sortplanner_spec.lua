@@ -694,6 +694,81 @@ describe("SortPlanner", function()
         end
     end)
 
+    it("honors items[id].slots as authoritative when slotOrder has fewer entries (UI slots-edit mismatch)", function()
+        -- Regression for the v0.29.7 field report: user captured 3 slots of X,
+        -- then edited the Slots field in the Layout UI to 5. items[X].slots
+        -- becomes 5, but slotOrder still only has 3 entries. Before this fix,
+        -- the planner counted demands from slotOrder (3) and silently dropped
+        -- the 2 extras. The planner must demand all 5 and place the 2 extras
+        -- at the first unclaimed slot indices (slots 4 and 5 here).
+        local snap = snapshot({
+            [1] = {},
+            [2] = {
+                [1] = { itemID = 100, count = 20 },
+                [2] = { itemID = 100, count = 20 },
+                [3] = { itemID = 100, count = 20 },
+                [4] = { itemID = 100, count = 20 },
+                [5] = { itemID = 100, count = 20 },
+            },
+        })
+        local layout = {
+            tabs = {
+                [1] = displayTab(
+                    { [100] = { slots = 5, perSlot = 20 } },
+                    { [1] = 100, [2] = 100, [3] = 100 }
+                ),
+                [2] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        local final = applyPlan(snap, plan)
+        for i = 1, 5 do
+            assert.is_not_nil(final[1][i], "slot " .. i .. " should be filled")
+            assert.equals(100, final[1][i].itemID)
+            assert.equals(20, final[1][i].count)
+        end
+        assert.is_nil(plan.deficits[100])
+    end)
+
+    it("caps demands at items[id].slots even when slotOrder has too many entries", function()
+        -- Converse: user reduced Slots via the UI from 5 to 3, but slotOrder
+        -- still has 5 X entries (UI now syncs slotOrder on edit, but older
+        -- saved layouts may still carry the surplus). Only 3 slots of X
+        -- should be demanded; the extra 2 bank X stacks end up in overflow.
+        local snap = snapshot({
+            [1] = {
+                [1] = { itemID = 100, count = 20 },
+                [2] = { itemID = 100, count = 20 },
+                [3] = { itemID = 100, count = 20 },
+                [4] = { itemID = 100, count = 20 },
+                [5] = { itemID = 100, count = 20 },
+            },
+            [2] = {},
+        })
+        local layout = {
+            tabs = {
+                [1] = displayTab(
+                    { [100] = { slots = 3, perSlot = 20 } },
+                    { [1] = 100, [2] = 100, [3] = 100, [4] = 100, [5] = 100 }
+                ),
+                [2] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        local final = applyPlan(snap, plan)
+        for i = 1, 3 do
+            assert.is_not_nil(final[1][i])
+            assert.equals(100, final[1][i].itemID)
+            assert.equals(20, final[1][i].count)
+        end
+        -- The 2 surplus X stacks end up in overflow (tab 2).
+        local overflowCount = 0
+        for _, s in pairs(final[2] or {}) do
+            if s.itemID == 100 then overflowCount = overflowCount + s.count end
+        end
+        assert.equals(40, overflowCount, "2 surplus X×20 stacks land in overflow")
+    end)
+
     it("harvests excess from an oversize keep-slot to fill a sibling demand (keep identity preserved)", function()
         -- Tab 1 slot 1 has X×40. slotOrder[1]=X at perSlot=20 — keep-slot
         -- with 20 excess. Slot 2 needs X×20. Optimal: 1 split from slot 1
