@@ -5,6 +5,19 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.0] — 2026-04-23
+
+**Milestone M-sort-1: Bank sorting foundation (data + planner)**
+
+### Added
+- New `BankLayout` module: per-guild saved templates that describe each tab's role (`display`, `overflow`, or `ignore`). Display tabs list the items they hold along with how many slots each occupies and the target stack size per slot. Exactly one overflow tab is required; ignored tabs are untouched by sort. Includes `CaptureTabLayout` — reads the most recent scan of a tab and produces a template that mirrors its current contents, so officers can hand-arrange a tab once and save the result as the canonical layout.
+- New `SortPlanner` module: given a bank scan and a saved layout, produces an ordered list of moves that will reshape the bank to match. Splits oversize stacks, pulls from other display tabs or the overflow tab to fill deficits, routes unassigned items to overflow, and reports shortfalls it could not satisfy. Pure function — no WoW API calls, fully deterministic, straightforward to test.
+- AceDB schema: new per-guild `bankLayout` and `stockReserves` tables.
+- Layout validation: exactly one overflow tab, no duplicate items across display tabs, per-tab slot budget ≤ 98, every `slotOrder` entry backed by a matching `items[]` row.
+
+### Notes
+- This milestone ships data + planner only. No execution, no UI, no sync wiring yet — those arrive in M-sort-2 through M-sort-4 on the `feature/sort-stock` branch.
+
 ## [0.28.8] — 2026-04-23
 
 ### Added

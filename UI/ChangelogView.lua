@@ -29,6 +29,15 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.0
+    {"0.29.0", "2026-04-23", {
+        Added = {
+            "Bank layout model: per-guild saved templates that describe each tab's role (display, overflow, or ignore). Display tabs list the items they hold along with how many slots each occupies and the target stack size per slot. Includes a Capture tool that reads the current contents of a hand-arranged tab and saves it as the canonical layout.",
+            "Sort planner: given a bank scan and a saved layout, produces an ordered list of moves that will reshape the bank to match — splitting oversize stacks, pulling from other display tabs or the overflow tab to fill deficits, and routing unassigned items to overflow. Pure function, fully tested. No execution or UI yet; those arrive in subsequent milestones.",
+            "Debug: /gbl sortpreview prints the current sort plan to chat.",
+        },
+    }, milestone = "M-sort-1: Bank sorting foundation"},
+
     -- v0.28.8
     {"0.28.8", "2026-04-23", {
         Added = {

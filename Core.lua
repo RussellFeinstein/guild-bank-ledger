@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.28.8"
+local VERSION = "0.29.0"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -72,6 +72,13 @@ local defaults = {
                     configuredBy = nil,
                     configuredAt = 0,
                 },
+                bankLayout = {
+                    version = 0,
+                    updatedBy = nil,
+                    updatedAt = 0,
+                    tabs = {},
+                },
+                stockReserves = {},
                 schemaVersion = 8,
             },
         },
@@ -1547,8 +1554,34 @@ function GBL:HandleSlashCommand(input)
         self:ShowSyncLog()
     elseif command == "cleanup" then
         self:RunCleanup()
+    elseif command == "sortpreview" then
+        self:PrintSortPreview()
     else
         self:Print("Unknown command: " .. command .. ". Type /gbl help for usage.")
+    end
+end
+
+--- Debug helper: print the current planned sort moves to chat.
+function GBL:PrintSortPreview()
+    if not self.PlanSort then
+        self:Print("SortPlanner not loaded.")
+        return
+    end
+    local snapshot = self:GetLastScanResults()
+    if not snapshot then
+        self:Print("No scan results yet. Open the bank and run /gbl scan first.")
+        return
+    end
+    local layout = self:GetBankLayout()
+    if not layout or not next(layout.tabs) then
+        self:Print("No bank layout configured yet. Nothing to sort.")
+        return
+    end
+    local plan = self:PlanSort(snapshot, layout)
+    local lines = self:SummarizeSortPlan(plan)
+    self:Print("|cffffcc00Sort preview (" .. #lines .. " lines):|r")
+    for _, line in ipairs(lines) do
+        self:Print("  " .. line)
     end
 end
 
@@ -1590,6 +1623,7 @@ function GBL:PrintHelp()
     self:Print("  /gbl status  — Show addon status")
     self:Print("  /gbl scan    — Manually scan the guild bank")
     self:Print("  /gbl cleanup — Remove duplicate records from the database")
+    self:Print("  /gbl sortpreview — Preview the current sort plan (debug)")
     self:Print("  /gbl help    — Show this help message")
 end
 
