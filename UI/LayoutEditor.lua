@@ -107,9 +107,10 @@ function GBL:BuildLayoutTab(container)
 
     -- Draft state — initialize from storage only if we don't already have
     -- one in progress. Refresh-on-mode-change must not wipe pending edits.
-    -- Save and Revert both explicitly reset the draft.
+    -- Save and Discard both explicitly reset the draft.
     if not self._layoutDraft then
         self._layoutDraft = freshDraft(self)
+        self._layoutDirty = false
     end
 
     -- ------------------------------------------------------------------
@@ -118,8 +119,28 @@ function GBL:BuildLayoutTab(container)
     self:_LayoutEditor_RenderTabs(scroll, writable)
 
     -- ------------------------------------------------------------------
-    -- Save bar.
+    -- Save bar. Explicit save model: edits buffer in a draft until you
+    -- click Save Layout. Dirty-state indicator makes it obvious when
+    -- changes are pending.
     -- ------------------------------------------------------------------
+    local statusBanner = AceGUI:Create("Label")
+    statusBanner:SetFullWidth(true)
+    statusBanner:SetFontObject(GameFontNormalSmall)
+    if not writable then
+        statusBanner:SetText(
+            "|cff888888Edits require sort access. Viewing the saved layout read-only.|r")
+    elseif self._layoutDirty then
+        statusBanner:SetText(
+            "|cffffcc00You have unsaved changes.|r " ..
+            "Click |cffffffffSave Layout|r to commit them (and broadcast to the guild), " ..
+            "or |cffffffffDiscard changes|r to throw them away.")
+    else
+        statusBanner:SetText(
+            "|cff888888Layout is up to date. " ..
+            "Changes you make here buffer until you click Save Layout.|r")
+    end
+    scroll:AddChild(statusBanner)
+
     local saveRow = AceGUI:Create("SimpleGroup")
     saveRow:SetFullWidth(true)
     saveRow:SetLayout("Flow")
@@ -130,16 +151,25 @@ function GBL:BuildLayoutTab(container)
     saveRow:AddChild(spacer)
 
     local saveBtn = AceGUI:Create("Button")
-    saveBtn:SetText(writable and "Save Layout" or "Save Layout (disabled)")
     saveBtn:SetWidth(200)
-    saveBtn:SetDisabled(not writable)
+    if not writable then
+        saveBtn:SetText("Save Layout (no access)")
+        saveBtn:SetDisabled(true)
+    elseif self._layoutDirty then
+        saveBtn:SetText("Save Layout")
+        saveBtn:SetDisabled(false)
+    else
+        saveBtn:SetText("Saved \226\156\147")  -- "Saved ✓"
+        saveBtn:SetDisabled(true)
+    end
     saveBtn:SetCallback("OnClick", function()
         local ok, err = self:SaveBankLayout(self._layoutDraft)
         if ok then
             self:Print("Layout saved (v" .. self:GetBankLayout().version .. ").")
             self:AddAuditEntry("Layout: saved by " ..
                 (UnitName("player") or "?") .. " (v" .. self:GetBankLayout().version .. ")")
-            self._layoutDraft = nil  -- force re-init from storage on next render
+            self._layoutDraft = nil   -- re-init from storage on next render
+            self._layoutDirty = false
             self:RefreshLayoutTab()
         else
             self:Print("|cffff5555Layout save failed:|r " .. tostring(err))
@@ -147,15 +177,16 @@ function GBL:BuildLayoutTab(container)
     end)
     saveRow:AddChild(saveBtn)
 
-    local revertBtn = AceGUI:Create("Button")
-    revertBtn:SetText("Revert")
-    revertBtn:SetWidth(120)
-    revertBtn:SetDisabled(not writable)
-    revertBtn:SetCallback("OnClick", function()
-        self._layoutDraft = nil  -- force re-init from storage on next render
+    local discardBtn = AceGUI:Create("Button")
+    discardBtn:SetText("Discard changes")
+    discardBtn:SetWidth(160)
+    discardBtn:SetDisabled(not (writable and self._layoutDirty))
+    discardBtn:SetCallback("OnClick", function()
+        self._layoutDraft = nil   -- re-init from storage on next render
+        self._layoutDirty = false
         self:RefreshLayoutTab()
     end)
-    saveRow:AddChild(revertBtn)
+    saveRow:AddChild(discardBtn)
 
     -- ------------------------------------------------------------------
     -- Sort Access section (GM-only to edit).
@@ -211,6 +242,7 @@ function GBL:_LayoutEditor_RenderTabs(parent, writable)
                 draft.tabs[tabIndex].items = {}
                 draft.tabs[tabIndex].slotOrder = {}
             end
+            self._layoutDirty = true
             self:RefreshLayoutTab()
         end)
         group:AddChild(dropdown)
@@ -249,7 +281,9 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
         local n = 0
         for _ in pairs(captured.items) do n = n + 1 end
         draft.tabs[tabIndex] = captured
-        self:Print(format("|cff00ff88Captured tab %d:|r %d distinct item(s).",
+        self._layoutDirty = true
+        self:Print(format("|cff00ff88Captured tab %d:|r %d distinct item(s). " ..
+            "Click |cffffffffSave Layout|r to commit.",
             tabIndex, n))
         self:RefreshLayoutTab()
     end
@@ -377,6 +411,7 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
                     remaining = remaining - 1
                 end
             end
+            self._layoutDirty = true
             self:RefreshLayoutTab()
         end)
         addRow:AddChild(addBtn)
@@ -410,6 +445,7 @@ function GBL:_LayoutEditor_RenderItemRow(parent, tabIndex, itemID, writable)
         local n = tonumber(value)
         if n and n >= 1 then
             row.slots = n
+            self._layoutDirty = true
             self:RefreshLayoutTab()
         end
     end)
@@ -425,6 +461,7 @@ function GBL:_LayoutEditor_RenderItemRow(parent, tabIndex, itemID, writable)
         local n = tonumber(value)
         if n and n >= 1 then
             row.perSlot = n
+            self._layoutDirty = true
             self:RefreshLayoutTab()
         end
     end)
@@ -446,6 +483,7 @@ function GBL:_LayoutEditor_RenderItemRow(parent, tabIndex, itemID, writable)
             for s, id in pairs(tab.slotOrder) do
                 if id == itemID then tab.slotOrder[s] = nil end
             end
+            self._layoutDirty = true
             self:RefreshLayoutTab()
         end)
         rowGroup:AddChild(removeBtn)

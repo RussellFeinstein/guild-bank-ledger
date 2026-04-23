@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.6] — 2026-04-23
+
+### Changed
+- **Layout tab save-bar is now self-explanatory.** The explicit save model (edits buffer in a draft until you click Save) is unchanged — that's deliberate so validation and sync broadcasts happen once per logical change, not per keystroke — but the UI now makes the state obvious. A status banner above the save row reads "You have unsaved changes…" when the draft differs from storage, or "Layout is up to date…" when clean. The save button is disabled and labels itself "Saved ✓" when there's nothing to commit, "Save Layout" when dirty. "Revert" was renamed to "Discard changes" and disables when clean. Capture now explicitly notes "Click Save Layout to commit" in its success message.
+
 ## [0.29.5] — 2026-04-23
 
 ### Fixed

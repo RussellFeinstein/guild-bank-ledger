@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.6
+    {"0.29.6", "2026-04-23", {
+        Changed = {
+            "Layout tab save-bar is now self-explanatory: status banner reads 'You have unsaved changes' vs 'Layout is up to date', the save button is disabled and labels itself 'Saved ✓' when clean, and 'Revert' was renamed to 'Discard changes'. Edits still buffer until Save (deliberate, so validation and sync run once per logical change), just with clearer signals.",
+        },
+    }},
+
     -- v0.29.5
     {"0.29.5", "2026-04-23", {
         Fixed = {
