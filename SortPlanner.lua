@@ -3,22 +3,61 @@
 -- Given a bank snapshot and a layout, produce an ordered list of moves
 -- that reshapes the bank toward the layout.
 --
--- Design:
---   * Pure function: PlanSort(snapshot, layout) -> planTable
---   * No WoW API calls. All inputs come through arguments.
---   * Plan ops use named fields so the executor can validate each step:
---       { op = "split"|"move", srcTab, srcSlot, dstTab, dstSlot,
---         itemID, count }
---     "split" means "take `count` from src, place at dst" (maps to
---     SplitGuildBankItem + Pickup). "move" means "take everything
---     from src, place at dst" (plain Pickup + Pickup).
---   * Overflow: single tab marked mode="overflow". Anything not
---     in a display template ends up there. If overflow fills up,
---     remaining items are recorded as unplaced.
---   * Stack reshape: display tabs always match template perSlot.
---   * Replan-friendly: the plan is idempotent if partially executed.
---     Re-running PlanSort on a later snapshot produces whatever is
---     still needed.
+-- Algorithm: assign-then-schedule.
+--
+--   Phase 1 Assignment
+--     * Build demands (one per slot claimed by any display tab's slotOrder).
+--     * Build supplies (every occupied slot outside ignore tabs).
+--     * Identify keep-slots — supplies whose (tab, slot, itemID) already
+--       match a demand. Reserve perSlot against the demand; any excess
+--       (oversize keep) becomes a free supply.
+--     * For each unfilled demand, pick sources in priority order:
+--         1. Same display tab, not-keep, same-item.
+--         2. Overflow tab, same-item.
+--         3. Other display tabs, not-keep, same-item.
+--       Within each tier, largest available first; deterministic tiebreak
+--       by (tab, slot) lex order. Emit assignment records.
+--     * Any non-overflow supply with leftover `available` → assignment to
+--       an empty overflow slot. If no overflow slot is free, record as
+--       unplaced with reason="overflow-full". Unmet demand → deficit.
+--
+--   Phase 2 Schedule
+--     * Topologically fire assignments whose preconditions hold against
+--       a mutable working-state model. Repeat until no progress.
+--     * Anything still remaining is a swap cycle. Pick a pivot:
+--         1. Same-tab empty slot not claimed by any demand.
+--         2. Empty overflow slot (not reserved by a remaining assignment).
+--       Emit a pivot move from the blocked op's destination, then redirect
+--       any other pending assignment that was reading from that slot to
+--       pull from the pivot instead. Re-run the greedy loop.
+--     * If no pivot is available, record all remaining cycle participants
+--       as unplaced with reason="cycle-no-pivot" and stop — do not emit
+--       half-broken ops.
+--
+--   Phase 3 Sweep
+--     * Defensive: any display-tab slot that still holds a non-fitting
+--       item in the post-schedule state (and is not already unplaced) is
+--       routed to overflow. In a well-formed plan this is a no-op; it
+--       guards against edge cases in Phase 1's assignment.
+--
+-- Public contract — identical to v0.29.x for drop-in compatibility with
+-- SortExecutor and UI/SortView:
+--
+--   PlanSort(snapshot, layout) -> {
+--       ops = { {op="split"|"move", srcTab, srcSlot,
+--                dstTab, dstSlot, itemID, count}, ... },
+--       deficits = { [itemID] = count },
+--       unplaced = { {tabIndex, slotIndex, itemID, count, reason}, ... },
+--       overflowTab = tabIndex | nil,
+--   }
+--
+-- Invariants:
+--   * Ignore tabs are never read as source nor written as destination.
+--   * Keep-slots (slot matching its own demand exactly) are never harvested.
+--   * Unplaced entries never duplicate (their source slot is flagged so
+--     Phase 3 skips it).
+--   * Plan is idempotent for replan: re-running against a later snapshot
+--     produces whatever moves are still needed.
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
@@ -27,6 +66,10 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 local MAX_SLOTS = MAX_GUILDBANK_SLOTS_PER_TAB or 98
 
 local BankLayout = GBL.BankLayout
+
+local REASON_OVERFLOW_FULL       = "overflow-full"
+local REASON_CYCLE_NO_PIVOT      = "cycle-no-pivot"
+local REASON_NO_OVERFLOW_DEFINED = "no-overflow-defined"
 
 ------------------------------------------------------------------------
 -- Helpers
@@ -41,295 +84,443 @@ local function extractItemID(itemLink)
     return id and tonumber(id) or nil
 end
 
---- Build a working copy of the snapshot as a flat slot map:
---   slots[tabIndex][slotIndex] = { itemID, count } or nil
--- The plan mutates this during planning to reflect post-move state.
-local function buildWorkingBank(snapshot)
-    local bank = {}
-    for tabIndex, tabResult in pairs(snapshot or {}) do
-        bank[tabIndex] = {}
-        if tabResult and tabResult.slots then
-            for slotIndex, slot in pairs(tabResult.slots) do
-                local itemID = extractItemID(slot.itemLink)
-                if itemID then
-                    bank[tabIndex][slotIndex] = {
-                        itemID = itemID,
-                        count = slot.count or 1,
-                    }
-                end
-            end
-        end
-    end
-    return bank
-end
-
---- Find any empty slot in a given tab, starting from slot 1.
--- Returns slotIndex or nil.
-local function findEmptySlot(bank, tabIndex, skipSlotOrder)
-    local tab = bank[tabIndex]
-    if not tab then return nil end
-    for slot = 1, MAX_SLOTS do
-        if not tab[slot] and not (skipSlotOrder and skipSlotOrder[slot]) then
-            return slot
-        end
-    end
-    return nil
-end
-
---- Find any empty slot in the overflow tab, or nil if full.
-local function findOverflowSlot(bank, overflowTab)
-    if not overflowTab then return nil end
-    return findEmptySlot(bank, overflowTab)
-end
-
---- Find a slot holding itemID somewhere in `sources` (list of {tabIndex, skipSet}).
--- `skipSet[slotIndex] = true` means don't harvest from this slot (it's a keep).
--- Returns srcTab, srcSlot, slotCount or nil.
-local function findSource(bank, itemID, sources)
-    for _, src in ipairs(sources) do
-        local tab = bank[src.tabIndex]
-        if tab then
-            for slotIndex = 1, MAX_SLOTS do
-                local slot = tab[slotIndex]
-                if slot and slot.itemID == itemID and not (src.keepSlots and src.keepSlots[slotIndex]) then
-                    return src.tabIndex, slotIndex, slot.count
-                end
-            end
-        end
-    end
-    return nil, nil, 0
-end
-
-------------------------------------------------------------------------
--- Plan ops
-------------------------------------------------------------------------
-
---- Emit a plan op and apply it to the working bank.
-local function doSplit(plan, bank, srcTab, srcSlot, dstTab, dstSlot, itemID, count)
-    assert(count > 0, "split count must be > 0")
-    local src = bank[srcTab] and bank[srcTab][srcSlot]
-    assert(src and src.itemID == itemID, "split source mismatch")
-    assert(src.count >= count, "split source has fewer than count")
-    if not bank[dstTab] then bank[dstTab] = {} end
-    local dst = bank[dstTab][dstSlot]
+--- Apply a planned op to a working state (mutates in place).
+local function applyOpToState(state, op)
+    if not state[op.srcTab] then state[op.srcTab] = {} end
+    if not state[op.dstTab] then state[op.dstTab] = {} end
+    local src = state[op.srcTab][op.srcSlot]
+    assert(src and src.itemID == op.itemID and src.count >= op.count,
+        "applyOpToState: src invariant violated")
+    src.count = src.count - op.count
+    if src.count == 0 then state[op.srcTab][op.srcSlot] = nil end
+    local dst = state[op.dstTab][op.dstSlot]
     if dst then
-        assert(dst.itemID == itemID, "split destination occupied by wrong item")
-        dst.count = dst.count + count
+        assert(dst.itemID == op.itemID,
+            "applyOpToState: dst occupied by wrong item")
+        dst.count = dst.count + op.count
     else
-        bank[dstTab][dstSlot] = { itemID = itemID, count = count }
+        state[op.dstTab][op.dstSlot] = { itemID = op.itemID, count = op.count }
     end
-    src.count = src.count - count
-    local op = "split"
-    if src.count == 0 then
-        bank[srcTab][srcSlot] = nil
-        op = "move" -- whole slot drained; executor can use plain move
-    end
-    table.insert(plan.ops, {
-        op = op,
-        srcTab = srcTab, srcSlot = srcSlot,
-        dstTab = dstTab, dstSlot = dstSlot,
-        itemID = itemID, count = count,
-    })
 end
 
---- Top-level planner. snapshot is { [tabIndex] = { slots = { [slotIndex] = { itemLink, count, ... } } } }.
--- layout is { tabs = { [tabIndex] = { mode, items, slotOrder } } } as returned by GetBankLayout.
--- Returns a plan table:
---   {
---     ops = { {op, srcTab, srcSlot, dstTab, dstSlot, itemID, count}, ... },
---     deficits = { [itemID] = count },     -- items template wanted but bank lacks
---     unplaced = { { tabIndex, slotIndex, itemID, count } }, -- spill we couldn't route
---     overflowTab = tabIndex or nil,
---   }
+--- Return true iff an op can fire against `state`.
+local function canExecute(op, state)
+    local src = state[op.srcTab] and state[op.srcTab][op.srcSlot]
+    if not src or src.itemID ~= op.itemID or src.count < op.count then
+        return false
+    end
+    local dst = state[op.dstTab] and state[op.dstTab][op.dstSlot]
+    if dst and dst.itemID ~= op.itemID then
+        return false
+    end
+    return true
+end
+
+--- Pick "split" or "move" label based on whether the op fully drains src.
+local function opLabel(state, ass)
+    local src = state[ass.srcTab] and state[ass.srcTab][ass.srcSlot]
+    if src and src.count > ass.count then return "split" end
+    return "move"
+end
+
+------------------------------------------------------------------------
+-- Main entry
+------------------------------------------------------------------------
+
 function GBL:PlanSort(snapshot, layout)
-    local bank = buildWorkingBank(snapshot)
     local plan = { ops = {}, deficits = {}, unplaced = {}, overflowTab = nil }
 
     if type(layout) ~= "table" or type(layout.tabs) ~= "table" then
         return plan
     end
 
-    -- Classify tabs. Ignore tabs are simply skipped (never read or written).
-    local displayTabs = {}    -- ordered list of { tabIndex, tab }
+    -- --------------------------------------------------------------
+    -- Classify tabs.
+    -- --------------------------------------------------------------
+    local displayTabs = {}
     local overflowTab = nil
+    local ignoreSet = {}
     for tabIndex, tab in pairs(layout.tabs) do
         if tab.mode == "overflow" then
             overflowTab = tabIndex
         elseif tab.mode == "display" then
             table.insert(displayTabs, { tabIndex = tabIndex, tab = tab })
+        elseif tab.mode == "ignore" then
+            ignoreSet[tabIndex] = true
         end
     end
     plan.overflowTab = overflowTab
-
-    -- Stable order: sort display tabs by tabIndex for determinism.
     table.sort(displayTabs, function(a, b) return a.tabIndex < b.tabIndex end)
 
-    -- Ensure overflow tab exists in bank even if snapshot had no entry for it.
+    -- --------------------------------------------------------------
+    -- Build working bank (excluding ignore tabs).
+    -- --------------------------------------------------------------
+    local bank = {}
+    for tabIndex, tabResult in pairs(snapshot or {}) do
+        if not ignoreSet[tabIndex] then
+            bank[tabIndex] = {}
+            if tabResult and tabResult.slots then
+                for slotIndex, slot in pairs(tabResult.slots) do
+                    local itemID = extractItemID(slot.itemLink)
+                    if itemID then
+                        bank[tabIndex][slotIndex] = {
+                            itemID = itemID,
+                            count = slot.count or 1,
+                        }
+                    end
+                end
+            end
+        end
+    end
     if overflowTab and not bank[overflowTab] then bank[overflowTab] = {} end
 
-    -- ------------------------------------------------------------------
-    -- Pass 1: evict wrong items from display tabs.
-    -- A slot in a display tab is "correct" if slotOrder[slotIndex] == itemID
-    -- AND count == perSlot for that itemID.
-    -- Wrong items go to the overflow tab (or unplaced).
-    -- ------------------------------------------------------------------
+    -- --------------------------------------------------------------
+    -- PHASE 1: Assignment
+    -- --------------------------------------------------------------
+
+    -- Demands: one per slotOrder-claimed display slot.
+    local demands = {}
+    local demandOfSlot = {}  -- demandOfSlot[t][s] -> demand | nil
     for _, entry in ipairs(displayTabs) do
         local tabIndex = entry.tabIndex
-        local tab = entry.tab
-        local slotOrder = tab.slotOrder or {}
-        local items = tab.items or {}
-
+        local items = entry.tab.items or {}
+        local slotOrder = entry.tab.slotOrder or {}
+        demandOfSlot[tabIndex] = demandOfSlot[tabIndex] or {}
         for slotIndex = 1, MAX_SLOTS do
-            local slot = bank[tabIndex] and bank[tabIndex][slotIndex]
-            if slot then
-                local targetItemID = slotOrder[slotIndex]
-                local itemRow = targetItemID and items[targetItemID] or nil
-                local isCorrectItem = (slot.itemID == targetItemID)
-                local hasRow = items[slot.itemID] ~= nil
-                if not isCorrectItem and not hasRow then
-                    -- Item doesn't belong in this tab at all -> overflow.
-                    local ovSlot = findOverflowSlot(bank, overflowTab)
-                    if ovSlot then
-                        doSplit(plan, bank, tabIndex, slotIndex,
-                            overflowTab, ovSlot, slot.itemID, slot.count)
-                    else
-                        table.insert(plan.unplaced, {
-                            tabIndex = tabIndex, slotIndex = slotIndex,
-                            itemID = slot.itemID, count = slot.count,
-                        })
-                        -- Drop from working bank so later passes don't re-process
-                        -- this same slot and emit duplicate unplaced entries or
-                        -- try to write into a slot already occupied by a foreign.
-                        bank[tabIndex][slotIndex] = nil
-                    end
-                elseif not isCorrectItem and hasRow then
-                    -- Item belongs in *this* tab but the slot belongs to a
-                    -- different item. Move it aside to a temp spot in this
-                    -- tab or overflow, so pass 2 can place it properly.
-                    -- We move it to overflow; pass 2 will pull it back.
-                    local ovSlot = findOverflowSlot(bank, overflowTab)
-                    if ovSlot then
-                        doSplit(plan, bank, tabIndex, slotIndex,
-                            overflowTab, ovSlot, slot.itemID, slot.count)
-                    else
-                        table.insert(plan.unplaced, {
-                            tabIndex = tabIndex, slotIndex = slotIndex,
-                            itemID = slot.itemID, count = slot.count,
-                        })
-                        bank[tabIndex][slotIndex] = nil
-                    end
-                elseif isCorrectItem and itemRow and slot.count > itemRow.perSlot then
-                    -- Slot has the right item but oversize: split off the excess.
-                    local excess = slot.count - itemRow.perSlot
-                    local ovSlot = findOverflowSlot(bank, overflowTab)
-                    if ovSlot then
-                        doSplit(plan, bank, tabIndex, slotIndex,
-                            overflowTab, ovSlot, slot.itemID, excess)
-                    else
-                        table.insert(plan.unplaced, {
-                            tabIndex = tabIndex, slotIndex = slotIndex,
-                            itemID = slot.itemID, count = excess,
-                        })
-                    end
-                end
-            end
-        end
-    end
-
-    -- ------------------------------------------------------------------
-    -- Pass 2: fill display slots per slotOrder, taking from overflow /
-    -- other display tabs / same-tab offslots.
-    -- ------------------------------------------------------------------
-    -- Build search order for sources: prefer same tab first, then overflow,
-    -- then other display tabs.
-    for _, entry in ipairs(displayTabs) do
-        local tabIndex = entry.tabIndex
-        local tab = entry.tab
-        local slotOrder = tab.slotOrder or {}
-        local items = tab.items or {}
-
-        -- Identify "keep" slots: those already matching template exactly.
-        -- Keep slots must NOT be harvested as sources — doing so would
-        -- shuffle correct items off their correct slots and invent moves
-        -- (and potentially swallow a genuine deficit).
-        local keepSlotsThisTab = {}
-        for slotIndex = 1, MAX_SLOTS do
-            local target = slotOrder[slotIndex]
-            local row = target and items[target] or nil
+            local itemID = slotOrder[slotIndex]
+            local row = itemID and items[itemID] or nil
             if row then
-                local existing = bank[tabIndex] and bank[tabIndex][slotIndex]
-                if existing and existing.itemID == target and existing.count == row.perSlot then
-                    keepSlotsThisTab[slotIndex] = true
-                end
+                local dem = {
+                    tabIndex = tabIndex, slotIndex = slotIndex,
+                    itemID = itemID, perSlot = row.perSlot, filled = 0,
+                }
+                table.insert(demands, dem)
+                demandOfSlot[tabIndex][slotIndex] = dem
             end
         end
+    end
 
-        for slotIndex = 1, MAX_SLOTS do
-            local targetItemID = slotOrder[slotIndex]
-            local itemRow = targetItemID and items[targetItemID] or nil
-            if itemRow then
-                local existing = bank[tabIndex] and bank[tabIndex][slotIndex]
-                local have = (existing and existing.itemID == targetItemID) and existing.count or 0
-                local need = itemRow.perSlot - have
-                if need > 0 then
-                    -- Same tab: skip keeps AND the destination slot itself.
-                    local sameTabKeeps = {}
-                    for k in pairs(keepSlotsThisTab) do sameTabKeeps[k] = true end
-                    sameTabKeeps[slotIndex] = true
+    -- Supplies: iterate tabs in deterministic order.
+    local tabOrder = {}
+    for _, entry in ipairs(displayTabs) do
+        table.insert(tabOrder, entry.tabIndex)
+    end
+    if overflowTab then table.insert(tabOrder, overflowTab) end
+    table.sort(tabOrder)
 
-                    local sources = {
-                        { tabIndex = tabIndex, keepSlots = sameTabKeeps },
-                    }
-                    if overflowTab and overflowTab ~= tabIndex then
-                        table.insert(sources, { tabIndex = overflowTab })
-                    end
-                    for _, other in ipairs(displayTabs) do
-                        if other.tabIndex ~= tabIndex then
-                            table.insert(sources, { tabIndex = other.tabIndex })
-                        end
-                    end
-
-                    while need > 0 do
-                        local srcTab, srcSlot, srcCount = findSource(bank, targetItemID, sources)
-                        if not srcTab then
-                            plan.deficits[targetItemID] = (plan.deficits[targetItemID] or 0) + need
-                            break
-                        end
-                        local take = math.min(need, srcCount)
-                        doSplit(plan, bank, srcTab, srcSlot, tabIndex, slotIndex, targetItemID, take)
-                        need = need - take
-                    end
+    local supplies = {}
+    for _, tabIndex in ipairs(tabOrder) do
+        local tab = bank[tabIndex]
+        if tab then
+            for slotIndex = 1, MAX_SLOTS do
+                local slot = tab[slotIndex]
+                if slot then
+                    table.insert(supplies, {
+                        tabIndex = tabIndex, slotIndex = slotIndex,
+                        itemID = slot.itemID, count = slot.count,
+                        available = slot.count,
+                        isOverflow = (tabIndex == overflowTab),
+                        isKeep = false,
+                    })
                 end
             end
         end
     end
 
-    -- ------------------------------------------------------------------
-    -- Pass 3: sweep any stragglers.
-    -- Items still left in display tabs that don't match template slotOrder
-    -- for their slot: push to overflow. (Handles case where display tab
-    -- had items in non-template slots after pass 1 tried to consolidate.)
-    -- ------------------------------------------------------------------
+    -- Keep-slot identification: reserve perSlot against the matching demand.
+    -- An oversize keep-slot retains identity but exposes its excess as
+    -- `available` supply for other demands of the same item.
+    for _, sup in ipairs(supplies) do
+        local dem = demandOfSlot[sup.tabIndex] and demandOfSlot[sup.tabIndex][sup.slotIndex]
+        if dem and dem.itemID == sup.itemID then
+            local reserve = math.min(sup.count, dem.perSlot)
+            dem.filled = reserve
+            sup.available = sup.count - reserve
+            sup.isKeep = true
+        end
+    end
+
+    -- Phase 1A — fill demands from the best source.
+    local function findBestSource(dem)
+        local best, bestP, bestAvail, bestTab, bestSlot = nil, 4, -1, math.huge, math.huge
+        for _, sup in ipairs(supplies) do
+            if sup.itemID == dem.itemID and sup.available > 0
+               and not (sup.tabIndex == dem.tabIndex and sup.slotIndex == dem.slotIndex) then
+                local p
+                if sup.tabIndex == dem.tabIndex then p = 1
+                elseif sup.isOverflow then p = 2
+                else p = 3 end
+                local pick = false
+                if p < bestP then
+                    pick = true
+                elseif p == bestP then
+                    if sup.available > bestAvail then
+                        pick = true
+                    elseif sup.available == bestAvail then
+                        if sup.tabIndex < bestTab
+                           or (sup.tabIndex == bestTab and sup.slotIndex < bestSlot) then
+                            pick = true
+                        end
+                    end
+                end
+                if pick then
+                    best, bestP, bestAvail = sup, p, sup.available
+                    bestTab, bestSlot = sup.tabIndex, sup.slotIndex
+                end
+            end
+        end
+        return best
+    end
+
+    local assignments = {}
+    for _, dem in ipairs(demands) do
+        while dem.filled < dem.perSlot do
+            local sup = findBestSource(dem)
+            if not sup then
+                plan.deficits[dem.itemID] = (plan.deficits[dem.itemID] or 0)
+                    + (dem.perSlot - dem.filled)
+                dem.filled = dem.perSlot  -- sentinel to exit loop
+                break
+            end
+            local take = math.min(dem.perSlot - dem.filled, sup.available)
+            table.insert(assignments, {
+                srcTab = sup.tabIndex, srcSlot = sup.slotIndex,
+                dstTab = dem.tabIndex, dstSlot = dem.slotIndex,
+                itemID = dem.itemID, count = take,
+            })
+            sup.available = sup.available - take
+            dem.filled = dem.filled + take
+        end
+    end
+
+    -- Phase 1B — route leftover non-overflow supply to overflow.
+    local overflowEmpties = {}  -- FIFO of empty overflow slot indices
+    if overflowTab then
+        for s = 1, MAX_SLOTS do
+            if not (bank[overflowTab] and bank[overflowTab][s]) then
+                table.insert(overflowEmpties, s)
+            end
+        end
+    end
+
+    local unplacedSlots = {}  -- unplacedSlots[t][s] = true
+    local function recordUnplaced(tabIndex, slotIndex, itemID, count, reason)
+        table.insert(plan.unplaced, {
+            tabIndex = tabIndex, slotIndex = slotIndex,
+            itemID = itemID, count = count, reason = reason,
+        })
+        unplacedSlots[tabIndex] = unplacedSlots[tabIndex] or {}
+        unplacedSlots[tabIndex][slotIndex] = true
+    end
+
+    for _, sup in ipairs(supplies) do
+        if sup.available > 0 and not sup.isOverflow then
+            if not overflowTab then
+                recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
+                    sup.available, REASON_NO_OVERFLOW_DEFINED)
+            elseif #overflowEmpties == 0 then
+                recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
+                    sup.available, REASON_OVERFLOW_FULL)
+            else
+                local ovSlot = table.remove(overflowEmpties, 1)
+                table.insert(assignments, {
+                    srcTab = sup.tabIndex, srcSlot = sup.slotIndex,
+                    dstTab = overflowTab, dstSlot = ovSlot,
+                    itemID = sup.itemID, count = sup.available,
+                })
+                sup.available = 0
+            end
+        end
+    end
+
+    -- --------------------------------------------------------------
+    -- PHASE 2: Schedule
+    -- --------------------------------------------------------------
+
+    -- Deep-copy bank into a mutable working state for Phase 2.
+    local state = {}
+    for tabIndex, tab in pairs(bank) do
+        state[tabIndex] = {}
+        for slotIndex, slot in pairs(tab) do
+            state[tabIndex][slotIndex] = {
+                itemID = slot.itemID, count = slot.count,
+            }
+        end
+    end
+
+    local remaining = {}
+    for i = 1, #assignments do remaining[i] = true end
+
+    local function emitAssignment(ass)
+        local op = {
+            op = opLabel(state, ass),
+            srcTab = ass.srcTab, srcSlot = ass.srcSlot,
+            dstTab = ass.dstTab, dstSlot = ass.dstSlot,
+            itemID = ass.itemID, count = ass.count,
+        }
+        table.insert(plan.ops, op)
+        applyOpToState(state, op)
+    end
+
+    local function greedyDrain()
+        local progressed
+        repeat
+            progressed = false
+            for i = 1, #assignments do
+                if remaining[i] then
+                    local ass = assignments[i]
+                    if canExecute(ass, state) then
+                        emitAssignment(ass)
+                        remaining[i] = nil
+                        progressed = true
+                    end
+                end
+            end
+        until not progressed
+    end
+
+    greedyDrain()
+
+    -- Pivot-break loop for any remaining cycle-blocked assignments.
+    local function findPivot(blockedDstTab)
+        -- Priority 1: same-tab empty, unclaimed by any demand.
+        for s = 1, MAX_SLOTS do
+            local claimed = demandOfSlot[blockedDstTab]
+                and demandOfSlot[blockedDstTab][s]
+            if not claimed then
+                local slot = state[blockedDstTab] and state[blockedDstTab][s]
+                if not slot then
+                    return blockedDstTab, s
+                end
+            end
+        end
+        -- Priority 2: empty overflow slot not reserved by a pending op.
+        if overflowTab then
+            for s = 1, MAX_SLOTS do
+                local slot = state[overflowTab] and state[overflowTab][s]
+                if not slot then
+                    local reserved = false
+                    for i = 1, #assignments do
+                        if remaining[i] then
+                            local a = assignments[i]
+                            if a.dstTab == overflowTab and a.dstSlot == s then
+                                reserved = true
+                                break
+                            end
+                        end
+                    end
+                    if not reserved then
+                        return overflowTab, s
+                    end
+                end
+            end
+        end
+        return nil, nil
+    end
+
+    local guard = 0
+    while next(remaining) ~= nil and guard < 500 do
+        guard = guard + 1
+
+        -- Find the first remaining op whose dst currently holds a foreign item.
+        local stuckIdx
+        for i = 1, #assignments do
+            if remaining[i] then
+                local a = assignments[i]
+                local dstCur = state[a.dstTab] and state[a.dstTab][a.dstSlot]
+                if dstCur and dstCur.itemID ~= a.itemID then
+                    stuckIdx = i
+                    break
+                end
+            end
+        end
+
+        if not stuckIdx then
+            -- No op is dst-blocked but some remain — should only happen if
+            -- a src drifted (shouldn't in pure-planner mode). Bail safely.
+            for i = 1, #assignments do
+                if remaining[i] then
+                    local a = assignments[i]
+                    recordUnplaced(a.srcTab, a.srcSlot, a.itemID, a.count,
+                        REASON_CYCLE_NO_PIVOT)
+                    remaining[i] = nil
+                end
+            end
+            break
+        end
+
+        local stuck = assignments[stuckIdx]
+        local pivotTab, pivotSlot = findPivot(stuck.dstTab)
+        if not pivotTab then
+            for i = 1, #assignments do
+                if remaining[i] then
+                    local a = assignments[i]
+                    recordUnplaced(a.srcTab, a.srcSlot, a.itemID, a.count,
+                        REASON_CYCLE_NO_PIVOT)
+                    remaining[i] = nil
+                end
+            end
+            break
+        end
+
+        local blockerSlot = state[stuck.dstTab][stuck.dstSlot]
+        local pivotOp = {
+            op = (blockerSlot.count > 0) and
+                 ((state[stuck.dstTab][stuck.dstSlot].count > blockerSlot.count)
+                    and "split" or "move") or "move",
+            srcTab = stuck.dstTab, srcSlot = stuck.dstSlot,
+            dstTab = pivotTab, dstSlot = pivotSlot,
+            itemID = blockerSlot.itemID, count = blockerSlot.count,
+        }
+        -- Simplify: pivot always moves the entire slot content away.
+        pivotOp.op = "move"
+        table.insert(plan.ops, pivotOp)
+        applyOpToState(state, pivotOp)
+
+        -- Redirect any still-remaining assignment whose src was the pivot's
+        -- original source slot — the item now lives at the pivot.
+        for j = 1, #assignments do
+            if remaining[j] then
+                local other = assignments[j]
+                if other.srcTab == stuck.dstTab and other.srcSlot == stuck.dstSlot then
+                    other.srcTab = pivotTab
+                    other.srcSlot = pivotSlot
+                end
+            end
+        end
+
+        greedyDrain()
+    end
+
+    -- --------------------------------------------------------------
+    -- PHASE 3: Sweep (defensive)
+    -- --------------------------------------------------------------
     for _, entry in ipairs(displayTabs) do
         local tabIndex = entry.tabIndex
-        local tab = entry.tab
-        local slotOrder = tab.slotOrder or {}
-        local items = tab.items or {}
+        local slotOrder = entry.tab.slotOrder or {}
+        local items = entry.tab.items or {}
         for slotIndex = 1, MAX_SLOTS do
-            local slot = bank[tabIndex] and bank[tabIndex][slotIndex]
-            if slot then
+            local slot = state[tabIndex] and state[tabIndex][slotIndex]
+            local isUnplaced = unplacedSlots[tabIndex]
+                and unplacedSlots[tabIndex][slotIndex]
+            if slot and not isUnplaced then
                 local expected = slotOrder[slotIndex]
-                local fitsHere = (expected == slot.itemID and items[expected])
-                if not fitsHere then
-                    local ovSlot = findOverflowSlot(bank, overflowTab)
-                    if ovSlot then
-                        doSplit(plan, bank, tabIndex, slotIndex,
-                            overflowTab, ovSlot, slot.itemID, slot.count)
-                    else
-                        table.insert(plan.unplaced, {
-                            tabIndex = tabIndex, slotIndex = slotIndex,
+                local fits = (expected == slot.itemID and items[expected])
+                if not fits then
+                    if overflowTab and #overflowEmpties > 0 then
+                        local ovSlot = table.remove(overflowEmpties, 1)
+                        local sweepOp = {
+                            op = "move",
+                            srcTab = tabIndex, srcSlot = slotIndex,
+                            dstTab = overflowTab, dstSlot = ovSlot,
                             itemID = slot.itemID, count = slot.count,
-                        })
+                        }
+                        table.insert(plan.ops, sweepOp)
+                        applyOpToState(state, sweepOp)
+                    else
+                        recordUnplaced(tabIndex, slotIndex, slot.itemID, slot.count,
+                            overflowTab and REASON_OVERFLOW_FULL
+                            or REASON_NO_OVERFLOW_DEFINED)
                     end
                 end
             end
@@ -339,8 +530,10 @@ function GBL:PlanSort(snapshot, layout)
     return plan
 end
 
---- Summarize a plan for preview UIs / the sortpreview slash command.
--- Returns a short list of strings, one per op (plus deficit/unplaced lines).
+------------------------------------------------------------------------
+-- Summarize a plan for preview UIs and /gbl sortpreview.
+------------------------------------------------------------------------
+
 function GBL:SummarizeSortPlan(plan)
     local lines = {}
     if not plan then
@@ -367,3 +560,10 @@ end
 
 -- Expose helper for tests.
 GBL._sortPlannerExtractItemID = extractItemID
+
+-- Expose reason codes for tests/UI.
+GBL._sortPlannerReasons = {
+    OVERFLOW_FULL       = REASON_OVERFLOW_FULL,
+    CYCLE_NO_PIVOT      = REASON_CYCLE_NO_PIVOT,
+    NO_OVERFLOW_DEFINED = REASON_NO_OVERFLOW_DEFINED,
+}

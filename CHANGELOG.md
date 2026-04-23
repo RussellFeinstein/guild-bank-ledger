@@ -5,6 +5,22 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.7] — 2026-04-23
+
+**Milestone M-sort-2.5: Planner algorithm upgrade**
+
+### Changed
+- **Sort planner rewritten from three-pass greedy to assign-then-schedule.** Same public contract (`PlanSort(snapshot, layout)` returns the same shape), no UI or saved-variable changes — a drop-in upgrade. Phase 1 assigns every demand to the best available source (same-tab direct → overflow → cross-tab; largest-count first within each tier). Phase 2 schedules the moves against a mutating state model and breaks swap cycles with a pivot slot (same-tab empty preferred, overflow fallback). Phase 3 sweeps any stragglers.
+- **Direct intra-tab moves skip the overflow round-trip.** An item in the wrong slot of the right tab now moves straight to its template slot — one op instead of two (evict + pull back).
+- **Oversize stacks serve multiple demands from a single source.** An oversize stack is no longer pre-split to overflow before the planner has looked at other demands; it splits directly into each destination that needs the item.
+- **Largest-source-first source selection minimizes split count.** When multiple same-item stacks can fill a demand, the planner picks the largest first so a single split ends the work.
+- **Swap cycles are detected and resolved with a pivot.** 2-cycles cost 3 ops (was 4 via overflow), 3-cycles cost 4 ops (was 6). Unreachable cycles — no empty unclaimed slot anywhere — are now reported as `unplaced` entries with `reason = "cycle-no-pivot"` instead of silently emitting half-broken ops.
+
+### Added
+- `plan.unplaced[].reason` field — one of `"overflow-full"`, `"cycle-no-pivot"`, `"no-overflow-defined"`. Backward-compatible (old callers ignore it); the existing SortExecutor and UI/SortView are unaffected.
+- 9 new planner tests in `spec/sortplanner_spec.lua` pinning the algorithmic wins (direct move, oversize split sharing, same-tab pivot, overflow pivot fallback, 3-cycle break, largest-first, unreachable-cycle unplaced, oversize-keep excess harvest).
+- `spec/sortplanner_perf_spec.lua` — benchmark asserting a worst-case plan (8 tabs × 98 slots, 90 demands) completes in under 250 ms.
+
 ## [0.29.6] — 2026-04-23
 
 ### Changed

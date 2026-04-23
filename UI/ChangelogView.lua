@@ -29,6 +29,14 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.7
+    {"0.29.7", "2026-04-23", {
+        Changed = {
+            "Sort planner rewritten from three-pass greedy to assign-then-schedule. Same inputs and outputs — drop-in upgrade. Items in the wrong slot of the right tab now move directly instead of round-tripping through overflow; oversize stacks feed multiple demands from a single source; the planner picks the largest source first to minimize split count; and swap cycles are detected and resolved with a pivot (3 ops for a 2-cycle, 4 for a 3-cycle, down from 4 and 6).",
+            "Unreachable swap cycles (no empty unclaimed slot anywhere) are now reported as unplaced with a 'cycle-no-pivot' reason instead of emitting half-broken ops.",
+        },
+    }, milestone = "M-sort-2.5: Planner algorithm upgrade"},
+
     -- v0.29.6
     {"0.29.6", "2026-04-23", {
         Changed = {

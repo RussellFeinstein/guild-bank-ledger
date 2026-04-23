@@ -16,7 +16,7 @@ WoW addon that persistently logs guild bank transactions. Lua 5.1 + Ace3 stack. 
 - **ItemCache.lua** — Lazy async item info cache (GetItemInfo + GET_ITEM_INFO_RECEIVED for synced records)
 - **Sync.lua** — Guild-wide sync via AceComm (HELLO/SYNC_REQUEST/SYNC_DATA/ACK/BUSY/MANIFEST protocol, epidemic gossip propagation, concurrent send+receive, smart peer selection, hash-gated HELLO reply suppression, fingerprint-based delta sync, pending peers queue, NACK backoff, combat/zone guards, bidirectional sync, jitter)
 - **BankLayout.lua** — Per-guild saved bank layout templates (display/overflow/ignore tab modes with per-item slot counts and stack sizes); validation (exactly one overflow, no duplicate items across display tabs, ≤98 slots); capture-from-snapshot; stock reserves storage
-- **SortPlanner.lua** — Pure-function move planner: given a bank snapshot + layout, produces deterministic ordered op list (split/move) to reshape bank. Three-pass algorithm (evict wrong items, fill template slots with keep-slot harvest protection, sweep stragglers). Reports deficits and unplaced items.
+- **SortPlanner.lua** — Pure-function move planner: given a bank snapshot + layout, produces deterministic ordered op list (split/move) to reshape bank. Assign-then-schedule algorithm: Phase 1 assigns each demand to the best source (same-tab direct → overflow → cross-tab; largest-count first within each tier; keep-slot harvest protection), Phase 2 schedules moves via a greedy feasibility loop and breaks swap cycles with a pivot slot (same-tab empty preferred, overflow fallback), Phase 3 sweeps stragglers. Reports deficits, unplaced items (with reason code), and the overflow tab.
 - **SortExecutor.lua** — Executes a plan one op at a time with throttling (0.3s gap), pre-step verification, cursor-leak safety, replan-on-foreign-activity (cap 5), bank-close abort, and `GUILDBANKBAGSLOTS_CHANGED`-driven confirmation with timeout fallback.
 - **UI/Accessibility.lua** — Colorblind-safe palettes, font scaling, keyboard nav, triple encoding
 - **UI/FilterBar.lua** — Transaction filter logic and AceGUI filter widgets
@@ -111,4 +111,4 @@ luacheck .                 # lint production code
 
 ## Version
 
-Current: 0.29.6 (see `VERSION` file)
+Current: 0.29.7 (see `VERSION` file)

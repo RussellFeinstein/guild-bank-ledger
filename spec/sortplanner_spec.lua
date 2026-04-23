@@ -403,6 +403,324 @@ describe("SortPlanner", function()
         assert.equals(1, count, "unplaced should contain exactly one entry for the stuck foreign item")
     end)
 
+    ------------------------------------------------------------------
+    -- M-sort-2.5: Assign-then-Schedule planner regressions.
+    -- These exercise the cases where the v0.29.0 three-pass greedy
+    -- wasted moves: overflow round-trips that could be direct, pre-
+    -- mature splits of oversize stacks, first-match (not largest-
+    -- first) source selection, and the absence of swap-cycle handling.
+    ------------------------------------------------------------------
+
+    it("routes a direct intra-tab move instead of an overflow round-trip", function()
+        -- X sits in tab 1 slot 3, template wants X at tab 1 slot 5
+        -- (empty). Optimal: 1 direct op. Greedy would go via overflow (2 ops).
+        local snap = snapshot({
+            [1] = { [3] = { itemID = 100, count = 20 } },
+            [2] = {},
+        })
+        local layout = {
+            tabs = {
+                [1] = displayTab(
+                    { [100] = { slots = 1, perSlot = 20 } },
+                    { [5] = 100 }
+                ),
+                [2] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        assert.equals(1, #plan.ops, "one direct op should suffice")
+        assert.equals(1, plan.ops[1].srcTab)
+        assert.equals(3, plan.ops[1].srcSlot)
+        assert.equals(1, plan.ops[1].dstTab)
+        assert.equals(5, plan.ops[1].dstSlot)
+    end)
+
+    it("splits an oversize stack across multiple demands without an overflow hop", function()
+        -- Tab 1 slot 1 has X×40. Template wants X×20 at both slot 1 and slot 2.
+        -- Optimal: 1 split moving 20 from slot 1 to slot 2. Slot 1 keeps 20.
+        -- Greedy: splits excess to overflow first, then pulls back (2 ops).
+        local snap = snapshot({
+            [1] = { [1] = { itemID = 100, count = 40 } },
+            [2] = {},
+        })
+        local layout = {
+            tabs = {
+                [1] = displayTab(
+                    { [100] = { slots = 2, perSlot = 20 } },
+                    { [1] = 100, [2] = 100 }
+                ),
+                [2] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        local final = applyPlan(snap, plan)
+        assert.equals(1, #plan.ops)
+        assert.equals(20, final[1][1].count, "slot 1 retains perSlot")
+        assert.equals(20, final[1][2].count, "slot 2 filled from excess")
+        for _, op in ipairs(plan.ops) do
+            assert.is_not_equal(2, op.srcTab, "no overflow pickup")
+            assert.is_not_equal(2, op.dstTab, "no overflow drop")
+        end
+    end)
+
+    it("routes an oversize non-keep stack directly across tabs to meet multiple demands", function()
+        -- Tab 1 slot 1 has X×40 but tab 1's template slot 1 wants Y (not X).
+        -- Tab 2 claims X×20 at two slots. Optimal: split X×40 directly into tab 2
+        -- without parking in overflow.
+        local snap = snapshot({
+            [1] = { [1] = { itemID = 100, count = 40 } },
+            [2] = {},
+            [3] = {},
+        })
+        local layout = {
+            tabs = {
+                [1] = displayTab(
+                    { [200] = { slots = 1, perSlot = 5 } },
+                    { [1] = 200 }
+                ),
+                [2] = displayTab(
+                    { [100] = { slots = 2, perSlot = 20 } },
+                    { [1] = 100, [2] = 100 }
+                ),
+                [3] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        for _, op in ipairs(plan.ops) do
+            if op.itemID == 100 then
+                assert.is_not_equal(3, op.srcTab,
+                    "X should not be harvested from overflow (it came from tab 1)")
+                assert.is_not_equal(3, op.dstTab,
+                    "X should not be parked in overflow (tab 2 wants it)")
+            end
+        end
+        local final = applyPlan(snap, plan)
+        local tab2X = 0
+        for _, slot in pairs(final[2] or {}) do
+            if slot.itemID == 100 then tab2X = tab2X + slot.count end
+        end
+        assert.equals(40, tab2X, "all X should reach tab 2")
+    end)
+
+    it("breaks a 2-cycle in the same tab using an unclaimed empty slot as pivot", function()
+        -- Template: tab 1 slot 1 = X×10, slot 2 = Y×5.
+        -- Bank: slot 1 = Y×5 and slot 2 = X×10 (a swap). Tab 1 has plenty of
+        -- unclaimed empty slots (3..98) so a same-tab pivot is available.
+        -- Expected: 3 ops, entirely within tab 1.
+        local snap = snapshot({
+            [1] = {
+                [1] = { itemID = 200, count = 5 },
+                [2] = { itemID = 100, count = 10 },
+            },
+            [2] = {},
+        })
+        local layout = {
+            tabs = {
+                [1] = displayTab(
+                    {
+                        [100] = { slots = 1, perSlot = 10 },
+                        [200] = { slots = 1, perSlot = 5 },
+                    },
+                    { [1] = 100, [2] = 200 }
+                ),
+                [2] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        assert.equals(3, #plan.ops, "2-cycle resolves in 3 ops")
+        for _, op in ipairs(plan.ops) do
+            assert.equals(1, op.srcTab, "pivot should stay in tab 1")
+            assert.equals(1, op.dstTab, "pivot should stay in tab 1")
+        end
+        local final = applyPlan(snap, plan)
+        assert.equals(100, final[1][1].itemID)
+        assert.equals(10, final[1][1].count)
+        assert.equals(200, final[1][2].itemID)
+        assert.equals(5, final[1][2].count)
+    end)
+
+    it("falls back to the overflow tab for pivot when no unclaimed empty exists in the cycle's tab", function()
+        -- Same 2-cycle as the previous test, but tab 1 claims every slot so
+        -- no unclaimed same-tab pivot is available. Overflow is free.
+        -- Expected: 3 ops, at least one touches the overflow tab.
+        local items = {
+            [100] = { slots = 1, perSlot = 10 },
+            [200] = { slots = 1, perSlot = 5 },
+        }
+        local slotOrder = { [1] = 100, [2] = 200 }
+        for i = 3, 98 do
+            local id = 10000 + i
+            items[id] = { slots = 1, perSlot = 1 }
+            slotOrder[i] = id
+        end
+        local snap = snapshot({
+            [1] = {
+                [1] = { itemID = 200, count = 5 },
+                [2] = { itemID = 100, count = 10 },
+            },
+            [2] = {},
+        })
+        local layout = {
+            tabs = {
+                [1] = displayTab(items, slotOrder),
+                [2] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        local cycleOps = 0
+        local touchedOverflow = false
+        for _, op in ipairs(plan.ops) do
+            if op.itemID == 100 or op.itemID == 200 then
+                cycleOps = cycleOps + 1
+                if op.srcTab == 2 or op.dstTab == 2 then
+                    touchedOverflow = true
+                end
+            end
+        end
+        assert.equals(3, cycleOps, "2-cycle still resolves in 3 ops")
+        assert.is_true(touchedOverflow, "overflow should serve as the pivot")
+        local final = applyPlan(snap, plan)
+        assert.equals(100, final[1][1].itemID)
+        assert.equals(200, final[1][2].itemID)
+    end)
+
+    it("breaks a 3-cycle with a single pivot round-trip", function()
+        -- A→B→C→A rotation. Optimal: 4 ops (3 cycle members + 1 pivot).
+        -- Greedy: 6 ops (evict all three, pull all three back).
+        local snap = snapshot({
+            [1] = {
+                [1] = { itemID = 200, count = 5 },  -- Y, wants X
+                [2] = { itemID = 300, count = 15 }, -- Z, wants Y
+                [3] = { itemID = 100, count = 10 }, -- X, wants Z
+            },
+            [2] = {},
+        })
+        local layout = {
+            tabs = {
+                [1] = displayTab(
+                    {
+                        [100] = { slots = 1, perSlot = 10 },
+                        [200] = { slots = 1, perSlot = 5 },
+                        [300] = { slots = 1, perSlot = 15 },
+                    },
+                    { [1] = 100, [2] = 200, [3] = 300 }
+                ),
+                [2] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        assert.equals(4, #plan.ops, "3-cycle needs 4 ops (3 members + 1 pivot)")
+        local final = applyPlan(snap, plan)
+        assert.equals(100, final[1][1].itemID)
+        assert.equals(10, final[1][1].count)
+        assert.equals(200, final[1][2].itemID)
+        assert.equals(5, final[1][2].count)
+        assert.equals(300, final[1][3].itemID)
+        assert.equals(15, final[1][3].count)
+    end)
+
+    it("picks the largest source first to minimize op count", function()
+        -- Demand: X×20 at display slot. Sources: X×5 and X×30 in overflow.
+        -- Largest-first: 1 op (split 20 from the 30 stack).
+        -- First-match: 2 ops (pull 5, then split 15 from 30).
+        local snap = snapshot({
+            [1] = {},
+            [2] = {
+                [1] = { itemID = 100, count = 5 },
+                [2] = { itemID = 100, count = 30 },
+            },
+        })
+        local layout = {
+            tabs = {
+                [1] = displayTab(
+                    { [100] = { slots = 1, perSlot = 20 } },
+                    { [1] = 100 }
+                ),
+                [2] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        assert.equals(1, #plan.ops, "should pick the larger source")
+        assert.equals(2, plan.ops[1].srcTab)
+        assert.equals(2, plan.ops[1].srcSlot, "pick slot with X×30 first")
+        assert.equals(20, plan.ops[1].count)
+    end)
+
+    it("records an unreachable cycle as unplaced instead of emitting broken ops", function()
+        -- 2-cycle in tab 1. Tab 1's every slot is claimed by template (no
+        -- unclaimed same-tab pivot). Overflow is completely full (no pivot
+        -- available there either). Cycle is unreachable.
+        local items = {
+            [100] = { slots = 1, perSlot = 10 },
+            [200] = { slots = 1, perSlot = 5 },
+        }
+        local slotOrder = { [1] = 100, [2] = 200 }
+        for i = 3, 98 do
+            local id = 10000 + i
+            items[id] = { slots = 1, perSlot = 1 }
+            slotOrder[i] = id
+        end
+        local overflowSlots = {}
+        for i = 1, 98 do
+            overflowSlots[i] = { itemID = 999, count = 1 }
+        end
+        local snap = snapshot({
+            [1] = {
+                [1] = { itemID = 200, count = 5 },
+                [2] = { itemID = 100, count = 10 },
+            },
+            [2] = overflowSlots,
+        })
+        local layout = {
+            tabs = {
+                [1] = displayTab(items, slotOrder),
+                [2] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        local unplaced = {}
+        for _, u in ipairs(plan.unplaced) do
+            unplaced[u.itemID] = u
+        end
+        assert.is_not_nil(unplaced[100], "cycle participant X should be unplaced")
+        assert.is_not_nil(unplaced[200], "cycle participant Y should be unplaced")
+        assert.matches("cycle", unplaced[100].reason or "")
+        assert.matches("cycle", unplaced[200].reason or "")
+        for _, op in ipairs(plan.ops) do
+            assert.is_false(
+                op.itemID == 100 or op.itemID == 200,
+                "no broken op should move cycle participants when unreachable"
+            )
+        end
+    end)
+
+    it("harvests excess from an oversize keep-slot to fill a sibling demand (keep identity preserved)", function()
+        -- Tab 1 slot 1 has X×40. slotOrder[1]=X at perSlot=20 — keep-slot
+        -- with 20 excess. Slot 2 needs X×20. Optimal: 1 split from slot 1
+        -- to slot 2. Slot 1 should still read as X×20 after — the keep
+        -- identity is preserved (we only touch the excess).
+        local snap = snapshot({
+            [1] = { [1] = { itemID = 100, count = 40 } },
+            [2] = {},
+        })
+        local layout = {
+            tabs = {
+                [1] = displayTab(
+                    { [100] = { slots = 2, perSlot = 20 } },
+                    { [1] = 100, [2] = 100 }
+                ),
+                [2] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        assert.equals(1, #plan.ops)
+        local final = applyPlan(snap, plan)
+        assert.equals(20, final[1][1].count,
+            "keep-slot retains exactly perSlot after excess harvest")
+        assert.equals(20, final[1][2].count)
+        assert.is_nil(plan.deficits[100])
+    end)
+
     it("summarizes a plan into human-readable lines", function()
         local snap = snapshot({
             [1] = { [1] = { itemID = 100, count = 20 } },
