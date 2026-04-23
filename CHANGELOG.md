@@ -5,6 +5,18 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.7] — 2026-04-22
+
+### Fixed
+- Sync reliability: chunk budget reduced to a true 1-fragment target (`MAX_RECORDS_PER_CHUNK`: 10→4, `CHUNK_BYTE_BUDGET`: 2500→900). v0.28.6 aimed for 2 fragments but real cross-realm compression ratio is 23–26%, not ~18% as assumed — compressed chunks landed at 659–737 bytes (3 fragments) and the sync aborted at chunk 38/331 with `p_frag_est=44.9%`. At 900 raw bytes with 26% worst-case compression, compressed stays ≤240 bytes = 1 AceComm fragment per chunk. Per-attempt loss drops from ~45% (v0.28.6) to ~18%; 6-retry failure drops from ~0.8% to ~0.003% per chunk; likelihood of a full bootstrap sync completing goes from ~6% to ~97% on a cross-realm peer. Total sync time ~18 min for a ~3300-record bootstrap (subsequent syncs much shorter after bucket-delta convergence).
+
+### Added
+- Diagnostics bundle for per-sync A/B comparison:
+  - **Retry cause tagging.** Each retry is tagged with its trigger (`ackTimeout` or `nack`). Aborts are split by cause: `combatAbort`, `zoneAbort`, `busyAbort`, `sendFailed` (target offline). Previous single-bucket `aborted` lost the distinction between a noisy test session and a genuine wire-loss problem.
+  - **Corrected `p_frag_est` math.** Old metric computed `failedAttempts/totalAttempts` (chunk-fail rate) but labeled it per-fragment. New output reports both: `chunkFail` (raw retry rate attributed to wire loss only) and `p_frag` (back-solved per-fragment estimate using observed average fragments per chunk). At n=1 frag the two are equal; at higher n the inversion kicks in so comparisons across chunk-size changes are valid.
+  - **Per-peer attribution.** `FinishSending` now emits three per-peer audit lines: `Sync outcomes for <peer>`, `Retry causes for <peer>`, `Compression for <peer>` (min/med/max compression percentage). With rotating cross-realm testers, per-peer is the only meaningful axis — a version that works on same-realm but fails cross-realm is no longer averaged away.
+  - **Per-chunk compression capture.** Each chunk's compressed bytes and ratio stored in `chunkOutcomes`, aggregated at end-of-sync. The v0.28.6 compression-ratio miss (23–26% vs ~18% predicted) would have been visible from one sync's audit line rather than requiring hand-parsing multiple chunk lines.
+
 ## [0.28.6] — 2026-04-22
 
 ### Fixed

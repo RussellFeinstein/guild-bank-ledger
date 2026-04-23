@@ -78,6 +78,7 @@ luacheck .                 # lint production code
 - `HasSyncBandwidth()` uses a **dynamic** threshold `max(CTL_BANDWIDTH_MIN, lastChunkBytes)` — this is the v0.28.2 fix for the burst-stall regression from v0.28.0. Do not regress to a fixed threshold.
 - The superset skip in `HandleHello` and again in the bidirectional check after `FinishSending` is load-bearing for convergence but lacks a "tried and failed, back off" state — when sends fail, both sides' bidirectional checks short-circuit on "likely superset" and the protocol re-enters the same failing pattern. Flagged as a candidate amplifier, not fixed in v0.28.4.
 - Stale-ACK discard in `HandleAck` (v0.23.0) and `ScheduleReceiveTimeout` rescheduling (v0.25.3) are real defect fixes, not patches — do not remove during refactors.
+- **`chunkOutcomes[idx]` outcome vocabulary (v0.28.7):** `"pending"`, `"ok"`, `"aborted"` (ackTimeout), `"combatAbort"`, `"zoneAbort"`, `"busyAbort"`, `"sendFailed"` (target offline). Abort-tagging paths are all guarded by `outcome == "pending"` so a later ACK that sets `"ok"` wins correctly. **`retryReasons`** is a per-chunk array of `"ackTimeout"` / `"nack"` tags; only these two count toward the wire-loss `chunkFail` metric. Combat/zone/busy/offline aborts are bucketed separately — mixing them into a single "aborted" count loses the ability to tell a noisy test session from a reliability issue.
 
 ### Historical patch verdicts
 
@@ -86,19 +87,22 @@ luacheck .                 # lint production code
 - **Correct in isolation, amplifier in practice:** v0.25.4 superset-skip interacts poorly with failed sends (covers the symmetric pair so neither side retries).
 - **Intentionally not a fix:** v0.28.1 and v0.28.4 added diagnostic logging because the root cause was uncertain.
 
-### Chunk sizing — moderate vs. conservative
+### Chunk sizing — observed reality
 
-- **Moderate (shipped, v0.28.6):** `MAX_RECORDS_PER_CHUNK = 10`, `CHUNK_BYTE_BUDGET = 2500`. Compressed chunks land around 450–510 bytes → 2 AceComm wire fragments per chunk. At the observed ~24% per-fragment drop on cross-realm whispers this gives ~42% per-attempt chunk loss and <1% 6-retry failure per chunk. Sync of ~4000 records ≈ 7 minutes at the 1.0s gap floor.
-- **Conservative (pinned as a commented block in `Sync.lua`):** `MAX_RECORDS_PER_CHUNK = 5`, `CHUNK_BYTE_BUDGET = 1500`. Compressed chunks ≤ 255 bytes → 1 fragment per chunk. Per-attempt loss equals per-fragment loss (~24%). 6-retry failure per chunk is ~0.02%. Sync time roughly doubles to ~14 minutes.
-- **When to flip to conservative:** if a v0.28.6 sync still aborts mid-stream on cross-realm peers (particularly chunk 1 failing all 6 retries from a fresh `Send complete to X — 1/N chunks` line), or `Sync outcomes` reports `p_frag_est > 15%` after multiple attempts. Flip by editing `Sync.lua:12-13` to the values in the commented alternative, bump patch version, ship.
-- **What NOT to do:** do not go *above* 10 records / 2500 byte budget without new diagnostic data — the v0.28.4→v0.28.5 evidence shows 4-fragment chunks have unrecoverable per-attempt loss on at least some cross-realm routes.
+- **Compression ratio is 23–26%, not ~18%.** v0.28.6 assumed a ~18% compressed:raw ratio and predicted 2-fragment chunks at a 2500-byte budget. Real cross-realm data showed chunks compressing to 659–737 bytes → 3 fragments, which pushed per-attempt chunk loss to ~45%. The ratio has been stable at 23–26% across chunk sizes in v0.28.5 and v0.28.6 captures.
+- **Per-fragment drop is ~18%, not ~24%.** Back-solved from v0.28.6's `p_frag_est=44.9%` with 3-fragment chunks: `1-(1-0.18)^3 ≈ 0.45`. Consistent with multiple capture sessions.
+- **Shipped (v0.28.7):** `MAX_RECORDS_PER_CHUNK = 4`, `CHUNK_BYTE_BUDGET = 900`. Byte budget is the binding constraint at ~287 raw bytes/record → ~3 records per chunk → ~860 raw → ~220 compressed → 1 fragment. Per-attempt loss = per-fragment loss ≈ 18%. 6-retry failure per chunk ≈ 0.003%. Sync of ~3300 records ≈ 18 min at the 1.0s gap floor; subsequent syncs are much shorter after bucket-delta convergence.
+- **When to flip further down:** if a v0.28.7 sync still aborts mid-stream, the fix is **not** smaller chunks (1 fragment is the floor) — instead raise `INTER_CHUNK_GAP_FLOOR` from 1.0s to 1.5s or 2.0s (server-side throttle is the remaining lever). Read the `Compression for <peer>` audit line first: if `max > ~40%` there's wide compression-ratio tail and further byte-budget reduction might help in edge cases.
+- **What NOT to do:** do not raise `CHUNK_BYTE_BUDGET` above ~900 without new data — the v0.28.5→v0.28.6→v0.28.7 arc shows 2-fragment chunks are still unreliable on some cross-realm routes.
 
 ### Diagnosis discipline
 
 - Do not lower a pacing constant without an independent reliability measurement — "more aggressive" is not the same as "better."
 - Per-chunk audit outcomes (attempt count, wire-to-ACK latency, gap since prior chunk, estimated fragments) are the minimum signal needed to discriminate fragment loss from server throttle from callback-timing bugs. Add these before changing behavior.
 - `sendChunkIndex` in the "Send complete X/Y chunks" line is the index of the **last attempted** chunk, not the count acknowledged. When writing future diagnostics or UI strings, prefer an explicit "N ok / M aborted" framing.
+- **v0.28.7 FinishSending output is three per-peer lines:** `Sync outcomes for <peer>` (histogram + split abort causes), `Retry causes for <peer>` (ackTimeout / nack / chunkFail / p_frag with observed `n=` frags/chunk), `Compression for <peer>` (min/med/max compression percentage). `p_frag` is back-solved using observed average fragment count rather than `lastChunkBytes`, so A/B data across chunk-size changes is directly comparable. **Do not conflate `chunkFail` (raw retry rate) with `p_frag` (per-fragment loss)** — they are equal only at n=1 fragments.
+- **Outcome vocabulary is load-bearing.** Any new abort/failure path should add a named outcome value, not reuse `"aborted"` — the split between wire-loss and environmental aborts is what makes the histogram interpretable.
 
 ## Version
 
-Current: 0.28.6 (see `VERSION` file)
+Current: 0.28.7 (see `VERSION` file)

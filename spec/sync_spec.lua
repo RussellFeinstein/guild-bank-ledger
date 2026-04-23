@@ -1778,8 +1778,8 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
 
     describe("ACK timer callback", function()
-        it("MAX_RECORDS_PER_CHUNK constant is 10", function()
-            assert.equals(10, GBL.SYNC_CHUNK_SIZE)
+        it("MAX_RECORDS_PER_CHUNK constant is 4", function()
+            assert.equals(4, GBL.SYNC_CHUNK_SIZE)
         end)
 
         it("ACK timer starts after send callback, not immediately", function()
@@ -3524,11 +3524,11 @@ describe("Sync", function()
     end)
 
     ---------------------------------------------------------------------------
-    -- Per-sync retry histogram (v0.28.4 diagnostics)
+    -- Per-sync retry histogram (v0.28.4 → v0.28.7 diagnostics)
     ---------------------------------------------------------------------------
 
     describe("FinishSending outcomes histogram", function()
-        it("emits Sync outcomes entry after Sync stats", function()
+        it("emits three per-peer diagnostic entries after Sync stats", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
             table.insert(guildData.transactions, {
@@ -3537,27 +3537,37 @@ describe("Sync", function()
             })
             GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
             GBL:HandleAck("OfficerB", { chunk = 1 })
-            -- Fire the post-ACK inter-chunk timer → SendNextChunk → FinishSending
             MockWoW.fireTimers()
 
             local trail = GBL:GetAuditTrail()
-            local foundOutcomes = false
+            local foundOutcomes, foundCauses, foundCompression = false, false, false
             for _, entry in ipairs(trail) do
-                if entry.message:find("Sync outcomes:")
+                if entry.message:find("Sync outcomes for OfficerB")
                     and entry.message:find("on 1st")
                     and entry.message:find("on 2nd")
                     and entry.message:find("on 3rd%+")
-                    and entry.message:find("aborted")
-                    and entry.message:find("p_frag_est=") then
+                    and entry.message:find("aborted:")
+                    and entry.message:find("combat") and entry.message:find("zone")
+                    and entry.message:find("busy") and entry.message:find("offline") then
                     foundOutcomes = true
-                    break
+                end
+                if entry.message:find("Retry causes for OfficerB")
+                    and entry.message:find("ackTimeout=")
+                    and entry.message:find("nack=")
+                    and entry.message:find("chunkFail=")
+                    and entry.message:find("p_frag=") then
+                    foundCauses = true
+                end
+                if entry.message:find("Compression for OfficerB") then
+                    foundCompression = true
                 end
             end
-            assert.is_true(foundOutcomes,
-                "FinishSending should emit a Sync outcomes histogram with all fields")
+            assert.is_true(foundOutcomes, "should emit Sync outcomes for <peer> line")
+            assert.is_true(foundCauses, "should emit Retry causes for <peer> line")
+            assert.is_true(foundCompression, "should emit Compression for <peer> line")
         end)
 
-        it("reports p_frag_est=n/a when fewer than 3 chunks observed", function()
+        it("reports p_frag=n/a when fewer than 3 chunks observed", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
             table.insert(guildData.transactions, {
@@ -3569,17 +3579,122 @@ describe("Sync", function()
             MockWoW.fireTimers()
 
             local trail = GBL:GetAuditTrail()
-            local outcomesEntry
+            local causesEntry
             for _, entry in ipairs(trail) do
-                if entry.message:find("Sync outcomes:") then
-                    outcomesEntry = entry.message
+                if entry.message:find("Retry causes for") then
+                    causesEntry = entry.message
                     break
                 end
             end
-            assert.is_not_nil(outcomesEntry, "outcomes entry should exist")
-            assert.is_not_nil(outcomesEntry:find("p_frag_est=n/a"),
-                "single-chunk sync should report p_frag_est=n/a, got: "
-                    .. tostring(outcomesEntry))
+            assert.is_not_nil(causesEntry, "retry causes entry should exist")
+            assert.is_not_nil(causesEntry:find("p_frag=n/a"),
+                "single-chunk sync should report p_frag=n/a, got: "
+                    .. tostring(causesEntry))
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- v0.28.7 diagnostics bundle: per-retry cause tags and per-chunk compression
+    ---------------------------------------------------------------------------
+
+    describe("v0.28.7 retry cause tagging", function()
+        it("tags ackTimeout in chunkOutcomes.retryReasons on ACK timer retry", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            for i = 1, 2 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000, id = "ack_tag_" .. i .. ":0",
+                })
+            end
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            local syncState = GBL:GetSyncStateForTests()
+            assert.is_not_nil(syncState.chunkOutcomes[1], "chunk 1 outcome should exist")
+            assert.same({}, syncState.chunkOutcomes[1].retryReasons)
+
+            -- Advance time past gap floor + ACK timeout so the retry fires cleanly
+            MockWoW.serverTime = MockWoW.serverTime + 10
+            -- Fire only the 8s ACK timer (avoid firing gap-floor timers that would
+            -- cascade through the retry and re-arm new timers indefinitely)
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 8 and not timer.cancelled then
+                    timer.callback()
+                    break
+                end
+            end
+
+            assert.is_table(syncState.chunkOutcomes[1].retryReasons)
+            local found = false
+            for _, r in ipairs(syncState.chunkOutcomes[1].retryReasons) do
+                if r == "ackTimeout" then found = true end
+            end
+            assert.is_true(found,
+                "retryReasons should contain 'ackTimeout' after ACK timeout retry")
+        end)
+
+        it("tags nack in retryReasons on NACK receipt", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            for i = 1, 2 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000, id = "nack_tag_" .. i .. ":0",
+                })
+            end
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleNack("OfficerB", { chunk = 1 })
+
+            local syncState = GBL:GetSyncStateForTests()
+            assert.is_not_nil(syncState.chunkOutcomes[1])
+            local found = false
+            for _, r in ipairs(syncState.chunkOutcomes[1].retryReasons) do
+                if r == "nack" then found = true end
+            end
+            assert.is_true(found, "retryReasons should contain 'nack' after NACK")
+        end)
+
+        it("tags outcome=combatAbort on the in-flight chunk at combat start", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            for i = 1, 2 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000, id = "combat_abort_" .. i .. ":0",
+                })
+            end
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            local syncState = GBL:GetSyncStateForTests()
+            local activeIdx = syncState.sendChunkIndex
+            -- Grab a reference before FinishSending reassigns chunkOutcomes = {}
+            local outcomesRef = syncState.chunkOutcomes
+            assert.is_not_nil(outcomesRef[activeIdx])
+            assert.equals("pending", outcomesRef[activeIdx].outcome)
+
+            GBL:OnCombatStart()
+
+            assert.equals("combatAbort",
+                outcomesRef[activeIdx].outcome,
+                "active chunk outcome should be combatAbort after OnCombatStart")
+        end)
+
+        it("captures compressed bytes and ratio per chunk", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "compression_capture:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            local syncState = GBL:GetSyncStateForTests()
+            assert.is_not_nil(syncState.chunkOutcomes[1])
+            assert.is_true(syncState.chunkOutcomes[1].bytes > 0,
+                "chunkOutcomes[1].bytes should be > 0 after send")
+            -- Mock LibDeflate is identity, so ratio is 1.0. Real LibDeflate < 1.
+            assert.is_true(syncState.chunkOutcomes[1].ratio > 0,
+                "chunkOutcomes[1].ratio should be > 0 after send")
         end)
     end)
 

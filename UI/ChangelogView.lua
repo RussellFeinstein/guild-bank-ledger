@@ -29,6 +29,15 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.28.7
+    {"0.28.7", "2026-04-22", {
+        Fixed = {
+            "Sync reliability: chunks shrunk to 1 AceComm wire fragment (4 records / 900 byte budget) after v0.28.6's 2-fragment target missed — actual compression ratio is 23–26%, not ~18% as assumed. Cross-realm syncs now complete instead of aborting mid-stream.",
+        },
+        Added = {
+            "Diagnostics: retry cause tagging (ackTimeout/nack split out from combat/zone/busy/offline aborts), corrected p_frag math, per-peer outcome lines, and end-of-sync compression-ratio summary (min/med/max) so A/B analysis across chunk-size changes is now one-line rather than multi-line parse.",
+        },
+    }},
     -- v0.28.6
     {"0.28.6", "2026-04-22", {
         Fixed = {

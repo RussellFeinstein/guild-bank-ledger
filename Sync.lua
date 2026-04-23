@@ -9,18 +9,18 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 -- Protocol constants
 local PREFIX = "GBLSync"
 local PROTOCOL_VERSION = 4
--- Chunk size tuning (v0.28.6 — moderate 2-fragment target)
--- Compressed payload targets ~450–510 bytes so each chunk is 2 AceComm wire
--- fragments (255 B each). Per-chunk loss per attempt drops from ~67% (4-fragment
--- chunks in v0.28.5) to ~42% at ~24% per-fragment drop observed on cross-realm
--- whispers, giving <1% 6-retry failure per chunk.
---
--- Conservative 1-fragment fallback (if v0.28.6 still aborts):
---     local MAX_RECORDS_PER_CHUNK = 5
---     local CHUNK_BYTE_BUDGET = 1500
--- See CLAUDE.md "Sync subsystem notes" for when/why to flip.
-local MAX_RECORDS_PER_CHUNK = 10
-local CHUNK_BYTE_BUDGET = 2500
+-- Chunk size tuning (v0.28.7 — true 1-fragment target)
+-- Compressed payload targets ≤255 bytes so each chunk is 1 AceComm wire
+-- fragment. v0.28.6 aimed for 2 fragments but actual compression ratio is
+-- 23–26% of raw (not ~18% as predicted), so a 2500-byte raw budget landed at
+-- ~660 bytes compressed = 3 fragments, giving ~45% per-attempt chunk loss.
+-- At 900-byte raw budget with 26% worst-case compression, compressed stays
+-- ≤240 bytes = 1 fragment. Per-attempt loss equals per-fragment loss
+-- (~18% observed), giving ~0.003% 6-retry failure per chunk. Sync of
+-- ~3300 records ≈ 18 minutes at the 1.0s gap floor; subsequent syncs are
+-- much shorter after the bucket-delta filter converges.
+local MAX_RECORDS_PER_CHUNK = 4
+local CHUNK_BYTE_BUDGET = 900
 local MAX_RETRIES = 5
 local ACK_TIMEOUT = 8
 local RECEIVE_CHUNK_TIMEOUT = 20
@@ -1266,7 +1266,14 @@ function GBL:SendNextChunk()
     syncState.lastSendIssuedAt = nowTime
     syncState.chunkOutcomes = syncState.chunkOutcomes or {}
     if not syncState.chunkOutcomes[idx] then
-        syncState.chunkOutcomes[idx] = { attempts = 0, outcome = "pending" }
+        syncState.chunkOutcomes[idx] = {
+            attempts = 0,
+            retryReasons = {},
+            outcome = "pending",
+            wireToAck = nil,
+            bytes = 0,
+            ratio = 0,
+        }
     end
     syncState.chunkOutcomes[idx].attempts = syncState.chunkOutcomes[idx].attempts + 1
 
@@ -1286,6 +1293,11 @@ function GBL:SendNextChunk()
 
     local rawLen = #serialized
     local msgLen = #msg
+    -- v0.28.7: capture per-chunk compression for FinishSending summary
+    if syncState.chunkOutcomes and syncState.chunkOutcomes[idx] then
+        syncState.chunkOutcomes[idx].bytes = msgLen
+        syncState.chunkOutcomes[idx].ratio = msgLen / math.max(rawLen, 1)
+    end
     local chunkRecords = #chunk.transactions + #chunk.moneyTransactions
     local total = #syncState.sendChunks
     local ctlAvailAtSend = ""
@@ -1373,6 +1385,10 @@ function GBL:SendNextChunk()
                         .. ", fragments~=" .. fragments
                         .. ", gapSinceWire=" .. gapSinceWire
                         .. ", nacksThisChunk=" .. (syncState.nacksForCurrentChunk or 0))
+                    -- v0.28.7: tag retry cause for FinishSending histogram
+                    if syncState.chunkOutcomes and syncState.chunkOutcomes[retryChunk] then
+                        table.insert(syncState.chunkOutcomes[retryChunk].retryReasons, "ackTimeout")
+                    end
                     self:SendNextChunk()
                 else
                     -- v0.28.4: record abort outcome for this chunk
@@ -1388,6 +1404,11 @@ function GBL:SendNextChunk()
         end) then
         self:AddAuditEntry("Target " .. (syncState.sendTarget or "?")
             .. " went offline — aborting send")
+        -- v0.28.7: tag outcome for histogram attribution
+        if syncState.chunkOutcomes and syncState.chunkOutcomes[idx]
+            and syncState.chunkOutcomes[idx].outcome == "pending" then
+            syncState.chunkOutcomes[idx].outcome = "sendFailed"
+        end
         self:FinishSending()
         return
     end
@@ -1407,37 +1428,79 @@ function GBL:FinishSending()
         .. ", " .. (syncState.helloRepliesDuringSync or 0) .. " HELLO replies suppressed"
         .. ", " .. (syncState.nacksReceivedDuringSync or 0) .. " NACKs received")
 
-    -- v0.28.4: per-chunk outcomes histogram + rough fragment-loss estimate
-    local on1, on2, on3plus, aborted, chunksSeen = 0, 0, 0, 0, 0
-    local totalFragSends, failedFragSends = 0, 0
-    local fragmentsPerAttempt = math.ceil((syncState.lastChunkBytes or 0) / 255)
-    for _, outcome in pairs(syncState.chunkOutcomes or {}) do
+    -- v0.28.7: per-peer outcomes + cause attribution + compression summary
+    -- Replaces v0.28.4's single `Sync outcomes:` line. Splits aborted causes
+    -- (ackTimeout/combat/zone/busy/offline) so a noisy test session can be
+    -- distinguished from a genuine reliability issue. Back-solves per-fragment
+    -- loss using observed avg fragments rather than `lastChunkBytes` so that
+    -- A/B data across versions is comparable even when chunk size differs.
+    local on1, on2, on3plus = 0, 0, 0
+    local outcomes = { ok = 0, aborted = 0, combatAbort = 0,
+                       zoneAbort = 0, busyAbort = 0, sendFailed = 0 }
+    local causes = { ackTimeout = 0, nack = 0 }
+    local chunksSeen, totalAttempts, wireLossRetries = 0, 0, 0
+    local sumFrags = 0
+    local ratios = {}
+
+    for _, o in pairs(syncState.chunkOutcomes or {}) do
         chunksSeen = chunksSeen + 1
-        local attempts = outcome.attempts or 0
-        if outcome.outcome == "aborted" then
-            aborted = aborted + 1
-        elseif attempts <= 1 then
-            on1 = on1 + 1
-        elseif attempts == 2 then
-            on2 = on2 + 1
-        else
-            on3plus = on3plus + 1
+        local attempts = o.attempts or 0
+        totalAttempts = totalAttempts + attempts
+
+        if o.outcome == "ok" then
+            if attempts <= 1 then on1 = on1 + 1
+            elseif attempts == 2 then on2 = on2 + 1
+            else on3plus = on3plus + 1 end
         end
-        if fragmentsPerAttempt > 0 and attempts > 0 then
-            totalFragSends = totalFragSends + attempts * fragmentsPerAttempt
-            failedFragSends = failedFragSends
-                + math.max(0, attempts - 1) * fragmentsPerAttempt
+
+        if outcomes[o.outcome] ~= nil then
+            outcomes[o.outcome] = outcomes[o.outcome] + 1
+        end
+
+        for _, reason in ipairs(o.retryReasons or {}) do
+            if causes[reason] ~= nil then
+                causes[reason] = causes[reason] + 1
+                wireLossRetries = wireLossRetries + 1
+            end
+        end
+
+        if o.bytes and o.bytes > 0 then
+            sumFrags = sumFrags + math.ceil(o.bytes / 255)
+        end
+        if o.ratio and o.ratio > 0 then
+            table.insert(ratios, o.ratio)
         end
     end
-    local pFragEst = "n/a"
-    if chunksSeen >= 3 and totalFragSends > 0 then
-        local p = failedFragSends / totalFragSends
-        if p > 0.5 then p = 0.5 end
-        pFragEst = string.format("%.1f%%", p * 100)
+
+    local chunkFail, pFragStr = "n/a", "n/a"
+    if chunksSeen >= 3 and totalAttempts > 0 then
+        local cf = wireLossRetries / totalAttempts
+        if cf > 0.5 then cf = 0.5 end
+        chunkFail = string.format("%.1f%%", cf * 100)
+        local avgFrags = (chunksSeen > 0) and (sumFrags / chunksSeen) or 1
+        if avgFrags < 1 then avgFrags = 1 end
+        local pf = 1 - (1 - cf) ^ (1 / avgFrags)
+        pFragStr = string.format("%.1f%% (n=%.1f frags/chunk)", pf * 100, avgFrags)
     end
-    self:AddAuditEntry("Sync outcomes: " .. on1 .. " on 1st, "
-        .. on2 .. " on 2nd, " .. on3plus .. " on 3rd+, "
-        .. aborted .. " aborted, p_frag_est=" .. pFragEst)
+
+    local ratioSummary = "n/a"
+    if #ratios > 0 then
+        table.sort(ratios)
+        local minR, maxR = ratios[1], ratios[#ratios]
+        local medR = ratios[math.floor(#ratios / 2) + 1]
+        ratioSummary = string.format("%.0f%% / %.0f%% / %.0f%% (min/med/max)",
+            minR * 100, medR * 100, maxR * 100)
+    end
+
+    self:AddAuditEntry("Sync outcomes for " .. target .. ": "
+        .. on1 .. " on 1st, " .. on2 .. " on 2nd, " .. on3plus .. " on 3rd+, "
+        .. "aborted: " .. outcomes.aborted .. " ackTimeout + "
+        .. outcomes.combatAbort .. " combat + " .. outcomes.zoneAbort .. " zone + "
+        .. outcomes.busyAbort .. " busy + " .. outcomes.sendFailed .. " offline")
+    self:AddAuditEntry("Retry causes for " .. target .. ": "
+        .. "ackTimeout=" .. causes.ackTimeout .. ", nack=" .. causes.nack
+        .. " | chunkFail=" .. chunkFail .. ", p_frag=" .. pFragStr)
+    self:AddAuditEntry("Compression for " .. target .. ": " .. ratioSummary)
 
     syncState.sending = false
     syncState.sendTarget = nil
@@ -2269,6 +2332,11 @@ function GBL._syncState_setLastChunkBytes(n)
     syncState.lastChunkBytes = n
 end
 
+--- Return the module-local syncState table. Exposed for testing only.
+function GBL:GetSyncStateForTests()
+    return syncState
+end
+
 --- Set receiveStartTime directly. Exposed for testing only.
 -- @param ts number Timestamp to set
 function GBL:SetReceiveStartTime(ts)
@@ -2375,6 +2443,10 @@ function GBL:HandleNack(sender, data)
     self:AddAuditEntry("NACK from " .. sender .. " for chunk " .. requestedChunk
         .. " — re-transmitting" .. ctlState)
 
+    -- v0.28.7: tag retry cause on the chunk we're re-requesting
+    if syncState.chunkOutcomes and syncState.chunkOutcomes[requestedChunk] then
+        table.insert(syncState.chunkOutcomes[requestedChunk].retryReasons, "nack")
+    end
     -- Rewind to the requested chunk and re-send after a brief delay
     syncState.sendChunkIndex = requestedChunk - 1
     C_Timer.After(0.5, function()
@@ -2421,6 +2493,12 @@ function GBL:HandleBusy(sender, data) -- luacheck: ignore 212/data
     -- (partner entered combat or became busy while we were sending to them)
     if syncState.sending
         and self:StripRealm(sender) == self:StripRealm(syncState.sendTarget) then
+        -- v0.28.7: tag outcome on the chunk that was in flight when BUSY arrived
+        local busyIdx = syncState.sendChunkIndex
+        if busyIdx and syncState.chunkOutcomes and syncState.chunkOutcomes[busyIdx]
+            and syncState.chunkOutcomes[busyIdx].outcome == "pending" then
+            syncState.chunkOutcomes[busyIdx].outcome = "busyAbort"
+        end
         if syncState.sendTimer then
             syncState.sendTimer:Cancel()
             syncState.sendTimer = nil
@@ -2489,6 +2567,14 @@ function GBL:OnCombatStart()
         syncState.receiveTimer = nil
     end
 
+    -- v0.28.7: tag the in-flight chunk as combatAbort before FinishSending runs
+    if syncState.sending and syncState.chunkOutcomes then
+        local combatIdx = syncState.sendChunkIndex
+        if combatIdx and syncState.chunkOutcomes[combatIdx]
+            and syncState.chunkOutcomes[combatIdx].outcome == "pending" then
+            syncState.chunkOutcomes[combatIdx].outcome = "combatAbort"
+        end
+    end
     -- Abort active sync
     if syncState.sending then
         self:FinishSending()
@@ -2555,6 +2641,18 @@ function GBL:OnLoadingScreenStart()
     if not syncState.sending and not syncState.receiving then return end
     syncState.zonePaused = true
     self:AddAuditEntry("Loading screen detected — sync paused")
+
+    -- v0.28.7: tag the in-flight chunk so the histogram attributes the gap
+    -- to a zone pause, not to a successful ACK on the pre-pause chunk. The
+    -- sync resumes post-cooldown but this chunk's ACK timer was cancelled,
+    -- so its outcome is genuinely indeterminate until the next chunk fires.
+    if syncState.sending and syncState.chunkOutcomes then
+        local zoneIdx = syncState.sendChunkIndex
+        if zoneIdx and syncState.chunkOutcomes[zoneIdx]
+            and syncState.chunkOutcomes[zoneIdx].outcome == "pending" then
+            syncState.chunkOutcomes[zoneIdx].outcome = "zoneAbort"
+        end
+    end
 
     -- Cancel pending cooldown from a prior zone change (double zone change)
     if syncState.zoneCooldownTimer then
