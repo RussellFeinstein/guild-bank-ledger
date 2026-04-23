@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.5
+    {"0.29.5", "2026-04-23", {
+        Fixed = {
+            "Capture current layout now auto-triggers a scan when none exists, polls for completion, and gives clear success/failure feedback. Previously it silently failed when no scan had been performed yet.",
+        },
+    }},
+
     -- v0.29.4
     {"0.29.4", "2026-04-23", {
         Fixed = {

@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.5] — 2026-04-23
+
+### Fixed
+- **Capture current layout** now works in more states. Previously it silently did nothing when the addon had no stored scan for the target tab (no visible feedback either — the failure print was easy to miss). It now: (a) warns if the bank is closed, (b) kicks off a scan automatically if no scan exists, (c) polls for scan completion up to 5 seconds, (d) applies the capture when data arrives, and (e) surfaces a specific error if the scan never produced data for the target tab (e.g., the character can't view it). Prints a green success line on completion.
+
 ## [0.29.4] — 2026-04-23
 
 ### Fixed

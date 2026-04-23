@@ -238,18 +238,52 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
     captureBtn:SetText("Capture current layout")
     captureBtn:SetWidth(200)
     captureBtn:SetDisabled(not writable)
-    captureBtn:SetCallback("OnClick", function()
+
+    local function applyCapture()
         local captured, err = self:CaptureTabLayout(tabIndex)
         if not captured then
-            self:Print("|cffff5555Capture failed:|r " .. tostring(err))
+            self:Print(format("|cffff5555Capture tab %d failed:|r %s",
+                tabIndex, tostring(err)))
             return
         end
+        local n = 0
+        for _ in pairs(captured.items) do n = n + 1 end
         draft.tabs[tabIndex] = captured
-        self:Print(format("Captured tab %d: %d distinct items.",
-            tabIndex, (function()
-                local n = 0; for _ in pairs(captured.items) do n = n + 1 end; return n
-            end)()))
+        self:Print(format("|cff00ff88Captured tab %d:|r %d distinct item(s).",
+            tabIndex, n))
         self:RefreshLayoutTab()
+    end
+
+    captureBtn:SetCallback("OnClick", function()
+        -- Guard: bank must be open so scan has real data to read.
+        if not self:IsBankOpen() then
+            self:Print("|cffffcc00Open the guild bank before capturing.|r")
+            return
+        end
+        -- Already-complete scan covering this tab? Just apply.
+        if self.lastScanResults and self.lastScanResults[tabIndex] then
+            applyCapture()
+            return
+        end
+        -- Otherwise trigger a scan and poll for its completion.
+        self:Print(format("Scanning bank before capturing tab %d...", tabIndex))
+        if not self.scanInProgress then
+            self:StartFullScan()
+        end
+        local deadline = GetTime() + 5
+        local function poll()
+            if self.lastScanResults and self.lastScanResults[tabIndex] then
+                applyCapture()
+            elseif GetTime() < deadline then
+                C_Timer.After(0.25, poll)
+            else
+                self:Print(format(
+                    "|cffff5555Capture tab %d failed:|r scan did not complete " ..
+                    "within 5s, or tab %d is not viewable to this character.",
+                    tabIndex, tabIndex))
+            end
+        end
+        C_Timer.After(0.25, poll)
     end)
     captureRow:AddChild(captureBtn)
 
