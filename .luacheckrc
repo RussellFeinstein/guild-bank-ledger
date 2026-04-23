@@ -27,6 +27,11 @@ read_globals = {
     "GuildControlGetNumRanks",
     "GuildControlGetRankName",
     "UnitName",
+    "GetNormalizedRealmName",
+    "PickupGuildBankItem",
+    "SplitGuildBankItem",
+    "ClearCursor",
+    "CursorHasItem",
 
     -- WoW constants and tables
     "Enum",

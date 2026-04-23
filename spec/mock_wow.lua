@@ -84,6 +84,7 @@ function MockWoW.reset()
     MockWoW.cvars = {}
     MockWoW.framerate = 60
     MockWoW.chatMessageFilters = {}
+    MockWoW.cursor = nil
 end
 
 ---------------------------------------------------------------------------
@@ -267,6 +268,156 @@ function MockWoW.install()
         local slot = tab.slots[slotIndex]
         if not slot then return nil end
         return slot.texture, slot.count, slot.locked, slot.isFiltered, slot.quality
+    end
+
+    ---------------------------------------------------------------------
+    -- Cursor + guild bank movement (M-sort-2).
+    --
+    -- Simplified model:
+    --   * MockWoW.cursor holds { itemLink, itemID, count, src = {tabIndex, slotIndex} } or nil.
+    --   * PickupGuildBankItem / SplitGuildBankItem pick items up into cursor.
+    --   * PickupGuildBankItem with a filled cursor drops the cursor onto the slot.
+    --   * If the dest is empty → place. If dest has the same item → merge (capped for realism).
+    --   * If dest has a different item → swap: cursor gets dest's old contents, src gets nothing.
+    --   * ClearCursor discards cursor contents (does NOT return them to src).
+    --   * Every completed mutation fires GUILDBANKBAGSLOTS_CHANGED (unless suppressed).
+    ---------------------------------------------------------------------
+
+    MockWoW.cursor = nil
+
+    local function fireBankEvent()
+        local handlers = MockWoW.frames  -- not used here
+        handlers = nil
+        -- Mock addon events go through MockAce; we call through to any
+        -- registered AceEvent handler via the global MockAce fireEvent shim.
+        if _G.__MockAce_fireEvent then
+            _G.__MockAce_fireEvent("GUILDBANKBAGSLOTS_CHANGED")
+        end
+    end
+    MockWoW.fireGuildBankBagslotsChanged = fireBankEvent
+
+    _G.ClearCursor = function()
+        MockWoW.cursor = nil
+    end
+
+    _G.CursorHasItem = function()
+        return MockWoW.cursor ~= nil
+    end
+
+    local function extractItemID(itemLink)
+        if not itemLink then return nil end
+        local id = itemLink:match("Hitem:(%d+)")
+        return id and tonumber(id) or nil
+    end
+
+    --- Pick up the full stack in (tabIndex, slotIndex) or drop cursor onto it.
+    _G.PickupGuildBankItem = function(tabIndex, slotIndex)
+        local tab = MockWoW.guildBank.tabs[tabIndex]
+        if not tab then return end
+        local slot = tab.slots[slotIndex]
+        if MockWoW.cursor == nil then
+            -- Pickup: grab whole slot.
+            if not slot then return end
+            MockWoW.cursor = {
+                itemLink = slot.itemLink,
+                itemID = extractItemID(slot.itemLink),
+                count = slot.count,
+                src = { tabIndex = tabIndex, slotIndex = slotIndex },
+                texture = slot.texture,
+                quality = slot.quality,
+            }
+            tab.slots[slotIndex] = nil
+            fireBankEvent()
+        else
+            -- Drop: place cursor onto the slot.
+            local cur = MockWoW.cursor
+            if not slot then
+                -- Empty destination: place.
+                tab.slots[slotIndex] = {
+                    itemLink = cur.itemLink,
+                    texture = cur.texture,
+                    count = cur.count,
+                    quality = cur.quality,
+                    locked = false,
+                    isFiltered = false,
+                    itemID = cur.itemID,
+                }
+                MockWoW.cursor = nil
+                fireBankEvent()
+            elseif extractItemID(slot.itemLink) == cur.itemID then
+                -- Same item: merge. No stack cap enforced in mock — fine for planner's purposes.
+                slot.count = slot.count + cur.count
+                MockWoW.cursor = nil
+                fireBankEvent()
+            else
+                -- Different item: swap. Cursor gets dest's contents; dest gets cursor's.
+                local prev = slot
+                tab.slots[slotIndex] = {
+                    itemLink = cur.itemLink,
+                    texture = cur.texture,
+                    count = cur.count,
+                    quality = cur.quality,
+                    locked = false,
+                    isFiltered = false,
+                    itemID = cur.itemID,
+                }
+                MockWoW.cursor = {
+                    itemLink = prev.itemLink,
+                    itemID = extractItemID(prev.itemLink),
+                    count = prev.count,
+                    src = { tabIndex = tabIndex, slotIndex = slotIndex },
+                    texture = prev.texture,
+                    quality = prev.quality,
+                }
+                fireBankEvent()
+            end
+        end
+    end
+
+    --- Pick up a partial stack from (tabIndex, slotIndex).
+    _G.SplitGuildBankItem = function(tabIndex, slotIndex, amount)
+        local tab = MockWoW.guildBank.tabs[tabIndex]
+        if not tab then return end
+        local slot = tab.slots[slotIndex]
+        if not slot or MockWoW.cursor ~= nil then return end
+        amount = math.min(amount or slot.count, slot.count)
+        if amount <= 0 then return end
+        MockWoW.cursor = {
+            itemLink = slot.itemLink,
+            itemID = extractItemID(slot.itemLink),
+            count = amount,
+            src = { tabIndex = tabIndex, slotIndex = slotIndex },
+            texture = slot.texture,
+            quality = slot.quality,
+        }
+        slot.count = slot.count - amount
+        if slot.count == 0 then
+            tab.slots[slotIndex] = nil
+        end
+        fireBankEvent()
+    end
+
+    --- Test utility: simulate a foreign player deleting an item from a slot
+    --- (e.g. another guild member withdrawing while we're sorting). Fires
+    --- GUILDBANKBAGSLOTS_CHANGED as the real server would.
+    function MockWoW.foreignRemoveSlot(tabIndex, slotIndex)
+        local tab = MockWoW.guildBank.tabs[tabIndex]
+        if tab and tab.slots[slotIndex] then
+            tab.slots[slotIndex] = nil
+            fireBankEvent()
+        end
+    end
+
+    --- Test utility: simulate a foreign player placing an item into a slot.
+    function MockWoW.foreignPlaceSlot(tabIndex, slotIndex, itemID, name, count)
+        local tab = MockWoW.guildBank.tabs[tabIndex]
+        if not tab then return end
+        local link = "|cffffffff|Hitem:" .. itemID .. "::::::::70:::::|h[" .. (name or "Test") .. "]|h|r"
+        tab.slots[slotIndex] = {
+            itemLink = link, texture = "", count = count or 1,
+            locked = false, isFiltered = false, itemID = itemID, quality = 1,
+        }
+        fireBankEvent()
     end
 
     -- C_Timer

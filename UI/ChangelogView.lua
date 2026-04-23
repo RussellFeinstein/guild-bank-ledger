@@ -29,6 +29,15 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.2
+    {"0.29.2", "2026-04-23", {
+        Added = {
+            "SortAccess policy — GM configures a rank threshold and named delegates to control who can edit layouts and execute sort. Default is GM-only; policy writes are GM-only so delegates can't self-escalate.",
+            "SortExecutor — executes plans one op at a time with throttling, pre-step verification against live bank, replan-on-foreign-activity (cap 5), bank-close abort, and cursor-leak safety on every exit path.",
+            "Slash commands: /gbl sortexec (run the current plan) and /gbl sortcancel (cancel a running sort), both gated by HasSortAccess.",
+        },
+    }, milestone = "M-sort-2 (backbone): Executor + Access policy"},
+
     -- v0.29.1
     {"0.29.1", "2026-04-23", {
         Added = {

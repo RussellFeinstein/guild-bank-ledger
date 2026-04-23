@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.29.1"
+local VERSION = "0.29.2"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -82,6 +82,12 @@ local defaults = {
                     tabs = {},
                 },
                 stockReserves = {},
+                sortAccess = {
+                    rankThreshold = nil,  -- nil = GM-only; N = rank index N and above
+                    delegates = {},       -- ["Char-Realm"] = true
+                    updatedBy = nil,
+                    updatedAt = 0,
+                },
                 schemaVersion = 8,
             },
         },
@@ -1516,6 +1522,96 @@ function GBL:GetGuildData()
 end
 
 ------------------------------------------------------------------------
+-- Sort access (bank sort + stocking policy)
+-- Distinct from GetAccessLevel/HasFullAccess above: sort access controls
+-- who can edit the bank layout and press Execute. Policy is:
+--   * GM always has access
+--   * Rank index <= sortAccess.rankThreshold has access (nil = GM-only)
+--   * Characters named in sortAccess.delegates have access regardless of rank
+-- Writes to sortAccess itself remain GM-only (otherwise a delegate could
+-- escalate by adding themselves).
+------------------------------------------------------------------------
+
+--- Return the normalized "Name-Realm" of the current player.
+local function normalizedPlayerName()
+    local name, realm = UnitName("player")
+    if not name then return nil end
+    if realm and realm ~= "" then
+        return name .. "-" .. realm
+    end
+    local fallback = GetNormalizedRealmName and GetNormalizedRealmName() or nil
+    if fallback and fallback ~= "" then
+        return name .. "-" .. fallback
+    end
+    return name
+end
+
+--- Check whether the current player can edit bank layouts and execute sort.
+-- @return boolean
+function GBL:HasSortAccess()
+    if self:IsGuildMaster() then return true end
+    local guildData = self:GetGuildData()
+    if not guildData or not guildData.sortAccess then return false end
+    local sa = guildData.sortAccess
+    local me = normalizedPlayerName()
+    if me and sa.delegates and sa.delegates[me] then return true end
+    if sa.rankThreshold ~= nil then
+        local _, _, rankIndex = GetGuildInfo("player")
+        if rankIndex and rankIndex <= sa.rankThreshold then return true end
+    end
+    return false
+end
+
+--- Return a deep copy of the sort-access policy. Never returns the live ref.
+function GBL:GetSortAccess()
+    local guildData = self:GetGuildData()
+    if not guildData or not guildData.sortAccess then
+        return { rankThreshold = nil, delegates = {}, updatedBy = nil, updatedAt = 0 }
+    end
+    local sa = guildData.sortAccess
+    local delegates = {}
+    for name in pairs(sa.delegates or {}) do delegates[name] = true end
+    return {
+        rankThreshold = sa.rankThreshold,
+        delegates = delegates,
+        updatedBy = sa.updatedBy,
+        updatedAt = sa.updatedAt or 0,
+    }
+end
+
+--- Save a new sort-access policy. GM-only.
+-- @param policy table with optional rankThreshold (number|nil) and delegates (set of names)
+-- @return ok, err
+function GBL:SaveSortAccess(policy)
+    if not self:IsGuildMaster() then
+        return false, "only the Guild Master can change sort access"
+    end
+    if type(policy) ~= "table" then
+        return false, "policy must be a table"
+    end
+    if policy.rankThreshold ~= nil and type(policy.rankThreshold) ~= "number" then
+        return false, "rankThreshold must be a number or nil"
+    end
+    local guildData = self:GetGuildData()
+    if not guildData then return false, "no active guild" end
+    local delegates = {}
+    if policy.delegates then
+        for name, v in pairs(policy.delegates) do
+            if v and type(name) == "string" and name ~= "" then
+                delegates[name] = true
+            end
+        end
+    end
+    guildData.sortAccess = {
+        rankThreshold = policy.rankThreshold,
+        delegates = delegates,
+        updatedBy = normalizedPlayerName(),
+        updatedAt = GetServerTime(),
+    }
+    return true, nil
+end
+
+------------------------------------------------------------------------
 -- Tab name backfill
 ------------------------------------------------------------------------
 
@@ -1559,9 +1655,56 @@ function GBL:HandleSlashCommand(input)
         self:RunCleanup()
     elseif command == "sortpreview" then
         self:PrintSortPreview()
+    elseif command == "sortexec" then
+        self:RunSortExec()
+    elseif command == "sortcancel" then
+        self:CancelSortExecution()
+        self:Print("Sort cancellation requested.")
     else
         self:Print("Unknown command: " .. command .. ". Type /gbl help for usage.")
     end
+end
+
+--- Debug helper: execute the current plan end-to-end via SortExecutor.
+-- GM / delegated-rank / delegate only. Prints progress on completion.
+function GBL:RunSortExec()
+    if not self:HasSortAccess() then
+        self:Print("You do not have sort access. Ask the GM to grant rank or delegate.")
+        return
+    end
+    if not self:IsBankOpen() then
+        self:Print("Open the guild bank first.")
+        return
+    end
+    if self:IsSortRunning() then
+        self:Print("A sort is already running. Use /gbl sortcancel to stop it.")
+        return
+    end
+    local snapshot = self:GetLastScanResults()
+    if not snapshot then
+        self:Print("No scan results yet. Run /gbl scan first.")
+        return
+    end
+    local layout = self:GetBankLayout()
+    if not layout or not next(layout.tabs) then
+        self:Print("No bank layout configured yet.")
+        return
+    end
+    local plan = self:PlanSort(snapshot, layout)
+    if not plan.ops or #plan.ops == 0 then
+        self:Print("Plan is a no-op. Nothing to execute.")
+        return
+    end
+    self:Print(format("Executing %d moves...", #plan.ops))
+    self:ExecuteSortPlan(plan, function(result)
+        if result.ok then
+            self:Print(format("Sort complete: %d ops done, %d failed, %d replans.",
+                result.done, result.failed, result.replans))
+        else
+            self:Print(format("Sort aborted (%s): %d/%d done, %d failed, %d replans.",
+                result.reason, result.done, result.total, result.failed, result.replans))
+        end
+    end, { layout = layout })
 end
 
 --- Debug helper: print the current planned sort moves to chat.
@@ -1627,6 +1770,8 @@ function GBL:PrintHelp()
     self:Print("  /gbl scan    — Manually scan the guild bank")
     self:Print("  /gbl cleanup — Remove duplicate records from the database")
     self:Print("  /gbl sortpreview — Preview the current sort plan (debug)")
+    self:Print("  /gbl sortexec    — Execute the current sort plan (GM/delegated only)")
+    self:Print("  /gbl sortcancel  — Cancel a running sort")
     self:Print("  /gbl help    — Show this help message")
 end
 

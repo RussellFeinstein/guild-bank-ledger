@@ -5,6 +5,21 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.2] — 2026-04-23
+
+**Milestone M-sort-2 (backbone): Sort executor + sort-access policy**
+
+### Added
+- `SortAccess` policy — a new AceDB field (`sortAccess`) and `GBL:HasSortAccess()` helper that mirror the existing access-control pattern. The Guild Master configures a rank threshold and an optional list of named delegates; any character who is the GM, at-or-above the threshold, or explicitly delegated can edit bank layouts and execute sort. Writes to the policy itself remain GM-only so delegates can't self-escalate. Default is GM-only on fresh install.
+- `SortExecutor` module — executes a plan one op at a time with a 0.3s inter-move throttle, pre-step verification against live bank state, `GUILDBANKBAGSLOTS_CHANGED`-driven confirmation plus a 2-second polling fallback, replan-on-foreign-activity (capped at 5 replans per run), bank-close abort, and cursor-leak safety on every exit path. Audit entries trace every step, retry, replan, and failure.
+- Two new slash commands for end-to-end in-game testing without UI:
+  - `/gbl sortexec` — executes the currently saved layout's plan against the latest scan (GM/delegate-gated).
+  - `/gbl sortcancel` — cancels a running sort.
+- Mock WoW APIs for bank movement (`PickupGuildBankItem`, `SplitGuildBankItem`, `ClearCursor`, `CursorHasItem`) with cursor state tracking and `GUILDBANKBAGSLOTS_CHANGED` firing, plus test helpers to simulate foreign deposits/withdrawals. 10 new executor tests in `spec/sortexecutor_spec.lua` and 9 new access-policy tests in `spec/sortaccess_spec.lua`.
+
+### Notes
+- This is the non-UI half of M-sort-2. Layout editing and sort preview/execute UI come next. The executor can be fully exercised via the slash commands above.
+
 ## [0.29.1] — 2026-04-23
 
 **Milestone M-sort-1.1: Audit cleanup for M-sort-1**
