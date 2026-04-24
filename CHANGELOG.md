@@ -5,6 +5,12 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.14] — 2026-04-23
+
+### Added
+- **Slot map panel in the Layout editor.** Every display tab now shows its `slotOrder` as a compact run-length list right under the item-row table — e.g. `S1-S23 (23): Silvermoon Health Potion × 20`, `S24 (1): Light's Potential × 20`, `S25-S49 (25): Silvermoon Health Potion × 20`. A 1-slot run wedged between two long runs of another item now stands out visually, which is exactly what the v0.29.12 "hidden swap" incident needed. When a recent bank scan is loaded, each run is compared against live slot contents and annotated with a green ✓ (all match) or red ✗ (N mismatches) plus per-slot detail lines naming what's actually sitting there. Items whose `items[id].slots` exceeds their pinned slotOrder count list below as "auto-placed at sort time" — matches the v0.29.13 ownership split (Capture pins, everything else is planner-placed).
+- **Pure `computeSlotRuns(slotOrder)` helper** exposed as `GBL._layoutEditorComputeSlotRuns` for the spec suite. Seven new tests cover empty input, contiguous fills, gap-breaks-run, the v0.29.12 anomaly shape (four runs including two 1-slot outliers), sparse non-adjacent keys, and nil inputs.
+
 ## [0.29.13] — 2026-04-23
 
 ### Changed

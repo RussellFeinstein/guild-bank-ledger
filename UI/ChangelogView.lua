@@ -29,6 +29,14 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.14
+    {"0.29.14", "2026-04-23", {
+        Added = {
+            "Slot map panel in the Layout editor. Every display tab now shows its slotOrder as a compact run-length list (e.g. 'S1-S23 (23): Silvermoon Health Potion × 20') right under the item rows. A 1-slot run wedged between two long runs of the same other item now stands out visually — which is exactly what the v0.29.12 hidden-swap incident needed.",
+            "Slot map compares against the current bank scan when one is available: green ✓ if every slot in the run matches, red ✗ with per-slot detail lines naming what's actually sitting there otherwise. Items whose Slots count exceeds their pinned slotOrder entries list below as 'auto-placed at sort time,' matching the v0.29.13 ownership split (Capture pins, planner places everything else at sort time).",
+        },
+    }},
+
     -- v0.29.13
     {"0.29.13", "2026-04-23", {
         Changed = {

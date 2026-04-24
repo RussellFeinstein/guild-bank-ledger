@@ -49,6 +49,56 @@ local function bankTabName(tabIndex)
     return "Tab " .. tabIndex
 end
 
+--- Group slotOrder entries into contiguous same-item runs.
+--
+-- Pure function. Given `slotOrder[slotIndex] = itemID`, returns a
+-- slot-index-ordered list of `{startSlot, endSlot, itemID, length}`.
+-- A run never crosses an empty slot — a nil entry breaks the sequence
+-- even if the same itemID resumes immediately after. Isolated single
+-- slots produce length-1 runs, which is what makes v0.29.12-style
+-- one-slot anomalies visually obvious in the Layout editor.
+local function computeSlotRuns(slotOrder)
+    local runs = {}
+    if type(slotOrder) ~= "table" then return runs end
+    local currentID, currentStart, currentEnd = nil, nil, nil
+    for s = 1, MAX_SLOTS do
+        local id = slotOrder[s]
+        if id == currentID and id ~= nil and currentEnd == s - 1 then
+            currentEnd = s
+        else
+            if currentID ~= nil then
+                table.insert(runs, {
+                    startSlot = currentStart,
+                    endSlot = currentEnd,
+                    itemID = currentID,
+                    length = currentEnd - currentStart + 1,
+                })
+            end
+            if id ~= nil then
+                currentID = id
+                currentStart = s
+                currentEnd = s
+            else
+                currentID = nil
+                currentStart = nil
+                currentEnd = nil
+            end
+        end
+    end
+    if currentID ~= nil then
+        table.insert(runs, {
+            startSlot = currentStart,
+            endSlot = currentEnd,
+            itemID = currentID,
+            length = currentEnd - currentStart + 1,
+        })
+    end
+    return runs
+end
+
+-- Expose the pure helper for the spec suite.
+GBL._layoutEditorComputeSlotRuns = computeSlotRuns
+
 ------------------------------------------------------------------------
 -- Working-copy state
 --
@@ -356,6 +406,16 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
         end
     end
 
+    -- Slot map: visualize slotOrder runs with live-scan comparison so a
+    -- user can see which slots are pinned to what and where the bank
+    -- currently diverges from the layout. Motivated by v0.29.12's
+    -- "hidden slot-swap" incident where two layouts with identical
+    -- per-item counts looked identical in the editor despite one
+    -- having S24 and S50 swapped.
+    if #itemIDs > 0 then
+        self:_LayoutEditor_RenderSlotMap(parent, tabIndex)
+    end
+
     -- Add-item row
     if writable then
         local addRow = AceGUI:Create("SimpleGroup")
@@ -499,6 +559,178 @@ function GBL:_LayoutEditor_RenderItemRow(parent, tabIndex, itemID, writable)
             self:RefreshLayoutTab()
         end)
         rowGroup:AddChild(removeBtn)
+    end
+end
+
+------------------------------------------------------------------------
+-- Slot map (v0.29.14)
+------------------------------------------------------------------------
+
+--- Render a "Slot map" panel for a display tab.
+--
+-- Goal: surface `slotOrder` (which the editor's aggregate per-item rows
+-- never show) and flag slots where the current bank scan disagrees with
+-- the layout. Pure display — no editing controls. Writable flag isn't
+-- needed here because nothing is editable.
+function GBL:_LayoutEditor_RenderSlotMap(parent, tabIndex)
+    local AceGUI = LibStub("AceGUI-3.0")
+    local draft = self._layoutDraft
+    local tab = draft and draft.tabs and draft.tabs[tabIndex]
+    if not tab or tab.mode ~= "display" then return end
+
+    local slotOrder = tab.slotOrder or {}
+    local items = tab.items or {}
+
+    -- Count pinned and unpinned slots per item so the summary can
+    -- distinguish "pinned by Capture" from "planner-placed at sort time".
+    local pinnedByItem, totalPinned = {}, 0
+    for s = 1, MAX_SLOTS do
+        local id = slotOrder[s]
+        if id then
+            pinnedByItem[id] = (pinnedByItem[id] or 0) + 1
+            totalPinned = totalPinned + 1
+        end
+    end
+    local unpinnedByItem, totalUnpinned = {}, 0
+    for id, row in pairs(items) do
+        local want = (row and row.slots) or 0
+        local have = pinnedByItem[id] or 0
+        if want > have then
+            unpinnedByItem[id] = want - have
+            totalUnpinned = totalUnpinned + (want - have)
+        end
+    end
+
+    -- Live-scan comparison; all reads are nil-safe so the panel renders
+    -- cleanly whether or not a scan has been taken yet.
+    local scanTab = self.lastScanResults and self.lastScanResults[tabIndex]
+    local scanSlots = scanTab and scanTab.slots or nil
+
+    local runs = computeSlotRuns(slotOrder)
+    local runMismatches = {}
+    local totalMismatches = 0
+    for i, run in ipairs(runs) do
+        local list = {}
+        if scanSlots then
+            for s = run.startSlot, run.endSlot do
+                local bankSlot = scanSlots[s]
+                local bankID = bankSlot and extractItemID(bankSlot.itemLink) or nil
+                if bankID ~= run.itemID then
+                    table.insert(list, { slot = s, actualID = bankID })
+                    totalMismatches = totalMismatches + 1
+                end
+            end
+        end
+        runMismatches[i] = list
+    end
+
+    local heading = AceGUI:Create("Heading")
+    heading:SetFullWidth(true)
+    heading:SetText("Slot map")
+    parent:AddChild(heading)
+
+    -- Header summary line.
+    local summary = AceGUI:Create("Label")
+    summary:SetFullWidth(true)
+    summary:SetFontObject(GameFontNormalSmall)
+    local parts = { format("%d/%d pinned", totalPinned, MAX_SLOTS) }
+    if totalUnpinned > 0 then
+        parts[#parts] = parts[#parts]
+            .. format(" (%d auto-placed at sort time)", totalUnpinned)
+    end
+    if scanSlots then
+        if totalMismatches == 0 then
+            table.insert(parts, "|cff00ff88matches current bank|r")
+        else
+            table.insert(parts, format(
+                "|cffff5555%d of %d slots differ from current bank|r",
+                totalMismatches, MAX_SLOTS))
+        end
+    else
+        table.insert(parts, "|cff888888(no scan loaded — comparison unavailable)|r")
+    end
+    summary:SetText(table.concat(parts, "; "))
+    parent:AddChild(summary)
+
+    -- Per-run lines.
+    for i, run in ipairs(runs) do
+        local itemRow = items[run.itemID]
+        local perSlot = (itemRow and itemRow.perSlot) or 0
+        local mismatches = runMismatches[i]
+        local rangeStr
+        if run.length == 1 then
+            rangeStr = format("S%d", run.startSlot)
+        else
+            rangeStr = format("S%d-S%d", run.startSlot, run.endSlot)
+        end
+        local baseText = format("|cffcccccc%s (%d):|r  %s × %d",
+            rangeStr, run.length, itemLabelFor(run.itemID), perSlot)
+        local line = AceGUI:Create("Label")
+        line:SetFullWidth(true)
+        line:SetFontObject(GameFontNormalSmall)
+        if not scanSlots then
+            line:SetText(baseText)
+        elseif #mismatches == 0 then
+            line:SetText(baseText .. "  |cff00ff88✓|r")
+        else
+            line:SetText(format("%s  |cffff5555✗ %d mismatch(es)|r",
+                baseText, #mismatches))
+        end
+        parent:AddChild(line)
+
+        -- Detail for mismatched slots (capped at 5 per run to avoid flood).
+        if scanSlots and #mismatches > 0 then
+            for j = 1, math.min(5, #mismatches) do
+                local m = mismatches[j]
+                local detail = AceGUI:Create("Label")
+                detail:SetFullWidth(true)
+                detail:SetFontObject(GameFontNormalSmall)
+                local actualStr
+                if m.actualID then
+                    actualStr = "has " .. itemLabelFor(m.actualID)
+                else
+                    actualStr = "is empty"
+                end
+                detail:SetText(format("    |cffff8888S%d %s|r",
+                    m.slot, actualStr))
+                parent:AddChild(detail)
+            end
+            if #mismatches > 5 then
+                local more = AceGUI:Create("Label")
+                more:SetFullWidth(true)
+                more:SetFontObject(GameFontNormalSmall)
+                more:SetText(format("    |cff888888(+%d more not shown)|r",
+                    #mismatches - 5))
+                parent:AddChild(more)
+            end
+        end
+    end
+
+    -- Unpinned capacity: items with slots > pinned count render here so
+    -- the user can see "Light's Potential has 5 slots the planner will
+    -- place at sort time" instead of those slots silently going missing
+    -- from the slot map.
+    if totalUnpinned > 0 then
+        local header = AceGUI:Create("Label")
+        header:SetFullWidth(true)
+        header:SetFontObject(GameFontNormalSmall)
+        header:SetText(format(
+            "|cffccccff%d slot(s) auto-placed at sort time:|r", totalUnpinned))
+        parent:AddChild(header)
+
+        local sortedIDs = {}
+        for id in pairs(unpinnedByItem) do table.insert(sortedIDs, id) end
+        table.sort(sortedIDs)
+        for _, id in ipairs(sortedIDs) do
+            local itemRow = items[id]
+            local perSlot = (itemRow and itemRow.perSlot) or 0
+            local line = AceGUI:Create("Label")
+            line:SetFullWidth(true)
+            line:SetFontObject(GameFontNormalSmall)
+            line:SetText(format("    %s × %d  (%d slot(s))",
+                itemLabelFor(id), perSlot, unpinnedByItem[id]))
+            parent:AddChild(line)
+        end
     end
 end
 
