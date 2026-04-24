@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.16
+    {"0.29.16", "2026-04-23", {
+        Fixed = {
+            "Layout tab edits no longer show a visible scroll-snap flicker. v0.29.15 preserved scroll position across rebuilds, but the Release → Build → SetScroll sequence was still visible as a brief blank-then-snap. The TabGroup's content frame is now hidden for the duration of the rebuild and revealed after scroll has been re-applied, so the tab appears static during edits.",
+        },
+    }},
+
     -- v0.29.15
     {"0.29.15", "2026-04-23", {
         Fixed = {

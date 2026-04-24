@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.16] — 2026-04-23
+
+### Fixed
+- **Layout tab edits no longer show a visible scroll-snap flicker.** v0.29.15 preserved scroll position across rebuilds, but the Release → Build → SetScroll sequence was still visible as a brief blank-then-snap. The TabGroup's content frame is now hidden (alpha 0) for the duration of the rebuild and revealed (alpha 1) after scroll has been re-applied, masking the flicker entirely. From the user's perspective the tab appears static during edits.
+
 ## [0.29.15] — 2026-04-23
 
 ### Fixed

@@ -262,6 +262,15 @@ end
 --- it at construction time, and we nudge it back into sync after
 --- content layout has settled (AceGUI applies scroll in LayoutFinished,
 --- so restoring on the next frame is the reliable timing).
+---
+--- The rebuild itself is visible — Release briefly blanks everything,
+--- Build repopulates starting at scroll=0, then SetScroll snaps to the
+--- saved value. That snap flickers noticeably in-game. To mask it, we
+--- set the TabGroup's content frame alpha to 0 for the duration, then
+--- restore to 1 once scroll has been reapplied. `self.tabGroup.content`
+--- is a stable frame owned by the TabGroup, so it persists across the
+--- Release/Build cycle — the new ScrollFrame becomes a child of the
+--- same (still-hidden) content, so nothing leaks through.
 function GBL:RefreshLayoutTab()
     if self.activeTab ~= "layout" then return end
     if not self.tabGroup then return end
@@ -269,16 +278,24 @@ function GBL:RefreshLayoutTab()
     local savedScroll = self._layoutScrollStatus
         and self._layoutScrollStatus.scrollvalue or 0
 
+    local content = self.tabGroup.content
+    if content and content.SetAlpha then content:SetAlpha(0) end
+
     self.tabGroup:ReleaseChildren()
     self:BuildLayoutTab(self.tabGroup)
 
-    if savedScroll and savedScroll > 0 and C_Timer and C_Timer.After then
-        C_Timer.After(0, function()
-            local scroll = self._layoutContainer
-            if scroll and scroll.SetScroll then
-                scroll:SetScroll(savedScroll)
-            end
-        end)
+    local function reveal()
+        if self._layoutContainer and self._layoutContainer.SetScroll
+           and savedScroll and savedScroll > 0 then
+            self._layoutContainer:SetScroll(savedScroll)
+        end
+        if content and content.SetAlpha then content:SetAlpha(1) end
+    end
+
+    if C_Timer and C_Timer.After then
+        C_Timer.After(0, reveal)
+    else
+        reveal()
     end
 end
 
