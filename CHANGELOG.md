@@ -5,6 +5,18 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.25] — 2026-04-24
+
+### Fixed
+- **Sort progress markers now render in WoW's default font.** v0.29.23 used `▶` / `✓` / `✗` Unicode glyphs that FRIZQT__ doesn't ship; users saw colored tofu boxes instead. Swapped to colored ASCII: `>` for currently executing, `+` for completed (including late-ACK reclassified), `x` for failed. Same colors, intelligible shapes.
+- **Per-op status markers now survive Sort tab rebuilds mid-sort.** `Ledger.lua` fires `RefreshUI` every time a rescan sees new transactions — and every successful move creates one — which routed through `UI/UI.lua`'s generic `SelectTab("sort")` fallback, re-entering `BuildSortTab` and wiping `self._sortOpRows`. Only the top progress label recovered (via the next event). Per-op markers were lost because they were transition-triggered and those events had already fired. Fix: the progress handler now writes every transition into a persistent `self._sortOpStatus` table (and the progress label text into `self._sortProgressText`) in addition to the live SetText calls. On rebuild, the Preview loop repaints each row from the status table and the progress label from the text cache. Tab-switching away and back mid-sort now preserves the full visual state too.
+
+## [0.29.24] — 2026-04-24
+
+### Changed
+- **Every sort now ends by tidying the overflow (stock) tab.** Added a Phase 4 to `SortPlanner` that, after Phase 3's defensive sweep, reshapes the overflow tab into a deterministic contiguous layout starting at slot 1: stacks sorted by (itemID ASC, count DESC, original slot ASC), closing gaps and grouping same-item stacks. Previously the overflow was a dumping ground — Phase 1B/3 only grouped *new* spills via adjacency, so pre-existing scattered stacks stayed scattered. Repeat sorts are now idempotent (already-compact overflow → zero Phase 4 ops). Swap cycles within the overflow resolve through the same `findPivot` Phase 2 uses. Partial-stack merging (e.g. 10+10 → 20) is out of scope here — the planner has no max-stack knowledge; that's a follow-up.
+- **Internal: extracted Phase 2's pivot-break loop into a reusable `pivotBreakLoop` local** so Phase 2 and Phase 4 share the same cycle-breaking machinery. No behavioral change to Phase 2.
+
 ## [0.29.23] — 2026-04-23
 
 ### Added

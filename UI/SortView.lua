@@ -19,6 +19,17 @@ local function itemLabel(itemID)
     return name or ("item " .. itemID)
 end
 
+--- Render an op-row label with an optional status marker. Used both by
+--- the live progress handler AND by the Preview rebuild loop when
+--- repainting persisted _sortOpStatus markers, so it's defined up here
+--- to be visible to both call sites.
+local function formatOpRow(op, marker)
+    local prefix = marker or "  "
+    return format("%s%s  %d × %s   T%d/%d → T%d/%d",
+        prefix, op.op, op.count, itemLabel(op.itemID),
+        op.srcTab, op.srcSlot, op.dstTab, op.dstSlot)
+end
+
 ------------------------------------------------------------------------
 -- Tab builder
 ------------------------------------------------------------------------
@@ -40,6 +51,14 @@ function GBL:BuildSortTab(container)
     -- dangle.
     self._sortOpRows = {}
     self._sortProgressLabel = nil
+    -- Persistent state survives BuildSortTab rebuilds. These tables are
+    -- repopulated by _SortView_OnProgress on every executor transition
+    -- and repainted into the freshly-built widgets below. Without them,
+    -- a Ledger rescan firing RefreshUI mid-sort (every time a move
+    -- produces a transaction log entry) tears down the rows and we lose
+    -- every completed-op marker until the next transition event.
+    self._sortOpStatus = self._sortOpStatus or {}
+    self._sortProgressText = self._sortProgressText or ""
 
     -- Status banner
     local status = AceGUI:Create("Label")
@@ -129,6 +148,15 @@ function GBL:_SortView_Preview()
     if not content then return end
     content:ReleaseChildren()
 
+    -- A fresh Preview generates a fresh plan; stale per-op status from a
+    -- previous run would paint onto the wrong op indices. Clear both
+    -- tables here AND on phase="start" in _SortView_OnProgress — either
+    -- path can precede a new execution.
+    if not self:IsSortRunning() then
+        self._sortOpStatus = {}
+        self._sortProgressText = ""
+    end
+
     -- If a post-sort rescan is in flight, show a placeholder instead of
     -- re-planning against a stale snapshot. The rescan callback will
     -- RefreshSortTab once the fresh scan lands.
@@ -174,12 +202,17 @@ function GBL:_SortView_Preview()
     content:AddChild(summary)
 
     -- Live progress label, updated by _SortView_OnProgress via direct
-    -- SetText on this widget — no rebuild needed. Shown blank until the
-    -- first progress event arrives.
+    -- SetText on this widget — no rebuild needed. Repopulated from the
+    -- persistent _sortProgressText cache so a rebuild mid-sort doesn't
+    -- leave the label blank until the next event fires.
     local progress = AceGUI:Create("Label")
     progress:SetFullWidth(true)
     progress:SetFontObject(GameFontNormalSmall)
-    progress:SetText(" ")
+    if self._sortProgressText and self._sortProgressText ~= "" then
+        progress:SetText(self._sortProgressText)
+    else
+        progress:SetText(" ")
+    end
     content:AddChild(progress)
     self._sortProgressLabel = progress
 
@@ -208,6 +241,18 @@ function GBL:_SortView_Preview()
             -- Retain the label ref keyed by op index so the progress
             -- handler can prefix it with a status marker.
             self._sortOpRows[idx] = { widget = lbl, op = op }
+            -- Repaint persisted per-op status. After a mid-sort rebuild
+            -- we'd otherwise start from blank rows and only update the
+            -- ops that have an event AFTER this rebuild; all prior
+            -- done/failed/current markers would vanish.
+            local status = self._sortOpStatus and self._sortOpStatus[idx]
+            if status == "current" then
+                lbl:SetText(formatOpRow(op, "|cffffaa55>|r "))
+            elseif status == "done" then
+                lbl:SetText(formatOpRow(op, "|cff00ff88+|r "))
+            elseif status == "failed" then
+                lbl:SetText(formatOpRow(op, "|cffff5555x|r "))
+            end
         end
     end
 
@@ -288,18 +333,6 @@ end
 -- Progress
 ------------------------------------------------------------------------
 
---- Render the op-row label text with an optional status marker. Separate
---- function so the progress handler can re-render a single row without
---- duplicating the formatting logic.
-local function formatOpRow(op, marker)
-    local prefix = marker or "  "
-    return format("%s%s  %d × %s   T%d/%d → T%d/%d",
-        prefix, op.op, op.count,
-        (GBL.GetCachedItemInfo and GBL:GetCachedItemInfo(op.itemID))
-            or ("item " .. op.itemID),
-        op.srcTab, op.srcSlot, op.dstTab, op.dstSlot)
-end
-
 --- Handle a GBL_SORT_PROGRESS message from the executor. Called many
 --- times per sort (once per op transition). Must be cheap — direct widget
 --- SetText only; never a full rebuild.
@@ -308,61 +341,67 @@ function GBL:_SortView_OnProgress(_msg, payload)
     if not payload then return end
     local phase = payload.phase
 
+    -- A fresh execution resets persisted state so old markers from a
+    -- previous plan don't bleed into the new move list.
+    if phase == "start" then
+        self._sortOpStatus = {}
+    end
+    self._sortOpStatus = self._sortOpStatus or {}
+
     -- Update the progress label at the top of the move list.
-    if self._sortProgressLabel then
-        local text
-        if phase == "finish" then
-            if payload.ok then
-                text = format(
-                    "|cff00ff88Sort complete|r — %d done, %d failed, %d replans. Rescanning...",
-                    payload.done or 0, payload.failed or 0, payload.replans or 0)
-            else
-                text = format(
-                    "|cffff5555Sort aborted|r (%s) — %d done, %d failed, %d replans.",
-                    tostring(payload.reason or "?"),
-                    payload.done or 0, payload.failed or 0, payload.replans or 0)
-            end
-        elseif phase == "replan" then
+    local text
+    if phase == "finish" then
+        if payload.ok then
             text = format(
-                "|cffffaa55Replan %d|r (%s) — %d done, %d failed so far.",
-                payload.replans or 0, tostring(payload.replanReason or "?"),
-                payload.done or 0, payload.failed or 0)
-        elseif phase == "start" then
-            text = format("|cffffaa55Starting|r — 0 / %d moves.", payload.total or 0)
+                "|cff00ff88Sort complete|r — %d done, %d failed, %d replans. Rescanning...",
+                payload.done or 0, payload.failed or 0, payload.replans or 0)
         else
-            -- step / complete / failed / reclassify — show current progress.
-            local doneOrFailed = (payload.done or 0) + (payload.failed or 0)
             text = format(
-                "|cffffaa55Executing|r — %d / %d  (%d done, %d failed, %d replans)",
-                doneOrFailed, payload.total or 0,
+                "|cffff5555Sort aborted|r (%s) — %d done, %d failed, %d replans.",
+                tostring(payload.reason or "?"),
                 payload.done or 0, payload.failed or 0, payload.replans or 0)
         end
+    elseif phase == "replan" then
+        text = format(
+            "|cffffaa55Replan %d|r (%s) — %d done, %d failed so far.",
+            payload.replans or 0, tostring(payload.replanReason or "?"),
+            payload.done or 0, payload.failed or 0)
+    elseif phase == "start" then
+        text = format("|cffffaa55Starting|r — 0 / %d moves.", payload.total or 0)
+    else
+        -- step / complete / failed / reclassify — show current progress.
+        local doneOrFailed = (payload.done or 0) + (payload.failed or 0)
+        text = format(
+            "|cffffaa55Executing|r — %d / %d  (%d done, %d failed, %d replans)",
+            doneOrFailed, payload.total or 0,
+            payload.done or 0, payload.failed or 0, payload.replans or 0)
+    end
+    -- Cache the last progress text so a rebuild (from Ledger rescan,
+    -- tab switch, etc.) can paint the label back to its current state
+    -- instead of going blank until the next event.
+    self._sortProgressText = text
+    if self._sortProgressLabel then
         self._sortProgressLabel:SetText(text)
     end
 
-    -- Mark the last completed / failed op row, and the next-to-run row.
-    if self._sortOpRows then
-        local completed = payload.completedOpIndex
-        if completed and self._sortOpRows[completed] then
-            local entry = self._sortOpRows[completed]
-            entry.widget:SetText(formatOpRow(entry.op, "|cff00ff88✓|r "))
+    -- Record and paint row-level status. The persisted _sortOpStatus
+    -- table is the source of truth; widget SetText calls are a live
+    -- optimization that can fail silently if the widget ref is stale
+    -- (post-rebuild). On rebuild, the Preview loop re-paints from the
+    -- status table, so nothing is lost.
+    local function mark(idx, status, markerColoredAscii)
+        if not idx then return end
+        self._sortOpStatus[idx] = status
+        local row = self._sortOpRows and self._sortOpRows[idx]
+        if row then
+            row.widget:SetText(formatOpRow(row.op, markerColoredAscii))
         end
-        local failedIdx = payload.failedOpIndex
-        if failedIdx and self._sortOpRows[failedIdx] then
-            local entry = self._sortOpRows[failedIdx]
-            entry.widget:SetText(formatOpRow(entry.op, "|cffff5555✗|r "))
-        end
-        local reclassified = payload.reclassifiedOpIndex
-        if reclassified and self._sortOpRows[reclassified] then
-            local entry = self._sortOpRows[reclassified]
-            entry.widget:SetText(formatOpRow(entry.op, "|cff00ff88✓|r "))
-        end
-        -- Highlight the current op (the one about to run or in flight).
-        if phase == "step" and payload.opIndex and
-           self._sortOpRows[payload.opIndex] then
-            local entry = self._sortOpRows[payload.opIndex]
-            entry.widget:SetText(formatOpRow(entry.op, "|cffffaa55▶|r "))
-        end
+    end
+    mark(payload.completedOpIndex,    "done",    "|cff00ff88+|r ")
+    mark(payload.reclassifiedOpIndex, "done",    "|cff00ff88+|r ")
+    mark(payload.failedOpIndex,       "failed",  "|cffff5555x|r ")
+    if phase == "step" and payload.opIndex then
+        mark(payload.opIndex,         "current", "|cffffaa55>|r ")
     end
 end
 

@@ -29,6 +29,21 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.25
+    {"0.29.25", "2026-04-24", {
+        Fixed = {
+            "Sort progress markers on each move row now render in WoW's default font. v0.29.23 used Unicode triangle/check/cross glyphs that FRIZQT__ doesn't ship, so users saw colored boxes instead. Replaced with colored ASCII: '>' (yellow) for the op currently in flight, '+' (green) for completed (including late-ACK reclassified), 'x' (red) for failed. Same colors, actual shapes.",
+            "Per-op status markers now survive Sort tab rebuilds mid-sort. Previously, every successful move created a transaction log entry; the ledger rescan reacted by firing RefreshUI, which (for the Sort tab) full-rebuilt the tab and wiped all per-row widget refs. The top progress line recovered on the next event but the per-op markers on already-completed rows were lost forever. Fixed by persisting a '_sortOpStatus' table and a cached progress-text string that the Preview loop repaints into freshly-built widgets on every rebuild — so a rescan, a tab switch, or any other rebuild now preserves the full visual state.",
+        },
+    }},
+
+    -- v0.29.24
+    {"0.29.24", "2026-04-24", {
+        Changed = {
+            "Every sort now ends by tidying the overflow (stock) tab. A new Phase 4 in the planner reshapes the overflow tab into a deterministic contiguous layout starting at slot 1: stacks sorted by itemID, larger stacks first within a group, no gaps. Previously the overflow was a dumping ground — Phase 1B and Phase 3 only grouped *new* spills using adjacency, so any pre-existing scattered stacks or gaps stayed scattered. Repeat sorts are now idempotent (already-compact overflow → zero compaction ops). Partial-stack merging (e.g. merging two half-stacks of Linen Cloth) is explicitly out of scope here — the planner has no max-stack-size knowledge; that's a follow-up.",
+        },
+    }},
+
     -- v0.29.23
     {"0.29.23", "2026-04-23", {
         Added = {
