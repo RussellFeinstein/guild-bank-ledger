@@ -29,6 +29,16 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.13
+    {"0.29.13", "2026-04-23", {
+        Changed = {
+            "Layout editor no longer pre-pins slotOrder positions for Add Item or Slots-up. The UI used to heuristically pin positions on edit — indistinguishable from a real Capture — which the planner then rigidly enforced. Same adjacency logic now runs at plan time instead, so slotOrder unambiguously means 'pin because observed,' saved layouts are smaller, and the post-sort bank state is byte-identical to before. Capture, Slots-down trim, and Remove cleanup are unchanged.",
+        },
+        Fixed = {
+            "Adding an item to a full captured tab no longer leaves partial slotOrder state. Previously items[id].slots would be set but only some of the requested slots got slotOrder entries when the tab was nearly full; the over-budget error surfaced only at save time. With the prefill gone, the authoritative items[].slots sum is what validation checks — single clean failure mode.",
+        },
+    }},
+
     -- v0.29.12
     {"0.29.12", "2026-04-23", {
         Added = {

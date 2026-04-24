@@ -5,6 +5,17 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.13] — 2026-04-23
+
+### Changed
+- **Layout editor no longer pre-pins `slotOrder` positions for Add Item or Slots-up edits.** The UI used to call a `pickSlotForItem` heuristic (right-extend → left-extend → first-empty) to pre-populate `slotOrder` every time a user added an item or bumped its Slots count. That pre-pin was indistinguishable from a real captured position — the planner would then rigidly enforce it as if the user had deliberately chosen that slot. The same adjacency logic already lives in `SortPlanner` Pass 2, so the prefill was pure duplication that just muddied the semantics of `slotOrder`. `slotOrder` is now written only by Capture (which reflects an observed bank state) and left untouched by Add Item / Slots-up (the planner places those demands adjacent to any existing pins at plan time). Result: saved layouts are smaller, `slotOrder` always means "pin these exact positions because I observed them," and the behavior for Add-Item-then-Sort is byte-identical to before. Slots-down still trims stale `slotOrder` pins, and Remove still clears entries for the removed item.
+
+### Fixed
+- **No more silent partial state from Add Item on a full captured tab.** Previously, if you added an item to a nearly-full captured tab, `items[id].slots` would be set but only some of the requested slots would get `slotOrder` entries (the rest silently dropped when `pickSlotForItem` ran out of empty slots). Validation caught the aggregate over-budget at save time, but not the specific "this item couldn't be placed" failure. With the prefill gone, the over-budget case surfaces cleanly at save time against the authoritative `items[id].slots` sum.
+
+### Tests
+- New `spec/sortplanner_spec.lua` test: a layout with three items, `items[].slots` set, and `slotOrder={}` produces the exact same final bank placement as the old pre-pinned variant — X/Y/Z packed contiguously at slots 1-5, 6-10, 11-15 in sortedID order.
+
 ## [0.29.12] — 2026-04-23
 
 ### Added

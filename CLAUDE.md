@@ -111,4 +111,4 @@ luacheck .                 # lint production code
 
 ## Version
 
-Current: 0.29.12 (see `VERSION` file)
+Current: 0.29.13 (see `VERSION` file)

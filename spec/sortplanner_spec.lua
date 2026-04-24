@@ -922,6 +922,59 @@ describe("SortPlanner", function()
         assert.is_nil(plan.demandMap[2])
     end)
 
+    it("plans items-only layouts identically to heuristically pre-pinned slotOrder (v0.29.13)", function()
+        -- After v0.29.13, Add Item and slots-up no longer populate slotOrder —
+        -- only Capture does. This test verifies that a layout with items set
+        -- but slotOrder={} produces the same final bank state as the old
+        -- pre-pinning behavior (items at slots 1-5, 6-10, 11-15 for X/Y/Z).
+        local snap = snapshot({
+            [1] = {},
+            [2] = {
+                [1] = { itemID = 100, count = 20 },
+                [2] = { itemID = 100, count = 20 },
+                [3] = { itemID = 100, count = 20 },
+                [4] = { itemID = 100, count = 20 },
+                [5] = { itemID = 100, count = 20 },
+                [6] = { itemID = 200, count = 20 },
+                [7] = { itemID = 200, count = 20 },
+                [8] = { itemID = 200, count = 20 },
+                [9] = { itemID = 300, count = 20 },
+                [10] = { itemID = 300, count = 20 },
+            },
+        })
+        local layout = {
+            tabs = {
+                [1] = displayTab(
+                    {
+                        [100] = { slots = 5, perSlot = 20 },
+                        [200] = { slots = 3, perSlot = 20 },
+                        [300] = { slots = 2, perSlot = 20 },
+                    },
+                    {}   -- empty slotOrder — pure items-only layout
+                ),
+                [2] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        local final = applyPlan(snap, plan)
+        -- Each item's group lands contiguous, in sortedID order, starting at S1.
+        for s = 1, 5 do
+            assert.is_not_nil(final[1][s], "expected item 100 at slot " .. s)
+            assert.equals(100, final[1][s].itemID)
+        end
+        for s = 6, 8 do
+            assert.is_not_nil(final[1][s], "expected item 200 at slot " .. s)
+            assert.equals(200, final[1][s].itemID)
+        end
+        for s = 9, 10 do
+            assert.is_not_nil(final[1][s], "expected item 300 at slot " .. s)
+            assert.equals(300, final[1][s].itemID)
+        end
+        assert.is_nil(plan.deficits[100])
+        assert.is_nil(plan.deficits[200])
+        assert.is_nil(plan.deficits[300])
+    end)
+
     it("summarizes a plan into human-readable lines", function()
         local snap = snapshot({
             [1] = { [1] = { itemID = 100, count = 20 } },
