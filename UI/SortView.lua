@@ -34,8 +34,10 @@ function GBL:BuildSortTab(container)
     status:SetFontObject(GameFontNormalSmall)
     if not self:IsBankOpen() then
         status:SetText("|cffffcc00Open the guild bank to preview and execute sort.|r")
+    elseif self._sortViewRescanning then
+        status:SetText("|cffffaa55Rescanning bank after sort \226\128\148 preview will update automatically.|r")
     elseif self:IsSortRunning() then
-        status:SetText("|cffffaa55Sort in progress — see progress below.|r")
+        status:SetText("|cffffaa55Sort in progress \226\128\148 see progress below.|r")
     else
         status:SetText("Ready. Click Preview to inspect the planned moves.")
     end
@@ -113,6 +115,17 @@ function GBL:_SortView_Preview()
     local content = self._sortContent
     if not content then return end
     content:ReleaseChildren()
+
+    -- If a post-sort rescan is in flight, show a placeholder instead of
+    -- re-planning against a stale snapshot. The rescan callback will
+    -- RefreshSortTab once the fresh scan lands.
+    if self._sortViewRescanning then
+        local lbl = AceGUI:Create("Label")
+        lbl:SetFullWidth(true)
+        lbl:SetText("|cffffaa55Waiting for fresh scan results\226\128\166|r")
+        content:AddChild(lbl)
+        return
+    end
 
     local snapshot = self:GetLastScanResults()
     if not snapshot then
@@ -237,7 +250,43 @@ function GBL:_SortView_Execute()
             self:Print(format("Sort aborted (%s): %d/%d done, %d failed, %d replans.",
                 result.reason, result.done, result.total, result.failed, result.replans))
         end
-        self:RefreshSortTab()
+        -- After execute, the cached snapshot is stale — Preview would show
+        -- the pre-sort plan. Rescan first, then refresh so Preview reflects
+        -- post-sort state.
+        self:_SortView_RescanAndRefresh()
     end, { layout = layout })
     self:RefreshSortTab()
+end
+
+--- Trigger a fresh bank scan and refresh the Sort tab when it completes.
+-- Used after Execute so Preview always reflects the post-sort snapshot.
+function GBL:_SortView_RescanAndRefresh()
+    self._sortViewRescanning = true
+    self._sortLastPlan = nil
+    self:RefreshSortTab()  -- show "rescanning" placeholder immediately
+
+    if not self:IsBankOpen() then
+        self._sortViewRescanning = false
+        self:RefreshSortTab()
+        return
+    end
+    if not self.scanInProgress then
+        self:StartFullScan()
+    end
+
+    local deadline = GetTime() + 5
+    local function poll()
+        if not self.scanInProgress then
+            self._sortViewRescanning = false
+            self:RefreshSortTab()
+        elseif GetTime() < deadline then
+            C_Timer.After(0.25, poll)
+        else
+            -- Scan didn't finish in time; refresh anyway so the user isn't
+            -- stuck on the placeholder.
+            self._sortViewRescanning = false
+            self:RefreshSortTab()
+        end
+    end
+    C_Timer.After(0.25, poll)
 end

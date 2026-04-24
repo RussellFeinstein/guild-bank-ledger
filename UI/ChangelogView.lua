@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.9
+    {"0.29.9", "2026-04-23", {
+        Fixed = {
+            "Sort tab now auto-refreshes after Execute. Preview was re-running against the pre-sort snapshot (stale), so the plan looked unchanged after sort had actually run. The tab now triggers a rescan on completion, shows a 'Rescanning...' placeholder, then re-previews against the post-sort state.",
+        },
+    }},
+
     -- v0.29.8
     {"0.29.8", "2026-04-23", {
         Fixed = {

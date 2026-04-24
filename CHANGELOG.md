@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.9] — 2026-04-23
+
+### Fixed
+- **Sort tab now auto-refreshes after Execute.** Preview was previously re-running against the pre-sort snapshot (the cached scan is stale until you rescan), so the plan looked unchanged even after sort had actually run. The tab now triggers a fresh scan when Execute completes, shows a "Rescanning bank after sort…" placeholder while it waits, then re-previews against the post-sort state.
+
 ## [0.29.8] — 2026-04-23
 
 ### Fixed
