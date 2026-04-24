@@ -5,6 +5,15 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.19] — 2026-04-23
+
+### Fixed
+- **Late ACK after move timeout no longer triggers a cascade abort.** The SortExecutor waits up to `MOVE_CONFIRM_TIMEOUT` seconds after issuing each move for `GUILDBANKBAGSLOTS_CHANGED`; when the timeout fired first, the subsequent (legitimate but late) event was misclassified as "foreign activity" and triggered a replan. Replan's fresh scan saw the move already settled, but the new plan still listed the just-completed move as op 1 in some cases, producing a pre-check failure loop that chewed through all 5 replans before aborting. Observed in-game with 2/222 ops completed before abort. The executor now tracks the most recent timed-out op for a short grace window (`LATE_ACK_GRACE = 5s`) and, if a stray `GUILDBANKBAGSLOTS_CHANGED` arrives while idle AND the timed-out op's dst slot is now populated as expected, retroactively reclassifies the op as success rather than replanning.
+
+### Changed
+- **`MOVE_CONFIRM_TIMEOUT` raised from 2s → 4s** to reduce how often legitimate server ACKs race the timeout on high-latency realms. Sort throughput is unchanged in the happy path (fast ACKs still advance immediately); this only matters for slow ACKs that would otherwise get misclassified.
+- **`SCAN_WAIT_TIMEOUT` raised from 5s → 10s.** Full-bank scans on 7+ populated tabs were observed taking ~4s in-game, too close to the 5s cap — one slow scan was enough to abort an otherwise-recoverable sort run.
+
 ## [0.29.18] — 2026-04-23
 
 ### Added

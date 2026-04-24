@@ -215,6 +215,40 @@ describe("SortExecutor", function()
             assert.is_nil(MockWoW.cursor)
         end)
 
+        it("late GUILDBANKBAGSLOTS_CHANGED after a timeout is reclassified as success", function()
+            -- Regression for the in-game v0.29.18 failure: when a move op's
+            -- confirming event arrives after MOVE_CONFIRM_TIMEOUT has fired,
+            -- the handler previously treated it as "foreign activity" and
+            -- replanned, cascading to an abort. The fix: if a recently timed
+            -- out op's dst is now populated as expected, reclassify as
+            -- success instead of replanning.
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                },
+            }, function(r) result = r end)
+            -- Op 1 completes synchronously (mock fires events sync). State is
+            -- still alive in the inter-move gap. Inject a pretend "prior op
+            -- timed out" marker pointing at the just-populated 2/1. Fire an
+            -- extra event — handler must reclassify, NOT replan.
+            GBL:_sortExecutorInjectTimeout({
+                opIndex = 99,
+                dstTab = 2, dstSlot = 1,
+                itemID = 100, count = 20,
+            })
+            MockAce.fireEvent("GUILDBANKBAGSLOTS_CHANGED")
+            drainTimers()
+            assert.is_not_nil(result)
+            assert.is_true(result.ok, result.reason)
+            assert.equals(0, result.replans,
+                "late ACK must not trigger replan; got " .. tostring(result.replans))
+        end)
+
         it("never leaves items on the cursor across any exit path", function()
             -- Run a normal plan to completion and assert cursor is clean.
             Helpers.populateTab(1, {

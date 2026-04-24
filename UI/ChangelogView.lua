@@ -29,6 +29,15 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.19
+    {"0.29.19", "2026-04-23", {
+        Fixed = {
+            "Sort no longer aborts mid-run when the server takes slightly longer than 2s to confirm a move. The executor used to classify the (legitimate but late) GUILDBANKBAGSLOTS_CHANGED event as 'foreign activity' and trigger a replan; the replan's fresh snapshot then saw the move already settled and the resulting plan sometimes pre-check-failed on op 1, cascading through all 5 replan retries before aborting. Now: if a recent op timed out and its destination slot is now populated as expected, the late event retroactively reclassifies the op as success and execution continues.",
+            "Raised MOVE_CONFIRM_TIMEOUT from 2s to 4s to give high-latency realms more headroom before a legitimate server ACK is misclassified as a timeout. Happy-path sorts are unchanged (fast ACKs advance immediately); this only affects slow ACKs that would otherwise stall the run.",
+            "Raised SCAN_WAIT_TIMEOUT from 5s to 10s. Full-bank scans on populated 7+ tab banks were observed taking ~4s in-game — uncomfortably close to the old 5s cap — and a single slow scan during a replan was enough to abort an otherwise-recoverable sort.",
+        },
+    }},
+
     -- v0.29.18
     {"0.29.18", "2026-04-23", {
         Added = {

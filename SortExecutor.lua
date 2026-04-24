@@ -30,9 +30,13 @@ local ADDON_NAME = "GuildBankLedger"
 local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 
 local INTER_MOVE_GAP      = 0.3   -- seconds between moves
-local MOVE_CONFIRM_TIMEOUT = 2.0  -- seconds to wait for event before giving up
+local MOVE_CONFIRM_TIMEOUT = 4.0  -- seconds to wait for event before giving up
 local MAX_REPLANS         = 5     -- per run
-local SCAN_WAIT_TIMEOUT   = 5.0   -- seconds to wait for replan scan
+local SCAN_WAIT_TIMEOUT   = 10.0  -- seconds to wait for replan scan
+-- Window after a timed-out op during which a late GUILDBANKBAGSLOTS_CHANGED
+-- can retroactively reclassify that op as success. Without this, a genuine
+-- late server ACK is misread as foreign activity and triggers replan.
+local LATE_ACK_GRACE      = 5.0
 
 ------------------------------------------------------------------------
 -- Helpers
@@ -294,8 +298,18 @@ step = function()
         end
         if slotHasAtLeast(op.dstTab, op.dstSlot, op.itemID, op.count) then
             state.done = state.done + 1
+            state.lastTimedOutOp = nil
         else
             state.failed = state.failed + 1
+            -- Record the timeout so a late GUILDBANKBAGSLOTS_CHANGED arriving
+            -- within LATE_ACK_GRACE can reclassify this as a success rather
+            -- than triggering a foreign-activity replan.
+            state.lastTimedOutOp = {
+                opIndex = myOpIndex,
+                dstTab = op.dstTab, dstSlot = op.dstSlot,
+                itemID = op.itemID, count = op.count,
+                at = GetTime(),
+            }
             GBL:AddAuditEntry(
                 string.format("Sort: op %d timed out (no confirm within %ds)",
                     myOpIndex, MOVE_CONFIRM_TIMEOUT))
@@ -315,14 +329,31 @@ function GBL:_SortExecutor_OnSlotsChanged()
     if not state then return end
     local w = state.waiting
     if not w then
-        -- Event fired while we're not in a move (between ops or during throttle).
-        -- That's foreign activity — trigger replan.
+        -- Event fired while no move is in flight. Two possibilities:
+        --  (a) Late ACK for an op that just timed out: the server eventually
+        --      processed the move, the event is arriving later than our 4s
+        --      confirmation window. If the timed-out op's dst is now populated
+        --      as expected, retroactively reclassify as success.
+        --  (b) Genuine foreign activity: another guild member touched the
+        --      bank. Replan.
+        local lto = state.lastTimedOutOp
+        if lto and (GetTime() - lto.at) <= LATE_ACK_GRACE and
+           slotHasAtLeast(lto.dstTab, lto.dstSlot, lto.itemID, lto.count) then
+            state.done = state.done + 1
+            state.failed = state.failed - 1
+            GBL:AddAuditEntry(string.format(
+                "Sort: op %d confirmed by late event after timeout — reclassified as success",
+                lto.opIndex))
+            state.lastTimedOutOp = nil
+            return
+        end
         doReplan("foreign activity (unexpected event)")
         return
     end
     if slotHasAtLeast(w.tabIndex, w.slotIndex, w.itemID, w.count) then
         state.done = state.done + 1
         state.waiting = nil
+        state.lastTimedOutOp = nil
         state.opIndex = state.opIndex + 1
         state.gapUntil = GetTime() + INTER_MOVE_GAP
         step()
@@ -384,4 +415,21 @@ GBL._sortExecutorConstants = {
     INTER_MOVE_GAP = INTER_MOVE_GAP,
     MOVE_CONFIRM_TIMEOUT = MOVE_CONFIRM_TIMEOUT,
     MAX_REPLANS = MAX_REPLANS,
+    SCAN_WAIT_TIMEOUT = SCAN_WAIT_TIMEOUT,
+    LATE_ACK_GRACE = LATE_ACK_GRACE,
 }
+
+function GBL:_sortExecutorInjectTimeout(info)
+    -- Test hook: pretend op `info.opIndex` (targeting `info.dstTab`/`info.dstSlot`
+    -- with `info.itemID` x `info.count`) just timed out and its failure was
+    -- recorded. The next GUILDBANKBAGSLOTS_CHANGED will be classified as a
+    -- late ACK if the dst slot is now populated.
+    if not state then return end
+    state.failed = state.failed + 1
+    state.lastTimedOutOp = {
+        opIndex = info.opIndex,
+        dstTab = info.dstTab, dstSlot = info.dstSlot,
+        itemID = info.itemID, count = info.count,
+        at = GetTime(),
+    }
+end
