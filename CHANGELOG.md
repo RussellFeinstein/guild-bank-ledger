@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.21] — 2026-04-23
+
+### Added
+- **Capture-button diagnostics in the Layout editor.** Clicking Capture now emits a chat line at every branch: the initial click (`Capture: click on tab N...`), the guard state (`scan=true/false slots=true/false dirty=... writable=...`), and a pcall-wrapped capture attempt so an unexpected Lua error in `CaptureTabLayout` surfaces as a visible message instead of a silent failure. The success message now also reports the number of pinned slots alongside distinct items. Purpose: chase down a reported regression where Capture on a freshly-switched-to-Display tab appeared to do nothing.
+
 ## [0.29.20] — 2026-04-23
 
 ### Added

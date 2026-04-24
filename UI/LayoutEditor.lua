@@ -364,7 +364,12 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
     captureBtn:SetDisabled(not writable)
 
     local function applyCapture()
-        local captured, err = self:CaptureTabLayout(tabIndex)
+        local ok, captured, err = pcall(self.CaptureTabLayout, self, tabIndex)
+        if not ok then
+            self:Print(format("|cffff5555Capture tab %d crashed:|r %s",
+                tabIndex, tostring(captured)))  -- captured holds pcall error
+            return
+        end
         if not captured then
             self:Print(format("|cffff5555Capture tab %d failed:|r %s",
                 tabIndex, tostring(err)))
@@ -372,22 +377,35 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
         end
         local n = 0
         for _ in pairs(captured.items) do n = n + 1 end
+        local slotCount = 0
+        for _ in pairs(captured.slotOrder or {}) do slotCount = slotCount + 1 end
         draft.tabs[tabIndex] = captured
         self._layoutDirty = true
-        self:Print(format("|cff00ff88Captured tab %d:|r %d distinct item(s). " ..
-            "Click |cffffffffSave Layout|r to commit.",
-            tabIndex, n))
+        self:Print(format("|cff00ff88Captured tab %d:|r %d distinct item(s), " ..
+            "%d slot(s) pinned. Click |cffffffffSave Layout|r to commit.",
+            tabIndex, n, slotCount))
         self:RefreshLayoutTab()
     end
 
     captureBtn:SetCallback("OnClick", function()
+        -- Emit first so a silent failure mode downstream is visibly a
+        -- downstream failure, not a "click did not register" problem.
+        self:Print(format("|cff888888Capture: click on tab %d...|r", tabIndex))
         -- Guard: bank must be open so scan has real data to read.
         if not self:IsBankOpen() then
             self:Print("|cffffcc00Open the guild bank before capturing.|r")
             return
         end
+        local haveScan = self.lastScanResults and self.lastScanResults[tabIndex]
+        local haveSlots = haveScan and type(self.lastScanResults[tabIndex].slots) == "table"
+        self:Print(format(
+            "|cff888888Capture: scan=%s slots=%s dirty=%s writable=%s|r",
+            tostring(haveScan ~= nil and true or false),
+            tostring(haveSlots ~= nil and true or false),
+            tostring(self._layoutDirty and true or false),
+            tostring(writable)))
         -- Already-complete scan covering this tab? Just apply.
-        if self.lastScanResults and self.lastScanResults[tabIndex] then
+        if haveScan then
             applyCapture()
             return
         end

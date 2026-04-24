@@ -29,6 +29,14 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.21
+    {"0.29.21", "2026-04-23", {
+        Added = {
+            "Diagnostic output on the Layout editor's Capture button. When clicked, the button now always prints at least one chat line — the initial click, the guard state (scan/slots/writable), and either a success or a wrapped-pcall error message. Added to chase down a reported regression where Capture on a freshly-switched-to-Display tab looked like it was doing nothing.",
+            "Capture success message now reports both the distinct-item count and the pinned-slot count ('Captured tab 5: 34 distinct item(s), 66 slot(s) pinned') so you can tell at a glance whether slotOrder got populated from the scan.",
+        },
+    }},
+
     -- v0.29.20
     {"0.29.20", "2026-04-23", {
         Added = {
