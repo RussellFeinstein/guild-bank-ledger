@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.15] — 2026-04-23
+
+### Fixed
+- **Layout tab no longer scrolls to the top every time you press Enter in an EditBox.** The tab rebuilds itself on every edit (to keep the slot budget label, save/discard buttons, and slot map panel in sync with the draft state), but that rebuild also recreated the ScrollFrame — throwing away scroll position. Editing a Slots or Per slot value halfway down the page would jump you back to the top, making anything past the first tab untenable to configure. The ScrollFrame now persists its scroll position across rebuilds via `SetStatusTable` on a table owned by the addon, and is re-applied once the new layout settles so the user stays where they were.
+
 ## [0.29.14] — 2026-04-23
 
 ### Added

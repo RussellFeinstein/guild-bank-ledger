@@ -131,11 +131,18 @@ function GBL:BuildLayoutTab(container)
     local writable = self:HasSortAccess()
     local isGM = self:IsGuildMaster()
 
-    -- Root scroll
+    -- Root scroll. A persistent SetStatusTable lets the ScrollFrame's
+    -- scroll position survive RefreshLayoutTab rebuilds — without this,
+    -- pressing Enter on any EditBox would rebuild the whole tab and
+    -- scroll back to the top, making mid-page edits miserable.
+    if not self._layoutScrollStatus then
+        self._layoutScrollStatus = {}
+    end
     local scroll = AceGUI:Create("ScrollFrame")
     scroll:SetFullWidth(true)
     scroll:SetFullHeight(true)
     scroll:SetLayout("Flow")
+    scroll:SetStatusTable(self._layoutScrollStatus)
     container:AddChild(scroll)
     self._layoutContainer = scroll
 
@@ -249,12 +256,30 @@ function GBL:BuildLayoutTab(container)
     self:_LayoutEditor_RenderSortAccess(scroll, isGM)
 end
 
---- Re-render the Layout tab (called after save / revert / capture).
+--- Re-render the Layout tab (called after save / revert / capture /
+--- field edits). Scroll position is preserved across the rebuild via
+--- a persistent status table: the ScrollFrame reads scrollvalue from
+--- it at construction time, and we nudge it back into sync after
+--- content layout has settled (AceGUI applies scroll in LayoutFinished,
+--- so restoring on the next frame is the reliable timing).
 function GBL:RefreshLayoutTab()
     if self.activeTab ~= "layout" then return end
     if not self.tabGroup then return end
+
+    local savedScroll = self._layoutScrollStatus
+        and self._layoutScrollStatus.scrollvalue or 0
+
     self.tabGroup:ReleaseChildren()
     self:BuildLayoutTab(self.tabGroup)
+
+    if savedScroll and savedScroll > 0 and C_Timer and C_Timer.After then
+        C_Timer.After(0, function()
+            local scroll = self._layoutContainer
+            if scroll and scroll.SetScroll then
+                scroll:SetScroll(savedScroll)
+            end
+        end)
+    end
 end
 
 ------------------------------------------------------------------------

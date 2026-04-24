@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.15
+    {"0.29.15", "2026-04-23", {
+        Fixed = {
+            "Layout tab no longer scrolls to the top every time you press Enter in an edit field. The tab rebuilds on every field change (to keep the slot budget, save/discard buttons, and slot map in sync), and that rebuild was also re-creating the ScrollFrame — throwing away scroll position. Editing Slots or Per slot halfway down the page used to jump you back to the top; the ScrollFrame now persists its scroll offset across rebuilds and snaps back to where you were.",
+        },
+    }},
+
     -- v0.29.14
     {"0.29.14", "2026-04-23", {
         Added = {
