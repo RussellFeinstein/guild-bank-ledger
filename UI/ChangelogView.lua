@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.10
+    {"0.29.10", "2026-04-23", {
+        Fixed = {
+            "First bank scan after login no longer misses every item. The scanner was reading slots immediately after requesting tab data, but on first open the client has no data yet — 98 nil slots, event unregistered, real data ignored when it arrived. The scanner now waits for the server's response event before scanning, with a 3-second timeout fallback for empty tabs that don't fire the event.",
+        },
+    }},
+
     -- v0.29.9
     {"0.29.9", "2026-04-23", {
         Fixed = {

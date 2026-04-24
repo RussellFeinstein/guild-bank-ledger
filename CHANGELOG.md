@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.10] — 2026-04-23
+
+### Fixed
+- **First-bank-open scan after login no longer misses every item.** The scanner was scanning each tab immediately after calling `QueryGuildBankTab`, but on first open the client has no slot data yet — so 98 slots read as nil, the event handler was unregistered too early, and when the server's actual response arrived the scanner had already moved on. Result: the first scan after login saw the bank as empty, and the Sort tab reported everything as "missing." The scanner now waits for `GUILDBANKBAGSLOTS_CHANGED` before scanning a tab, with a 3-second timeout fallback for tabs that genuinely have nothing to send.
+
 ## [0.29.9] — 2026-04-23
 
 ### Fixed

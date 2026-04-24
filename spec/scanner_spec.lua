@@ -241,5 +241,53 @@ describe("Scanner", function()
             assert.is_not_nil(results[1].slots[1])
             assert.is_nil(results[1].slots[2])
         end)
+
+        it("waits for GUILDBANKBAGSLOTS_CHANGED before scanning (first-open safety)", function()
+            -- Regression for the v0.29.9 report: on first bank open after
+            -- login, the client has no slot data yet. The OLD scanner called
+            -- TryScanCurrentTab immediately after QueryGuildBankTab, which
+            -- read 98 nil slots, unregistered the event, and moved on — so
+            -- when the server's response actually arrived, the scanner was
+            -- no longer listening. Everything showed as "missing."
+            --
+            -- This test simulates the sequence: scan starts with NO data;
+            -- data+event arrive later; scanner must have captured it.
+            MockWoW.addTab("Tab 1", nil, true)
+            GBL:CancelPendingScan()
+            GBL.scanInProgress = false
+            GBL.bankOpen = true
+
+            -- Override QueryGuildBankTab to suppress the mock's synchronous
+            -- event firing so we can control when the "server response" happens.
+            local mockQuery = _G.QueryGuildBankTab
+            _G.QueryGuildBankTab = function(tabIndex)
+                MockWoW.guildBank.queriedTabs[tabIndex] = true
+                -- No event fired here — simulates data-not-yet-arrived.
+            end
+
+            GBL:StartFullScan()
+
+            -- Scan should still be waiting (no data, no event yet).
+            assert.is_true(GBL.scanInProgress,
+                "scan should still be in progress before data arrives")
+
+            -- Now populate data and fire the server-response event.
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+                [2] = { itemID = 101, name = "Potion", count = 5 },
+            })
+            MockAce.fireEvent("GUILDBANKBAGSLOTS_CHANGED")
+
+            -- Any chained tab-advance timers.
+            MockWoW.fireTimers()
+
+            local results = GBL:GetLastScanResults()
+            assert.is_not_nil(results)
+            assert.is_not_nil(results[1])
+            assert.equals(2, results[1].itemCount,
+                "scan should have captured the delayed data, not the empty pre-data state")
+
+            _G.QueryGuildBankTab = mockQuery
+        end)
     end)
 end)

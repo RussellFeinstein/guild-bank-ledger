@@ -218,9 +218,15 @@ function MockWoW.install()
         return tab.name, tab.icon, tab.isViewable
     end
 
-    -- Query (marks tab as ready)
+    -- Query (marks tab as ready) — simulates the server responding by firing
+    -- GUILDBANKBAGSLOTS_CHANGED synchronously. Real WoW fires this event a
+    -- short time after QueryGuildBankTab; for tests we fire immediately so
+    -- scanner flows don't need explicit event firing.
     _G.QueryGuildBankTab = function(tabIndex)
         MockWoW.guildBank.queriedTabs[tabIndex] = true
+        if _G.__MockAce_fireEvent then
+            _G.__MockAce_fireEvent("GUILDBANKBAGSLOTS_CHANGED")
+        end
     end
 
     -- Query transaction log (marks tab log as ready)
