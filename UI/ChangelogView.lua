@@ -29,6 +29,16 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.22
+    {"0.29.22", "2026-04-23", {
+        Fixed = {
+            "Late server ACKs for move ops are now reclassified correctly even when the next op is already in flight. v0.29.19 added the grace window but only fired it when no op was waiting — in a live sort the 0.3s inter-move gap means an op is almost always armed, so the grace window essentially never fired. The handler now checks both 'is this a late ACK for a timed-out prior op' and 'does this advance the current in-flight op' as independent concerns. Expected effect: cleaner audit trails (fewer 'op N timed out / op N+1 pre-check fail' cascades) and more accurate done/failed counters after a sort completes.",
+        },
+        Changed = {
+            "Removed the loud Capture-button diagnostics added in v0.29.21 now that the reported regression wasn't reproducible (it cleared on /reload). Kept the pcall-wrapped error handler and the pinned-slot count in the success message — cheap, informative, won't spam chat.",
+        },
+    }},
+
     -- v0.29.21
     {"0.29.21", "2026-04-23", {
         Added = {

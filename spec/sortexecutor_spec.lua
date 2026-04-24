@@ -215,6 +215,50 @@ describe("SortExecutor", function()
             assert.is_nil(MockWoW.cursor)
         end)
 
+        it("late ACK reclassifies even when state.waiting is armed for a subsequent op", function()
+            -- Regression for the v0.29.19 in-game failure: the late-ACK
+            -- reclassification must fire even when the next op is already
+            -- waiting on its own confirmation. In a live sort the gap
+            -- between ops is 0.3s, so state.waiting is almost never nil
+            -- when a late event arrives.
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+                [2] = { itemID = 200, name = "Vial",  count = 20 },
+            })
+            Helpers.populateTab(2, {})
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 2, dstSlot = 2, itemID = 200, count = 20 },
+                },
+            }, function(r) result = r end)
+            -- Op 1 fires synchronously; executor is now in the INTER_MOVE_GAP
+            -- pause with state.waiting=nil but state still alive and a gap
+            -- timer pending. Inject a phantom prior-op timeout whose dst is
+            -- now populated (reuse slot 2/1), and fire a stray event. The
+            -- handler must reclassify rather than trigger replan.
+            GBL:_sortExecutorInjectTimeout({
+                opIndex = 42,
+                dstTab = 2, dstSlot = 1,
+                itemID = 100, count = 20,
+            })
+            MockAce.fireEvent("GUILDBANKBAGSLOTS_CHANGED")
+            -- Advance serverTime past the inter-move gap so the rescheduled
+            -- step() timer can actually proceed when drained. Without this,
+            -- the gap timer infinite-reschedules since GetTime() is frozen.
+            MockWoW.serverTime = MockWoW.serverTime + 1.0
+            drainTimers()
+            assert.is_not_nil(result)
+            assert.is_true(result.ok, result.reason)
+            assert.equals(0, result.replans,
+                "late ACK must not trigger replan; got " .. tostring(result.replans))
+            -- Phantom op 42 reclassified as success: done = op1 + op2 + phantom = 3.
+            assert.equals(3, result.done)
+        end)
+
         it("late GUILDBANKBAGSLOTS_CHANGED after a timeout is reclassified as success", function()
             -- Regression for the in-game v0.29.18 failure: when a move op's
             -- confirming event arrives after MOVE_CONFIRM_TIMEOUT has fired,

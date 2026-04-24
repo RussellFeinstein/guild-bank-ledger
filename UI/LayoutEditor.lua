@@ -388,24 +388,13 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
     end
 
     captureBtn:SetCallback("OnClick", function()
-        -- Emit first so a silent failure mode downstream is visibly a
-        -- downstream failure, not a "click did not register" problem.
-        self:Print(format("|cff888888Capture: click on tab %d...|r", tabIndex))
         -- Guard: bank must be open so scan has real data to read.
         if not self:IsBankOpen() then
             self:Print("|cffffcc00Open the guild bank before capturing.|r")
             return
         end
-        local haveScan = self.lastScanResults and self.lastScanResults[tabIndex]
-        local haveSlots = haveScan and type(self.lastScanResults[tabIndex].slots) == "table"
-        self:Print(format(
-            "|cff888888Capture: scan=%s slots=%s dirty=%s writable=%s|r",
-            tostring(haveScan ~= nil and true or false),
-            tostring(haveSlots ~= nil and true or false),
-            tostring(self._layoutDirty and true or false),
-            tostring(writable)))
         -- Already-complete scan covering this tab? Just apply.
-        if haveScan then
+        if self.lastScanResults and self.lastScanResults[tabIndex] then
             applyCapture()
             return
         end

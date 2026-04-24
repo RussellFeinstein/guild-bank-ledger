@@ -379,40 +379,51 @@ end
 
 function GBL:_SortExecutor_OnSlotsChanged()
     if not state then return end
+
+    -- First, check if this event is the late ACK for a recently-timed-out
+    -- op. The server may have processed the move after we'd already armed
+    -- the next op's waiting state, so this check must run independent of
+    -- whether state.waiting is currently populated. Without this, the
+    -- reclassification only fires when no in-flight op exists, which is
+    -- almost never true during a live sort (the gap between ops is 0.3s).
+    local reclassified = false
+    local lto = state.lastTimedOutOp
+    if lto and (GetTime() - lto.at) <= LATE_ACK_GRACE and
+       slotHasAtLeast(lto.dstTab, lto.dstSlot, lto.itemID, lto.count) then
+        state.done = state.done + 1
+        state.failed = state.failed - 1
+        GBL:AddAuditEntry(string.format(
+            "Sort: op %d confirmed by late event after timeout — reclassified as success",
+            lto.opIndex))
+        state.lastTimedOutOp = nil
+        reclassified = true
+        -- Fall through: the same event may *also* be the ACK for the
+        -- current in-flight op, or there may be genuine foreign activity
+        -- to replan around. Don't short-circuit here.
+    end
+
     local w = state.waiting
-    if not w then
-        -- Event fired while no move is in flight. Two possibilities:
-        --  (a) Late ACK for an op that just timed out: the server eventually
-        --      processed the move, the event is arriving later than our 4s
-        --      confirmation window. If the timed-out op's dst is now populated
-        --      as expected, retroactively reclassify as success.
-        --  (b) Genuine foreign activity: another guild member touched the
-        --      bank. Replan.
-        local lto = state.lastTimedOutOp
-        if lto and (GetTime() - lto.at) <= LATE_ACK_GRACE and
-           slotHasAtLeast(lto.dstTab, lto.dstSlot, lto.itemID, lto.count) then
+    if w then
+        if slotHasAtLeast(w.tabIndex, w.slotIndex, w.itemID, w.count) then
             state.done = state.done + 1
-            state.failed = state.failed - 1
-            GBL:AddAuditEntry(string.format(
-                "Sort: op %d confirmed by late event after timeout — reclassified as success",
-                lto.opIndex))
+            state.waiting = nil
             state.lastTimedOutOp = nil
-            return
+            state.opIndex = state.opIndex + 1
+            state.gapUntil = GetTime() + INTER_MOVE_GAP
+            step()
         end
-        doReplan("foreign activity (unexpected event)")
+        -- Slot doesn't match the in-flight op yet — still mid-sequence
+        -- (pickup fired, place hasn't) or unrelated event. The
+        -- MOVE_CONFIRM_TIMEOUT handler will resolve this op if no further
+        -- event advances us.
         return
     end
-    if slotHasAtLeast(w.tabIndex, w.slotIndex, w.itemID, w.count) then
-        state.done = state.done + 1
-        state.waiting = nil
-        state.lastTimedOutOp = nil
-        state.opIndex = state.opIndex + 1
-        state.gapUntil = GetTime() + INTER_MOVE_GAP
-        step()
+
+    -- No in-flight op. If we reclassified a late ACK, the event is fully
+    -- explained. Otherwise it's genuine foreign activity → replan.
+    if not reclassified then
+        doReplan("foreign activity (unexpected event)")
     end
-    -- Slot doesn't match yet — still mid-sequence (pickup fired, place hasn't)
-    -- or foreign activity. Fallthrough: the MOVE_CONFIRM_TIMEOUT handler will
-    -- make a final decision if no further event advances us.
 end
 
 function GBL:_SortExecutor_OnFrameHide(_event, interactionType)

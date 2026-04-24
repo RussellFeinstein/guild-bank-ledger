@@ -5,6 +5,14 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.22] — 2026-04-23
+
+### Fixed
+- **Late-ACK reclassification now fires during an in-flight op, not just when idle.** v0.29.19 added the grace window but gated it on `state.waiting == nil` — which in a live sort is almost never true (the inter-move gap is 0.3s, so a delayed 4-second ACK almost always arrives while the next op is already armed). The handler now checks `lastTimedOutOp` independently of `state.waiting`, so a late server ACK retroactively reclassifies the prior op as success even if the executor has already moved on. The second-pass check for the current in-flight op runs separately, so the event still advances the plan when it confirms the current op. This should collapse the noisy "op N timed out, op N+1 pre-check fail" audit lines down to clean "op N confirmed by late event" lines on realistic sorts.
+
+### Changed
+- **Dialed back the Capture button diagnostics to happy-path-silent.** v0.29.21 added loud chat output on every Capture click to chase a reported regression (turned out to be transient UI state that cleared on /reload). The pcall-wrapped error handler and the pinned-slot count in the success message both stay — they're cheap and useful. The per-branch state prints are removed since the regression isn't reproducible.
+
 ## [0.29.21] — 2026-04-23
 
 ### Added
