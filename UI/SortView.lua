@@ -168,26 +168,38 @@ function GBL:_SortView_Preview()
         return
     end
 
-    local snapshot = self:GetLastScanResults()
-    if not snapshot then
-        local lbl = AceGUI:Create("Label")
-        lbl:SetFullWidth(true)
-        lbl:SetText("|cffffcc00No scan yet. Open the bank and click \"Scan bank\".|r")
-        content:AddChild(lbl)
-        return
-    end
+    -- During execution, the executor's state.plan is authoritative and
+    -- may have been replaced by a replan. Running a fresh PlanSort here
+    -- would compute a DIFFERENT plan than what's actually running,
+    -- misaligning every row marker and the "X / Y" counter. The cached
+    -- self._sortLastPlan is updated via the "planupdated" progress
+    -- message, so it tracks the executor's current plan 1:1 during
+    -- sorts.
+    local plan
+    if self:IsSortRunning() and self._sortLastPlan then
+        plan = self._sortLastPlan
+    else
+        local snapshot = self:GetLastScanResults()
+        if not snapshot then
+            local lbl = AceGUI:Create("Label")
+            lbl:SetFullWidth(true)
+            lbl:SetText("|cffffcc00No scan yet. Open the bank and click \"Scan bank\".|r")
+            content:AddChild(lbl)
+            return
+        end
 
-    local layout = self:GetBankLayout()
-    if not layout or not next(layout.tabs) then
-        local lbl = AceGUI:Create("Label")
-        lbl:SetFullWidth(true)
-        lbl:SetText("|cffffcc00No bank layout configured. Open the Layout tab to set one up.|r")
-        content:AddChild(lbl)
-        return
-    end
+        local layout = self:GetBankLayout()
+        if not layout or not next(layout.tabs) then
+            local lbl = AceGUI:Create("Label")
+            lbl:SetFullWidth(true)
+            lbl:SetText("|cffffcc00No bank layout configured. Open the Layout tab to set one up.|r")
+            content:AddChild(lbl)
+            return
+        end
 
-    local plan = self:PlanSort(snapshot, layout)
-    self._sortLastPlan = plan
+        plan = self:PlanSort(snapshot, layout)
+        self._sortLastPlan = plan
+    end
 
     -- Summary line
     local opsN = #(plan.ops or {})
@@ -348,6 +360,19 @@ function GBL:_SortView_OnProgress(_msg, payload)
     end
     self._sortOpStatus = self._sortOpStatus or {}
 
+    -- Replan produced a new plan — swap the cached plan, drop all
+    -- per-op status (indices now refer to different moves), and
+    -- rebuild the tab so the move list shows the actual pending work.
+    -- The rebuild uses the cached plan path in _SortView_Preview, so
+    -- we don't re-run PlanSort and diverge from what's executing.
+    if phase == "planupdated" and payload.plan then
+        self._sortLastPlan = payload.plan
+        self._sortOpStatus = {}
+        self:RefreshSortTab()
+        -- Fall through: update the progress label below with the new
+        -- total from payload.
+    end
+
     -- Update the progress label at the top of the move list.
     local text
     if phase == "finish" then
@@ -369,11 +394,18 @@ function GBL:_SortView_OnProgress(_msg, payload)
     elseif phase == "start" then
         text = format("|cffffaa55Starting|r — 0 / %d moves.", payload.total or 0)
     else
-        -- step / complete / failed / reclassify — show current progress.
-        local doneOrFailed = (payload.done or 0) + (payload.failed or 0)
+        -- step / complete / failed / reclassify / planupdated — show
+        -- position within the CURRENT plan. We deliberately don't use
+        -- (done+failed)/total here: those counters accumulate across
+        -- replans while total is the current plan's size, so the
+        -- numerator could exceed the denominator ("34/33") after a
+        -- replan reissued work.
+        local opN = payload.opIndex or 0
+        local opT = payload.total or 0
+        if opN > opT then opN = opT end  -- clamp at finish
         text = format(
-            "|cffffaa55Executing|r — %d / %d  (%d done, %d failed, %d replans)",
-            doneOrFailed, payload.total or 0,
+            "|cffffaa55Executing|r — op %d / %d  (%d done, %d failed, %d replans)",
+            opN, opT,
             payload.done or 0, payload.failed or 0, payload.replans or 0)
     end
     -- Cache the last progress text so a rebuild (from Ledger rescan,

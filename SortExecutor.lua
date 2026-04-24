@@ -226,6 +226,12 @@ local function doReplan(reason)
         state.plan = newPlan
         state.opIndex = 1
         state.waiting = nil
+        -- Broadcast the new plan so UI listeners can rebuild their move
+        -- list against the CURRENT plan, not the stale pre-replan one.
+        -- Without this, per-op row markers drift onto the wrong moves
+        -- and the progress counter references a plan the executor is
+        -- no longer working on.
+        emitProgress("planupdated", { plan = newPlan })
         -- Resume stepping.
         step()
     end

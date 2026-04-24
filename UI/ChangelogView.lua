@@ -29,6 +29,14 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.26
+    {"0.29.26", "2026-04-24", {
+        Fixed = {
+            "Sort progress counter no longer shows impossible values like '34/33' after a replan. The old display used (done+failed)/total, but done and failed accumulate across replans while total is the current plan's size, so the numerator could exceed the denominator once a replan reissued work. Switched to 'op N / T' using the executor's live op index and current-plan total — always in range and reflects 'where are we in the plan that's actually running.'",
+            "Move list and per-op status markers now realign after a replan. Previously the UI kept rendering the original plan's rows while the executor had moved on to a different post-replan plan, so row markers drifted onto the wrong moves and the counter referenced a plan that was no longer executing. SortExecutor now broadcasts the new plan via a 'planupdated' progress phase, and SortView swaps the cached plan, clears stale op markers, and rebuilds the move list to match what's actually running.",
+        },
+    }},
+
     -- v0.29.25
     {"0.29.25", "2026-04-24", {
         Fixed = {

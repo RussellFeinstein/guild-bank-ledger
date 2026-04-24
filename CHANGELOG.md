@@ -5,6 +5,12 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.26] — 2026-04-24
+
+### Fixed
+- **Sort progress counter no longer exceeds the plan total after a replan.** v0.29.23's display used `(done+failed) / total` — but `done` and `failed` accumulate across replans while `total` is the current (possibly-smaller) plan's size, so once a replan reissued work the numerator could overshoot (users saw `34/33`, `35/33`). Switched the display to `op N / T` using the executor's live `opIndex` and current-plan `total`, which is always in-range and reflects "where are we in the plan that's actually running."
+- **Move list and per-op markers now realign after a replan.** SortExecutor's `doReplan` now emits a `phase="planupdated"` progress message with the new plan right after it's built. SortView swaps the cached `_sortLastPlan` to the new plan, clears the stale `_sortOpStatus` (old indices referred to different moves), and rebuilds the move list so the displayed rows match what the executor is actually working on. During execution, `_SortView_Preview` now uses the cached plan instead of re-running `PlanSort` — otherwise a rescan-triggered rebuild could show a plan different from the one executing.
+
 ## [0.29.25] — 2026-04-24
 
 ### Fixed
