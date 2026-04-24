@@ -29,6 +29,16 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.18
+    {"0.29.18", "2026-04-23", {
+        Added = {
+            "'Unpin all slots' button on each display tab in the Layout editor. Wipes slotOrder (keeps items). Use when a captured layout is forcing new restock stacks to scatter to the end of the tab — after unpinning, the planner packs everything by adjacency at sort time.",
+            "Per-item 'Unpin' button on every item row. Clears pinned slots for just that item while the rest of the tab stays pinned. Useful for 'mostly frozen, except this one high-churn item' setups. Disabled when the item has no pinned slots.",
+            "Each item row now shows a pin count ('3 pinned' in yellow, or 'not pinned' in gray) between the = total and the action buttons, so you can see at a glance which items are fixed to positions and which aren't.",
+            "Three modes now legible in the editor: Fully pinned (Capture everything, positions locked), Fully declarative (no pins, planner places at sort time), or Mixed (pin some, let others flow). Pick the mode that matches how much you care about exact placement vs. tolerating reorganization.",
+        },
+    }},
+
     -- v0.29.17
     {"0.29.17", "2026-04-23", {
         Added = {

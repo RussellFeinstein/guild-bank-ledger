@@ -5,6 +5,19 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.18] — 2026-04-23
+
+### Added
+- **"Unpin all slots" button per display tab.** Sits next to "Capture current layout" in the Layout editor. Clicking wipes `tab.slotOrder` and leaves `items` intact — so the same item list is retained but every slot position becomes planner-decided at sort time. The intended use case (and v0.29.17 diagnostic target): you captured a tab with N items pinned to specific slots, then bumped Slots on some items to restock, and the new stacks scattered to the end of the tab instead of landing adjacent to their same-item group. One click of Unpin All lets the planner pack everything by adjacency on the next sort.
+- **Per-item "Unpin" button** on every item row in the Layout editor. Clears `slotOrder` entries just for that one item; the rest stay pinned. Useful when you want most of a captured tab frozen but one high-churn item to flow freely. Disabled when the item has no pinned slots.
+- **Pin-count label on every item row.** Between the `= N` total and the action buttons, each row now shows `N pinned` (yellow) or `not pinned` (gray) so the pin state is visible at a glance without scrolling down to the slot map.
+
+### Mode guidance
+There are now three legible modes per display tab:
+1. **Fully pinned** — `Capture` a tab; every slot is pinned to a specific item. Sort enforces exact positions. Best for tabs you've deliberately arranged and don't want shuffled.
+2. **Fully declarative** — `Capture` then `Unpin all slots`, or just `Add Item` without ever capturing. Items are listed with slot counts but no positions. Planner packs items by adjacency at sort time. Best for gem/stock tabs where you care about "these items exist" more than exact placement.
+3. **Mixed** — Capture to fix some items, then `Unpin` the rows that should flow freely. Use when a handful of items deserve fixed positions but the rest should restock cleanly.
+
 ## [0.29.17] — 2026-04-23
 
 ### Added

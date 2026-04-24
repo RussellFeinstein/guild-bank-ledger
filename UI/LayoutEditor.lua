@@ -421,6 +421,40 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
     captureHint:SetFontObject(GameFontNormalSmall)
     captureRow:AddChild(captureHint)
 
+    -- Unpin-all row. Use this when a captured tab's pins are preventing
+    -- new restock stacks from sitting adjacent to their same-item group
+    -- — wiping slotOrder drops all pins, keeps all items, and lets the
+    -- planner lay everything out via adjacency at sort time.
+    local unpinRow = AceGUI:Create("SimpleGroup")
+    unpinRow:SetFullWidth(true)
+    unpinRow:SetLayout("Flow")
+    parent:AddChild(unpinRow)
+
+    local unpinBtn = AceGUI:Create("Button")
+    unpinBtn:SetText("Unpin all slots")
+    unpinBtn:SetWidth(200)
+    unpinBtn:SetDisabled(not writable)
+    unpinBtn:SetCallback("OnClick", function()
+        tab.slotOrder = {}
+        self._layoutDirty = true
+        self:Print(format(
+            "|cff00ff88Unpinned all slots on tab %d.|r Items retained; sort will " ..
+            "place them adjacent to same-item groups at run time. " ..
+            "Click |cffffffffSave Layout|r to commit.",
+            tabIndex))
+        self:RefreshLayoutTab()
+    end)
+    unpinRow:AddChild(unpinBtn)
+
+    local unpinHint = AceGUI:Create("Label")
+    unpinHint:SetWidth(400)
+    unpinHint:SetText(
+        "|cff888888Clears pinned positions on this tab. Items stay; sort picks " ..
+        "slots at run time. Use when a captured layout is forcing new stacks " ..
+        "to scatter.|r")
+    unpinHint:SetFontObject(GameFontNormalSmall)
+    unpinRow:AddChild(unpinHint)
+
     -- Item rows table
     local totalSlots = 0
     for _, row in pairs(tab.items) do totalSlots = totalSlots + row.slots end
@@ -587,7 +621,40 @@ function GBL:_LayoutEditor_RenderItemRow(parent, tabIndex, itemID, writable)
     totalLabel:SetFontObject(GameFontNormalSmall)
     rowGroup:AddChild(totalLabel)
 
+    -- Count how many slotOrder entries pin this specific item, so the
+    -- per-item Unpin button can show the count and be disabled when
+    -- there's nothing to unpin.
+    local itemPinnedCount = 0
+    for _, pinnedID in pairs(tab.slotOrder) do
+        if pinnedID == itemID then
+            itemPinnedCount = itemPinnedCount + 1
+        end
+    end
+
+    local pinLabel = AceGUI:Create("Label")
+    pinLabel:SetWidth(100)
+    pinLabel:SetFontObject(GameFontNormalSmall)
+    if itemPinnedCount > 0 then
+        pinLabel:SetText(format("|cffffcc00%d pinned|r", itemPinnedCount))
+    else
+        pinLabel:SetText("|cff888888not pinned|r")
+    end
+    rowGroup:AddChild(pinLabel)
+
     if writable then
+        local unpinItemBtn = AceGUI:Create("Button")
+        unpinItemBtn:SetText("Unpin")
+        unpinItemBtn:SetWidth(80)
+        unpinItemBtn:SetDisabled(itemPinnedCount == 0)
+        unpinItemBtn:SetCallback("OnClick", function()
+            for s, id in pairs(tab.slotOrder) do
+                if id == itemID then tab.slotOrder[s] = nil end
+            end
+            self._layoutDirty = true
+            self:RefreshLayoutTab()
+        end)
+        rowGroup:AddChild(unpinItemBtn)
+
         local removeBtn = AceGUI:Create("Button")
         removeBtn:SetText("Remove")
         removeBtn:SetWidth(80)
