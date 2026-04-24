@@ -128,7 +128,15 @@ end
 ------------------------------------------------------------------------
 
 function GBL:PlanSort(snapshot, layout)
-    local plan = { ops = {}, deficits = {}, unplaced = {}, overflowTab = nil }
+    local plan = {
+        ops = {}, deficits = {}, unplaced = {}, overflowTab = nil,
+        -- demandMap is the authoritative expected layout: for each display
+        -- tab, a map slotIndex -> {itemID, perSlot} including both
+        -- slotOrder-pinned demands and items[id].slots extensions. Populated
+        -- at the end of Phase 1 and exposed for diagnostic / deviation
+        -- commands.
+        demandMap = {},
+    }
 
     if type(layout) ~= "table" or type(layout.tabs) ~= "table" then
         return plan
@@ -655,6 +663,14 @@ function GBL:PlanSort(snapshot, layout)
                     end
                 end
             end
+        end
+    end
+
+    -- Expose the effective demand map for diagnostics / deviation checks.
+    for tabIndex, slotMap in pairs(demandOfSlot) do
+        plan.demandMap[tabIndex] = {}
+        for s, dem in pairs(slotMap) do
+            plan.demandMap[tabIndex][s] = { itemID = dem.itemID, perSlot = dem.perSlot }
         end
     end
 

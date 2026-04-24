@@ -202,7 +202,16 @@ step = function()
     local myOpIndex = state.opIndex
 
     -- Pre-verify src: must have at least op.count of op.itemID.
-    if not slotHasAtLeast(op.srcTab, op.srcSlot, op.itemID, op.count) then
+    local srcLink = GetGuildBankItemLink(op.srcTab, op.srcSlot)
+    local srcID = srcLink and extractItemID(srcLink) or nil
+    local _, srcCount = GetGuildBankItemInfo(op.srcTab, op.srcSlot)
+    srcCount = srcCount or 0
+    if srcID ~= op.itemID or srcCount < op.count then
+        GBL:AddAuditEntry(string.format(
+            "Sort op %d/%d pre-check fail src T%d/S%d: expected it:%d x>=%d, got %s x%d",
+            myOpIndex, #state.plan.ops,
+            op.srcTab, op.srcSlot, op.itemID, op.count,
+            srcID and ("it:" .. srcID) or "empty", srcCount))
         doReplan("src mismatch at op " .. myOpIndex)
         return
     end
@@ -212,6 +221,12 @@ step = function()
     if dstLink then
         local dstID = extractItemID(dstLink)
         if dstID ~= op.itemID then
+            local _, dstCount = GetGuildBankItemInfo(op.dstTab, op.dstSlot)
+            GBL:AddAuditEntry(string.format(
+                "Sort op %d/%d pre-check fail dst T%d/S%d: expected empty or it:%d, got it:%d x%d",
+                myOpIndex, #state.plan.ops,
+                op.dstTab, op.dstSlot, op.itemID,
+                dstID, dstCount or 0))
             doReplan("dst occupied by wrong item at op " .. myOpIndex)
             return
         end
@@ -229,7 +244,6 @@ step = function()
     }
 
     -- Issue the move.
-    local _, srcCount = GetGuildBankItemInfo(op.srcTab, op.srcSlot)
     if op.op == "split" and srcCount and srcCount > op.count then
         SplitGuildBankItem(op.srcTab, op.srcSlot, op.count)
     else

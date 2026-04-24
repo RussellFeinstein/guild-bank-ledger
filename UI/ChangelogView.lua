@@ -29,6 +29,15 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.12
+    {"0.29.12", "2026-04-23", {
+        Added = {
+            "/gbl deviations (alias /gbl devs) compares the current bank to the layout's expected demand map and prints every slot that doesn't match — wrong item, wrong count, empty-where-expected, or extras in unclaimed slots.",
+            "Auto-run deviation check after Execute. The Sort tab already rescans after Execute (v0.29.9); it now also prints the deviation report when the fresh scan lands, so any mismatch between plan and result is immediately visible.",
+            "Pre-check failure audit entries now include the observed state (e.g. 'expected it:12345 x>=20, got it:99999 x10') instead of a bare 'src mismatch' message — makes it obvious whether the failure was foreign activity, a stack-size drift, or a planner bug.",
+        },
+    }},
+
     -- v0.29.11
     {"0.29.11", "2026-04-23", {
         Fixed = {

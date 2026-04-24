@@ -893,6 +893,35 @@ describe("SortPlanner", function()
         assert.is_nil(plan.deficits[100])
     end)
 
+    it("exposes plan.demandMap covering slotOrder and items.slots extensions", function()
+        -- Layout has Power at slotOrder 1-3 plus items[Power].slots=5 so Pass 2
+        -- adds two more demands (at slots 4 and 5 via right-extend). The plan's
+        -- demandMap must reflect all 5 demand positions with correct perSlot,
+        -- so /gbl deviations can compare the bank to the exact expected layout.
+        local snap = snapshot({ [1] = {}, [2] = {} })
+        local layout = {
+            tabs = {
+                [1] = displayTab(
+                    { [100] = { slots = 5, perSlot = 20 } },
+                    { [1] = 100, [2] = 100, [3] = 100 }
+                ),
+                [2] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        assert.is_table(plan.demandMap)
+        assert.is_table(plan.demandMap[1])
+        for s = 1, 5 do
+            assert.is_not_nil(plan.demandMap[1][s], "demandMap missing slot " .. s)
+            assert.equals(100, plan.demandMap[1][s].itemID)
+            assert.equals(20, plan.demandMap[1][s].perSlot)
+        end
+        -- Slot 6 and beyond aren't demanded.
+        assert.is_nil(plan.demandMap[1][6])
+        -- Overflow tab has no demands.
+        assert.is_nil(plan.demandMap[2])
+    end)
+
     it("summarizes a plan into human-readable lines", function()
         local snap = snapshot({
             [1] = { [1] = { itemID = 100, count = 20 } },

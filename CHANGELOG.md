@@ -5,6 +5,14 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.12] — 2026-04-23
+
+### Added
+- **`/gbl deviations` (alias `/gbl devs`)** compares the current bank scan to the layout's expected demand map and prints every slot that doesn't match. Three categories of deviation are reported: wrong item, wrong count (same item), and empty-where-expected; plus "extras" for items sitting in unclaimed slots. Output is capped at 40 lines so a disastrous state doesn't flood chat; full detail stays in the audit trail.
+- **Auto-run deviation check after Execute.** The Sort tab already rescans after Execute (v0.29.9); it now also runs `PrintDeviations` once the fresh scan lands, so you immediately see what didn't match without having to type the command.
+- **`plan.demandMap` exposed by `PlanSort`.** Maps `tabIndex` → `slotIndex` → `{itemID, perSlot}` for every display demand including `items[id].slots` extensions. Consumed by the deviations check and available to other diagnostics. Backward-compatible additive field; consumers that don't read it are unaffected.
+- **Pre-check failure audit entries now include the observed state.** Instead of `"Sort: replan (src mismatch at op N)"`, the audit now records `"Sort op N/M pre-check fail src T1/S5: expected it:12345 x>=20, got it:99999 x10"`. Makes it obvious whether foreign activity, a split-size drift, or a planner bug caused the replan.
+
 ## [0.29.11] — 2026-04-23
 
 ### Fixed

@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.29.11"
+local VERSION = "0.29.12"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -1660,8 +1660,125 @@ function GBL:HandleSlashCommand(input)
     elseif command == "sortcancel" then
         self:CancelSortExecution()
         self:Print("Sort cancellation requested.")
+    elseif command == "deviations" or command == "devs" then
+        self:PrintDeviations()
     else
         self:Print("Unknown command: " .. command .. ". Type /gbl help for usage.")
+    end
+end
+
+--- Compare the current bank scan against the layout's expected demand map
+-- and print every mismatch. Useful after a sort to confirm the result, or
+-- before a sort to see what's deviant. Uses the same expected layout the
+-- planner does (including items[id].slots extensions beyond slotOrder).
+function GBL:PrintDeviations()
+    if not self.PlanSort then
+        self:Print("SortPlanner not loaded.")
+        return
+    end
+    local snapshot = self:GetLastScanResults()
+    if not snapshot then
+        self:Print("No scan yet. Open the bank and run /gbl scan first.")
+        return
+    end
+    local layout = self:GetBankLayout()
+    if not layout or not next(layout.tabs) then
+        self:Print("No bank layout configured.")
+        return
+    end
+
+    local plan = self:PlanSort(snapshot, layout)
+    local expected = plan.demandMap or {}
+
+    -- Ignore tabs are excluded from comparison; they're never touched by sort.
+    local ignoreSet = {}
+    for tabIndex, tab in pairs(layout.tabs) do
+        if tab.mode == "ignore" then ignoreSet[tabIndex] = true end
+    end
+
+    local function slotActual(tabIndex, slotIndex)
+        local tr = snapshot[tabIndex]
+        local s = tr and tr.slots and tr.slots[slotIndex]
+        if not s then return nil, 0 end
+        local id = s.itemLink and s.itemLink:match("Hitem:(%d+)")
+        id = id and tonumber(id) or nil
+        return id, s.count or 0
+    end
+
+    local function itemName(itemID)
+        if GBL.GetCachedItemInfo then
+            local n = self:GetCachedItemInfo(itemID)
+            if n then return n .. " (id " .. itemID .. ")" end
+        end
+        return "item:" .. tostring(itemID)
+    end
+
+    local mismatches, extras, missingEmpty, wrongCount = 0, 0, 0, 0
+    local lines = {}
+    -- Sort tabs ascending so output is predictable.
+    local tabs = {}
+    for t in pairs(layout.tabs) do table.insert(tabs, t) end
+    table.sort(tabs)
+    for _, tabIndex in ipairs(tabs) do
+        if not ignoreSet[tabIndex] then
+            local tab = layout.tabs[tabIndex]
+            local expectedSlots = expected[tabIndex]
+            if tab.mode == "display" and expectedSlots then
+                for s = 1, MAX_GUILDBANK_SLOTS_PER_TAB or 98 do
+                    local exp = expectedSlots[s]
+                    local actualID, actualCount = slotActual(tabIndex, s)
+                    if exp then
+                        if not actualID then
+                            table.insert(lines, string.format(
+                                "  T%d/S%d  expected %s x%d, EMPTY",
+                                tabIndex, s, itemName(exp.itemID), exp.perSlot))
+                            missingEmpty = missingEmpty + 1
+                            mismatches = mismatches + 1
+                        elseif actualID ~= exp.itemID then
+                            table.insert(lines, string.format(
+                                "  T%d/S%d  expected %s x%d, got %s x%d",
+                                tabIndex, s, itemName(exp.itemID), exp.perSlot,
+                                itemName(actualID), actualCount))
+                            mismatches = mismatches + 1
+                        elseif actualCount ~= exp.perSlot then
+                            table.insert(lines, string.format(
+                                "  T%d/S%d  expected %s x%d, count is x%d",
+                                tabIndex, s, itemName(exp.itemID), exp.perSlot, actualCount))
+                            wrongCount = wrongCount + 1
+                            mismatches = mismatches + 1
+                        end
+                    else
+                        if actualID then
+                            table.insert(lines, string.format(
+                                "  T%d/S%d  unclaimed, holds %s x%d (extra)",
+                                tabIndex, s, itemName(actualID), actualCount))
+                            extras = extras + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    self:Print(string.format("|cffffcc00Deviation check:|r %d mismatch(es), %d extra(s)",
+        mismatches, extras))
+    if mismatches > 0 then
+        self:Print(string.format("  breakdown: %d empty (should hold item), %d wrong count, %d wrong item",
+            missingEmpty, wrongCount,
+            mismatches - missingEmpty - wrongCount))
+    end
+    if #lines == 0 then
+        self:Print("  |cff00ff88Bank matches layout exactly.|r")
+        return
+    end
+    -- Cap output so a disastrous state doesn't flood chat.
+    local cap = 40
+    for i = 1, math.min(cap, #lines) do
+        self:Print(lines[i])
+    end
+    if #lines > cap then
+        self:Print(string.format("  ... and %d more (output capped at %d lines; run /gbl synclog for the audit trail)",
+            #lines - cap, cap))
     end
 end
 

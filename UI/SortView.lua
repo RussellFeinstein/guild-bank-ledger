@@ -260,6 +260,9 @@ end
 
 --- Trigger a fresh bank scan and refresh the Sort tab when it completes.
 -- Used after Execute so Preview always reflects the post-sort snapshot.
+-- Also runs a deviation check (chat print) so the user sees exactly what
+-- didn't match the layout — useful for catching executor failures or
+-- planner-demand mismatches that otherwise would be invisible.
 function GBL:_SortView_RescanAndRefresh()
     self._sortViewRescanning = true
     self._sortLastPlan = nil
@@ -279,6 +282,12 @@ function GBL:_SortView_RescanAndRefresh()
         if not self.scanInProgress then
             self._sortViewRescanning = false
             self:RefreshSortTab()
+            -- Post-sort deviation check: highlights any slot that didn't
+            -- land as the planner expected. Prints to chat so it ends up
+            -- in the audit trail / combat log for later inspection.
+            if self.PrintDeviations then
+                self:PrintDeviations()
+            end
         elseif GetTime() < deadline then
             C_Timer.After(0.25, poll)
         else
