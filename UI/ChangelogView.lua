@@ -29,6 +29,14 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.20
+    {"0.29.20", "2026-04-23", {
+        Added = {
+            "Timeout-time diagnostics in the sort executor. When an op times out, the audit trail now dumps a classification ([none] / [partial] / [complete] / [other]), the op's full details, and the observed live state of the source/destination slots and cursor. This distinguishes 'server dropped the request,' 'pickup worked but drop didn't,' and 'move completed but ACK was lost' cases without needing to re-run the sort.",
+            "Pre-check failures on destination slot mismatches now also log the op's full context (src/dst tab+slot, itemID, count), making it legible in the audit trail why a replan was triggered and what op the planner scheduled there.",
+        },
+    }},
+
     -- v0.29.19
     {"0.29.19", "2026-04-23", {
         Fixed = {

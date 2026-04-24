@@ -59,6 +59,38 @@ local function slotHasAtLeast(tabIndex, slotIndex, itemID, count)
     return (c or 0) >= count
 end
 
+--- Describe the current contents of a bank slot as a short string for audit:
+--- "empty", "it:NNN x<count>", or "err" on missing data.
+local function describeSlot(tabIndex, slotIndex)
+    local link = GetGuildBankItemLink(tabIndex, slotIndex)
+    if not link then return "empty" end
+    local id = extractItemID(link)
+    local _, c = GetGuildBankItemInfo(tabIndex, slotIndex)
+    return string.format("it:%s x%d", tostring(id or "?"), c or 0)
+end
+
+--- Classify a timeout's observed src/dst/cursor state into one of:
+--- "none"    — src unchanged, dst empty (server dropped the request outright)
+--- "partial" — src emptied, cursor holds item (pickup done, drop never landed)
+--- "complete"— src drained, dst has expected item (move succeeded, ACK lost)
+--- "other"   — some other anomalous combination
+local function classifyTimeoutState(op, srcDesc, dstDesc, cursorHasItem)
+    local srcExpected = string.format("it:%d x", op.itemID)  -- prefix match
+    local srcHasExpected = srcDesc:find(srcExpected, 1, true) == 1
+    local dstHasExpected = dstDesc:find(srcExpected, 1, true) == 1
+    local srcEmpty = (srcDesc == "empty")
+    local dstEmpty = (dstDesc == "empty")
+    if srcHasExpected and dstEmpty and not cursorHasItem then
+        return "none"
+    elseif srcEmpty and cursorHasItem then
+        return "partial"
+    elseif srcEmpty and dstHasExpected and not cursorHasItem then
+        return "complete"
+    else
+        return "other"
+    end
+end
+
 ------------------------------------------------------------------------
 -- State
 ------------------------------------------------------------------------
@@ -231,6 +263,11 @@ step = function()
                 myOpIndex, #state.plan.ops,
                 op.dstTab, op.dstSlot, op.itemID,
                 dstID, dstCount or 0))
+            GBL:AddAuditEntry(string.format(
+                "  op %d was: %s T%d/S%d -> T%d/S%d it:%d x%d",
+                myOpIndex, op.op or "move",
+                op.srcTab, op.srcSlot, op.dstTab, op.dstSlot,
+                op.itemID, op.count))
             doReplan("dst occupied by wrong item at op " .. myOpIndex)
             return
         end
@@ -310,9 +347,24 @@ step = function()
                 itemID = op.itemID, count = op.count,
                 at = GetTime(),
             }
-            GBL:AddAuditEntry(
-                string.format("Sort: op %d timed out (no confirm within %ds)",
-                    myOpIndex, MOVE_CONFIRM_TIMEOUT))
+            -- Dump live state so the audit trail reveals WHY the timeout
+            -- fired — did the move never happen, partially happen (pickup
+            -- done, drop failed), or fully happen with a silent ACK?
+            local srcDesc = describeSlot(op.srcTab, op.srcSlot)
+            local dstDesc = describeSlot(op.dstTab, op.dstSlot)
+            local cursorHas = _G.CursorHasItem and _G.CursorHasItem() or false
+            local class = classifyTimeoutState(op, srcDesc, dstDesc, cursorHas)
+            GBL:AddAuditEntry(string.format(
+                "Sort: op %d timed out (no confirm within %ds) [%s]",
+                myOpIndex, MOVE_CONFIRM_TIMEOUT, class))
+            GBL:AddAuditEntry(string.format(
+                "  op %d was: %s T%d/S%d -> T%d/S%d it:%d x%d",
+                myOpIndex, op.op or "move",
+                op.srcTab, op.srcSlot, op.dstTab, op.dstSlot,
+                op.itemID, op.count))
+            GBL:AddAuditEntry(string.format(
+                "  observed: src %s, dst %s, cursor %s",
+                srcDesc, dstDesc, cursorHas and "held" or "empty"))
         end
         state.waiting = nil
         state.opIndex = myOpIndex + 1

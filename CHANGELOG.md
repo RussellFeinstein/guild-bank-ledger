@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.20] — 2026-04-23
+
+### Added
+- **Timeout-time state diagnostics in SortExecutor.** When a move op times out, the audit trail now dumps three extra lines per timeout: (1) a one-word classification — `[none]` (move never executed), `[partial]` (pickup done, drop failed), `[complete]` (move succeeded, ACK was lost), or `[other]` (anomalous); (2) the full op details (src/dst tab+slot, itemID, count, op type); (3) observed live state of src, dst, and cursor. Purpose: distinguish server-drop vs. late-ACK vs. cursor-leak scenarios without round-tripping for more data. Also added the same op-details line to dst-mismatch pre-check failures so the cascading-replan case is legible in the audit trail.
+
 ## [0.29.19] — 2026-04-23
 
 ### Fixed
