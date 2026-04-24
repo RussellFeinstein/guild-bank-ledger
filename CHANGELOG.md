@@ -5,6 +5,13 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.17] — 2026-04-23
+
+### Added
+- **Demand origin tracking in SortPlanner.** Each demand now carries an `origin` field — one of `"pinned"` (slotOrder entry from Capture), `"extend-right"` / `"extend-left"` (Pass 2a adjacency extension from a pinned claim), or `"first-empty"` (Pass 2b fallback when no adjacency is possible). Exposed on `plan.demandMap[tabIndex][slotIndex].origin`. The gem-tab restock pattern — pinned gems forcing new stacks to scatter to the end of the tab — is now visible in diagnostics as a high first-empty count alongside a high pinned count.
+- **`/gbl sortpreview` per-tab origin breakdown.** After the `Plan: N moves, …` line, each display tab prints `T2 origins: 47 pinned + 3 auto-placed (0 extend-right, 0 extend-left, 3 first-empty)`. Each planned-move line is now annotated with `(dst pinned)` / `(dst extend-right)` / etc. so you can trace why each move lands where it lands.
+- **Layout editor slot map header shows the three-way split.** Previous wording `"98/98 pinned"` is replaced with `"47 pinned + 3 auto-placed; 48 empty"`. The per-item line under "auto-placed at sort time" now distinguishes `(3 auto-placed)` from `(1 pinned + 3 auto-placed)` — the second form is the gem-tab pattern where an item has captured stacks plus new ones.
+
 ## [0.29.16] — 2026-04-23
 
 ### Fixed

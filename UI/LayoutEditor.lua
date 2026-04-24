@@ -671,15 +671,18 @@ function GBL:_LayoutEditor_RenderSlotMap(parent, tabIndex)
     heading:SetText("Slot map")
     parent:AddChild(heading)
 
-    -- Header summary line.
+    -- Header summary line: decompose into pinned / auto-placed / empty.
+    -- Before v0.29.17 this just showed "N/98 pinned" which was ambiguous
+    -- for mixed tabs (e.g. captured gem tab with restock bumps added on
+    -- top — the diagnostic now shows exactly how many demands are fixed
+    -- to slots vs how many the planner will scatter).
     local summary = AceGUI:Create("Label")
     summary:SetFullWidth(true)
     summary:SetFontObject(GameFontNormalSmall)
-    local parts = { format("%d/%d pinned", totalPinned, MAX_SLOTS) }
-    if totalUnpinned > 0 then
-        parts[#parts] = parts[#parts]
-            .. format(" (%d auto-placed at sort time)", totalUnpinned)
-    end
+    local emptySlots = MAX_SLOTS - totalPinned - totalUnpinned
+    if emptySlots < 0 then emptySlots = 0 end  -- over-budget layouts
+    local parts = { format("%d pinned + %d auto-placed; %d empty",
+        totalPinned, totalUnpinned, emptySlots) }
     if scanSlots then
         if totalMismatches == 0 then
             table.insert(parts, "|cff00ff88matches current bank|r")
@@ -766,11 +769,23 @@ function GBL:_LayoutEditor_RenderSlotMap(parent, tabIndex)
         for _, id in ipairs(sortedIDs) do
             local itemRow = items[id]
             local perSlot = (itemRow and itemRow.perSlot) or 0
+            local pinned = pinnedByItem[id] or 0
             local line = AceGUI:Create("Label")
             line:SetFullWidth(true)
             line:SetFontObject(GameFontNormalSmall)
-            line:SetText(format("    %s × %d  (%d slot(s))",
-                itemLabelFor(id), perSlot, unpinnedByItem[id]))
+            local suffix
+            if pinned > 0 then
+                -- Mixed item: some stacks pinned from Capture, rest are
+                -- new (restock increase). This is the gem-tab pattern —
+                -- surface it so the user can see pinned positions are
+                -- forcing new stacks to scatter.
+                suffix = format("(%d pinned + %d auto-placed)",
+                    pinned, unpinnedByItem[id])
+            else
+                suffix = format("(%d auto-placed)", unpinnedByItem[id])
+            end
+            line:SetText(format("    %s × %d  %s",
+                itemLabelFor(id), perSlot, suffix))
             parent:AddChild(line)
         end
     end

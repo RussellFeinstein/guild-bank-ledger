@@ -922,6 +922,45 @@ describe("SortPlanner", function()
         assert.is_nil(plan.demandMap[2])
     end)
 
+    it("tags demand origins so diagnostics can distinguish pinned/extended/first-empty (v0.29.17)", function()
+        -- Covers all four origin values in one plan:
+        --   * Slots 1, 3, 4, 6: slotOrder-pinned by Pass 1 -> "pinned".
+        --   * Slot 7: item 500 slots=2, pin at 6, Pass 2a right-extend ->
+        --     "extend-right".
+        --   * Slot 2: item 200 slots=2, pin at 3. Right side (slot 4) is
+        --     pinned to item 300 so extend-right is blocked; Pass 2a
+        --     extend-left claims slot 2 -> "extend-left".
+        --   * Slot 5: item 400 has no pinned claim anywhere. Pass 2a
+        --     right/left extend both skip (no existing claim to extend
+        --     from). Pass 2b fallback picks slot 5 (first unused slot
+        --     after claims at 1-4 and 6) -> "first-empty".
+        local snap = snapshot({ [1] = {}, [2] = {} })
+        local layout = {
+            tabs = {
+                [1] = displayTab(
+                    {
+                        [100] = { slots = 1, perSlot = 20 },
+                        [200] = { slots = 2, perSlot = 20 },  -- extend-left
+                        [300] = { slots = 1, perSlot = 20 },
+                        [400] = { slots = 1, perSlot = 20 },  -- first-empty
+                        [500] = { slots = 2, perSlot = 20 },  -- extend-right
+                    },
+                    { [1] = 100, [3] = 200, [4] = 300, [6] = 500 }
+                ),
+                [2] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        local m = plan.demandMap[1]
+        assert.equals("pinned",       m[1].origin)
+        assert.equals("extend-left",  m[2].origin)
+        assert.equals("pinned",       m[3].origin)
+        assert.equals("pinned",       m[4].origin)
+        assert.equals("first-empty",  m[5].origin)
+        assert.equals("pinned",       m[6].origin)
+        assert.equals("extend-right", m[7].origin)
+    end)
+
     it("plans items-only layouts identically to heuristically pre-pinned slotOrder (v0.29.13)", function()
         -- After v0.29.13, Add Item and slots-up no longer populate slotOrder —
         -- only Capture does. This test verifies that a layout with items set

@@ -201,7 +201,8 @@ function GBL:PlanSort(snapshot, layout)
 
         -- Pass 1: emit demands from slotOrder positions, capped per item at
         -- items[id].slots (ignore surplus slotOrder entries if the user
-        -- reduced Slots below the captured count).
+        -- reduced Slots below the captured count). These are the "pinned"
+        -- demands — placement comes from an explicit user action (Capture).
         local emitted = {}
         for slotIndex = 1, MAX_SLOTS do
             local itemID = slotOrder[slotIndex]
@@ -210,6 +211,7 @@ function GBL:PlanSort(snapshot, layout)
                 local dem = {
                     tabIndex = tabIndex, slotIndex = slotIndex,
                     itemID = itemID, perSlot = row.perSlot, filled = 0,
+                    origin = "pinned",
                 }
                 table.insert(demands, dem)
                 demandOfSlot[tabIndex][slotIndex] = dem
@@ -243,10 +245,11 @@ function GBL:PlanSort(snapshot, layout)
         for id in pairs(items) do table.insert(sortedIDs, id) end
         table.sort(sortedIDs)
 
-        local function addDemandAt(s, itemID, row)
+        local function addDemandAt(s, itemID, row, origin)
             local dem = {
                 tabIndex = tabIndex, slotIndex = s,
                 itemID = itemID, perSlot = row.perSlot, filled = 0,
+                origin = origin,
             }
             table.insert(demands, dem)
             demandOfSlot[tabIndex][s] = dem
@@ -278,25 +281,28 @@ function GBL:PlanSort(snapshot, layout)
                     -- group starts there.
                     while need > 0 and hi >= 1 and hi < MAX_SLOTS
                           and not usedSlots[hi + 1] do
-                        addDemandAt(hi + 1, itemID, row)
+                        addDemandAt(hi + 1, itemID, row, "extend-right")
                         need = need - 1
                         hi = hi + 1
                     end
                     while need > 0 and lo <= MAX_SLOTS and lo > 1
                           and not usedSlots[lo - 1] do
-                        addDemandAt(lo - 1, itemID, row)
+                        addDemandAt(lo - 1, itemID, row, "extend-left")
                         need = need - 1
                         lo = lo - 1
                     end
 
                     -- Phase 2b — fall back to any unclaimed slot (used
                     -- only when the item has no existing claim to extend
-                    -- from, or both ends are blocked).
+                    -- from, or both ends are blocked). This is the path
+                    -- that scatters restock stacks to the end of a dense
+                    -- captured tab — surfacing it as a distinct origin
+                    -- lets diagnostics flag it specifically.
                     if need > 0 then
                         for s = 1, MAX_SLOTS do
                             if need <= 0 then break end
                             if not usedSlots[s] then
-                                addDemandAt(s, itemID, row)
+                                addDemandAt(s, itemID, row, "first-empty")
                                 need = need - 1
                             end
                         end
@@ -667,10 +673,17 @@ function GBL:PlanSort(snapshot, layout)
     end
 
     -- Expose the effective demand map for diagnostics / deviation checks.
+    -- `origin` is one of "pinned" | "extend-right" | "extend-left" |
+    -- "first-empty" so callers can see why each demand is at its slot
+    -- (Capture vs adjacency extension vs first-empty fallback).
     for tabIndex, slotMap in pairs(demandOfSlot) do
         plan.demandMap[tabIndex] = {}
         for s, dem in pairs(slotMap) do
-            plan.demandMap[tabIndex][s] = { itemID = dem.itemID, perSlot = dem.perSlot }
+            plan.demandMap[tabIndex][s] = {
+                itemID = dem.itemID,
+                perSlot = dem.perSlot,
+                origin = dem.origin,
+            }
         end
     end
 
@@ -686,11 +699,22 @@ function GBL:SummarizeSortPlan(plan)
     if not plan then
         return { "No plan." }
     end
+    local demandMap = plan.demandMap or {}
     for _, op in ipairs(plan.ops or {}) do
+        -- Annotate each op with the destination demand's origin so
+        -- /gbl sortpreview output shows why each move lands where
+        -- (pinned vs planner-placed via adjacency or first-empty).
+        -- Ops targeting overflow or a pivot slot have no dst demand
+        -- and render without a suffix.
+        local dstDem = demandMap[op.dstTab] and demandMap[op.dstTab][op.dstSlot]
+        local suffix = ""
+        if dstDem and dstDem.origin then
+            suffix = "  (dst " .. dstDem.origin .. ")"
+        end
         table.insert(lines, string.format(
-            "%s %d x item:%d  T%d/%d -> T%d/%d",
+            "%s %d x item:%d  T%d/%d -> T%d/%d%s",
             op.op, op.count, op.itemID,
-            op.srcTab, op.srcSlot, op.dstTab, op.dstSlot))
+            op.srcTab, op.srcSlot, op.dstTab, op.dstSlot, suffix))
     end
     for itemID, count in pairs(plan.deficits or {}) do
         table.insert(lines, string.format("deficit: %d x item:%d (need more)", count, itemID))

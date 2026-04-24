@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.29.16"
+local VERSION = "0.29.17"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -1917,6 +1917,33 @@ function GBL:PrintSortPreview()
     local unpN = #(plan.unplaced or {})
     self:Print(format("  Plan: %d moves, %d deficits, %d unplaced",
         opsN, defN, unpN))
+
+    -- Per-tab origin breakdown (v0.29.17 diagnostics): shows how many
+    -- demands per display tab are pinned (from Capture) vs auto-placed
+    -- (extended adjacent to a pin, or first-empty fallback). A big
+    -- first-empty count alongside many pinned demands is the gem-tab
+    -- restock pattern — new stacks landing at the end of the tab
+    -- because their item's pin has no room to extend.
+    local orderedTabs = {}
+    for t in pairs(plan.demandMap or {}) do table.insert(orderedTabs, t) end
+    table.sort(orderedTabs)
+    for _, t in ipairs(orderedTabs) do
+        local c = { pinned = 0, extR = 0, extL = 0, firstE = 0 }
+        for _, dem in pairs(plan.demandMap[t]) do
+            if     dem.origin == "pinned"       then c.pinned = c.pinned + 1
+            elseif dem.origin == "extend-right" then c.extR   = c.extR + 1
+            elseif dem.origin == "extend-left"  then c.extL   = c.extL + 1
+            elseif dem.origin == "first-empty"  then c.firstE = c.firstE + 1
+            end
+        end
+        local auto = c.extR + c.extL + c.firstE
+        if c.pinned + auto > 0 then
+            self:Print(format(
+                "  T%d origins: %d pinned + %d auto-placed (%d extend-right, %d extend-left, %d first-empty)",
+                t, c.pinned, auto, c.extR, c.extL, c.firstE))
+        end
+    end
+
     if opsN == 0 and defN == 0 and unpN == 0 then
         if totalDemands == 0 then
             self:Print("  |cffffaa55Reason: layout has no display-tab demands — no template to sort toward. " ..

@@ -29,6 +29,15 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.17
+    {"0.29.17", "2026-04-23", {
+        Added = {
+            "Demand origin tracking in the sort planner. Each demand is tagged 'pinned' (from Capture), 'extend-right' / 'extend-left' (planner adjacency), or 'first-empty' (fallback when no adjacency is possible). The gem-tab restock pattern — pinned captures forcing new stacks to scatter — is now visible in diagnostics as a high first-empty count alongside many pinned demands.",
+            "/gbl sortpreview now breaks down each display tab's demands by origin (pinned / auto-placed / extend-right / extend-left / first-empty) and annotates each planned move line with its destination origin so you can trace why each move lands where it lands.",
+            "Layout editor slot map header now shows 'N pinned + M auto-placed; K empty' instead of just 'N/98 pinned.' The per-item 'auto-placed at sort time' list distinguishes all-new items from mixed ones ('1 pinned + 3 auto-placed') — the second form is the gem-tab pattern where Capture locked in old stacks and a later Slots bump added new ones.",
+        },
+    }},
+
     -- v0.29.16
     {"0.29.16", "2026-04-23", {
         Fixed = {
