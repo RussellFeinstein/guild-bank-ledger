@@ -5,6 +5,13 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.11] — 2026-04-23
+
+### Fixed
+- **Sort now keeps each item's span contiguous in the display tab.** When `items[id].slots` exceeded the captured `slotOrder` entries (e.g., you captured 25 slots and then edited Slots up to 49), the planner's Pass 2 used to fill "first unclaimed slot" and could land items in the middle of another item's section depending on itemID ordering. The planner now extends an item's contiguous group RIGHT first, then LEFT, only falling back to arbitrary empty slots when both ends are blocked. Result: a group that started at 50-74 grows to 50-98 before it ever reaches back to slot 49.
+- **Overflow (stock) tab stays organized by item.** Before, spills routed to the first empty overflow slot regardless of what was next to it — a stray Power Potion would land between a Health block and whatever else was in stock. The planner now prefers slots adjacent to existing same-item stacks (right-extend first, then left-extend), so stock grows by item group instead of filling the next free slot.
+- **Layout editor's Add Item and Slots field apply the same adjacency rule.** New item rows and Slots-increase edits now extend the item's contiguous group instead of picking the first empty slotOrder position. Keeps saved layouts neat without requiring a recapture.
+
 ## [0.29.10] — 2026-04-23
 
 ### Fixed

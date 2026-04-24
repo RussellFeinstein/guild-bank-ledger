@@ -730,6 +730,103 @@ describe("SortPlanner", function()
         assert.is_nil(plan.deficits[100])
     end)
 
+    it("extends Pass 2 demands contiguously adjacent to same-item claims", function()
+        -- Two items, Power (lower ID) and Health. slotOrder captures only
+        -- half of each — Power at 1-25, Health at 50-74. items[].slots say
+        -- 49 each. Before the adjacency fix, Pass 2 iterated lower-ID first
+        -- and filled "first unclaimed" (26-49 for Power, 75-98 for Health
+        -- — which coincidentally came out neat). Swap IDs though and the
+        -- lower-ID item (Health) would grab 26-49, fragmenting the sections
+        -- to Power at 1-25 + 75-98 and Health at 26-49 + 50-74.
+        --
+        -- This test uses Health as the lower ID to verify the adjacency
+        -- extension keeps each item's group contiguous regardless of ID
+        -- ordering: Health stays at 50-98 (extending upward from 50-74),
+        -- Power stays at 1-49 (extending upward from 1-25).
+        local snap = snapshot({
+            [1] = {}, [2] = {},  -- empty; irrelevant for this demand test
+        })
+        local layout = {
+            tabs = {
+                [1] = displayTab(
+                    {
+                        [100] = { slots = 49, perSlot = 20 },  -- Health (low ID)
+                        [200] = { slots = 49, perSlot = 20 },  -- Power (high ID)
+                    },
+                    (function()
+                        local so = {}
+                        for s = 1, 25 do so[s] = 200 end    -- Power at 1-25
+                        for s = 50, 74 do so[s] = 100 end   -- Health at 50-74
+                        return so
+                    end)()
+                ),
+                [2] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+
+        -- The plan has no ops (no supplies) but plenty of deficits. The
+        -- assertion we care about is that the planner's demand set placed
+        -- each item contiguously. Pull it back out via deficits' slot
+        -- mapping — but PlanSort doesn't expose demand positions directly,
+        -- so inspect the Phase 3 sweep's effect instead: there is none,
+        -- since the bank is empty. Instead, synthesize a bank that fills
+        -- the expected demand positions and re-plan: if they're truly
+        -- contiguous, the plan will be a full keep-set with zero ops.
+        -- (Test this by placing Power at 1-49 and Health at 50-98 in the
+        -- bank and confirming the planner treats every slot as a keep.)
+        local snap2 = snapshot({
+            [1] = (function()
+                local s = {}
+                for i = 1, 49 do s[i] = { itemID = 200, count = 20 } end
+                for i = 50, 98 do s[i] = { itemID = 100, count = 20 } end
+                return s
+            end)(),
+            [2] = {},
+        })
+        local plan2 = GBL:PlanSort(snap2, layout)
+        assert.equals(0, #plan2.ops,
+            "Power 1-49 + Health 50-98 should match the extended slotOrder with zero ops")
+        assert.is_nil(plan2.deficits[100])
+        assert.is_nil(plan2.deficits[200])
+    end)
+
+    it("groups overflow spills next to existing same-item stacks", function()
+        -- Overflow already has Power at slot 1 and Health at slot 50.
+        -- Two display tabs spill orphan stacks: Power at (2, 5) and
+        -- Health at (2, 6). Before the adjacency fix, both spills went
+        -- to "first empty" — slots 2 and 3 of overflow, interleaving with
+        -- whatever came first. With the fix, Power lands adjacent to the
+        -- existing Power (slot 2), Health adjacent to the existing Health
+        -- (slot 51).
+        local snap = snapshot({
+            [1] = {},
+            [2] = {
+                [5] = { itemID = 100, count = 5 },   -- orphan Power
+                [6] = { itemID = 200, count = 5 },   -- orphan Health
+            },
+            [3] = {
+                [1]  = { itemID = 100, count = 200 },
+                [50] = { itemID = 200, count = 200 },
+            },
+        })
+        local layout = {
+            tabs = {
+                [1] = displayTab({}, {}),
+                [2] = displayTab({}, {}),
+                [3] = overflow(),
+            },
+        }
+        local plan = GBL:PlanSort(snap, layout)
+        local final = applyPlan(snap, plan)
+        -- Power spill lands adjacent to overflow slot 1 (i.e. slot 2).
+        assert.is_not_nil(final[3][2])
+        assert.equals(100, final[3][2].itemID)
+        -- Health spill lands adjacent to overflow slot 50 (i.e. slot 51).
+        assert.is_not_nil(final[3][51])
+        assert.equals(200, final[3][51].itemID)
+    end)
+
     it("caps demands at items[id].slots even when slotOrder has too many entries", function()
         -- Converse: user reduced Slots via the UI from 5 to 3, but slotOrder
         -- still has 5 X entries (UI now syncs slotOrder on edit, but older

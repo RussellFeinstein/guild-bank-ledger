@@ -211,33 +211,86 @@ function GBL:PlanSort(snapshot, layout)
 
         -- Pass 2: for any items[id].slots that exceeds emitted count (user
         -- increased Slots via the UI but slotOrder wasn't extended), add
-        -- extra demands at the first unclaimed slot indices. Deterministic
-        -- iteration over sorted itemIDs so the resulting positions are
-        -- stable across planner runs.
+        -- extra demands preferring slots adjacent to existing same-item
+        -- demands. This keeps each item's claim contiguous so the planned
+        -- layout looks neat (no Health demand landing in the middle of a
+        -- Power section just because that gap happened to come first).
+        -- Deterministic iteration over sorted itemIDs so positions are
+        -- stable across runs.
         local usedSlots = {}
         for s = 1, MAX_SLOTS do
             if demandOfSlot[tabIndex][s] then usedSlots[s] = true end
         end
+        -- claimedByItem[item][s] = true when s is a demand position for item.
+        -- We mutate this as we extend so each iteration sees prior additions.
+        local claimedByItem = {}
+        for s = 1, MAX_SLOTS do
+            local d = demandOfSlot[tabIndex][s]
+            if d then
+                claimedByItem[d.itemID] = claimedByItem[d.itemID] or {}
+                claimedByItem[d.itemID][s] = true
+            end
+        end
         local sortedIDs = {}
         for id in pairs(items) do table.insert(sortedIDs, id) end
         table.sort(sortedIDs)
+
+        local function addDemandAt(s, itemID, row)
+            local dem = {
+                tabIndex = tabIndex, slotIndex = s,
+                itemID = itemID, perSlot = row.perSlot, filled = 0,
+            }
+            table.insert(demands, dem)
+            demandOfSlot[tabIndex][s] = dem
+            usedSlots[s] = true
+            claimedByItem[itemID] = claimedByItem[itemID] or {}
+            claimedByItem[itemID][s] = true
+            emitted[itemID] = (emitted[itemID] or 0) + 1
+        end
+
         for _, itemID in ipairs(sortedIDs) do
             local row = items[itemID]
             if type(row) == "table" and type(row.slots) == "number" then
                 local need = row.slots - (emitted[itemID] or 0)
                 if need > 0 then
+                    local myClaims = claimedByItem[itemID] or {}
+                    local hi, lo = 0, MAX_SLOTS + 1
                     for s = 1, MAX_SLOTS do
-                        if need <= 0 then break end
-                        if not usedSlots[s] then
-                            local dem = {
-                                tabIndex = tabIndex, slotIndex = s,
-                                itemID = itemID, perSlot = row.perSlot, filled = 0,
-                            }
-                            table.insert(demands, dem)
-                            demandOfSlot[tabIndex][s] = dem
-                            usedSlots[s] = true
-                            emitted[itemID] = (emitted[itemID] or 0) + 1
-                            need = need - 1
+                        if myClaims[s] then
+                            if s > hi then hi = s end
+                            if s < lo then lo = s end
+                        end
+                    end
+
+                    -- Phase 2a — extend the item's contiguous group RIGHT
+                    -- first, then LEFT. Extending in one direction at a
+                    -- time keeps each item's span clean: a group starting
+                    -- at 50-74 grows to 50-98 before it ever dips below 50,
+                    -- leaving slots 1-49 available for the item whose
+                    -- group starts there.
+                    while need > 0 and hi >= 1 and hi < MAX_SLOTS
+                          and not usedSlots[hi + 1] do
+                        addDemandAt(hi + 1, itemID, row)
+                        need = need - 1
+                        hi = hi + 1
+                    end
+                    while need > 0 and lo <= MAX_SLOTS and lo > 1
+                          and not usedSlots[lo - 1] do
+                        addDemandAt(lo - 1, itemID, row)
+                        need = need - 1
+                        lo = lo - 1
+                    end
+
+                    -- Phase 2b — fall back to any unclaimed slot (used
+                    -- only when the item has no existing claim to extend
+                    -- from, or both ends are blocked).
+                    if need > 0 then
+                        for s = 1, MAX_SLOTS do
+                            if need <= 0 then break end
+                            if not usedSlots[s] then
+                                addDemandAt(s, itemID, row)
+                                need = need - 1
+                            end
                         end
                     end
                 end
@@ -339,13 +392,40 @@ function GBL:PlanSort(snapshot, layout)
     end
 
     -- Phase 1B — route leftover non-overflow supply to overflow.
-    local overflowEmpties = {}  -- FIFO of empty overflow slot indices
+    --
+    -- Virtual overflow layout: starts with the initial bank state and is
+    -- extended as we plan spills. Used by pickOverflowSlot to group stacks
+    -- by item — a spill of X lands adjacent to an existing X stack rather
+    -- than in the first empty slot, so the stock tab stays organized.
+    local overflowVirtual = {}
     if overflowTab then
         for s = 1, MAX_SLOTS do
-            if not (bank[overflowTab] and bank[overflowTab][s]) then
-                table.insert(overflowEmpties, s)
+            local slot = bank[overflowTab] and bank[overflowTab][s]
+            if slot then
+                overflowVirtual[s] = slot.itemID
             end
         end
+    end
+
+    local function pickOverflowSlot(itemID)
+        if not overflowTab then return nil end
+        -- Right-extend an existing same-item group first (natural reading order).
+        for s = 2, MAX_SLOTS do
+            if not overflowVirtual[s] and overflowVirtual[s - 1] == itemID then
+                return s
+            end
+        end
+        -- Left-extend if no right-extension is possible.
+        for s = MAX_SLOTS - 1, 1, -1 do
+            if not overflowVirtual[s] and overflowVirtual[s + 1] == itemID then
+                return s
+            end
+        end
+        -- First empty slot (new item in overflow).
+        for s = 1, MAX_SLOTS do
+            if not overflowVirtual[s] then return s end
+        end
+        return nil
     end
 
     local unplacedSlots = {}  -- unplacedSlots[t][s] = true
@@ -363,17 +443,20 @@ function GBL:PlanSort(snapshot, layout)
             if not overflowTab then
                 recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
                     sup.available, REASON_NO_OVERFLOW_DEFINED)
-            elseif #overflowEmpties == 0 then
-                recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
-                    sup.available, REASON_OVERFLOW_FULL)
             else
-                local ovSlot = table.remove(overflowEmpties, 1)
-                table.insert(assignments, {
-                    srcTab = sup.tabIndex, srcSlot = sup.slotIndex,
-                    dstTab = overflowTab, dstSlot = ovSlot,
-                    itemID = sup.itemID, count = sup.available,
-                })
-                sup.available = 0
+                local ovSlot = pickOverflowSlot(sup.itemID)
+                if not ovSlot then
+                    recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
+                        sup.available, REASON_OVERFLOW_FULL)
+                else
+                    overflowVirtual[ovSlot] = sup.itemID
+                    table.insert(assignments, {
+                        srcTab = sup.tabIndex, srcSlot = sup.slotIndex,
+                        dstTab = overflowTab, dstSlot = ovSlot,
+                        itemID = sup.itemID, count = sup.available,
+                    })
+                    sup.available = 0
+                end
             end
         end
     end
@@ -554,8 +637,9 @@ function GBL:PlanSort(snapshot, layout)
                     and demandOfSlot[tabIndex][slotIndex]
                 local fits = (dem and dem.itemID == slot.itemID)
                 if not fits then
-                    if overflowTab and #overflowEmpties > 0 then
-                        local ovSlot = table.remove(overflowEmpties, 1)
+                    local ovSlot = pickOverflowSlot(slot.itemID)
+                    if overflowTab and ovSlot then
+                        overflowVirtual[ovSlot] = slot.itemID
                         local sweepOp = {
                             op = "move",
                             srcTab = tabIndex, srcSlot = slotIndex,

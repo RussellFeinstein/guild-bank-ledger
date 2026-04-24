@@ -49,6 +49,26 @@ local function bankTabName(tabIndex)
     return "Tab " .. tabIndex
 end
 
+-- Pick a slot for `itemID` that keeps the item's claim contiguous.
+-- Preference: right-extend existing same-item slots, then left-extend, then
+-- first unclaimed. Returns nil if the tab is full.
+local function pickSlotForItem(slotOrder, itemID)
+    for s = 2, MAX_SLOTS do
+        if not slotOrder[s] and slotOrder[s - 1] == itemID then
+            return s
+        end
+    end
+    for s = MAX_SLOTS - 1, 1, -1 do
+        if not slotOrder[s] and slotOrder[s + 1] == itemID then
+            return s
+        end
+    end
+    for s = 1, MAX_SLOTS do
+        if not slotOrder[s] then return s end
+    end
+    return nil
+end
+
 ------------------------------------------------------------------------
 -- Working-copy state
 --
@@ -400,16 +420,15 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
                 return
             end
             tab.items[id] = { slots = slots, perSlot = perSlot }
-            -- Append to slotOrder: fill unused slotOrder entries.
-            local taken = {}
-            for s, _ in pairs(tab.slotOrder) do taken[s] = true end
+            -- Claim slotOrder entries for the new item, adjacency-first so
+            -- its group stays contiguous. If the item is new to the tab,
+            -- pickSlotForItem falls back to the first unclaimed slot.
             local remaining = slots
-            for s = 1, MAX_SLOTS do
-                if remaining <= 0 then break end
-                if not taken[s] then
-                    tab.slotOrder[s] = id
-                    remaining = remaining - 1
-                end
+            while remaining > 0 do
+                local s = pickSlotForItem(tab.slotOrder, id)
+                if not s then break end
+                tab.slotOrder[s] = id
+                remaining = remaining - 1
             end
             self._layoutDirty = true
             self:RefreshLayoutTab()
@@ -447,19 +466,17 @@ function GBL:_LayoutEditor_RenderItemRow(parent, tabIndex, itemID, writable)
             local old = row.slots or 0
             row.slots = n
             -- Keep slotOrder in sync with slots count so the planner's pinned
-            -- positions match what the user sees. Add entries at the first
-            -- unclaimed slot indices on increase; trim from the highest slot
-            -- index downward on decrease.
+            -- positions match what the user sees. On increase, extend the
+            -- item's claim adjacent to its existing slots (keeps the group
+            -- contiguous); falls back to first unclaimed if no adjacency is
+            -- available. On decrease, trim from the highest slot down.
             if n > old then
-                local taken = {}
-                for s, _ in pairs(tab.slotOrder) do taken[s] = true end
                 local toAdd = n - old
-                for s = 1, MAX_SLOTS do
-                    if toAdd <= 0 then break end
-                    if not taken[s] then
-                        tab.slotOrder[s] = itemID
-                        toAdd = toAdd - 1
-                    end
+                while toAdd > 0 do
+                    local s = pickSlotForItem(tab.slotOrder, itemID)
+                    if not s then break end
+                    tab.slotOrder[s] = itemID
+                    toAdd = toAdd - 1
                 end
             elseif n < old then
                 local toRemove = old - n

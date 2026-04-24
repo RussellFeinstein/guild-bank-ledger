@@ -29,6 +29,15 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.11
+    {"0.29.11", "2026-04-23", {
+        Fixed = {
+            "Sort now keeps each item's span contiguous in the display tab. When items[id].slots exceeded the captured slotOrder entries, the planner used to fill first unclaimed slot and could drop items into another item's section depending on itemID ordering. It now extends an item's group RIGHT first, then LEFT, only falling back to arbitrary slots when both ends are blocked.",
+            "Overflow (stock) tab stays organized by item. Spills used to land in the first empty slot regardless of what was next to it; they now prefer slots adjacent to existing same-item stacks.",
+            "Layout editor's Add Item and Slots field use the same adjacency rule so saved layouts stay neat without a recapture.",
+        },
+    }},
+
     -- v0.29.10
     {"0.29.10", "2026-04-23", {
         Fixed = {
