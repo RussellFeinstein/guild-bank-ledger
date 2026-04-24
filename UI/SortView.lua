@@ -28,6 +28,19 @@ function GBL:BuildSortTab(container)
 
     local canExecute = self:HasSortAccess()
 
+    -- Subscribe to progress events from SortExecutor. Registering on
+    -- every build is safe because AceEvent's RegisterMessage is
+    -- idempotent (same handler name overwrites the previous subscription).
+    -- The handler updates targeted widgets rather than rebuilding the tab,
+    -- so per-op events cost microseconds, not a full UI recreation.
+    self:RegisterMessage("GBL_SORT_PROGRESS", "_SortView_OnProgress")
+
+    -- Reset per-build widget tables; BuildSortTab is the one place we
+    -- recreate the widgets, so caller-retained refs elsewhere would
+    -- dangle.
+    self._sortOpRows = {}
+    self._sortProgressLabel = nil
+
     -- Status banner
     local status = AceGUI:Create("Label")
     status:SetFullWidth(true)
@@ -160,6 +173,16 @@ function GBL:_SortView_Preview()
         opsN, defN, unpN))
     content:AddChild(summary)
 
+    -- Live progress label, updated by _SortView_OnProgress via direct
+    -- SetText on this widget — no rebuild needed. Shown blank until the
+    -- first progress event arrives.
+    local progress = AceGUI:Create("Label")
+    progress:SetFullWidth(true)
+    progress:SetFontObject(GameFontNormalSmall)
+    progress:SetText(" ")
+    content:AddChild(progress)
+    self._sortProgressLabel = progress
+
     if opsN == 0 and defN == 0 and unpN == 0 then
         local lbl = AceGUI:Create("Label")
         lbl:SetFullWidth(true)
@@ -174,7 +197,7 @@ function GBL:_SortView_Preview()
         h:SetFullWidth(true)
         h:SetText(format("Moves (%d)", opsN))
         content:AddChild(h)
-        for _, op in ipairs(plan.ops) do
+        for idx, op in ipairs(plan.ops) do
             local lbl = AceGUI:Create("Label")
             lbl:SetFullWidth(true)
             lbl:SetFontObject(GameFontNormalSmall)
@@ -182,6 +205,9 @@ function GBL:_SortView_Preview()
                 op.op, op.count, itemLabel(op.itemID),
                 op.srcTab, op.srcSlot, op.dstTab, op.dstSlot))
             content:AddChild(lbl)
+            -- Retain the label ref keyed by op index so the progress
+            -- handler can prefix it with a status marker.
+            self._sortOpRows[idx] = { widget = lbl, op = op }
         end
     end
 
@@ -256,6 +282,88 @@ function GBL:_SortView_Execute()
         self:_SortView_RescanAndRefresh()
     end, { layout = layout })
     self:RefreshSortTab()
+end
+
+------------------------------------------------------------------------
+-- Progress
+------------------------------------------------------------------------
+
+--- Render the op-row label text with an optional status marker. Separate
+--- function so the progress handler can re-render a single row without
+--- duplicating the formatting logic.
+local function formatOpRow(op, marker)
+    local prefix = marker or "  "
+    return format("%s%s  %d × %s   T%d/%d → T%d/%d",
+        prefix, op.op, op.count,
+        (GBL.GetCachedItemInfo and GBL:GetCachedItemInfo(op.itemID))
+            or ("item " .. op.itemID),
+        op.srcTab, op.srcSlot, op.dstTab, op.dstSlot)
+end
+
+--- Handle a GBL_SORT_PROGRESS message from the executor. Called many
+--- times per sort (once per op transition). Must be cheap — direct widget
+--- SetText only; never a full rebuild.
+function GBL:_SortView_OnProgress(_msg, payload)
+    if self.activeTab ~= "sort" then return end
+    if not payload then return end
+    local phase = payload.phase
+
+    -- Update the progress label at the top of the move list.
+    if self._sortProgressLabel then
+        local text
+        if phase == "finish" then
+            if payload.ok then
+                text = format(
+                    "|cff00ff88Sort complete|r — %d done, %d failed, %d replans. Rescanning...",
+                    payload.done or 0, payload.failed or 0, payload.replans or 0)
+            else
+                text = format(
+                    "|cffff5555Sort aborted|r (%s) — %d done, %d failed, %d replans.",
+                    tostring(payload.reason or "?"),
+                    payload.done or 0, payload.failed or 0, payload.replans or 0)
+            end
+        elseif phase == "replan" then
+            text = format(
+                "|cffffaa55Replan %d|r (%s) — %d done, %d failed so far.",
+                payload.replans or 0, tostring(payload.replanReason or "?"),
+                payload.done or 0, payload.failed or 0)
+        elseif phase == "start" then
+            text = format("|cffffaa55Starting|r — 0 / %d moves.", payload.total or 0)
+        else
+            -- step / complete / failed / reclassify — show current progress.
+            local doneOrFailed = (payload.done or 0) + (payload.failed or 0)
+            text = format(
+                "|cffffaa55Executing|r — %d / %d  (%d done, %d failed, %d replans)",
+                doneOrFailed, payload.total or 0,
+                payload.done or 0, payload.failed or 0, payload.replans or 0)
+        end
+        self._sortProgressLabel:SetText(text)
+    end
+
+    -- Mark the last completed / failed op row, and the next-to-run row.
+    if self._sortOpRows then
+        local completed = payload.completedOpIndex
+        if completed and self._sortOpRows[completed] then
+            local entry = self._sortOpRows[completed]
+            entry.widget:SetText(formatOpRow(entry.op, "|cff00ff88✓|r "))
+        end
+        local failedIdx = payload.failedOpIndex
+        if failedIdx and self._sortOpRows[failedIdx] then
+            local entry = self._sortOpRows[failedIdx]
+            entry.widget:SetText(formatOpRow(entry.op, "|cffff5555✗|r "))
+        end
+        local reclassified = payload.reclassifiedOpIndex
+        if reclassified and self._sortOpRows[reclassified] then
+            local entry = self._sortOpRows[reclassified]
+            entry.widget:SetText(formatOpRow(entry.op, "|cff00ff88✓|r "))
+        end
+        -- Highlight the current op (the one about to run or in flight).
+        if phase == "step" and payload.opIndex and
+           self._sortOpRows[payload.opIndex] then
+            local entry = self._sortOpRows[payload.opIndex]
+            entry.widget:SetText(formatOpRow(entry.op, "|cffffaa55▶|r "))
+        end
+    end
 end
 
 --- Trigger a fresh bank scan and refresh the Sort tab when it completes.

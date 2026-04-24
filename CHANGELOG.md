@@ -5,6 +5,12 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.23] — 2026-04-23
+
+### Added
+- **Live sort progress in the Sort tab.** While a sort is running, the Sort view now shows a running `Executing — N / T (X done, Y failed, Z replans)` line at the top of the move list, updated on every op transition via a new `GBL_SORT_PROGRESS` message. Each individual move row gets a status marker prepended as it advances: `▶` for currently executing, `✓` for completed (including late-ACK reclassification), and `✗` for failed. No network cost — sort execution is 100% local, and the UI updates are direct `SetText` calls on persistent widget references, not full tab rebuilds.
+- **`GBL_SORT_PROGRESS` AceEvent message.** Emitted by SortExecutor on every state transition: `start`, `step`, `complete`, `failed`, `replan`, `reclassify`, `finish`. Payload includes `opIndex`, `done`, `failed`, `replans`, `total`, `currentOp`, and per-phase extras (`completedOpIndex`, `failedOpIndex`, `reclassifiedOpIndex`, `replanReason`, `ok`, `reason`). External consumers (UI, chat formatters, audit plumbing) can subscribe without poking into executor-local state.
+
 ## [0.29.22] — 2026-04-23
 
 ### Fixed

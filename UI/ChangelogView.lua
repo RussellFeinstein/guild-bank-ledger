@@ -29,6 +29,14 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.29.23
+    {"0.29.23", "2026-04-23", {
+        Added = {
+            "Live progress display in the Sort tab while a sort is executing. A running 'Executing — N/T (X done, Y failed, Z replans)' line updates at the top of the move list every time an op starts, completes, fails, or gets reclassified by the late-ACK path. Each move row also gets a status marker prefixed to it as it advances: ▶ for the op currently in flight, ✓ for completed (including late-ACK success), ✗ for failed. Sort execution is 100% local so these updates have no bandwidth cost — they're just direct SetText calls on widgets we already have references to.",
+            "On sort completion, the progress line switches to 'Sort complete — N done, M failed, K replans. Rescanning...' immediately, then the tab refreshes with the post-sort plan once the rescan lands. No more waiting on the scan to see whether the sort succeeded.",
+        },
+    }},
+
     -- v0.29.22
     {"0.29.22", "2026-04-23", {
         Fixed = {

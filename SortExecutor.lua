@@ -139,6 +139,28 @@ function unregisterBankEvents()
     -- Our handler is idempotent when not running.
 end
 
+--- Emit a progress message for UI subscribers (notably UI/SortView).
+--- Payload is a flat table with the sort's current state so listeners can
+--- update without reading executor-local state. `phase` tags the reason for
+--- the emission so a UI can choose to redraw differently, e.g. highlight
+--- the active row on "step" vs. draw a "sort complete" overlay on "finish".
+local function emitProgress(phase, extras)
+    if not state then return end
+    local payload = {
+        phase = phase,
+        opIndex = state.opIndex,
+        done = state.done,
+        failed = state.failed,
+        replans = state.replans,
+        total = #state.plan.ops,
+        currentOp = state.plan.ops[state.opIndex],
+    }
+    if extras then
+        for k, v in pairs(extras) do payload[k] = v end
+    end
+    GBL:SendMessage("GBL_SORT_PROGRESS", payload)
+end
+
 function finish(ok, reason)
     if not state then return end
     local cb = state.onComplete
@@ -150,6 +172,9 @@ function finish(ok, reason)
         total = #state.plan.ops,
         replans = state.replans,
     }
+    -- Emit the final progress message BEFORE clearing state so listeners
+    -- get the completion summary without needing a separate event shape.
+    emitProgress("finish", { ok = ok, reason = reason })
     ClearCursor()
     unregisterBankEvents()
     state = nil
@@ -177,6 +202,7 @@ local function doReplan(reason)
 
     GBL:AddAuditEntry(
         string.format("Sort: replan %d/%d (%s)", state.replans, MAX_REPLANS, reason))
+    emitProgress("replan", { replanReason = reason })
 
     -- Start a fresh scan, then rebuild the plan from the new snapshot.
     GBL:StartFullScan()
@@ -284,6 +310,10 @@ step = function()
         startedAt = GetTime(),
     }
 
+    -- Notify UI subscribers that this op is now executing. SortView uses
+    -- this to highlight the active row in its move list.
+    emitProgress("step")
+
     -- Issue the move.
     if op.op == "split" and srcCount and srcCount > op.count then
         SplitGuildBankItem(op.srcTab, op.srcSlot, op.count)
@@ -306,6 +336,7 @@ step = function()
             state.waiting = nil
             state.opIndex = myOpIndex + 1
             state.gapUntil = GetTime() + INTER_MOVE_GAP
+            emitProgress("complete", { completedOpIndex = myOpIndex })
             C_Timer.After(INTER_MOVE_GAP, function()
                 if isRunning() then step() end
             end)
@@ -322,6 +353,7 @@ step = function()
             string.format("Sort: op %d failed (cursor stuck after placement)", myOpIndex))
         state.opIndex = myOpIndex + 1
         state.gapUntil = GetTime() + INTER_MOVE_GAP
+        emitProgress("failed", { failedOpIndex = myOpIndex, reason = "cursor-stuck" })
         C_Timer.After(INTER_MOVE_GAP, function()
             if isRunning() then step() end
         end)
@@ -333,7 +365,8 @@ step = function()
         if not state or not state.waiting or state.waiting.opIndex ~= myOpIndex then
             return  -- already advanced
         end
-        if slotHasAtLeast(op.dstTab, op.dstSlot, op.itemID, op.count) then
+        local completedAtTimeout = slotHasAtLeast(op.dstTab, op.dstSlot, op.itemID, op.count)
+        if completedAtTimeout then
             state.done = state.done + 1
             state.lastTimedOutOp = nil
         else
@@ -369,6 +402,11 @@ step = function()
         state.waiting = nil
         state.opIndex = myOpIndex + 1
         state.gapUntil = GetTime() + INTER_MOVE_GAP
+        if completedAtTimeout then
+            emitProgress("complete", { completedOpIndex = myOpIndex })
+        else
+            emitProgress("failed", { failedOpIndex = myOpIndex, reason = "timeout" })
+        end
         step()
     end)
 end
@@ -395,6 +433,7 @@ function GBL:_SortExecutor_OnSlotsChanged()
         GBL:AddAuditEntry(string.format(
             "Sort: op %d confirmed by late event after timeout — reclassified as success",
             lto.opIndex))
+        emitProgress("reclassify", { reclassifiedOpIndex = lto.opIndex })
         state.lastTimedOutOp = nil
         reclassified = true
         -- Fall through: the same event may *also* be the ACK for the
@@ -410,6 +449,7 @@ function GBL:_SortExecutor_OnSlotsChanged()
             state.lastTimedOutOp = nil
             state.opIndex = state.opIndex + 1
             state.gapUntil = GetTime() + INTER_MOVE_GAP
+            emitProgress("complete", { completedOpIndex = w.opIndex })
             step()
         end
         -- Slot doesn't match the in-flight op yet — still mid-sequence
@@ -461,6 +501,7 @@ function GBL:ExecuteSortPlan(plan, onComplete, opts)
     registerBankEvents()
     GBL:AddAuditEntry(
         string.format("Sort: starting execution of %d ops", #plan.ops))
+    emitProgress("start")
     step()
     return true, nil
 end
