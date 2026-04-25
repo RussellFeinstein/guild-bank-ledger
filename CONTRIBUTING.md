@@ -1,6 +1,6 @@
 # Contributing to GuildBankLedger
 
-Thanks for your interest in contributing! This doc covers how to get set up, what the project expects of a pull request, and the conventions the codebase follows. If anything is unclear, open an issue — vague docs are a bug.
+Thanks for your interest in contributing! This doc covers how to get set up, what the project expects of a pull request, and the conventions the codebase follows. If anything is unclear, open an issue. Vague docs are a bug.
 
 ## Table of contents
 
@@ -24,7 +24,7 @@ GuildBankLedger is a Lua 5.1 WoW addon tested with [busted](https://lunarmodules
 3. **Install test tooling**: `luarocks install busted && luarocks install luacheck`
 4. **Run tests**:
    - On Linux / macOS: `busted --verbose`
-   - On Windows (Git Bash): `bash run_tests.sh --verbose` (handles the MSYS2 PATH gymnastics for you)
+   - On Windows (Git Bash): `bash run_tests.sh --verbose` (wraps the Windows/MSYS2 PATH setup)
 5. **Run the linter**:
    - Linux / macOS: `luacheck .`
    - Windows: `bash run_tests.sh --lint`
@@ -37,7 +37,7 @@ GuildBankLedger is a Lua 5.1 WoW addon tested with [busted](https://lunarmodules
 3. Make your changes with tests.
 4. `bash run_tests.sh` and `bash run_tests.sh --lint` must both pass before you push.
 5. Push your branch and open a pull request. CI will run tests + lint automatically; the PR cannot be merged until CI is green.
-6. The PR template will prompt you for a summary, testing notes, and a checklist. Fill it in — it speeds up review.
+6. The PR template will prompt you for a summary, testing notes, and a checklist. Fill it in. It speeds up review.
 
 `main` is protected: direct pushes are blocked, merge is gated on CI, and the only merge style is a merge commit (so your commits are preserved on `main` with your authorship).
 
@@ -63,9 +63,9 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 
 Follows [Semantic Versioning 2.0](https://semver.org/). Rules of thumb:
 
-- **Patch (x.y.Z)** — bug fixes, internal refactors, performance improvements, docs/tests. No new externally-visible surface.
-- **Minor (x.Y.0)** — new features a user or contributor needs to know about: new slash commands, new config keys, new modules, new output/schema types.
-- **Major (X.0.0)** — breaking changes: removed commands, renamed keys, incompatible schema migrations.
+- **Patch (x.y.Z)**: bug fixes, internal refactors, performance improvements, docs/tests. No new externally-visible surface.
+- **Minor (x.Y.0)**: new features a user or contributor needs to know about. New slash commands, new config keys, new modules, new output/schema types.
+- **Major (X.0.0)**: breaking changes. Removed commands, renamed keys, incompatible schema migrations.
 
 The authoritative version is in `VERSION`. Files that must agree: `VERSION`, `GuildBankLedger.toc` (`## Version:` line), `Core.lua` (local `VERSION` string), `CLAUDE.md` (`Current:` line). Every commit that bumps the version must update all four in lockstep, plus add a `CHANGELOG.md` entry and a matching `CHANGELOG_DATA` entry in `UI/ChangelogView.lua`.
 
@@ -75,16 +75,16 @@ The authoritative version is in `VERSION`. Files that must agree: `VERSION`, `Gu
 
 Follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). Categories (in order): **Added**, **Changed**, **Fixed**, **Removed**, **Deprecated**, **Security**.
 
-- Each version header: `## [X.Y.Z] — YYYY-MM-DD`
+- Each version header: `## [X.Y.Z] - YYYY-MM-DD`
 - Entries describe user-visible impact, not internal implementation. *"Fixed sync stall when peer disconnects mid-chunk"*, not *"Added nil check in SendNextChunk"*.
 - Group related changes under one version; don't create a separate entry per touched file.
 
-In-addon mirror: `UI/ChangelogView.lua`'s `GBL.CHANGELOG_DATA` table shows the same content inside the game's Changelog tab. Keep the two in sync — if you bump `CHANGELOG.md`, add an entry to `CHANGELOG_DATA` too.
+In-addon mirror: `UI/ChangelogView.lua`'s `GBL.CHANGELOG_DATA` table shows the same content inside the game's Changelog tab. Keep the two in sync. If you bump `CHANGELOG.md`, add an entry to `CHANGELOG_DATA` too.
 
 ## Tests
 
 - **Every code PR needs tests.** New modules get a new spec file in `spec/`. New features get specs for core logic, edge cases, and error paths. Bug fixes get a regression test that fails without the fix and passes with it.
-- **Mocks**: `spec/mock_wow.lua` provides WoW API stubs, `spec/mock_ace.lua` provides Ace3 / AceGUI stubs. Extend them if you need a new API — do not introduce WoW API calls in tests directly.
+- **Mocks**: `spec/mock_wow.lua` provides WoW API stubs, `spec/mock_ace.lua` provides Ace3 / AceGUI stubs. Extend them if you need a new API. Do not introduce WoW API calls in tests directly.
 - **Test helper**: `spec/helpers.lua` has shared utilities (print capture, timestamp helpers, etc.).
 - **Naming**: `spec/foo_spec.lua` tests `Foo.lua`.
 
@@ -99,7 +99,7 @@ If you're touching a module that has no existing spec, adding coverage as part o
 - **Dates / times**: always `GetServerTime()`, never `time()` or `os.time()`.
 - **Item identification**: numeric `classID` / `subclassID` via `C_Item.GetItemInfoInstant()`, never localized strings.
 
-For AI-assisted development (Claude Code, Copilot, etc.), see `CLAUDE.md` — it documents project-specific conventions at a deeper level than this contributor guide.
+For AI-assisted development (Claude Code, Copilot, etc.), see `CLAUDE.md`. It has more detailed project-specific conventions than this contributor guide.
 
 ## WoW-specific gotchas
 
@@ -117,7 +117,7 @@ These come up in ~every sync / bank interaction PR:
 
 1. Open your PR against `main`. Fill in the PR template.
 2. CI runs (`busted` + `luacheck`). Iterate until green.
-3. The maintainer will review. For most PRs this is a day or two — faster for small fixes.
+3. The maintainer will review. For most PRs this is a day or two, faster for small fixes.
 4. On approval, the maintainer merges with a merge commit (your commits stay intact on `main` with your authorship). If you're not bumping versions / CHANGELOG, a follow-up bookkeeping commit handles that.
 5. The feature branch auto-deletes on merge (for branches in this repo; forks are untouched).
 

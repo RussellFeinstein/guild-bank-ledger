@@ -11,7 +11,7 @@ Thanks for contributing to GuildBankLedger! A few quick notes:
 ## Testing
 
 <!--
-How did you test this? For code changes, tests are required — list the new / updated specs and how to run them locally:
+How did you test this? For code changes, tests are required. List the new / updated specs and how to run them locally:
     bash run_tests.sh             # busted
     bash run_tests.sh --lint      # luacheck
 For UI changes, describe the in-game smoke test and include a screenshot below.
@@ -31,4 +31,4 @@ For UI changes, describe the in-game smoke test and include a screenshot below.
 - [ ] Lint passes (`bash run_tests.sh --lint`)
 - [ ] `CHANGELOG.md` updated under `### Added` / `### Changed` / `### Fixed` etc. (Keep a Changelog format)
 - [ ] In-addon changelog (`UI/ChangelogView.lua` `CHANGELOG_DATA`) updated if user-visible
-- [ ] `VERSION`, `GuildBankLedger.toc`, `Core.lua`, `CLAUDE.md` version strings bumped per semver policy in `CONTRIBUTING.md` — **external contributors: leave version strings alone, the maintainer will handle the bump on merge**
+- [ ] `VERSION`, `GuildBankLedger.toc`, `Core.lua`, `CLAUDE.md` version strings bumped per semver policy in `CONTRIBUTING.md`. **External contributors: leave version strings alone, the maintainer will handle the bump on merge.**
