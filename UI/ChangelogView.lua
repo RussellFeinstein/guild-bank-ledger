@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.30.1
+    {"0.30.1", "2026-04-25", {
+        Changed = {
+            "Internal refactor with no behavior change: a new GBL:SafeRecordTimestamp helper replaces ten copies of the same 'use record.timestamp if valid, else GetServerTime' ternary across the migration paths in Core.lua and the sender-wins reconciliation in Sync.lua. Also re-enables the 120-character line-length lint on Core.lua, since the long lines that originally forced an override are gone.",
+        },
+    }},
+
     -- v0.30.0
     {"0.30.0", "2026-04-24", {
         Added = {

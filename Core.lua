@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.30.0"
+local VERSION = "0.30.1"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -247,7 +247,7 @@ function GBL:MigrateOccurrenceScheme(guildData)
     local newHashes = {}
     for _, record in ipairs(allRecords) do
         if record.id then
-            newHashes[record.id] = self:IsValidTimestamp(record.timestamp) and record.timestamp or GetServerTime()
+            newHashes[record.id] = self:SafeRecordTimestamp(record)
         end
     end
 
@@ -484,7 +484,7 @@ function GBL:MigrateSchemaV2ToV3(guildData)
     end
     for _, record in ipairs(newAllRecords) do
         if record.id then
-            guildData.seenTxHashes[record.id] = self:IsValidTimestamp(record.timestamp) and record.timestamp or GetServerTime()
+            guildData.seenTxHashes[record.id] = self:SafeRecordTimestamp(record)
         end
     end
 
@@ -612,7 +612,7 @@ function GBL:MigrateOccurrenceToPerSlot(guildData)
     end
     for _, record in ipairs(allRecords) do
         if record.id then
-            guildData.seenTxHashes[record.id] = self:IsValidTimestamp(record.timestamp) and record.timestamp or GetServerTime()
+            guildData.seenTxHashes[record.id] = self:SafeRecordTimestamp(record)
         end
     end
 
@@ -763,7 +763,7 @@ function GBL:MigrateDeduplicateRecords(guildData)
         end
         for _, record in ipairs(allRecords) do
             if record.id then
-                guildData.seenTxHashes[record.id] = self:IsValidTimestamp(record.timestamp) and record.timestamp or GetServerTime()
+                guildData.seenTxHashes[record.id] = self:SafeRecordTimestamp(record)
             end
         end
 
@@ -961,7 +961,7 @@ function GBL:MigrateCrossSlotDedup(guildData)
         end
         for _, record in ipairs(allRecords) do
             if record.id then
-                guildData.seenTxHashes[record.id] = self:IsValidTimestamp(record.timestamp) and record.timestamp or GetServerTime()
+                guildData.seenTxHashes[record.id] = self:SafeRecordTimestamp(record)
             end
         end
 
@@ -1064,14 +1064,12 @@ function GBL:MigrateRepairEpochTimestamps(guildData)
         local newHashes = {}
         for _, record in ipairs(guildData.transactions or {}) do
             if record.id then
-                newHashes[record.id] = self:IsValidTimestamp(record.timestamp)
-                    and record.timestamp or GetServerTime()
+                newHashes[record.id] = self:SafeRecordTimestamp(record)
             end
         end
         for _, record in ipairs(guildData.moneyTransactions or {}) do
             if record.id then
-                newHashes[record.id] = self:IsValidTimestamp(record.timestamp)
-                    and record.timestamp or GetServerTime()
+                newHashes[record.id] = self:SafeRecordTimestamp(record)
             end
         end
         for k in pairs(guildData.seenTxHashes) do
@@ -1164,7 +1162,7 @@ function GBL:RepairPlayerNames()
     end
     for _, record in ipairs(allRecords) do
         if record.id then
-            guildData.seenTxHashes[record.id] = self:IsValidTimestamp(record.timestamp) and record.timestamp or GetServerTime()
+            guildData.seenTxHashes[record.id] = self:SafeRecordTimestamp(record)
         end
     end
 
@@ -2278,7 +2276,7 @@ function GBL:CleanupWithEventCounts(guildData)
         end
         for _, record in ipairs(allRecords) do
             if record.id then
-                guildData.seenTxHashes[record.id] = self:IsValidTimestamp(record.timestamp) and record.timestamp or GetServerTime()
+                guildData.seenTxHashes[record.id] = self:SafeRecordTimestamp(record)
             end
         end
 

@@ -19,6 +19,17 @@ function GBL:IsValidTimestamp(ts)
     return type(ts) == "number" and ts >= MIN_VALID_TIMESTAMP
 end
 
+--- Return the record's timestamp if valid, otherwise the current server time.
+-- Used wherever we need a record's effective timestamp without risking a
+-- bogus epoch-0 value (see v0.27.0 epoch-0 fix). Callers include the
+-- migration paths in Core.lua that rebuild seenTxHashes, and the
+-- sender-wins reconciliation in Sync.lua's NormalizeRecordId.
+-- @param record table Transaction record (must be a table)
+-- @return number A WoW-era server-time timestamp
+function GBL:SafeRecordTimestamp(record)
+    return self:IsValidTimestamp(record.timestamp) and record.timestamp or GetServerTime()
+end
+
 ------------------------------------------------------------------------
 -- Hash computation
 ------------------------------------------------------------------------

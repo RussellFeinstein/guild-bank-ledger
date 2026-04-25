@@ -111,10 +111,3 @@ max_line_length = 120
 files["UI/ChangelogView.lua"] = {
     max_line_length = false,
 }
-
--- Core.lua has six identical long lines for record-timestamp recovery in
--- migration paths. TODO: extract a SafeRecordTimestamp helper in a follow-up
--- and re-enable the limit. Suppressing for now so CI is unblocked.
-files["Core.lua"] = {
-    max_line_length = false,
-}
