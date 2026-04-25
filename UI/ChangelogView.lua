@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.28.12
+    {"0.28.12", "2026-04-24", {
+        Added = {
+            "GitHub Actions CI workflow runs busted tests and luacheck on every pull request and on every push to main. Phase C will require passing CI before merge.",
+        },
+    }},
+
     -- v0.28.11
     {"0.28.11", "2026-04-24", {
         Added = {

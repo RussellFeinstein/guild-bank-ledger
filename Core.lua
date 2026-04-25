@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.28.11"
+local VERSION = "0.28.12"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -792,9 +792,8 @@ end
 function GBL:MigrateCrossSlotDedup(guildData)
     if not guildData or (guildData.schemaVersion or 0) >= 6 then return 0 end
 
-    -- Pass 1: re-run same-slot dedup — the counting bug continued creating
+    -- Pass 1: re-run same-slot dedup. The counting bug continued creating
     -- new duplicates between v0.14.2 (which ran this pass once) and now.
-    local savedSchema = guildData.schemaVersion
     guildData.schemaVersion = 4
     local pass1Removed = self:MigrateDeduplicateRecords(guildData)
     -- MigrateDeduplicateRecords sets schemaVersion=5; continue to pass 2
