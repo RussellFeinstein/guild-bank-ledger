@@ -86,6 +86,8 @@ globals = {
 exclude_files = {
     "Libs/**",
     "spec/**",
+    ".luarocks/**",  -- CI installs busted / luacheck here; not our code
+    ".github/**",
 }
 
 -- Ignore unused self in Ace callback methods and underscore-prefixed vars
