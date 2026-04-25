@@ -5,6 +5,14 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.11] — 2026-04-24
+
+### Added
+- `CONTRIBUTING.md` with quick-start setup, commit + versioning conventions, test expectations, code style, and WoW-specific gotchas for new contributors.
+- `.github/PULL_REQUEST_TEMPLATE.md` with structured Summary / Testing / Screenshots / Checklist sections.
+- `.github/CODEOWNERS` so the maintainer is auto-requested as reviewer on every PR.
+- README "Contributing" section linking to `CONTRIBUTING.md`.
+
 ## [0.28.10] — 2026-04-24
 
 ### Fixed
