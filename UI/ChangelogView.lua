@@ -724,6 +724,7 @@ function GBL:BuildChangelogTab(container)
     scroll:SetFullHeight(true)
     scroll:SetLayout("List")
     container:AddChild(scroll)
+    scroll.frame:SetPoint("BOTTOMRIGHT", container.content, "BOTTOMRIGHT", 0, 0)
 
     -- Navigation bar inside scroll (only when multiple pages)
     if totalPages > 1 then
