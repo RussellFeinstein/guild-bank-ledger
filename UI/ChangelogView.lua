@@ -29,6 +29,20 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.28.9
+    {"0.28.9", "2026-04-24", {
+        Added = {
+            "LuaLS workspace config so contributors get consistent IDE diagnostics out of the box.",
+            "Internal design doc preserving the v0.26.0 throughput audit that justifies the 6h fingerprint bucket size.",
+        },
+        Changed = {
+            "CurseForge listing copy refreshed (Beta tag, reorganized sections). No code change.",
+        },
+        Fixed = {
+            ".gitignore now excludes .claude/walkthrough/ and .claude/settings.local.json so machine-local Claude Code state stops appearing in git status.",
+        },
+    }},
+
     -- v0.28.8
     {"0.28.8", "2026-04-23", {
         Added = {

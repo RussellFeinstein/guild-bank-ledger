@@ -1,0 +1,77 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+  "runtime": {
+    "version": "Lua 5.1"
+  },
+  "workspace": {
+    "library": [],
+    "ignoreDir": ["Libs", "spec"]
+  },
+  "diagnostics": {
+    "globals": [
+      "CreateFrame",
+      "GetGuildBankItemInfo",
+      "GetGuildBankItemLink",
+      "GetGuildBankTabInfo",
+      "GetGuildInfo",
+      "GetNumGuildBankTabs",
+      "GetServerTime",
+      "QueryGuildBankLog",
+      "QueryGuildBankTab",
+      "GetGuildBankTransaction",
+      "GetNumGuildBankTransactions",
+      "GetGuildBankMoneyTransaction",
+      "GetNumGuildBankMoneyTransactions",
+      "InCombatLockdown",
+      "GetGuildRosterInfo",
+      "GetNumGuildMembers",
+      "IsInGuild",
+      "IsInRaid",
+      "UnitAffectingCombat",
+      "Ambiguate",
+      "GetFramerate",
+      "UnitName",
+      "Enum",
+      "MAX_GUILDBANK_SLOTS_PER_TAB",
+      "MAX_GUILDBANK_TABS",
+      "NORMAL_FONT_COLOR",
+      "HIGHLIGHT_FONT_COLOR",
+      "SOUNDKIT",
+      "GameTooltip",
+      "UIParent",
+      "UISpecialFrames",
+      "GameFontNormal",
+      "GameFontHighlight",
+      "ChatFontNormal",
+      "PlaySound",
+      "GetCVar",
+      "SetCVar",
+      "C_Item",
+      "C_Timer",
+      "C_PlayerInteractionManager",
+      "C_ChatInfo",
+      "GetAddOnMetadata",
+      "GetTime",
+      "format",
+      "strsplit",
+      "strtrim",
+      "tinsert",
+      "tremove",
+      "wipe",
+      "date",
+      "print",
+      "bit",
+      "LibStub",
+      "GuildBankLedger",
+      "GuildBankLedgerDB",
+      "CloseGuildBankFrame",
+      "ChatThrottleLib"
+    ],
+    "disable": [
+      "lowercase-global"
+    ]
+  },
+  "type": {
+    "castNumberToInteger": true
+  }
+}

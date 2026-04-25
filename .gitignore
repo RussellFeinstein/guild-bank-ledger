@@ -19,3 +19,9 @@ Thumbs.db
 *~
 .vscode/
 .idea/
+
+# Local Claude walkthrough notes (personal reference, not shipped)
+.claude/walkthrough/
+
+# Machine-local Claude Code permission state — never shared
+.claude/settings.local.json
