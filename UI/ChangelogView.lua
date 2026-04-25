@@ -269,6 +269,41 @@ GBL.CHANGELOG_DATA = {
         },
     }, milestone = "M-sort-1: Bank sorting foundation"},
 
+    -- v0.28.12
+    {"0.28.12", "2026-04-24", {
+        Added = {
+            "GitHub Actions CI workflow runs busted tests and luacheck on every pull request and on every push to main. Phase C will require passing CI before merge.",
+        },
+    }},
+
+    -- v0.28.11
+    {"0.28.11", "2026-04-24", {
+        Added = {
+            "Contributor docs: CONTRIBUTING.md, PR template, CODEOWNERS, and a README \"Contributing\" section. Aimed at external contributors but also documents internal conventions.",
+        },
+    }},
+
+    -- v0.28.10
+    {"0.28.10", "2026-04-24", {
+        Fixed = {
+            "Removed blank space at the bottom of all six tabs (Transactions, Gold Log, Consumption, Sync, Changelog, About). Thanks @katogaming88 for spotting and fixing the first three in #1.",
+        },
+    }},
+
+    -- v0.28.9
+    {"0.28.9", "2026-04-24", {
+        Added = {
+            "LuaLS workspace config so contributors get consistent IDE diagnostics out of the box.",
+            "Internal design doc preserving the v0.26.0 throughput audit that justifies the 6h fingerprint bucket size.",
+        },
+        Changed = {
+            "CurseForge listing copy refreshed (Beta tag, reorganized sections). No code change.",
+        },
+        Fixed = {
+            ".gitignore now excludes .claude/walkthrough/ and .claude/settings.local.json so machine-local Claude Code state stops appearing in git status.",
+        },
+    }},
+
     -- v0.28.8
     {"0.28.8", "2026-04-23", {
         Added = {
@@ -950,6 +985,7 @@ function GBL:BuildChangelogTab(container)
     scroll:SetFullHeight(true)
     scroll:SetLayout("List")
     container:AddChild(scroll)
+    scroll.frame:SetPoint("BOTTOMRIGHT", container.content, "BOTTOMRIGHT", 0, 0)
 
     -- Navigation bar inside scroll (only when multiple pages)
     if totalPages > 1 then

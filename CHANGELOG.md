@@ -240,6 +240,42 @@ There are now three legible modes per display tab:
 ### Notes
 - This milestone ships data + planner only. No execution, no UI, no sync wiring yet — those arrive in M-sort-2 through M-sort-4 on the `feature/sort-stock` branch.
 
+## [0.28.12] - 2026-04-24
+
+### Added
+- GitHub Actions CI workflow (`.github/workflows/ci.yml`). Runs busted tests and luacheck on every pull request and on every push to `main`. Job context is `test-and-lint`, which Phase C will require as a passing status check before merge.
+
+### Changed
+- `.luacheckrc` extended to keep luacheck clean under CI: added `GameFontNormalLarge`, `GetItemInfo`, `GetRealmName`, `GetNormalizedRealmName` to read-only globals; ignored warning code 542 (intentional empty-if-branch pattern used for early-out comments); suppressed `max_line_length` for `Core.lua` (TODO: extract a `SafeRecordTimestamp` helper for the six repeated migration lines) and `UI/ChangelogView.lua` (changelog strings are intentionally one line per entry).
+
+### Removed
+- Dead `local savedSchema` capture in `Core.lua`'s migration pass-1 path. The variable was assigned but never read.
+
+## [0.28.11] - 2026-04-24
+
+### Added
+- `CONTRIBUTING.md` with quick-start setup, commit + versioning conventions, test expectations, code style, and WoW-specific gotchas for new contributors.
+- `.github/PULL_REQUEST_TEMPLATE.md` with structured Summary / Testing / Screenshots / Checklist sections.
+- `.github/CODEOWNERS` so the maintainer is auto-requested as reviewer on every PR.
+- README "Contributing" section linking to `CONTRIBUTING.md`.
+
+## [0.28.10] — 2026-04-24
+
+### Fixed
+- Removed blank space at the bottom of all six tabs — Transactions, Gold Log, Consumption, Sync, Changelog, and About — by anchoring each tab's content frame to the container's `BOTTOMRIGHT`. Thanks @katogaming88 for spotting it and fixing the first three tabs in #1; extended to Sync / Changelog / About in a follow-up on the same PR.
+
+## [0.28.9] — 2026-04-24
+
+### Added
+- LuaLS workspace config (`.luarc.json`) so contributors get consistent IDE diagnostics out of the box (Lua 5.1 runtime + WoW API globals).
+- Internal design doc (`docs/sync-bucket-analysis.md`) capturing the v0.26.0-era throughput audit that justifies the 6-hour fingerprint bucket size — preserved for reproducibility now that the analysis lives outside the memory index.
+
+### Changed
+- CurseForge listing copy refreshed (Beta tag, reorganized sections, updated category counts). No code change.
+
+### Fixed
+- `.gitignore` now excludes `.claude/walkthrough/` and `.claude/settings.local.json` so machine-local Claude Code state stops appearing in `git status`.
+
 ## [0.28.8] — 2026-04-23
 
 ### Added

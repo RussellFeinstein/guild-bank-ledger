@@ -112,6 +112,7 @@ function GBL:BuildSyncTab(container)
     end
 
     container:AddChild(syncContent)
+    syncContent.frame:SetPoint("BOTTOMRIGHT", container.content, "BOTTOMRIGHT", 0, 0)
 
     self._syncContent = syncContent
     self:RenderSyncContent(syncContent)

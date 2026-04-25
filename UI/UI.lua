@@ -362,6 +362,7 @@ function GBL:BuildTransactionsTab(container, transactions)
     end)
 
     container:AddChild(ledgerGroup)
+    ledgerGroup.frame:SetPoint("BOTTOMRIGHT", container.content, "BOTTOMRIGHT", 0, 0)
 
     -- Store references for refresh
     self._ledgerContainer = ledgerGroup
@@ -423,6 +424,7 @@ function GBL:BuildGoldLogTab(container, moneyTransactions)
     contentGroup:SetFullHeight(true)
     contentGroup:SetLayout("Flow")
     container:AddChild(contentGroup)
+    contentGroup.frame:SetPoint("BOTTOMRIGHT", container.content, "BOTTOMRIGHT", 0, 0)
 
     local filters = self:CreateDefaultFilters()
 
@@ -901,6 +903,7 @@ function GBL:BuildConsumptionTab(container, transactions)
     contentGroup:SetFullHeight(true)
     contentGroup:SetLayout("Flow")
     container:AddChild(contentGroup)
+    contentGroup.frame:SetPoint("BOTTOMRIGHT", container.content, "BOTTOMRIGHT", 0, 0)
 
     -- Store references for refresh
     self._consumptionContainer = contentGroup
