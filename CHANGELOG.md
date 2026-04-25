@@ -5,6 +5,17 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.12] - 2026-04-24
+
+### Added
+- GitHub Actions CI workflow (`.github/workflows/ci.yml`). Runs busted tests and luacheck on every pull request and on every push to `main`. Job context is `test-and-lint`, which Phase C will require as a passing status check before merge.
+
+### Changed
+- `.luacheckrc` extended to keep luacheck clean under CI: added `GameFontNormalLarge`, `GetItemInfo`, `GetRealmName`, `GetNormalizedRealmName` to read-only globals; ignored warning code 542 (intentional empty-if-branch pattern used for early-out comments); suppressed `max_line_length` for `Core.lua` (TODO: extract a `SafeRecordTimestamp` helper for the six repeated migration lines) and `UI/ChangelogView.lua` (changelog strings are intentionally one line per entry).
+
+### Removed
+- Dead `local savedSchema` capture in `Core.lua`'s migration pass-1 path. The variable was assigned but never read.
+
 ## [0.28.11] - 2026-04-24
 
 ### Added
