@@ -20,6 +20,7 @@ function GBL:BuildAboutTab(container)
     scroll:SetFullHeight(true)
     scroll:SetLayout("List")
     container:AddChild(scroll)
+    scroll.frame:SetPoint("BOTTOMRIGHT", container.content, "BOTTOMRIGHT", 0, 0)
 
     -- Header
     local header = AceGUI:Create("Label")
