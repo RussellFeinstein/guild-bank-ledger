@@ -40,6 +40,14 @@
 --       routed to overflow. In a well-formed plan this is a no-op; it
 --       guards against edge cases in Phase 1's assignment.
 --
+--   Phase 4 Overflow Compaction
+--     * Reorders the overflow tab into a deterministic contiguous run
+--       starting at slot 1, sorted by (itemID ASC, count DESC, slot ASC).
+--       Closes gaps, groups same-item stacks, and makes repeat sorts
+--       idempotent. Swap cycles resolve via the same findPivot used in
+--       Phase 2. Partial-stack merging is out of scope (the planner has
+--       no max-stack-size knowledge).
+--
 -- Public contract — identical to v0.29.x for drop-in compatibility with
 -- SortExecutor and UI/SortView:
 --
@@ -521,8 +529,6 @@ function GBL:PlanSort(snapshot, layout)
         until not progressed
     end
 
-    greedyDrain()
-
     -- Pivot-break loop for any remaining cycle-blocked assignments.
     local function findPivot(blockedDstTab)
         -- Priority 1: same-tab empty, unclaimed by any demand.
@@ -560,79 +566,80 @@ function GBL:PlanSort(snapshot, layout)
         return nil, nil
     end
 
-    local guard = 0
-    while next(remaining) ~= nil and guard < 500 do
-        guard = guard + 1
+    local function pivotBreakLoop()
+        local guard = 0
+        while next(remaining) ~= nil and guard < 500 do
+            guard = guard + 1
 
-        -- Find the first remaining op whose dst currently holds a foreign item.
-        local stuckIdx
-        for i = 1, #assignments do
-            if remaining[i] then
-                local a = assignments[i]
-                local dstCur = state[a.dstTab] and state[a.dstTab][a.dstSlot]
-                if dstCur and dstCur.itemID ~= a.itemID then
-                    stuckIdx = i
-                    break
-                end
-            end
-        end
-
-        if not stuckIdx then
-            -- No op is dst-blocked but some remain — should only happen if
-            -- a src drifted (shouldn't in pure-planner mode). Bail safely.
+            -- Find the first remaining op whose dst currently holds a foreign item.
+            local stuckIdx
             for i = 1, #assignments do
                 if remaining[i] then
                     local a = assignments[i]
-                    recordUnplaced(a.srcTab, a.srcSlot, a.itemID, a.count,
-                        REASON_CYCLE_NO_PIVOT)
-                    remaining[i] = nil
+                    local dstCur = state[a.dstTab] and state[a.dstTab][a.dstSlot]
+                    if dstCur and dstCur.itemID ~= a.itemID then
+                        stuckIdx = i
+                        break
+                    end
                 end
             end
-            break
-        end
 
-        local stuck = assignments[stuckIdx]
-        local pivotTab, pivotSlot = findPivot(stuck.dstTab)
-        if not pivotTab then
-            for i = 1, #assignments do
-                if remaining[i] then
-                    local a = assignments[i]
-                    recordUnplaced(a.srcTab, a.srcSlot, a.itemID, a.count,
-                        REASON_CYCLE_NO_PIVOT)
-                    remaining[i] = nil
+            if not stuckIdx then
+                -- No op is dst-blocked but some remain — should only happen if
+                -- a src drifted (shouldn't in pure-planner mode). Bail safely.
+                for i = 1, #assignments do
+                    if remaining[i] then
+                        local a = assignments[i]
+                        recordUnplaced(a.srcTab, a.srcSlot, a.itemID, a.count,
+                            REASON_CYCLE_NO_PIVOT)
+                        remaining[i] = nil
+                    end
+                end
+                break
+            end
+
+            local stuck = assignments[stuckIdx]
+            local pivotTab, pivotSlot = findPivot(stuck.dstTab)
+            if not pivotTab then
+                for i = 1, #assignments do
+                    if remaining[i] then
+                        local a = assignments[i]
+                        recordUnplaced(a.srcTab, a.srcSlot, a.itemID, a.count,
+                            REASON_CYCLE_NO_PIVOT)
+                        remaining[i] = nil
+                    end
+                end
+                break
+            end
+
+            local blockerSlot = state[stuck.dstTab][stuck.dstSlot]
+            local pivotOp = {
+                op = "move",
+                srcTab = stuck.dstTab, srcSlot = stuck.dstSlot,
+                dstTab = pivotTab, dstSlot = pivotSlot,
+                itemID = blockerSlot.itemID, count = blockerSlot.count,
+            }
+            table.insert(plan.ops, pivotOp)
+            applyOpToState(state, pivotOp)
+
+            -- Redirect any still-remaining assignment whose src was the pivot's
+            -- original source slot — the item now lives at the pivot.
+            for j = 1, #assignments do
+                if remaining[j] then
+                    local other = assignments[j]
+                    if other.srcTab == stuck.dstTab and other.srcSlot == stuck.dstSlot then
+                        other.srcTab = pivotTab
+                        other.srcSlot = pivotSlot
+                    end
                 end
             end
-            break
+
+            greedyDrain()
         end
-
-        local blockerSlot = state[stuck.dstTab][stuck.dstSlot]
-        local pivotOp = {
-            op = (blockerSlot.count > 0) and
-                 ((state[stuck.dstTab][stuck.dstSlot].count > blockerSlot.count)
-                    and "split" or "move") or "move",
-            srcTab = stuck.dstTab, srcSlot = stuck.dstSlot,
-            dstTab = pivotTab, dstSlot = pivotSlot,
-            itemID = blockerSlot.itemID, count = blockerSlot.count,
-        }
-        -- Simplify: pivot always moves the entire slot content away.
-        pivotOp.op = "move"
-        table.insert(plan.ops, pivotOp)
-        applyOpToState(state, pivotOp)
-
-        -- Redirect any still-remaining assignment whose src was the pivot's
-        -- original source slot — the item now lives at the pivot.
-        for j = 1, #assignments do
-            if remaining[j] then
-                local other = assignments[j]
-                if other.srcTab == stuck.dstTab and other.srcSlot == stuck.dstSlot then
-                    other.srcTab = pivotTab
-                    other.srcSlot = pivotSlot
-                end
-            end
-        end
-
-        greedyDrain()
     end
+
+    greedyDrain()
+    pivotBreakLoop()
 
     -- --------------------------------------------------------------
     -- PHASE 3: Sweep (defensive)
@@ -669,6 +676,56 @@ function GBL:PlanSort(snapshot, layout)
                     end
                 end
             end
+        end
+    end
+
+    -- --------------------------------------------------------------
+    -- PHASE 4: Overflow Compaction
+    -- --------------------------------------------------------------
+    -- Reshape the overflow tab into a deterministic contiguous layout:
+    -- stacks sorted by (itemID ASC, count DESC, origSlot ASC), packed
+    -- from slot 1 with no gaps. Reuses the Phase-2 greedy drain and
+    -- pivot-break loop by appending new assignments to `assignments` /
+    -- `remaining` and re-running both. count-DESC puts a partial stack
+    -- at the tail of its item's group so a future stack-merge pass has
+    -- an easy adjacency to work with. Out of scope here: merging partial
+    -- stacks (the planner has no max-stack knowledge).
+    if overflowTab then
+        local ovStacks = {}
+        for s = 1, MAX_SLOTS do
+            local slot = state[overflowTab] and state[overflowTab][s]
+            local isUnplaced = unplacedSlots[overflowTab]
+                and unplacedSlots[overflowTab][s]
+            if slot and not isUnplaced then
+                table.insert(ovStacks, {
+                    origSlot = s, itemID = slot.itemID, count = slot.count,
+                })
+            end
+        end
+
+        table.sort(ovStacks, function(a, b)
+            if a.itemID ~= b.itemID then return a.itemID < b.itemID end
+            if a.count ~= b.count then return a.count > b.count end
+            return a.origSlot < b.origSlot
+        end)
+
+        local phase4Added = false
+        for i, stack in ipairs(ovStacks) do
+            if stack.origSlot ~= i then
+                local idx = #assignments + 1
+                assignments[idx] = {
+                    srcTab = overflowTab, srcSlot = stack.origSlot,
+                    dstTab = overflowTab, dstSlot = i,
+                    itemID = stack.itemID, count = stack.count,
+                }
+                remaining[idx] = true
+                phase4Added = true
+            end
+        end
+
+        if phase4Added then
+            greedyDrain()
+            pivotBreakLoop()
         end
     end
 

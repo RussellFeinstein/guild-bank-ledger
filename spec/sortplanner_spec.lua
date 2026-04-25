@@ -640,7 +640,10 @@ describe("SortPlanner", function()
             },
         }
         local plan = GBL:PlanSort(snap, layout)
-        assert.equals(1, #plan.ops, "should pick the larger source")
+        -- Phase 2's first op is the canonical "pick largest source" move.
+        -- Phase 4 may append compaction ops afterward — they don't affect
+        -- the Phase 2 decision we're checking here.
+        assert.is_true(#plan.ops >= 1)
         assert.equals(2, plan.ops[1].srcTab)
         assert.equals(2, plan.ops[1].srcSlot, "pick slot with X×30 first")
         assert.equals(20, plan.ops[1].count)
@@ -791,14 +794,14 @@ describe("SortPlanner", function()
         assert.is_nil(plan2.deficits[200])
     end)
 
-    it("groups overflow spills next to existing same-item stacks", function()
+    it("groups overflow contents by item after spills from display tabs", function()
         -- Overflow already has Power at slot 1 and Health at slot 50.
-        -- Two display tabs spill orphan stacks: Power at (2, 5) and
-        -- Health at (2, 6). Before the adjacency fix, both spills went
-        -- to "first empty" — slots 2 and 3 of overflow, interleaving with
-        -- whatever came first. With the fix, Power lands adjacent to the
-        -- existing Power (slot 2), Health adjacent to the existing Health
-        -- (slot 51).
+        -- Display tabs spill orphan stacks: Power and Health (5 each).
+        -- Phase 1B uses adjacency to place spills near existing same-item
+        -- stacks; Phase 4 then globally compacts so the tab ends grouped
+        -- by itemID starting at slot 1, bigger stacks first within a
+        -- group. Net effect: [1]=Power×200, [2]=Power×5,
+        -- [3]=Health×200, [4]=Health×5, rest empty.
         local snap = snapshot({
             [1] = {},
             [2] = {
@@ -819,12 +822,12 @@ describe("SortPlanner", function()
         }
         local plan = GBL:PlanSort(snap, layout)
         local final = applyPlan(snap, plan)
-        -- Power spill lands adjacent to overflow slot 1 (i.e. slot 2).
-        assert.is_not_nil(final[3][2])
-        assert.equals(100, final[3][2].itemID)
-        -- Health spill lands adjacent to overflow slot 50 (i.e. slot 51).
-        assert.is_not_nil(final[3][51])
-        assert.equals(200, final[3][51].itemID)
+        assert.is_not_nil(final[3][1]); assert.equals(100, final[3][1].itemID); assert.equals(200, final[3][1].count)
+        assert.is_not_nil(final[3][2]); assert.equals(100, final[3][2].itemID); assert.equals(5,   final[3][2].count)
+        assert.is_not_nil(final[3][3]); assert.equals(200, final[3][3].itemID); assert.equals(200, final[3][3].count)
+        assert.is_not_nil(final[3][4]); assert.equals(200, final[3][4].itemID); assert.equals(5,   final[3][4].count)
+        assert.is_nil(final[3][50])
+        assert.is_nil(final[3][51])
     end)
 
     it("caps demands at items[id].slots even when slotOrder has too many entries", function()
@@ -1031,5 +1034,157 @@ describe("SortPlanner", function()
         local plan = GBL:PlanSort(snap, layout)
         local lines = GBL:SummarizeSortPlan(plan)
         assert.is_true(#lines >= 1)
+    end)
+
+    -- ------------------------------------------------------------------
+    -- Phase 4 — overflow compaction
+    -- ------------------------------------------------------------------
+    describe("Phase 4 overflow compaction", function()
+        --- Convenience: layout with a single empty display tab [1] and
+        --- overflow tab [2]. The display demand asks for N×perSlot of the
+        --- given item so Phase 1/2/3 do not disturb the overflow contents
+        --- (unless the test deliberately sets up eviction).
+        local function emptyDisplayOverflow()
+            return {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                },
+            }
+        end
+
+        it("is idempotent when overflow is already sorted", function()
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [1] = { itemID = 100, count = 5 },
+                    [2] = { itemID = 100, count = 3 },
+                    [3] = { itemID = 200, count = 10 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow())
+            assert.equals(0, #plan.ops)
+        end)
+
+        it("consolidates scattered same-item stacks into contiguous group", function()
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [1]  = { itemID = 100, count = 5 },
+                    [5]  = { itemID = 100, count = 3 },
+                    [10] = { itemID = 200, count = 8 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow())
+            assert.is_true(#plan.ops > 0)
+            local final = applyPlan(snap, plan)
+            -- Slot 1: item 100 count 5 (bigger stack of 100 first).
+            -- Slot 2: item 100 count 3.
+            -- Slot 3: item 200 count 8.
+            assert.is_not_nil(final[2][1]); assert.equals(100, final[2][1].itemID); assert.equals(5, final[2][1].count)
+            assert.is_not_nil(final[2][2]); assert.equals(100, final[2][2].itemID); assert.equals(3, final[2][2].count)
+            assert.is_not_nil(final[2][3]); assert.equals(200, final[2][3].itemID); assert.equals(8, final[2][3].count)
+            for s = 4, 10 do
+                assert.is_nil(final[2][s], "expected overflow slot " .. s .. " to be empty")
+            end
+        end)
+
+        it("closes gaps in the overflow tab", function()
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [3] = { itemID = 100, count = 5 },
+                    [7] = { itemID = 200, count = 8 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow())
+            assert.is_true(#plan.ops > 0)
+            local final = applyPlan(snap, plan)
+            assert.is_not_nil(final[2][1]); assert.equals(100, final[2][1].itemID); assert.equals(5, final[2][1].count)
+            assert.is_not_nil(final[2][2]); assert.equals(200, final[2][2].itemID); assert.equals(8, final[2][2].count)
+            assert.is_nil(final[2][3])
+            assert.is_nil(final[2][7])
+        end)
+
+        it("breaks a two-stack swap cycle via a same-tab pivot", function()
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [1] = { itemID = 200, count = 5 },
+                    [2] = { itemID = 100, count = 5 },
+                    -- slots 3..98 empty — pivot available.
+                },
+            })
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow())
+            assert.is_true(#plan.ops >= 3, "expected at least 3 ops (pivot + 2 moves)")
+            local final = applyPlan(snap, plan)
+            assert.is_not_nil(final[2][1]); assert.equals(100, final[2][1].itemID); assert.equals(5, final[2][1].count)
+            assert.is_not_nil(final[2][2]); assert.equals(200, final[2][2].itemID); assert.equals(5, final[2][2].count)
+        end)
+
+        it("sorts overflow after evicting a foreign item from a display tab", function()
+            local snap = snapshot({
+                [1] = {
+                    [1] = { itemID = 100, count = 20 },
+                    [2] = { itemID = 999, count = 3 }, -- foreign, will spill to overflow
+                },
+                [2] = {
+                    [5] = { itemID = 500, count = 4 }, -- scattered pre-existing stack
+                },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab(
+                        { [100] = { slots = 2, perSlot = 20 } },
+                        { [1] = 100, [2] = 100 }
+                    ),
+                    [2] = overflow(),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout)
+            local final = applyPlan(snap, plan)
+            -- Foreign 999 evicted from display.
+            assert.is_true(final[1][2] == nil or final[1][2].itemID == 100,
+                "expected display slot 2 to be empty or filled with 100")
+            -- Overflow compacted: item 500 first (lower itemID), then 999.
+            assert.is_not_nil(final[2][1]); assert.equals(500, final[2][1].itemID); assert.equals(4, final[2][1].count)
+            assert.is_not_nil(final[2][2]); assert.equals(999, final[2][2].itemID); assert.equals(3, final[2][2].count)
+            assert.is_nil(final[2][3])
+            assert.is_nil(final[2][5])
+        end)
+
+        it("is a no-op when no overflow tab is defined", function()
+            local snap = snapshot({
+                [1] = {
+                    [1] = { itemID = 100, count = 20 },
+                },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab(
+                        { [100] = { slots = 1, perSlot = 20 } },
+                        { [1] = 100 }
+                    ),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout)
+            assert.equals(0, #plan.ops)
+            assert.is_nil(plan.overflowTab)
+        end)
+
+        it("orders same-item stacks by count DESC (bigger stack first)", function()
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [1] = { itemID = 100, count = 3 },
+                    [5] = { itemID = 100, count = 10 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow())
+            local final = applyPlan(snap, plan)
+            assert.is_not_nil(final[2][1]); assert.equals(100, final[2][1].itemID); assert.equals(10, final[2][1].count)
+            assert.is_not_nil(final[2][2]); assert.equals(100, final[2][2].itemID); assert.equals(3, final[2][2].count)
+            assert.is_nil(final[2][3])
+        end)
     end)
 end)
