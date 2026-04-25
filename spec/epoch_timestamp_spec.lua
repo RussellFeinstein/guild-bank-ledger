@@ -77,6 +77,37 @@ describe("Epoch-0 timestamp fixes", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- SafeRecordTimestamp
+    ---------------------------------------------------------------------------
+
+    describe("SafeRecordTimestamp", function()
+        it("returns record.timestamp when valid", function()
+            local validTs = 3600 * 475100
+            assert.equals(validTs, GBL:SafeRecordTimestamp({ timestamp = validTs }))
+        end)
+
+        it("returns GetServerTime when timestamp is nil", function()
+            assert.equals(Helpers.MockWoW.serverTime,
+                GBL:SafeRecordTimestamp({ timestamp = nil }))
+        end)
+
+        it("returns GetServerTime when timestamp is 0", function()
+            assert.equals(Helpers.MockWoW.serverTime,
+                GBL:SafeRecordTimestamp({ timestamp = 0 }))
+        end)
+
+        it("returns GetServerTime when timestamp is a string", function()
+            assert.equals(Helpers.MockWoW.serverTime,
+                GBL:SafeRecordTimestamp({ timestamp = "1711700000" }))
+        end)
+
+        it("returns GetServerTime when timestamp is negative", function()
+            assert.equals(Helpers.MockWoW.serverTime,
+                GBL:SafeRecordTimestamp({ timestamp = -100 }))
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- ComputeTxHash with nil timestamp
     ---------------------------------------------------------------------------
 

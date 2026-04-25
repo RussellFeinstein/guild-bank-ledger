@@ -1602,8 +1602,7 @@ function GBL:NormalizeRecordId(incomingRecord, matchedKey, guildData, idIndex)
     -- Sender-wins: always adopt the incoming ID so the receiver fully
     -- converges with the sender in one cycle. The sync protocol serializes
     -- direction (one side sends per cycle), preventing oscillation.
-    local newTs = GBL:IsValidTimestamp(incomingRecord.timestamp)
-        and incomingRecord.timestamp or GetServerTime()
+    local newTs = GBL:SafeRecordTimestamp(incomingRecord)
 
     -- Find local record via pre-built index
     local localRecord = idIndex and idIndex[matchedKey] or nil

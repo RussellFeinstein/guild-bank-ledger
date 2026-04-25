@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.1] - 2026-04-25
+
+### Changed
+- Internal refactor: extracted a `GBL:SafeRecordTimestamp(record)` helper in `Dedup.lua` to replace ten copies of the `IsValidTimestamp(record.timestamp) and record.timestamp or GetServerTime()` ternary across `Core.lua` (nine migration paths) and `Sync.lua` (one in `NormalizeRecordId`). No behavior change. Three of the call sites that had been wrapped onto two physical lines collapse back to one. Re-enables the 120-character line-length lint on `Core.lua` (the `.luacheckrc` file-specific override placed in v0.28.12 is now removed).
+
 ## [0.30.0] — 2026-04-24
 
 ### Added
