@@ -2,8 +2,9 @@
 -- GuildBankLedger — UI/LayoutEditor.lua
 -- Layout tab: per-tab mode picker + item template editor + Sort Access.
 --
--- Write operations are gated by HasSortAccess(). The Sort Access
--- sub-section (rank threshold + delegate list) is GM-only to edit.
+-- Write operations are gated by HasLayoutWrite(). The Sort Access
+-- sub-section (two tiers: Layout Write and Sort-only, each with rank
+-- threshold + delegate list) is GM-only to edit.
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
@@ -128,7 +129,7 @@ end
 function GBL:BuildLayoutTab(container)
     local AceGUI = LibStub("AceGUI-3.0")
 
-    local writable = self:HasSortAccess()
+    local writable = self:HasLayoutWrite()
     local isGM = self:IsGuildMaster()
 
     -- Root scroll. A persistent SetStatusTable lets the ScrollFrame's
@@ -152,13 +153,14 @@ function GBL:BuildLayoutTab(container)
     banner:SetFontObject(GameFontNormalSmall)
     if not writable then
         banner:SetText(
-            "|cffffcc00Read-only view.|r Only the Guild Master and delegated ranks/characters can edit the layout. " ..
-            "Ask the GM to grant you access via the Sort Access section below.")
+            "|cffffcc00Read-only view.|r Only players with layout-write access " ..
+            "(Guild Master or a delegated rank/character) can edit the layout. " ..
+            "Ask the GM to grant you Layout Write access via the Sort Access section below.")
     else
         local why
         if self:IsGuildMaster() then why = "GM"
         else why = "rank-or-delegate" end
-        banner:SetText(format("|cff00ff88Write access:|r %s.", why))
+        banner:SetText(format("|cff00ff88Layout-write access:|r %s.", why))
     end
     scroll:AddChild(banner)
 
@@ -185,7 +187,7 @@ function GBL:BuildLayoutTab(container)
     statusBanner:SetFontObject(GameFontNormalSmall)
     if not writable then
         statusBanner:SetText(
-            "|cff888888Edits require sort access. Viewing the saved layout read-only.|r")
+            "|cff888888Edits require layout-write access. Viewing the saved layout read-only.|r")
     elseif self._layoutDirty then
         statusBanner:SetText(
             "|cffffcc00You have unsaved changes.|r " ..
@@ -869,40 +871,68 @@ end
 -- Sort Access sub-section
 ------------------------------------------------------------------------
 
-function GBL:_LayoutEditor_RenderSortAccess(parent, isGM)
+-- Render one tier of the Sort Access section (write or sort). Each tier has
+-- its own rank-threshold dropdown + delegate list. Callbacks write the full
+-- two-tier policy back via SaveSortAccess.
+local function renderAccessTier(self, parent, sa, tierKey, tierLabel, tierHelp, isGM)
     local AceGUI = LibStub("AceGUI-3.0")
-
-    local sa = self:GetSortAccess()
     local numRanks = (GuildControlGetNumRanks and GuildControlGetNumRanks()) or 0
+    local tier = sa[tierKey] or { rankThreshold = nil, delegates = {} }
+
+    -- Section heading
+    local heading = AceGUI:Create("Heading")
+    heading:SetFullWidth(true)
+    heading:SetText(tierLabel)
+    parent:AddChild(heading)
+
+    local help = AceGUI:Create("Label")
+    help:SetFullWidth(true)
+    help:SetFontObject(GameFontNormalSmall)
+    help:SetText(tierHelp)
+    parent:AddChild(help)
 
     local summary = AceGUI:Create("Label")
     summary:SetFullWidth(true)
     summary:SetFontObject(GameFontNormalSmall)
     local who = "GM only"
-    if sa.rankThreshold ~= nil then
-        who = "GM + ranks ≤ " .. sa.rankThreshold
+    if tier.rankThreshold ~= nil then
+        who = "GM + ranks \226\137\164 " .. tier.rankThreshold
     end
     local delegateCount = 0
-    for _ in pairs(sa.delegates) do delegateCount = delegateCount + 1 end
+    for _ in pairs(tier.delegates or {}) do delegateCount = delegateCount + 1 end
     if delegateCount > 0 then
         who = who .. " + " .. delegateCount .. " delegate(s)"
     end
-    summary:SetText("|cff00ff88Current policy:|r " .. who)
+    summary:SetText("|cff00ff88Current:|r " .. who)
     parent:AddChild(summary)
 
-    if not isGM then
-        local note = AceGUI:Create("Label")
-        note:SetFullWidth(true)
-        note:SetFontObject(GameFontNormalSmall)
-        note:SetText("|cffffcc00Only the Guild Master can change sort access.|r")
-        parent:AddChild(note)
-        -- Still render the delegate list read-only so delegates can see themselves.
+    -- Helper: build a fresh policy with this tier mutated. Always pulls from
+    -- `sa` (the deep copy we were handed) so edits to one tier preserve the
+    -- other tier's current state.
+    local function makePolicy(nextTierTable)
+        local policy = {
+            write = {
+                rankThreshold = sa.write and sa.write.rankThreshold or nil,
+                delegates = {},
+            },
+            sort = {
+                rankThreshold = sa.sort and sa.sort.rankThreshold or nil,
+                delegates = {},
+            },
+        }
+        if sa.write and sa.write.delegates then
+            for k, v in pairs(sa.write.delegates) do policy.write.delegates[k] = v end
+        end
+        if sa.sort and sa.sort.delegates then
+            for k, v in pairs(sa.sort.delegates) do policy.sort.delegates[k] = v end
+        end
+        policy[tierKey] = nextTierTable
+        return policy
     end
 
-    -- Rank threshold picker.
+    -- Rank threshold dropdown.
     -- AceGUI Dropdown:SetList(items, order) expects `items` to be a HASH
-    -- keyed by the option value (the thing passed to SetValue / OnValueChanged).
-    -- We use -1 as the sentinel for "no rank-based access, GM only".
+    -- keyed by option value. -1 sentinel = "no rank-based access, GM only".
     local rankRow = AceGUI:Create("SimpleGroup")
     rankRow:SetFullWidth(true)
     rankRow:SetLayout("Flow")
@@ -920,16 +950,17 @@ function GBL:_LayoutEditor_RenderSortAccess(parent, isGM)
     rankDD:SetLabel("Grant to rank and above")
     rankDD:SetWidth(360)
     rankDD:SetList(rankList, rankOrder)
-    rankDD:SetValue(sa.rankThreshold == nil and -1 or sa.rankThreshold)
+    rankDD:SetValue(tier.rankThreshold == nil and -1 or tier.rankThreshold)
     rankDD:SetDisabled(not isGM)
     rankDD:SetCallback("OnValueChanged", function(_w, _e, value)
-        local nextPolicy = {
+        local nextDelegates = {}
+        for k, v in pairs(tier.delegates or {}) do nextDelegates[k] = v end
+        local ok, err = self:SaveSortAccess(makePolicy({
             rankThreshold = (value == -1) and nil or value,
-            delegates = sa.delegates,
-        }
-        local ok, err = self:SaveSortAccess(nextPolicy)
+            delegates = nextDelegates,
+        }))
         if ok then
-            self:Print("Sort Access updated.")
+            self:Print("Sort Access updated (" .. tierLabel .. ").")
             self:RefreshLayoutTab()
         else
             self:Print("|cffff5555SortAccess save failed:|r " .. tostring(err))
@@ -944,7 +975,7 @@ function GBL:_LayoutEditor_RenderSortAccess(parent, isGM)
     parent:AddChild(delegateHeading)
 
     local names = {}
-    for n in pairs(sa.delegates) do names[#names + 1] = n end
+    for n in pairs(tier.delegates or {}) do names[#names + 1] = n end
     table.sort(names)
 
     if #names == 0 then
@@ -971,12 +1002,12 @@ function GBL:_LayoutEditor_RenderSortAccess(parent, isGM)
                 rem:SetWidth(90)
                 rem:SetCallback("OnClick", function()
                     local nextDelegates = {}
-                    for k, v in pairs(sa.delegates) do nextDelegates[k] = v end
+                    for k, v in pairs(tier.delegates or {}) do nextDelegates[k] = v end
                     nextDelegates[name] = nil
-                    local ok, err = self:SaveSortAccess({
-                        rankThreshold = sa.rankThreshold,
+                    local ok, err = self:SaveSortAccess(makePolicy({
+                        rankThreshold = tier.rankThreshold,
                         delegates = nextDelegates,
-                    })
+                    }))
                     if ok then self:RefreshLayoutTab() else self:Print(err) end
                 end)
                 rowGroup:AddChild(rem)
@@ -1004,14 +1035,39 @@ function GBL:_LayoutEditor_RenderSortAccess(parent, isGM)
             v = v:match("^%s*(.-)%s*$")  -- trim
             if v == "" then return end
             local nextDelegates = {}
-            for k, vv in pairs(sa.delegates) do nextDelegates[k] = vv end
+            for k, vv in pairs(tier.delegates or {}) do nextDelegates[k] = vv end
             nextDelegates[v] = true
-            local ok, err = self:SaveSortAccess({
-                rankThreshold = sa.rankThreshold,
+            local ok, err = self:SaveSortAccess(makePolicy({
+                rankThreshold = tier.rankThreshold,
                 delegates = nextDelegates,
-            })
+            }))
             if ok then self:RefreshLayoutTab() else self:Print(err) end
         end)
         addRow:AddChild(addBtn)
     end
+end
+
+function GBL:_LayoutEditor_RenderSortAccess(parent, isGM)
+    local AceGUI = LibStub("AceGUI-3.0")
+    local sa = self:GetSortAccess()
+
+    if not isGM then
+        local note = AceGUI:Create("Label")
+        note:SetFullWidth(true)
+        note:SetFontObject(GameFontNormalSmall)
+        note:SetText("|cffffcc00Only the Guild Master can change sort access.|r")
+        parent:AddChild(note)
+        -- Still render the tier details read-only so members can see the policy.
+    end
+
+    renderAccessTier(self, parent, sa, "write",
+        "Layout Write access",
+        "Grants editing the layout (templates, captures, slot pins, stock reserves). " ..
+        "Layout Write includes sort access automatically.",
+        isGM)
+
+    renderAccessTier(self, parent, sa, "sort",
+        "Sort-only access",
+        "Grants pressing Execute on the Sort tab. Cannot edit the layout.",
+        isGM)
 end

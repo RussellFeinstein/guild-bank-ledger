@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.29.26"
+local VERSION = "0.30.0"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -1097,6 +1097,7 @@ function GBL:MigrateAllGuilds()
         self:MigrateCrossSlotDedup(guildData)
         self:MigrateAccessControl(guildData)
         self:MigrateRepairEpochTimestamps(guildData)
+        self:MigrateSortAccessShape(guildData)
     end
 end
 
@@ -1524,12 +1525,20 @@ end
 ------------------------------------------------------------------------
 -- Sort access (bank sort + stocking policy)
 -- Distinct from GetAccessLevel/HasFullAccess above: sort access controls
--- who can edit the bank layout and press Execute. Policy is:
---   * GM always has access
---   * Rank index <= sortAccess.rankThreshold has access (nil = GM-only)
---   * Characters named in sortAccess.delegates have access regardless of rank
--- Writes to sortAccess itself remain GM-only (otherwise a delegate could
--- escalate by adding themselves).
+-- who can edit the bank layout and who can press Execute on the Sort tab.
+--
+-- Two independent tiers:
+--   * sortAccess.write — grants layout-write + sort (edit templates, capture,
+--     pin slots, change stock reserves; inherently can also Execute).
+--   * sortAccess.sort  — grants sort only (press Execute on the Sort tab);
+--     cannot edit the layout.
+--
+-- Each tier has rankThreshold (number|nil; nil = GM-only) and delegates
+-- (set of "Name-Realm"). Write ⇒ sort — anyone in the write tier is treated
+-- as having sort access regardless of the sort tier's membership.
+--
+-- GM always has both. Writes to sortAccess itself remain GM-only (otherwise
+-- a delegate could escalate by adding themselves).
 ------------------------------------------------------------------------
 
 --- Return the normalized "Name-Realm" of the current player.
@@ -1546,41 +1555,126 @@ local function normalizedPlayerName()
     return name
 end
 
---- Check whether the current player can edit bank layouts and execute sort.
+--- Empty two-tier policy skeleton.
+local function emptySortAccess()
+    return {
+        write = { rankThreshold = nil, delegates = {} },
+        sort  = { rankThreshold = nil, delegates = {} },
+        updatedBy = nil,
+        updatedAt = 0,
+    }
+end
+
+--- Convert a single-tier or legacy sortAccess table into the two-tier shape.
+-- Idempotent — feeding an already-migrated table returns the equivalent shape.
+-- Legacy flat-shape (top-level rankThreshold/delegates) moves into the write
+-- tier so no existing delegate loses permission on upgrade.
+-- @param sa table|nil
+-- @return table new-shape sortAccess
+local function migrateSortAccessTable(sa)
+    if not sa then return emptySortAccess() end
+
+    local hasNew = type(sa.write) == "table" or type(sa.sort) == "table"
+    local hasLegacy = sa.rankThreshold ~= nil or sa.delegates ~= nil
+
+    if hasNew then
+        local out = emptySortAccess()
+        if type(sa.write) == "table" then
+            out.write.rankThreshold = sa.write.rankThreshold
+            if type(sa.write.delegates) == "table" then
+                for name, v in pairs(sa.write.delegates) do
+                    if v and type(name) == "string" and name ~= "" then
+                        out.write.delegates[name] = true
+                    end
+                end
+            end
+        end
+        if type(sa.sort) == "table" then
+            out.sort.rankThreshold = sa.sort.rankThreshold
+            if type(sa.sort.delegates) == "table" then
+                for name, v in pairs(sa.sort.delegates) do
+                    if v and type(name) == "string" and name ~= "" then
+                        out.sort.delegates[name] = true
+                    end
+                end
+            end
+        end
+        out.updatedBy = sa.updatedBy
+        out.updatedAt = sa.updatedAt or 0
+        return out
+    end
+
+    if hasLegacy then
+        local out = emptySortAccess()
+        out.write.rankThreshold = sa.rankThreshold
+        if type(sa.delegates) == "table" then
+            for name, v in pairs(sa.delegates) do
+                if v and type(name) == "string" and name ~= "" then
+                    out.write.delegates[name] = true
+                end
+            end
+        end
+        out.updatedBy = sa.updatedBy
+        out.updatedAt = sa.updatedAt or 0
+        return out
+    end
+
+    return emptySortAccess()
+end
+
+--- Migrate sortAccess in-place for a single guildData entry. Idempotent.
+function GBL:MigrateSortAccessShape(guildData)
+    if not guildData then return end
+    guildData.sortAccess = migrateSortAccessTable(guildData.sortAccess)
+end
+
+--- Internal: does the current player pass a single tier's membership check?
+-- @param tier table|nil { rankThreshold, delegates }
 -- @return boolean
-function GBL:HasSortAccess()
-    if self:IsGuildMaster() then return true end
-    local guildData = self:GetGuildData()
-    if not guildData or not guildData.sortAccess then return false end
-    local sa = guildData.sortAccess
+local function playerInTier(tier)
+    if type(tier) ~= "table" then return false end
     local me = normalizedPlayerName()
-    if me and sa.delegates and sa.delegates[me] then return true end
-    if sa.rankThreshold ~= nil then
+    if me and type(tier.delegates) == "table" and tier.delegates[me] then
+        return true
+    end
+    if tier.rankThreshold ~= nil then
         local _, _, rankIndex = GetGuildInfo("player")
-        if rankIndex and rankIndex <= sa.rankThreshold then return true end
+        if rankIndex and rankIndex <= tier.rankThreshold then return true end
     end
     return false
 end
 
---- Return a deep copy of the sort-access policy. Never returns the live ref.
+--- Check whether the current player can edit the bank layout.
+-- Layout write implies sort access.
+-- @return boolean
+function GBL:HasLayoutWrite()
+    if self:IsGuildMaster() then return true end
+    local guildData = self:GetGuildData()
+    if not guildData or not guildData.sortAccess then return false end
+    return playerInTier(guildData.sortAccess.write)
+end
+
+--- Check whether the current player can execute a sort (write implies sort).
+-- @return boolean
+function GBL:HasSortAccess()
+    if self:HasLayoutWrite() then return true end
+    local guildData = self:GetGuildData()
+    if not guildData or not guildData.sortAccess then return false end
+    return playerInTier(guildData.sortAccess.sort)
+end
+
+--- Return a deep copy of the two-tier sort-access policy. Never returns
+-- the live ref. Transparently upgrades legacy flat-shape tables.
 function GBL:GetSortAccess()
     local guildData = self:GetGuildData()
-    if not guildData or not guildData.sortAccess then
-        return { rankThreshold = nil, delegates = {}, updatedBy = nil, updatedAt = 0 }
-    end
-    local sa = guildData.sortAccess
-    local delegates = {}
-    for name in pairs(sa.delegates or {}) do delegates[name] = true end
-    return {
-        rankThreshold = sa.rankThreshold,
-        delegates = delegates,
-        updatedBy = sa.updatedBy,
-        updatedAt = sa.updatedAt or 0,
-    }
+    if not guildData then return emptySortAccess() end
+    local sa = migrateSortAccessTable(guildData.sortAccess)
+    return sa
 end
 
 --- Save a new sort-access policy. GM-only.
--- @param policy table with optional rankThreshold (number|nil) and delegates (set of names)
+-- @param policy table shaped { write = {rankThreshold, delegates},
+--                              sort  = {rankThreshold, delegates} }
 -- @return ok, err
 function GBL:SaveSortAccess(policy)
     if not self:IsGuildMaster() then
@@ -1589,22 +1683,40 @@ function GBL:SaveSortAccess(policy)
     if type(policy) ~= "table" then
         return false, "policy must be a table"
     end
-    if policy.rankThreshold ~= nil and type(policy.rankThreshold) ~= "number" then
-        return false, "rankThreshold must be a number or nil"
-    end
-    local guildData = self:GetGuildData()
-    if not guildData then return false, "no active guild" end
-    local delegates = {}
-    if policy.delegates then
-        for name, v in pairs(policy.delegates) do
-            if v and type(name) == "string" and name ~= "" then
-                delegates[name] = true
+
+    local function validateTier(tier, label)
+        if tier == nil then return { rankThreshold = nil, delegates = {} } end
+        if type(tier) ~= "table" then
+            return nil, label .. " tier must be a table"
+        end
+        if tier.rankThreshold ~= nil and type(tier.rankThreshold) ~= "number" then
+            return nil, label .. " rankThreshold must be a number or nil"
+        end
+        if tier.delegates ~= nil and type(tier.delegates) ~= "table" then
+            return nil, label .. " delegates must be a table"
+        end
+        local delegates = {}
+        if tier.delegates then
+            for name, v in pairs(tier.delegates) do
+                if v and type(name) == "string" and name ~= "" then
+                    delegates[name] = true
+                end
             end
         end
+        return { rankThreshold = tier.rankThreshold, delegates = delegates }
     end
+
+    local writeTier, err = validateTier(policy.write, "write")
+    if not writeTier then return false, err end
+    local sortTier, err2 = validateTier(policy.sort, "sort")
+    if not sortTier then return false, err2 end
+
+    local guildData = self:GetGuildData()
+    if not guildData then return false, "no active guild" end
+
     guildData.sortAccess = {
-        rankThreshold = policy.rankThreshold,
-        delegates = delegates,
+        write = writeTier,
+        sort  = sortTier,
         updatedBy = normalizedPlayerName(),
         updatedAt = GetServerTime(),
     }

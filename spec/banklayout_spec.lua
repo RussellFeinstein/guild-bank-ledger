@@ -13,6 +13,7 @@ describe("BankLayout", function()
         GBL = Helpers.loadAddon()
         GBL:OnInitialize()
         MockWoW.guild.name = "Test Guild"
+        MockWoW.guild.rankIndex = 0   -- GM: bypass HasLayoutWrite gate for these tests
         GBL:OnEnable()
     end)
 

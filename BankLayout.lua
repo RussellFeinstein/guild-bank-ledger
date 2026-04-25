@@ -167,6 +167,10 @@ end
 -- @param layout table produced by GetBankLayout (or constructed fresh).
 -- @param updatedBy string|nil player name of the editor (defaults to UnitName("player")).
 function GBL:SaveBankLayout(layout, updatedBy)
+    if not self:HasLayoutWrite() then
+        return false, "you do not have layout-write access for this guild"
+    end
+
     local ok, err = BankLayout.Validate(layout)
     if not ok then return false, err end
 
@@ -199,6 +203,9 @@ end
 --- Set the reserve count for an item (beyond display-tab totals).
 -- A reserve of 0 or nil removes the entry.
 function GBL:SetStockReserve(itemID, reserve)
+    if not self:HasLayoutWrite() then
+        return false, "you do not have layout-write access for this guild"
+    end
     if type(itemID) ~= "number" then return false, "itemID must be numeric" end
     local guild = getStore(self)
     if not guild then return false, "no active guild" end

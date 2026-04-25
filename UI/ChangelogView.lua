@@ -29,6 +29,17 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.30.0
+    {"0.30.0", "2026-04-24", {
+        Added = {
+            "Sort Access now has two independent tiers. The Layout tab's Sort Access section is split into Layout Write access (edit templates, capture, pin slots, change stock reserves — inherently includes sort) and Sort-only access (press Execute on the Sort tab but cannot edit the layout). Each tier has its own rank threshold and its own delegate list. Only the Guild Master can change the policy. Grant sort execution widely while keeping layout edits locked down.",
+            "Defense-in-depth gate at the storage API. SaveBankLayout and SetStockReserve now reject any caller that does not pass HasLayoutWrite(), in addition to the existing UI callback check.",
+        },
+        Changed = {
+            "Existing sortAccess configurations migrate into the new Layout Write tier on upgrade, so no one silently loses a permission. The sort-only tier starts empty; populate it in the Layout tab if you want to grant sort without layout write.",
+        },
+    }},
+
     -- v0.29.26
     {"0.29.26", "2026-04-24", {
         Fixed = {

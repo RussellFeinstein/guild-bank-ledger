@@ -5,7 +5,17 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.29.26] — 2026-04-24
+## [0.30.0] — 2026-04-24
+
+### Added
+- **Sort Access now has two independent tiers.** The Layout tab's Sort Access section is split into **Layout Write access** (edit templates, capture, pin slots, change stock reserves — inherently includes sort) and **Sort-only access** (press Execute on the Sort tab but cannot edit the layout). Each tier has its own rank threshold and its own delegate list, configured independently. Only the Guild Master can change the policy. The intent is to let the GM hand out sort execution widely (anyone in the sort tier can run a sort) while keeping layout edits locked down to a small trusted group.
+- **Defense-in-depth gate at the storage API.** `SaveBankLayout` and `SetStockReserve` in `BankLayout.lua` now reject any caller who does not pass `HasLayoutWrite()`. Previously the check lived only in the UI callback layer; a future UI bug that forgot the check could have silently mutated the layout. This is belt-and-suspenders — the UI gate still runs first.
+- **`GBL:HasLayoutWrite()`** as the canonical "can edit the layout" check. `HasSortAccess()` keeps its meaning (can press Execute), now with broader semantics: write implies sort, so anyone in the write tier is automatically counted as having sort access regardless of the sort tier's membership.
+
+### Changed
+- **Existing `sortAccess` configurations migrate into the new Layout Write tier.** On upgrade, anyone who had sort access before (via the old single-tier rank threshold or delegate list) keeps layout write access — no one silently loses a permission. The sort-only tier starts empty; populate it in the Layout tab if you want to grant sort without layout write. Migration is idempotent and runs automatically at addon load.
+
+
 
 ### Fixed
 - **Sort progress counter no longer exceeds the plan total after a replan.** v0.29.23's display used `(done+failed) / total` — but `done` and `failed` accumulate across replans while `total` is the current (possibly-smaller) plan's size, so once a replan reissued work the numerator could overshoot (users saw `34/33`, `35/33`). Switched the display to `op N / T` using the executor's live `opIndex` and current-plan `total`, which is always in-range and reflects "where are we in the plan that's actually running."
