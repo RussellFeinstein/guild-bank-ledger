@@ -27,6 +27,11 @@ read_globals = {
     "GuildControlGetNumRanks",
     "GuildControlGetRankName",
     "UnitName",
+    "GetNormalizedRealmName",
+    "PickupGuildBankItem",
+    "SplitGuildBankItem",
+    "ClearCursor",
+    "CursorHasItem",
 
     -- WoW constants and tables
     "Enum",
@@ -56,7 +61,6 @@ read_globals = {
     "C_Timer",
     "GetAddOnMetadata",
     "GetItemInfo",
-    "GetNormalizedRealmName",
     "GetRealmName",
     "GetTime",
     "format",
@@ -95,6 +99,7 @@ ignore = {
     "212/self",   -- unused argument 'self' (Ace method callbacks)
     "211/_.*",    -- unused local variables prefixed with underscore
     "212/_.*",    -- unused arguments prefixed with underscore
+    "213/_.*",    -- unused loop variables prefixed with underscore
     "542",        -- empty if branch (intentional pattern for early-out comments)
 }
 

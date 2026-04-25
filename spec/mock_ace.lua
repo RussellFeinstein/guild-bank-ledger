@@ -180,6 +180,11 @@ local serializerMixin = {
 ---------------------------------------------------------------------------
 
 function MockAce.install()
+    -- Expose a cross-mock event-fire hook so spec/mock_wow.lua can raise
+    -- events (e.g. GUILDBANKBAGSLOTS_CHANGED fired by PickupGuildBankItem)
+    -- without needing a hard require on MockAce.
+    _G.__MockAce_fireEvent = MockAce.fireEvent
+
     -- LibStub
     local libs = {}
 

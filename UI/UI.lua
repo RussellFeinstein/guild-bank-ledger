@@ -67,10 +67,15 @@ function GBL:RebuildTabs()
             { value = "transactions", text = "Transactions" },
             { value = "goldlog", text = "Gold Log" },
             { value = "consumption", text = "Consumption" },
-            { value = "sync", text = "Sync" },
-            { value = "changelog", text = "Changelog" },
-            { value = "about", text = "About" },
+            { value = "sort", text = "Sort" },
         }
+        -- Layout editor: only visible to characters with sort access.
+        if self.HasSortAccess and self:HasSortAccess() then
+            table.insert(tabs, { value = "layout", text = "Layout" })
+        end
+        table.insert(tabs, { value = "sync", text = "Sync" })
+        table.insert(tabs, { value = "changelog", text = "Changelog" })
+        table.insert(tabs, { value = "about", text = "About" })
     end
 
     self.tabGroup:SetTabs(tabs)
@@ -226,6 +231,10 @@ function GBL:SelectTab(tabName)
         self:BuildChangelogTab(self.tabGroup)
     elseif tabName == "about" then
         self:BuildAboutTab(self.tabGroup)
+    elseif tabName == "sort" then
+        self:BuildSortTab(self.tabGroup)
+    elseif tabName == "layout" then
+        self:BuildLayoutTab(self.tabGroup)
     end
 end
 

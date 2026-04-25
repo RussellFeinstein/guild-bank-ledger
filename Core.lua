@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.28.12"
+local VERSION = "0.30.0"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -61,6 +61,9 @@ local defaults = {
                 },
                 teams = {},
                 altLinks = {},
+                -- stockAlerts: reserved for planned v1.3.0 low-stock alerts feature
+                -- (threshold-based chat pings). Semantically distinct from stockReserves
+                -- below (which holds sort/restock target counts). Do not repurpose.
                 stockAlerts = {},
                 seenTxHashes = {},
                 playerRealms = {},
@@ -71,6 +74,19 @@ local defaults = {
                     restrictedMode = nil,
                     configuredBy = nil,
                     configuredAt = 0,
+                },
+                bankLayout = {
+                    version = 0,
+                    updatedBy = nil,
+                    updatedAt = 0,
+                    tabs = {},
+                },
+                stockReserves = {},
+                sortAccess = {
+                    rankThreshold = nil,  -- nil = GM-only; N = rank index N and above
+                    delegates = {},       -- ["Char-Realm"] = true
+                    updatedBy = nil,
+                    updatedAt = 0,
                 },
                 schemaVersion = 8,
             },
@@ -1080,6 +1096,7 @@ function GBL:MigrateAllGuilds()
         self:MigrateCrossSlotDedup(guildData)
         self:MigrateAccessControl(guildData)
         self:MigrateRepairEpochTimestamps(guildData)
+        self:MigrateSortAccessShape(guildData)
     end
 end
 
@@ -1505,6 +1522,207 @@ function GBL:GetGuildData()
 end
 
 ------------------------------------------------------------------------
+-- Sort access (bank sort + stocking policy)
+-- Distinct from GetAccessLevel/HasFullAccess above: sort access controls
+-- who can edit the bank layout and who can press Execute on the Sort tab.
+--
+-- Two independent tiers:
+--   * sortAccess.write — grants layout-write + sort (edit templates, capture,
+--     pin slots, change stock reserves; inherently can also Execute).
+--   * sortAccess.sort  — grants sort only (press Execute on the Sort tab);
+--     cannot edit the layout.
+--
+-- Each tier has rankThreshold (number|nil; nil = GM-only) and delegates
+-- (set of "Name-Realm"). Write ⇒ sort — anyone in the write tier is treated
+-- as having sort access regardless of the sort tier's membership.
+--
+-- GM always has both. Writes to sortAccess itself remain GM-only (otherwise
+-- a delegate could escalate by adding themselves).
+------------------------------------------------------------------------
+
+--- Return the normalized "Name-Realm" of the current player.
+local function normalizedPlayerName()
+    local name, realm = UnitName("player")
+    if not name then return nil end
+    if realm and realm ~= "" then
+        return name .. "-" .. realm
+    end
+    local fallback = GetNormalizedRealmName and GetNormalizedRealmName() or nil
+    if fallback and fallback ~= "" then
+        return name .. "-" .. fallback
+    end
+    return name
+end
+
+--- Empty two-tier policy skeleton.
+local function emptySortAccess()
+    return {
+        write = { rankThreshold = nil, delegates = {} },
+        sort  = { rankThreshold = nil, delegates = {} },
+        updatedBy = nil,
+        updatedAt = 0,
+    }
+end
+
+--- Convert a single-tier or legacy sortAccess table into the two-tier shape.
+-- Idempotent — feeding an already-migrated table returns the equivalent shape.
+-- Legacy flat-shape (top-level rankThreshold/delegates) moves into the write
+-- tier so no existing delegate loses permission on upgrade.
+-- @param sa table|nil
+-- @return table new-shape sortAccess
+local function migrateSortAccessTable(sa)
+    if not sa then return emptySortAccess() end
+
+    local hasNew = type(sa.write) == "table" or type(sa.sort) == "table"
+    local hasLegacy = sa.rankThreshold ~= nil or sa.delegates ~= nil
+
+    if hasNew then
+        local out = emptySortAccess()
+        if type(sa.write) == "table" then
+            out.write.rankThreshold = sa.write.rankThreshold
+            if type(sa.write.delegates) == "table" then
+                for name, v in pairs(sa.write.delegates) do
+                    if v and type(name) == "string" and name ~= "" then
+                        out.write.delegates[name] = true
+                    end
+                end
+            end
+        end
+        if type(sa.sort) == "table" then
+            out.sort.rankThreshold = sa.sort.rankThreshold
+            if type(sa.sort.delegates) == "table" then
+                for name, v in pairs(sa.sort.delegates) do
+                    if v and type(name) == "string" and name ~= "" then
+                        out.sort.delegates[name] = true
+                    end
+                end
+            end
+        end
+        out.updatedBy = sa.updatedBy
+        out.updatedAt = sa.updatedAt or 0
+        return out
+    end
+
+    if hasLegacy then
+        local out = emptySortAccess()
+        out.write.rankThreshold = sa.rankThreshold
+        if type(sa.delegates) == "table" then
+            for name, v in pairs(sa.delegates) do
+                if v and type(name) == "string" and name ~= "" then
+                    out.write.delegates[name] = true
+                end
+            end
+        end
+        out.updatedBy = sa.updatedBy
+        out.updatedAt = sa.updatedAt or 0
+        return out
+    end
+
+    return emptySortAccess()
+end
+
+--- Migrate sortAccess in-place for a single guildData entry. Idempotent.
+function GBL:MigrateSortAccessShape(guildData)
+    if not guildData then return end
+    guildData.sortAccess = migrateSortAccessTable(guildData.sortAccess)
+end
+
+--- Internal: does the current player pass a single tier's membership check?
+-- @param tier table|nil { rankThreshold, delegates }
+-- @return boolean
+local function playerInTier(tier)
+    if type(tier) ~= "table" then return false end
+    local me = normalizedPlayerName()
+    if me and type(tier.delegates) == "table" and tier.delegates[me] then
+        return true
+    end
+    if tier.rankThreshold ~= nil then
+        local _, _, rankIndex = GetGuildInfo("player")
+        if rankIndex and rankIndex <= tier.rankThreshold then return true end
+    end
+    return false
+end
+
+--- Check whether the current player can edit the bank layout.
+-- Layout write implies sort access.
+-- @return boolean
+function GBL:HasLayoutWrite()
+    if self:IsGuildMaster() then return true end
+    local guildData = self:GetGuildData()
+    if not guildData or not guildData.sortAccess then return false end
+    return playerInTier(guildData.sortAccess.write)
+end
+
+--- Check whether the current player can execute a sort (write implies sort).
+-- @return boolean
+function GBL:HasSortAccess()
+    if self:HasLayoutWrite() then return true end
+    local guildData = self:GetGuildData()
+    if not guildData or not guildData.sortAccess then return false end
+    return playerInTier(guildData.sortAccess.sort)
+end
+
+--- Return a deep copy of the two-tier sort-access policy. Never returns
+-- the live ref. Transparently upgrades legacy flat-shape tables.
+function GBL:GetSortAccess()
+    local guildData = self:GetGuildData()
+    if not guildData then return emptySortAccess() end
+    local sa = migrateSortAccessTable(guildData.sortAccess)
+    return sa
+end
+
+--- Save a new sort-access policy. GM-only.
+-- @param policy table shaped { write = {rankThreshold, delegates},
+--                              sort  = {rankThreshold, delegates} }
+-- @return ok, err
+function GBL:SaveSortAccess(policy)
+    if not self:IsGuildMaster() then
+        return false, "only the Guild Master can change sort access"
+    end
+    if type(policy) ~= "table" then
+        return false, "policy must be a table"
+    end
+
+    local function validateTier(tier, label)
+        if tier == nil then return { rankThreshold = nil, delegates = {} } end
+        if type(tier) ~= "table" then
+            return nil, label .. " tier must be a table"
+        end
+        if tier.rankThreshold ~= nil and type(tier.rankThreshold) ~= "number" then
+            return nil, label .. " rankThreshold must be a number or nil"
+        end
+        if tier.delegates ~= nil and type(tier.delegates) ~= "table" then
+            return nil, label .. " delegates must be a table"
+        end
+        local delegates = {}
+        if tier.delegates then
+            for name, v in pairs(tier.delegates) do
+                if v and type(name) == "string" and name ~= "" then
+                    delegates[name] = true
+                end
+            end
+        end
+        return { rankThreshold = tier.rankThreshold, delegates = delegates }
+    end
+
+    local writeTier, err = validateTier(policy.write, "write")
+    if not writeTier then return false, err end
+    local sortTier, err2 = validateTier(policy.sort, "sort")
+    if not sortTier then return false, err2 end
+
+    local guildData = self:GetGuildData()
+    if not guildData then return false, "no active guild" end
+
+    guildData.sortAccess = {
+        write = writeTier,
+        sort  = sortTier,
+        updatedBy = normalizedPlayerName(),
+        updatedAt = GetServerTime(),
+    }
+    return true, nil
+end
+
+------------------------------------------------------------------------
 -- Tab name backfill
 ------------------------------------------------------------------------
 
@@ -1546,8 +1764,311 @@ function GBL:HandleSlashCommand(input)
         self:ShowSyncLog()
     elseif command == "cleanup" then
         self:RunCleanup()
+    elseif command == "sortpreview" then
+        self:PrintSortPreview()
+    elseif command == "sortexec" then
+        self:RunSortExec()
+    elseif command == "sortcancel" then
+        self:CancelSortExecution()
+        self:Print("Sort cancellation requested.")
+    elseif command == "deviations" or command == "devs" then
+        self:PrintDeviations()
     else
         self:Print("Unknown command: " .. command .. ". Type /gbl help for usage.")
+    end
+end
+
+--- Compare the current bank scan against the layout's expected demand map
+-- and print every mismatch. Useful after a sort to confirm the result, or
+-- before a sort to see what's deviant. Uses the same expected layout the
+-- planner does (including items[id].slots extensions beyond slotOrder).
+function GBL:PrintDeviations()
+    if not self.PlanSort then
+        self:Print("SortPlanner not loaded.")
+        return
+    end
+    local snapshot = self:GetLastScanResults()
+    if not snapshot then
+        self:Print("No scan yet. Open the bank and run /gbl scan first.")
+        return
+    end
+    local layout = self:GetBankLayout()
+    if not layout or not next(layout.tabs) then
+        self:Print("No bank layout configured.")
+        return
+    end
+
+    local plan = self:PlanSort(snapshot, layout)
+    local expected = plan.demandMap or {}
+
+    -- Ignore tabs are excluded from comparison; they're never touched by sort.
+    local ignoreSet = {}
+    for tabIndex, tab in pairs(layout.tabs) do
+        if tab.mode == "ignore" then ignoreSet[tabIndex] = true end
+    end
+
+    local function slotActual(tabIndex, slotIndex)
+        local tr = snapshot[tabIndex]
+        local s = tr and tr.slots and tr.slots[slotIndex]
+        if not s then return nil, 0 end
+        local id = s.itemLink and s.itemLink:match("Hitem:(%d+)")
+        id = id and tonumber(id) or nil
+        return id, s.count or 0
+    end
+
+    local function itemName(itemID)
+        if GBL.GetCachedItemInfo then
+            local n = self:GetCachedItemInfo(itemID)
+            if n then return n .. " (id " .. itemID .. ")" end
+        end
+        return "item:" .. tostring(itemID)
+    end
+
+    local mismatches, extras, missingEmpty, wrongCount = 0, 0, 0, 0
+    local lines = {}
+    -- Sort tabs ascending so output is predictable.
+    local tabs = {}
+    for t in pairs(layout.tabs) do table.insert(tabs, t) end
+    table.sort(tabs)
+    for _, tabIndex in ipairs(tabs) do
+        if not ignoreSet[tabIndex] then
+            local tab = layout.tabs[tabIndex]
+            local expectedSlots = expected[tabIndex]
+            if tab.mode == "display" and expectedSlots then
+                for s = 1, MAX_GUILDBANK_SLOTS_PER_TAB or 98 do
+                    local exp = expectedSlots[s]
+                    local actualID, actualCount = slotActual(tabIndex, s)
+                    if exp then
+                        if not actualID then
+                            table.insert(lines, string.format(
+                                "  T%d/S%d  expected %s x%d, EMPTY",
+                                tabIndex, s, itemName(exp.itemID), exp.perSlot))
+                            missingEmpty = missingEmpty + 1
+                            mismatches = mismatches + 1
+                        elseif actualID ~= exp.itemID then
+                            table.insert(lines, string.format(
+                                "  T%d/S%d  expected %s x%d, got %s x%d",
+                                tabIndex, s, itemName(exp.itemID), exp.perSlot,
+                                itemName(actualID), actualCount))
+                            mismatches = mismatches + 1
+                        elseif actualCount ~= exp.perSlot then
+                            table.insert(lines, string.format(
+                                "  T%d/S%d  expected %s x%d, count is x%d",
+                                tabIndex, s, itemName(exp.itemID), exp.perSlot, actualCount))
+                            wrongCount = wrongCount + 1
+                            mismatches = mismatches + 1
+                        end
+                    else
+                        if actualID then
+                            table.insert(lines, string.format(
+                                "  T%d/S%d  unclaimed, holds %s x%d (extra)",
+                                tabIndex, s, itemName(actualID), actualCount))
+                            extras = extras + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    self:Print(string.format("|cffffcc00Deviation check:|r %d mismatch(es), %d extra(s)",
+        mismatches, extras))
+    if mismatches > 0 then
+        self:Print(string.format("  breakdown: %d empty (should hold item), %d wrong count, %d wrong item",
+            missingEmpty, wrongCount,
+            mismatches - missingEmpty - wrongCount))
+    end
+    if #lines == 0 then
+        self:Print("  |cff00ff88Bank matches layout exactly.|r")
+        return
+    end
+    -- Cap output so a disastrous state doesn't flood chat.
+    local cap = 40
+    for i = 1, math.min(cap, #lines) do
+        self:Print(lines[i])
+    end
+    if #lines > cap then
+        self:Print(string.format("  ... and %d more (output capped at %d lines; run /gbl synclog for the audit trail)",
+            #lines - cap, cap))
+    end
+end
+
+--- Debug helper: execute the current plan end-to-end via SortExecutor.
+-- GM / delegated-rank / delegate only. Prints progress on completion.
+function GBL:RunSortExec()
+    if not self:HasSortAccess() then
+        self:Print("You do not have sort access. Ask the GM to grant rank or delegate.")
+        return
+    end
+    if not self:IsBankOpen() then
+        self:Print("Open the guild bank first.")
+        return
+    end
+    if self:IsSortRunning() then
+        self:Print("A sort is already running. Use /gbl sortcancel to stop it.")
+        return
+    end
+    local snapshot = self:GetLastScanResults()
+    if not snapshot then
+        self:Print("No scan results yet. Run /gbl scan first.")
+        return
+    end
+    local layout = self:GetBankLayout()
+    if not layout or not next(layout.tabs) then
+        self:Print("No bank layout configured yet.")
+        return
+    end
+    local plan = self:PlanSort(snapshot, layout)
+    if not plan.ops or #plan.ops == 0 then
+        self:Print("Plan is a no-op. Nothing to execute.")
+        return
+    end
+    self:Print(format("Executing %d moves...", #plan.ops))
+    self:ExecuteSortPlan(plan, function(result)
+        if result.ok then
+            self:Print(format("Sort complete: %d ops done, %d failed, %d replans.",
+                result.done, result.failed, result.replans))
+        else
+            self:Print(format("Sort aborted (%s): %d/%d done, %d failed, %d replans.",
+                result.reason, result.done, result.total, result.failed, result.replans))
+        end
+    end, { layout = layout })
+end
+
+--- Debug helper: print the current planned sort moves to chat.
+-- Also prints a diagnostic breakdown (tab modes, demand/supply counts, keep
+-- slots) so "no moves needed" outcomes can be distinguished between "bank
+-- genuinely matches layout" vs. "layout has no demands" vs. "scan is stale."
+function GBL:PrintSortPreview()
+    if not self.PlanSort then
+        self:Print("SortPlanner not loaded.")
+        return
+    end
+    local snapshot = self:GetLastScanResults()
+    if not snapshot then
+        self:Print("No scan results yet. Open the bank and run /gbl scan first.")
+        return
+    end
+    local layout = self:GetBankLayout()
+    if not layout or not next(layout.tabs) then
+        self:Print("No bank layout configured yet. Nothing to sort.")
+        return
+    end
+
+    -- Layout breakdown.
+    local displayTabs, overflowTab, ignoreTabs = {}, nil, {}
+    local totalDemands = 0
+    for tabIndex, tab in pairs(layout.tabs) do
+        if tab.mode == "display" then
+            -- Count demands by items[id].slots (authoritative); this matches
+            -- what the planner actually uses.
+            local dCount = 0
+            if tab.items then
+                for _, row in pairs(tab.items) do
+                    if type(row) == "table" and type(row.slots) == "number" then
+                        dCount = dCount + row.slots
+                    end
+                end
+            end
+            totalDemands = totalDemands + dCount
+            table.insert(displayTabs, { tabIndex = tabIndex, demands = dCount })
+        elseif tab.mode == "overflow" then
+            overflowTab = tabIndex
+        elseif tab.mode == "ignore" then
+            table.insert(ignoreTabs, tabIndex)
+        end
+    end
+    table.sort(displayTabs, function(a, b) return a.tabIndex < b.tabIndex end)
+    table.sort(ignoreTabs)
+
+    -- Snapshot breakdown.
+    local snapshotStr = {}
+    local totalSupplies = 0
+    for tabIndex, tabResult in pairs(snapshot) do
+        local n = 0
+        if tabResult and tabResult.slots then
+            for _, _slot in pairs(tabResult.slots) do
+                n = n + 1
+            end
+        end
+        totalSupplies = totalSupplies + n
+        table.insert(snapshotStr, { tabIndex = tabIndex, n = n })
+    end
+    table.sort(snapshotStr, function(a, b) return a.tabIndex < b.tabIndex end)
+
+    local lastScan = "Never"
+    if self.lastScanTime and self.lastScanTime > 0 then
+        lastScan = date("%H:%M:%S", self.lastScanTime)
+    end
+
+    self:Print("|cffffcc00Sort diagnostic:|r")
+    self:Print(format("  Layout v%s, last scan %s",
+        tostring(layout.version or "?"), lastScan))
+    local displaySummary = {}
+    for _, e in ipairs(displayTabs) do
+        table.insert(displaySummary, format("T%d=%d", e.tabIndex, e.demands))
+    end
+    self:Print(format("  Display tabs: [%s] (%d demands total)",
+        table.concat(displaySummary, ", "), totalDemands))
+    self:Print(format("  Overflow tab: %s", tostring(overflowTab or "none")))
+    if #ignoreTabs > 0 then
+        self:Print(format("  Ignore tabs: [%s]",
+            table.concat(ignoreTabs, ", ")))
+    end
+    local snapSummary = {}
+    for _, e in ipairs(snapshotStr) do
+        table.insert(snapSummary, format("T%d=%d", e.tabIndex, e.n))
+    end
+    self:Print(format("  Scan contents: [%s] (%d occupied slots total)",
+        table.concat(snapSummary, ", "), totalSupplies))
+
+    local plan = self:PlanSort(snapshot, layout)
+    local opsN = #(plan.ops or {})
+    local defN = 0; for _ in pairs(plan.deficits or {}) do defN = defN + 1 end
+    local unpN = #(plan.unplaced or {})
+    self:Print(format("  Plan: %d moves, %d deficits, %d unplaced",
+        opsN, defN, unpN))
+
+    -- Per-tab origin breakdown (v0.29.17 diagnostics): shows how many
+    -- demands per display tab are pinned (from Capture) vs auto-placed
+    -- (extended adjacent to a pin, or first-empty fallback). A big
+    -- first-empty count alongside many pinned demands is the gem-tab
+    -- restock pattern — new stacks landing at the end of the tab
+    -- because their item's pin has no room to extend.
+    local orderedTabs = {}
+    for t in pairs(plan.demandMap or {}) do table.insert(orderedTabs, t) end
+    table.sort(orderedTabs)
+    for _, t in ipairs(orderedTabs) do
+        local c = { pinned = 0, extR = 0, extL = 0, firstE = 0 }
+        for _, dem in pairs(plan.demandMap[t]) do
+            if     dem.origin == "pinned"       then c.pinned = c.pinned + 1
+            elseif dem.origin == "extend-right" then c.extR   = c.extR + 1
+            elseif dem.origin == "extend-left"  then c.extL   = c.extL + 1
+            elseif dem.origin == "first-empty"  then c.firstE = c.firstE + 1
+            end
+        end
+        local auto = c.extR + c.extL + c.firstE
+        if c.pinned + auto > 0 then
+            self:Print(format(
+                "  T%d origins: %d pinned + %d auto-placed (%d extend-right, %d extend-left, %d first-empty)",
+                t, c.pinned, auto, c.extR, c.extL, c.firstE))
+        end
+    end
+
+    if opsN == 0 and defN == 0 and unpN == 0 then
+        if totalDemands == 0 then
+            self:Print("  |cffffaa55Reason: layout has no display-tab demands — no template to sort toward. " ..
+                       "Use Capture or Add Item on the Layout tab.|r")
+        else
+            self:Print("  |cff00ff88Reason: every demand is already satisfied by a slot at the correct count.|r")
+        end
+        return
+    end
+
+    local lines = self:SummarizeSortPlan(plan)
+    self:Print("|cffffcc00Planned moves (" .. #lines .. " lines):|r")
+    for _, line in ipairs(lines) do
+        self:Print("  " .. line)
     end
 end
 
@@ -1589,6 +2110,9 @@ function GBL:PrintHelp()
     self:Print("  /gbl status  — Show addon status")
     self:Print("  /gbl scan    — Manually scan the guild bank")
     self:Print("  /gbl cleanup — Remove duplicate records from the database")
+    self:Print("  /gbl sortpreview — Preview the current sort plan (debug)")
+    self:Print("  /gbl sortexec    — Execute the current sort plan (GM/delegated only)")
+    self:Print("  /gbl sortcancel  — Cancel a running sort")
     self:Print("  /gbl help    — Show this help message")
 end
 

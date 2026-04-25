@@ -78,6 +78,13 @@ function GBL:StartFullScan()
 end
 
 --- Query the current tab and prepare to scan it.
+-- The old immediate-scan fast-path was removed because on first bank open
+-- the client has no slot data yet — GetGuildBankItemLink returns nil for
+-- every slot, the scan unregisters the event, and the actual data arrival
+-- is then ignored. The correct flow is: register → query → wait for the
+-- server's GUILDBANKBAGSLOTS_CHANGED → scan. A timeout fallback covers
+-- the edge case where a tab never fires the event (e.g., a truly empty
+-- tab, or a network stall).
 function GBL:QueryAndScanTab()
     local tabIndex = scanState.viewableTabs[scanState.tabIndex]
     if not tabIndex then
@@ -88,14 +95,22 @@ function GBL:QueryAndScanTab()
     scanState.currentTab = tabIndex
     scanState.waitingForData = true
 
-    -- Register for slot data event
+    -- Register BEFORE the query so we can't miss the response.
     self:RegisterEvent("GUILDBANKBAGSLOTS_CHANGED")
 
-    -- Request tab data from server
+    -- Request tab data from server.
     QueryGuildBankTab(tabIndex)
 
-    -- Also try scanning immediately (data may already be cached)
-    self:TryScanCurrentTab()
+    -- Fallback: if the event doesn't fire within the timeout, scan anyway.
+    -- Guards on scanState so a late timer firing for a previous tab is a no-op.
+    local tabAtStart = tabIndex
+    local SCAN_TIMEOUT = self.db.profile.scanning.queryTimeout or 3.0
+    scanState.pendingTimer = C_Timer.After(SCAN_TIMEOUT, function()
+        if scanState.inProgress and scanState.waitingForData
+           and scanState.currentTab == tabAtStart then
+            GBL:TryScanCurrentTab()
+        end
+    end)
 end
 
 --- Attempt to scan the current tab's slots.

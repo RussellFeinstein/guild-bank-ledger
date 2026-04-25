@@ -29,6 +29,246 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.30.0
+    {"0.30.0", "2026-04-24", {
+        Added = {
+            "Sort Access now has two independent tiers. The Layout tab's Sort Access section is split into Layout Write access (edit templates, capture, pin slots, change stock reserves — inherently includes sort) and Sort-only access (press Execute on the Sort tab but cannot edit the layout). Each tier has its own rank threshold and its own delegate list. Only the Guild Master can change the policy. Grant sort execution widely while keeping layout edits locked down.",
+            "Defense-in-depth gate at the storage API. SaveBankLayout and SetStockReserve now reject any caller that does not pass HasLayoutWrite(), in addition to the existing UI callback check.",
+        },
+        Changed = {
+            "Existing sortAccess configurations migrate into the new Layout Write tier on upgrade, so no one silently loses a permission. The sort-only tier starts empty; populate it in the Layout tab if you want to grant sort without layout write.",
+        },
+    }},
+
+    -- v0.29.26
+    {"0.29.26", "2026-04-24", {
+        Fixed = {
+            "Sort progress counter no longer shows impossible values like '34/33' after a replan. The old display used (done+failed)/total, but done and failed accumulate across replans while total is the current plan's size, so the numerator could exceed the denominator once a replan reissued work. Switched to 'op N / T' using the executor's live op index and current-plan total — always in range and reflects 'where are we in the plan that's actually running.'",
+            "Move list and per-op status markers now realign after a replan. Previously the UI kept rendering the original plan's rows while the executor had moved on to a different post-replan plan, so row markers drifted onto the wrong moves and the counter referenced a plan that was no longer executing. SortExecutor now broadcasts the new plan via a 'planupdated' progress phase, and SortView swaps the cached plan, clears stale op markers, and rebuilds the move list to match what's actually running.",
+        },
+    }},
+
+    -- v0.29.25
+    {"0.29.25", "2026-04-24", {
+        Fixed = {
+            "Sort progress markers on each move row now render in WoW's default font. v0.29.23 used Unicode triangle/check/cross glyphs that FRIZQT__ doesn't ship, so users saw colored boxes instead. Replaced with colored ASCII: '>' (yellow) for the op currently in flight, '+' (green) for completed (including late-ACK reclassified), 'x' (red) for failed. Same colors, actual shapes.",
+            "Per-op status markers now survive Sort tab rebuilds mid-sort. Previously, every successful move created a transaction log entry; the ledger rescan reacted by firing RefreshUI, which (for the Sort tab) full-rebuilt the tab and wiped all per-row widget refs. The top progress line recovered on the next event but the per-op markers on already-completed rows were lost forever. Fixed by persisting a '_sortOpStatus' table and a cached progress-text string that the Preview loop repaints into freshly-built widgets on every rebuild — so a rescan, a tab switch, or any other rebuild now preserves the full visual state.",
+        },
+    }},
+
+    -- v0.29.24
+    {"0.29.24", "2026-04-24", {
+        Changed = {
+            "Every sort now ends by tidying the overflow (stock) tab. A new Phase 4 in the planner reshapes the overflow tab into a deterministic contiguous layout starting at slot 1: stacks sorted by itemID, larger stacks first within a group, no gaps. Previously the overflow was a dumping ground — Phase 1B and Phase 3 only grouped *new* spills using adjacency, so any pre-existing scattered stacks or gaps stayed scattered. Repeat sorts are now idempotent (already-compact overflow → zero compaction ops). Partial-stack merging (e.g. merging two half-stacks of Linen Cloth) is explicitly out of scope here — the planner has no max-stack-size knowledge; that's a follow-up.",
+        },
+    }},
+
+    -- v0.29.23
+    {"0.29.23", "2026-04-23", {
+        Added = {
+            "Live progress display in the Sort tab while a sort is executing. A running 'Executing — N/T (X done, Y failed, Z replans)' line updates at the top of the move list every time an op starts, completes, fails, or gets reclassified by the late-ACK path. Each move row also gets a status marker prefixed to it as it advances: ▶ for the op currently in flight, ✓ for completed (including late-ACK success), ✗ for failed. Sort execution is 100% local so these updates have no bandwidth cost — they're just direct SetText calls on widgets we already have references to.",
+            "On sort completion, the progress line switches to 'Sort complete — N done, M failed, K replans. Rescanning...' immediately, then the tab refreshes with the post-sort plan once the rescan lands. No more waiting on the scan to see whether the sort succeeded.",
+        },
+    }},
+
+    -- v0.29.22
+    {"0.29.22", "2026-04-23", {
+        Fixed = {
+            "Late server ACKs for move ops are now reclassified correctly even when the next op is already in flight. v0.29.19 added the grace window but only fired it when no op was waiting — in a live sort the 0.3s inter-move gap means an op is almost always armed, so the grace window essentially never fired. The handler now checks both 'is this a late ACK for a timed-out prior op' and 'does this advance the current in-flight op' as independent concerns. Expected effect: cleaner audit trails (fewer 'op N timed out / op N+1 pre-check fail' cascades) and more accurate done/failed counters after a sort completes.",
+        },
+        Changed = {
+            "Removed the loud Capture-button diagnostics added in v0.29.21 now that the reported regression wasn't reproducible (it cleared on /reload). Kept the pcall-wrapped error handler and the pinned-slot count in the success message — cheap, informative, won't spam chat.",
+        },
+    }},
+
+    -- v0.29.21
+    {"0.29.21", "2026-04-23", {
+        Added = {
+            "Diagnostic output on the Layout editor's Capture button. When clicked, the button now always prints at least one chat line — the initial click, the guard state (scan/slots/writable), and either a success or a wrapped-pcall error message. Added to chase down a reported regression where Capture on a freshly-switched-to-Display tab looked like it was doing nothing.",
+            "Capture success message now reports both the distinct-item count and the pinned-slot count ('Captured tab 5: 34 distinct item(s), 66 slot(s) pinned') so you can tell at a glance whether slotOrder got populated from the scan.",
+        },
+    }},
+
+    -- v0.29.20
+    {"0.29.20", "2026-04-23", {
+        Added = {
+            "Timeout-time diagnostics in the sort executor. When an op times out, the audit trail now dumps a classification ([none] / [partial] / [complete] / [other]), the op's full details, and the observed live state of the source/destination slots and cursor. This distinguishes 'server dropped the request,' 'pickup worked but drop didn't,' and 'move completed but ACK was lost' cases without needing to re-run the sort.",
+            "Pre-check failures on destination slot mismatches now also log the op's full context (src/dst tab+slot, itemID, count), making it legible in the audit trail why a replan was triggered and what op the planner scheduled there.",
+        },
+    }},
+
+    -- v0.29.19
+    {"0.29.19", "2026-04-23", {
+        Fixed = {
+            "Sort no longer aborts mid-run when the server takes slightly longer than 2s to confirm a move. The executor used to classify the (legitimate but late) GUILDBANKBAGSLOTS_CHANGED event as 'foreign activity' and trigger a replan; the replan's fresh snapshot then saw the move already settled and the resulting plan sometimes pre-check-failed on op 1, cascading through all 5 replan retries before aborting. Now: if a recent op timed out and its destination slot is now populated as expected, the late event retroactively reclassifies the op as success and execution continues.",
+            "Raised MOVE_CONFIRM_TIMEOUT from 2s to 4s to give high-latency realms more headroom before a legitimate server ACK is misclassified as a timeout. Happy-path sorts are unchanged (fast ACKs advance immediately); this only affects slow ACKs that would otherwise stall the run.",
+            "Raised SCAN_WAIT_TIMEOUT from 5s to 10s. Full-bank scans on populated 7+ tab banks were observed taking ~4s in-game — uncomfortably close to the old 5s cap — and a single slow scan during a replan was enough to abort an otherwise-recoverable sort.",
+        },
+    }},
+
+    -- v0.29.18
+    {"0.29.18", "2026-04-23", {
+        Added = {
+            "'Unpin all slots' button on each display tab in the Layout editor. Wipes slotOrder (keeps items). Use when a captured layout is forcing new restock stacks to scatter to the end of the tab — after unpinning, the planner packs everything by adjacency at sort time.",
+            "Per-item 'Unpin' button on every item row. Clears pinned slots for just that item while the rest of the tab stays pinned. Useful for 'mostly frozen, except this one high-churn item' setups. Disabled when the item has no pinned slots.",
+            "Each item row now shows a pin count ('3 pinned' in yellow, or 'not pinned' in gray) between the = total and the action buttons, so you can see at a glance which items are fixed to positions and which aren't.",
+            "Three modes now legible in the editor: Fully pinned (Capture everything, positions locked), Fully declarative (no pins, planner places at sort time), or Mixed (pin some, let others flow). Pick the mode that matches how much you care about exact placement vs. tolerating reorganization.",
+        },
+    }},
+
+    -- v0.29.17
+    {"0.29.17", "2026-04-23", {
+        Added = {
+            "Demand origin tracking in the sort planner. Each demand is tagged 'pinned' (from Capture), 'extend-right' / 'extend-left' (planner adjacency), or 'first-empty' (fallback when no adjacency is possible). The gem-tab restock pattern — pinned captures forcing new stacks to scatter — is now visible in diagnostics as a high first-empty count alongside many pinned demands.",
+            "/gbl sortpreview now breaks down each display tab's demands by origin (pinned / auto-placed / extend-right / extend-left / first-empty) and annotates each planned move line with its destination origin so you can trace why each move lands where it lands.",
+            "Layout editor slot map header now shows 'N pinned + M auto-placed; K empty' instead of just 'N/98 pinned.' The per-item 'auto-placed at sort time' list distinguishes all-new items from mixed ones ('1 pinned + 3 auto-placed') — the second form is the gem-tab pattern where Capture locked in old stacks and a later Slots bump added new ones.",
+        },
+    }},
+
+    -- v0.29.16
+    {"0.29.16", "2026-04-23", {
+        Fixed = {
+            "Layout tab edits no longer show a visible scroll-snap flicker. v0.29.15 preserved scroll position across rebuilds, but the Release → Build → SetScroll sequence was still visible as a brief blank-then-snap. The TabGroup's content frame is now hidden for the duration of the rebuild and revealed after scroll has been re-applied, so the tab appears static during edits.",
+        },
+    }},
+
+    -- v0.29.15
+    {"0.29.15", "2026-04-23", {
+        Fixed = {
+            "Layout tab no longer scrolls to the top every time you press Enter in an edit field. The tab rebuilds on every field change (to keep the slot budget, save/discard buttons, and slot map in sync), and that rebuild was also re-creating the ScrollFrame — throwing away scroll position. Editing Slots or Per slot halfway down the page used to jump you back to the top; the ScrollFrame now persists its scroll offset across rebuilds and snaps back to where you were.",
+        },
+    }},
+
+    -- v0.29.14
+    {"0.29.14", "2026-04-23", {
+        Added = {
+            "Slot map panel in the Layout editor. Every display tab now shows its slotOrder as a compact run-length list (e.g. 'S1-S23 (23): Silvermoon Health Potion × 20') right under the item rows. A 1-slot run wedged between two long runs of the same other item now stands out visually — which is exactly what the v0.29.12 hidden-swap incident needed.",
+            "Slot map compares against the current bank scan when one is available: green ✓ if every slot in the run matches, red ✗ with per-slot detail lines naming what's actually sitting there otherwise. Items whose Slots count exceeds their pinned slotOrder entries list below as 'auto-placed at sort time,' matching the v0.29.13 ownership split (Capture pins, planner places everything else at sort time).",
+        },
+    }},
+
+    -- v0.29.13
+    {"0.29.13", "2026-04-23", {
+        Changed = {
+            "Layout editor no longer pre-pins slotOrder positions for Add Item or Slots-up. The UI used to heuristically pin positions on edit — indistinguishable from a real Capture — which the planner then rigidly enforced. Same adjacency logic now runs at plan time instead, so slotOrder unambiguously means 'pin because observed,' saved layouts are smaller, and the post-sort bank state is byte-identical to before. Capture, Slots-down trim, and Remove cleanup are unchanged.",
+        },
+        Fixed = {
+            "Adding an item to a full captured tab no longer leaves partial slotOrder state. Previously items[id].slots would be set but only some of the requested slots got slotOrder entries when the tab was nearly full; the over-budget error surfaced only at save time. With the prefill gone, the authoritative items[].slots sum is what validation checks — single clean failure mode.",
+        },
+    }},
+
+    -- v0.29.12
+    {"0.29.12", "2026-04-23", {
+        Added = {
+            "/gbl deviations (alias /gbl devs) compares the current bank to the layout's expected demand map and prints every slot that doesn't match — wrong item, wrong count, empty-where-expected, or extras in unclaimed slots.",
+            "Auto-run deviation check after Execute. The Sort tab already rescans after Execute (v0.29.9); it now also prints the deviation report when the fresh scan lands, so any mismatch between plan and result is immediately visible.",
+            "Pre-check failure audit entries now include the observed state (e.g. 'expected it:12345 x>=20, got it:99999 x10') instead of a bare 'src mismatch' message — makes it obvious whether the failure was foreign activity, a stack-size drift, or a planner bug.",
+        },
+    }},
+
+    -- v0.29.11
+    {"0.29.11", "2026-04-23", {
+        Fixed = {
+            "Sort now keeps each item's span contiguous in the display tab. When items[id].slots exceeded the captured slotOrder entries, the planner used to fill first unclaimed slot and could drop items into another item's section depending on itemID ordering. It now extends an item's group RIGHT first, then LEFT, only falling back to arbitrary slots when both ends are blocked.",
+            "Overflow (stock) tab stays organized by item. Spills used to land in the first empty slot regardless of what was next to it; they now prefer slots adjacent to existing same-item stacks.",
+            "Layout editor's Add Item and Slots field use the same adjacency rule so saved layouts stay neat without a recapture.",
+        },
+    }},
+
+    -- v0.29.10
+    {"0.29.10", "2026-04-23", {
+        Fixed = {
+            "First bank scan after login no longer misses every item. The scanner was reading slots immediately after requesting tab data, but on first open the client has no data yet — 98 nil slots, event unregistered, real data ignored when it arrived. The scanner now waits for the server's response event before scanning, with a 3-second timeout fallback for empty tabs that don't fire the event.",
+        },
+    }},
+
+    -- v0.29.9
+    {"0.29.9", "2026-04-23", {
+        Fixed = {
+            "Sort tab now auto-refreshes after Execute. Preview was re-running against the pre-sort snapshot (stale), so the plan looked unchanged after sort had actually run. The tab now triggers a rescan on completion, shows a 'Rescanning...' placeholder, then re-previews against the post-sort state.",
+        },
+    }},
+
+    -- v0.29.8
+    {"0.29.8", "2026-04-23", {
+        Fixed = {
+            "Sort planner now honors items[id].slots as the authoritative demand count. Before, if you captured a layout with 3 slots of an item then edited Slots to 5 in the Layout UI, the 2 extra slots were silently dropped and sort saw 'no discrepancy' even when the bank was obviously off. The planner now emits demands up to items[id].slots, adding extras at the first unclaimed slot indices.",
+            "Layout editor's Slots input now syncs slotOrder on edit so the mismatch above can't reappear. Increasing Slots pins new positions at the first unclaimed indices; decreasing Slots trims from the highest slot index down.",
+            "Phase 3 sweep no longer mis-evicts items placed by dynamically-added demands (was a consequence of the above fix — discovered via the regression tests).",
+        },
+        Added = {
+            "/gbl sortpreview now prints a diagnostic breakdown: per-display-tab demand counts, overflow/ignore tab indices, scan contents by tab, and a plain-English reason when the plan is empty. Tells you whether a 0-op result is a config issue (no demands) or the bank genuinely matches the layout.",
+        },
+    }},
+
+    -- v0.29.7
+    {"0.29.7", "2026-04-23", {
+        Changed = {
+            "Sort planner rewritten from three-pass greedy to assign-then-schedule. Same inputs and outputs — drop-in upgrade. Items in the wrong slot of the right tab now move directly instead of round-tripping through overflow; oversize stacks feed multiple demands from a single source; the planner picks the largest source first to minimize split count; and swap cycles are detected and resolved with a pivot (3 ops for a 2-cycle, 4 for a 3-cycle, down from 4 and 6).",
+            "Unreachable swap cycles (no empty unclaimed slot anywhere) are now reported as unplaced with a 'cycle-no-pivot' reason instead of emitting half-broken ops.",
+        },
+    }, milestone = "M-sort-2.5: Planner algorithm upgrade"},
+
+    -- v0.29.6
+    {"0.29.6", "2026-04-23", {
+        Changed = {
+            "Layout tab save-bar is now self-explanatory: status banner reads 'You have unsaved changes' vs 'Layout is up to date', the save button is disabled and labels itself 'Saved ✓' when clean, and 'Revert' was renamed to 'Discard changes'. Edits still buffer until Save (deliberate, so validation and sync run once per logical change), just with clearer signals.",
+        },
+    }},
+
+    -- v0.29.5
+    {"0.29.5", "2026-04-23", {
+        Fixed = {
+            "Capture current layout now auto-triggers a scan when none exists, polls for completion, and gives clear success/failure feedback. Previously it silently failed when no scan had been performed yet.",
+        },
+    }},
+
+    -- v0.29.4
+    {"0.29.4", "2026-04-23", {
+        Fixed = {
+            "Layout tab dropdowns (mode + per-item Slots/Per-slot) now accept edits. The draft state was being wiped on every refresh, so changes applied then immediately reverted.",
+            "Sort Access rank dropdown now shows all options including 'None (GM only)' as the default. It was previously rendering blank entries due to an array-vs-hash mismatch in the AceGUI dropdown call.",
+        },
+    }},
+
+    -- v0.29.3
+    {"0.29.3", "2026-04-23", {
+        Added = {
+            "Layout tab — per-tab mode picker (display/overflow/ignore), item template rows with Slots + Per-slot inputs, live slot-budget readout, Capture-current-layout button, and Add-item input that takes an itemID or a pasted item link.",
+            "Sort tab — Preview builds and displays the planned moves with human-readable item names, deficits, and unplaced items. Execute runs the plan through SortExecutor with progress prints. Cancel aborts.",
+            "Sort Access section (on the Layout tab) — GM sets a rank threshold and named delegates. Non-GMs see the policy read-only. Layout tab visibility itself now depends on sort access.",
+        },
+    }, milestone = "M-sort-2 (UI): Layout editor + Sort tab"},
+
+    -- v0.29.2
+    {"0.29.2", "2026-04-23", {
+        Added = {
+            "SortAccess policy — GM configures a rank threshold and named delegates to control who can edit layouts and execute sort. Default is GM-only; policy writes are GM-only so delegates can't self-escalate.",
+            "SortExecutor — executes plans one op at a time with throttling, pre-step verification against live bank, replan-on-foreign-activity (cap 5), bank-close abort, and cursor-leak safety on every exit path.",
+            "Slash commands: /gbl sortexec (run the current plan) and /gbl sortcancel (cancel a running sort), both gated by HasSortAccess.",
+        },
+    }, milestone = "M-sort-2 (backbone): Executor + Access policy"},
+
+    -- v0.29.1
+    {"0.29.1", "2026-04-23", {
+        Added = {
+            "CLAUDE.md architecture list now includes BankLayout and SortPlanner.",
+            "Four sort-planner regression tests: ignore-tab invisibility, keep-slot protection, multi-tab orphan routing, and no-duplicate-unplaced under overflow saturation.",
+        },
+        Fixed = {
+            "SortPlanner no longer produces duplicate unplaced entries when the overflow tab is full — Pass 1 now drops the working-bank copy of any slot it records as unplaced so later passes don't re-process it.",
+        },
+    }, milestone = "M-sort-1.1: Audit cleanup"},
+
+    -- v0.29.0
+    {"0.29.0", "2026-04-23", {
+        Added = {
+            "Bank layout model: per-guild saved templates that describe each tab's role (display, overflow, or ignore). Display tabs list the items they hold along with how many slots each occupies and the target stack size per slot. Includes a Capture tool that reads the current contents of a hand-arranged tab and saves it as the canonical layout.",
+            "Sort planner: given a bank scan and a saved layout, produces an ordered list of moves that will reshape the bank to match — splitting oversize stacks, pulling from other display tabs or the overflow tab to fill deficits, and routing unassigned items to overflow. Pure function, fully tested. No execution or UI yet; those arrive in subsequent milestones.",
+            "Debug: /gbl sortpreview prints the current sort plan to chat.",
+        },
+    }, milestone = "M-sort-1: Bank sorting foundation"},
+
     -- v0.28.12
     {"0.28.12", "2026-04-24", {
         Added = {
