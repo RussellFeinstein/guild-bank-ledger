@@ -324,6 +324,7 @@ function MockAce.install()
         widget.frame = {
             IsShown = function() return widget._shown end,
             SetClampedToScreen = function() end,
+            SetPoint = function() end,
             CreateFontString = function()
                 local fs = { _text = "" }
                 fs.SetFont = function() end

@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.10] — 2026-04-24
+
+### Fixed
+- Removed blank space at the bottom of all six tabs — Transactions, Gold Log, Consumption, Sync, Changelog, and About — by anchoring each tab's content frame to the container's `BOTTOMRIGHT`. Thanks @katogaming88 for spotting it and fixing the first three tabs in #1; extended to Sync / Changelog / About in a follow-up on the same PR.
+
 ## [0.28.9] — 2026-04-24
 
 ### Added

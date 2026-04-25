@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.28.10
+    {"0.28.10", "2026-04-24", {
+        Fixed = {
+            "Removed blank space at the bottom of all six tabs (Transactions, Gold Log, Consumption, Sync, Changelog, About). Thanks @katogaming88 for spotting and fixing the first three in #1.",
+        },
+    }},
+
     -- v0.28.9
     {"0.28.9", "2026-04-24", {
         Added = {
