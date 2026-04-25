@@ -85,6 +85,10 @@ busted --verbose
 luacheck .
 ```
 
+## Contributing
+
+Bug reports, feature requests, and pull requests are all welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide: quick-start setup, commit / versioning conventions, test expectations, and the PR review process.
+
 ## Support
 
 If you find GuildBankLedger useful, consider supporting development:

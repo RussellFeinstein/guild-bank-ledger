@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.28.11
+    {"0.28.11", "2026-04-24", {
+        Added = {
+            "Contributor docs: CONTRIBUTING.md, PR template, CODEOWNERS, and a README \"Contributing\" section. Aimed at external contributors but also documents internal conventions.",
+        },
+    }},
+
     -- v0.28.10
     {"0.28.10", "2026-04-24", {
         Fixed = {
