@@ -5,6 +5,15 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.2] - 2026-04-27
+
+### Added
+- **Sync audit trail now distinguishes silent receiver-side aborts from wire loss.** Two diagnostic-only additions, no behavior change:
+  - **Receiver auto-bootstrap audit line.** When a `SYNC_DATA` chunk arrives while the receiver is not in an active receive session AND the chunk index is greater than 1, the audit log now records `Auto-bootstrap at chunk N from <sender> (prior abort signal likely missed)`. This signals that the receiver missed an earlier abort hand-off (combat with lost BUSY, or a sender-side state desync) and is recovering data mid-stream from chunk N onward. Bootstraps at `chunk = 1` stay silent (legitimate fresh start, e.g. addon reload between SYNC_REQUEST and the first chunk).
+  - **Sender liveness tag on ACK timeout retries.** The `ACK timeout — retrying chunk N (attempt X/Y), fragments~=Z, gapSinceWire=Ts, nacksThisChunk=N` audit line now appends `, target=<online|offline|unknown>` from `IsGuildMemberOnline`. `unknown` covers both "not in roster" and "roster not yet populated" (the latter only relevant for the first few seconds after `PLAYER_ENTERING_WORLD`). Lets future capture analysis count how many timeouts happened against a peer who was already offline (failed-to-detect-disconnect) versus a peer who was nominally online (true wire loss or in-instance silent abort).
+
+The motivation is observability before action: prior captures showed `chunkFail≈45–50%` patterns that conflate true wire loss, combat-with-lost-BUSY, full peer disconnect, and a separate auto-bootstrap desync path. Fixing chunk sizing without first measuring the cause distribution risks treating the wrong failure mode. These two log lines let the next 2–3 real failure captures be cross-correlated to pick the right v0.30.3 fix.
+
 ## [0.30.1] - 2026-04-25
 
 ### Changed

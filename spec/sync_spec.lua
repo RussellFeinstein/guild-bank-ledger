@@ -949,6 +949,65 @@ describe("Sync", function()
             assert.equals(1, #guildData.moneyTransactions)
             assert.equals("Jaina-TestRealm", guildData.moneyTransactions[1].player)
         end)
+
+        -- v0.30.2: receiver-side auto-bootstrap diagnostic. When a SYNC_DATA
+        -- chunk arrives at chunk N>1 with no active receive session, it means
+        -- the receiver missed an earlier abort signal — log it.
+        it("logs auto-bootstrap when chunk > 1 arrives with no receive state", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 5,
+                totalChunks = 10,
+                transactions = {},
+                moneyTransactions = {},
+            })
+
+            local trail = GBL:GetAuditTrail()
+            local found = false
+            for _, entry in ipairs(trail) do
+                if entry.message:match("Auto%-bootstrap at chunk 5") then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found, "expected auto-bootstrap audit entry for chunk 5")
+        end)
+
+        it("does NOT log auto-bootstrap on legitimate chunk = 1 fresh start", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 3,
+                transactions = {},
+                moneyTransactions = {},
+            })
+
+            local trail = GBL:GetAuditTrail()
+            for _, entry in ipairs(trail) do
+                assert.is_nil(entry.message:match("Auto%-bootstrap"),
+                    "chunk = 1 should not trigger auto-bootstrap log")
+            end
+        end)
+
+        it("does NOT log auto-bootstrap or crash when chunk is nil", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- Defensive: malformed payload with no chunk field. Existing
+            -- code already silently ignores; the new audit gate must too.
+            GBL:HandleSyncData("OfficerB", {
+                totalChunks = 3,
+                transactions = {},
+                moneyTransactions = {},
+            })
+
+            local trail = GBL:GetAuditTrail()
+            for _, entry in ipairs(trail) do
+                assert.is_nil(entry.message:match("Auto%-bootstrap"),
+                    "chunk = nil should not trigger auto-bootstrap log")
+            end
+        end)
     end)
 
     ---------------------------------------------------------------------------
@@ -2078,6 +2137,91 @@ describe("Sync", function()
             end
             assert.is_true(GBL:GetSyncStatus().sending,
                 "retry counter should have reset — still sending")
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- ACK timeout target liveness tag (v0.30.2)
+    ---------------------------------------------------------------------------
+
+    describe("ACK timeout target liveness", function()
+        local function fireOneAckTimeout()
+            MockWoW.serverTime = MockWoW.serverTime + 10
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 8 and not timer.cancelled then
+                    timer.callback()
+                    return
+                end
+            end
+        end
+
+        local function findRetryEntry()
+            local trail = GBL:GetAuditTrail()
+            for _, entry in ipairs(trail) do
+                -- Match the distinctive "retrying chunk" substring; the
+                -- audit message itself contains an em dash before it
+                -- (pre-existing pre-v0.30.2 wording), so don't anchor on that.
+                if entry.message:find("retrying chunk", 1, true) then
+                    return entry.message
+                end
+            end
+            return nil
+        end
+
+        -- Sets up state with target online (HandleSyncRequest gates on
+        -- IsGuildMemberOnline via SendSyncWhisper at Sync.lua:222). Tests
+        -- that need a different liveness must flip the roster AFTER setup,
+        -- before firing the ACK timeout — that mirrors the real-world
+        -- scenario of a peer who goes offline mid-stream.
+        local function setupSendingState()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            MockWoW.guildRoster = {
+                { name = "OfficerB-TestRealm", isOnline = true },
+            }
+            for i = 1, 4 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000 + i, id = "h" .. i,
+                })
+            end
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending)
+        end
+
+        it("appends target=online when send target is in roster and online", function()
+            setupSendingState()
+            fireOneAckTimeout()
+
+            local entry = findRetryEntry()
+            assert.is_not_nil(entry, "expected an ACK timeout retry entry")
+            assert.is_not_nil(entry:match("target=online"),
+                "retry entry should include target=online; got: " .. entry)
+        end)
+
+        it("appends target=offline when send target goes offline mid-stream", function()
+            setupSendingState()
+            -- Peer disconnects after we already started sending
+            MockWoW.guildRoster = {
+                { name = "OfficerB-TestRealm", isOnline = false },
+            }
+            fireOneAckTimeout()
+
+            local entry = findRetryEntry()
+            assert.is_not_nil(entry, "expected an ACK timeout retry entry")
+            assert.is_not_nil(entry:match("target=offline"),
+                "retry entry should include target=offline; got: " .. entry)
+        end)
+
+        it("appends target=unknown when send target leaves the guild mid-stream", function()
+            setupSendingState()
+            -- Peer drops out of roster entirely — IsGuildMemberOnline returns nil
+            MockWoW.guildRoster = {}
+            fireOneAckTimeout()
+
+            local entry = findRetryEntry()
+            assert.is_not_nil(entry, "expected an ACK timeout retry entry")
+            assert.is_not_nil(entry:match("target=unknown"),
+                "retry entry should include target=unknown; got: " .. entry)
         end)
     end)
 

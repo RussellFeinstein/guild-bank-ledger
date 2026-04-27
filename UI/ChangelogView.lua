@@ -29,6 +29,14 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.30.2
+    {"0.30.2", "2026-04-27", {
+        Added = {
+            "Sync audit trail now records when a SYNC_DATA chunk arrives at chunk N>1 while no receive session is active — that means the receiver missed an earlier abort signal (combat with a lost BUSY, or a sender desync) and is recovering data mid-stream. Look for 'Auto-bootstrap at chunk N from <sender>' in /gbl synclog.",
+            "Sync ACK timeout retry log now appends 'target=online|offline|unknown' so future capture analysis can tell apart 'peer was already offline and we kept retrying' from 'peer was nominally online but timed out anyway' (likely true wire loss or in-instance silent abort). 'unknown' covers both 'not in roster' and 'roster not yet populated' — the latter only happens for a few seconds right after login.",
+        },
+    }},
+
     -- v0.30.1
     {"0.30.1", "2026-04-25", {
         Changed = {

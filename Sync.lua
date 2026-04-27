@@ -1383,12 +1383,16 @@ function GBL:SendNextChunk()
                     local wireAnchor = syncState.sendChunkTransmittedAt or 0
                     local gapSinceWire = (wireAnchor > 0)
                         and string.format("%.2fs", GetTime() - wireAnchor) or "?"
+                    local liveness = self:IsGuildMemberOnline(syncState.sendTarget)
+                    local livenessStr = (liveness == true) and "online"
+                        or (liveness == false) and "offline" or "unknown"
                     self:AddAuditEntry("ACK timeout — retrying chunk " .. retryChunk
                         .. " (attempt " .. (syncState.sendRetryCount + 1) .. "/"
                         .. (MAX_RETRIES + 1) .. ")"
                         .. ", fragments~=" .. fragments
                         .. ", gapSinceWire=" .. gapSinceWire
-                        .. ", nacksThisChunk=" .. (syncState.nacksForCurrentChunk or 0))
+                        .. ", nacksThisChunk=" .. (syncState.nacksForCurrentChunk or 0)
+                        .. ", target=" .. livenessStr)
                     -- v0.28.7: tag retry cause for FinishSending histogram
                     if syncState.chunkOutcomes and syncState.chunkOutcomes[retryChunk] then
                         table.insert(syncState.chunkOutcomes[retryChunk].retryReasons, "ackTimeout")
@@ -1635,6 +1639,11 @@ function GBL:HandleSyncData(sender, data)
         syncState.receiveSource = sender
         syncState.receiveGot = 0
         syncState.receiveStored = 0
+        if data.chunk and data.chunk > 1 then
+            self:AddAuditEntry("Auto-bootstrap at chunk " .. data.chunk
+                .. " from " .. sender
+                .. " (prior abort signal likely missed)")
+        end
     elseif self:StripRealm(sender) ~= self:StripRealm(syncState.receiveSource) then
         -- Reject data from a different sender during active receive
         self:AddAuditEntry("Ignored SYNC_DATA from " .. sender
