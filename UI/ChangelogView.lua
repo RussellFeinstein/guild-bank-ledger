@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.30.3
+    {"0.30.3", "2026-04-27", {
+        Changed = {
+            "Repository workflow change with no addon behavior impact: auto branch deletion on merge is disabled, and recurring maintainer work now lives on long-lived per-area topic branches (ui, sync, accessibility, layout-sort). Short-lived chore/, infra/, and hotfix/ branches still cover one-off and cross-cutting changes. Documented in the CLAUDE.md Branch Workflow section.",
+        },
+    }},
+
     -- v0.30.2
     {"0.30.2", "2026-04-27", {
         Added = {
