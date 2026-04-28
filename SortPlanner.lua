@@ -258,12 +258,30 @@ function GBL:PlanSort(snapshot, layout, opts)
         return nil
     end
 
+    -- Snapshot what the planner sees at a slot RIGHT NOW (before applying
+    -- the op). The returned table is independent of state, so subsequent
+    -- mutations don't disturb it. Returning nil means the planner expected
+    -- the slot to be empty at this point in the plan.
+    local function snapshotSlot(t, s)
+        local v = state[t] and state[t][s]
+        if v then return { itemID = v.itemID, count = v.count } end
+        return nil
+    end
+
     local function emitAssignment(ass)
         local op = {
             op = opLabel(state, ass),
             srcTab = ass.srcTab, srcSlot = ass.srcSlot,
             dstTab = ass.dstTab, dstSlot = ass.dstSlot,
             itemID = ass.itemID, count = ass.count,
+            -- plannerSrcAt / plannerDstAt freeze what the planner THOUGHT
+            -- the src/dst slots held at the moment this op was emitted.
+            -- The executor compares these against live bank state on a
+            -- pre-check fail to distinguish stale-snapshot bugs from
+            -- execution drift (an earlier op didn't actually clear the
+            -- slot the way the planner projected).
+            plannerSrcAt = snapshotSlot(ass.srcTab, ass.srcSlot),
+            plannerDstAt = snapshotSlot(ass.dstTab, ass.dstSlot),
         }
         table.insert(plan.ops, op)
         applyOpToState(state, op)
@@ -456,16 +474,27 @@ function GBL:PlanSort(snapshot, layout, opts)
                     end
 
                     -- Phase 2b — fall back to any unclaimed slot (used
-                    -- only when the item has no existing claim to extend
-                    -- from, or both ends are blocked). This is the path
-                    -- that scatters restock stacks to the end of a dense
-                    -- captured tab — surfacing it as a distinct origin
-                    -- lets diagnostics flag it specifically.
+                    -- when the item has no existing claim to extend from,
+                    -- or both ends are blocked). Each add re-checks
+                    -- adjacency to existing claims, so an items-only
+                    -- layout (slotOrder empty, all demands fall through
+                    -- here) surfaces as one "first-empty" seed per item
+                    -- followed by "extend-right"/"extend-left" rather
+                    -- than every demand collapsing to "first-empty".
                     if need > 0 then
                         for s = 1, MAX_SLOTS do
                             if need <= 0 then break end
                             if not usedSlots[s] then
-                                addDemandAt(s, itemID, row, "first-empty")
+                                local mine = claimedByItem[itemID]
+                                local origin
+                                if mine and mine[s - 1] then
+                                    origin = "extend-right"
+                                elseif mine and mine[s + 1] then
+                                    origin = "extend-left"
+                                else
+                                    origin = "first-empty"
+                                end
+                                addDemandAt(s, itemID, row, origin)
                                 need = need - 1
                             end
                         end
@@ -808,6 +837,8 @@ function GBL:PlanSort(snapshot, layout, opts)
                 srcTab = stuck.dstTab, srcSlot = stuck.dstSlot,
                 dstTab = pivotTab, dstSlot = pivotSlot,
                 itemID = blockerSlot.itemID, count = blockerSlot.count,
+                plannerSrcAt = snapshotSlot(stuck.dstTab, stuck.dstSlot),
+                plannerDstAt = snapshotSlot(pivotTab, pivotSlot),
             }
             table.insert(plan.ops, pivotOp)
             applyOpToState(state, pivotOp)
@@ -868,6 +899,8 @@ function GBL:PlanSort(snapshot, layout, opts)
                                 srcTab = tabIndex, srcSlot = slotIndex,
                                 dstTab = overflowTab, dstSlot = ovSlot,
                                 itemID = slot.itemID, count = take,
+                                plannerSrcAt = snapshotSlot(tabIndex, slotIndex),
+                                plannerDstAt = snapshotSlot(overflowTab, ovSlot),
                             }
                             table.insert(plan.ops, sweepOp)
                             applyOpToState(state, sweepOp)

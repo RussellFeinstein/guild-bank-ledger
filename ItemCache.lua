@@ -85,6 +85,22 @@ function GBL:OnItemInfoReceived(_event, itemID)
     end
 end
 
+--- Format an itemID for human-readable audit/diagnostic lines.
+-- Returns "<name> (it:NNN)" when the cache has loaded the name, or
+-- "it:NNN" as a fallback. Never warms the cache (audit emission paths
+-- shouldn't trigger async loads). nil itemID renders as "it:?" so the
+-- output is always something printable.
+-- @param itemID number|nil
+-- @return string
+function GBL:DescribeItem(itemID)
+    if not itemID then return "it:?" end
+    local entry = cache[itemID]
+    if entry and entry.loaded and entry.name then
+        return entry.name .. " (it:" .. itemID .. ")"
+    end
+    return "it:" .. itemID
+end
+
 --- Clear the item cache (for testing).
 function GBL:ClearItemCache()
     cache = {}

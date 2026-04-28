@@ -60,13 +60,25 @@ local function slotHasAtLeast(tabIndex, slotIndex, itemID, count)
 end
 
 --- Describe the current contents of a bank slot as a short string for audit:
---- "empty", "it:NNN x<count>", or "err" on missing data.
+--- "empty", "<name> (it:NNN) x<count>", or "err" on missing data.
 local function describeSlot(tabIndex, slotIndex)
     local link = GetGuildBankItemLink(tabIndex, slotIndex)
     if not link then return "empty" end
     local id = extractItemID(link)
     local _, c = GetGuildBankItemInfo(tabIndex, slotIndex)
-    return string.format("it:%s x%d", tostring(id or "?"), c or 0)
+    local name = (id and GBL.DescribeItem) and GBL:DescribeItem(id) or
+        ("it:" .. tostring(id or "?"))
+    return string.format("%s x%d", name, c or 0)
+end
+
+--- Render a planner-stamped slot snapshot ({itemID, count} or nil) as the
+--- same shorthand used by describeSlot, so pre-check-fail audit lines can
+--- show planner-expected vs bank-reality side-by-side.
+local function describePlannerSlot(snap)
+    if not snap then return "empty" end
+    local name = (snap.itemID and GBL.DescribeItem)
+        and GBL:DescribeItem(snap.itemID) or ("it:" .. tostring(snap.itemID))
+    return string.format("%s x%d", name, snap.count or 0)
 end
 
 --- Classify a timeout's observed src/dst/cursor state into one of:
@@ -139,6 +151,26 @@ function unregisterBankEvents()
     -- Our handler is idempotent when not running.
 end
 
+--- Emit a one-line audit entry for a successfully completed op. Captures
+--- src→dst, item, count, op label, and wall-clock elapsed since the op
+--- started so /gbl synclog can be replayed as a per-op timeline. Called
+--- from every success path (sync-already-landed, async event, late-ACK
+--- reclassify, timeout-but-actually-completed) so the line emits exactly
+--- once per op regardless of which path resolved it.
+local function auditOpSuccess(w, suffix)
+    if not w then return end
+    local elapsed = w.startedAt and (GetTime() - w.startedAt) or 0
+    local itemDesc = (w.itemID and GBL.DescribeItem)
+        and GBL:DescribeItem(w.itemID) or ("it:" .. tostring(w.itemID))
+    GBL:AddAuditEntry(string.format(
+        "Sort op %d done: %s T%d/S%d->T%d/S%d %s x%d (%.1fs)%s",
+        w.opIndex, w.opLabel or "move",
+        w.srcTab or 0, w.srcSlot or 0,
+        w.tabIndex, w.slotIndex,
+        itemDesc, w.count, elapsed,
+        suffix and (" " .. suffix) or ""))
+end
+
 --- Emit a progress message for UI subscribers (notably UI/SortView).
 --- Payload is a flat table with the sort's current state so listeners can
 --- update without reading executor-local state. `phase` tags the reason for
@@ -187,7 +219,7 @@ function finish(ok, reason)
     local avg = attempted > 0 and (elapsed / attempted) or 0
     local tbc = state.timeoutByClass
     GBL:AddAuditEntry(string.format(
-        "Sort: %s in %.1fs — %d ops (%d done, %d failed, %d replans, %d reclass)"
+        "Sort: %s in %.1fs - %d ops (%d done, %d failed, %d replans, %d reclass)"
         .. " preCheck=%d cursor=%d timeout[n=%d,p=%d,c=%d,o=%d] avg %.2fs/op",
         ok and "complete" or ("aborted (" .. (reason or "?") .. ")"),
         elapsed, #state.plan.ops, state.done, state.failed,
@@ -300,10 +332,17 @@ step = function()
     srcCount = srcCount or 0
     if srcID ~= op.itemID or srcCount < op.count then
         GBL:AddAuditEntry(string.format(
-            "Sort op %d/%d pre-check fail src T%d/S%d: expected it:%d x>=%d, got %s x%d",
+            "Sort op %d/%d pre-check fail src T%d/S%d: expected %s x>=%d, got %s",
             myOpIndex, #state.plan.ops,
-            op.srcTab, op.srcSlot, op.itemID, op.count,
-            srcID and ("it:" .. srcID) or "empty", srcCount))
+            op.srcTab, op.srcSlot,
+            GBL.DescribeItem and GBL:DescribeItem(op.itemID) or ("it:" .. op.itemID),
+            op.count,
+            describeSlot(op.srcTab, op.srcSlot)))
+        if op.plannerSrcAt then
+            GBL:AddAuditEntry(string.format(
+                "  planner expected src at emit: %s",
+                describePlannerSlot(op.plannerSrcAt)))
+        end
         state.preCheckFails = state.preCheckFails + 1
         doReplan("src mismatch at op " .. myOpIndex)
         return
@@ -314,17 +353,27 @@ step = function()
     if dstLink then
         local dstID = extractItemID(dstLink)
         if dstID ~= op.itemID then
-            local _, dstCount = GetGuildBankItemInfo(op.dstTab, op.dstSlot)
             GBL:AddAuditEntry(string.format(
-                "Sort op %d/%d pre-check fail dst T%d/S%d: expected empty or it:%d, got it:%d x%d",
+                "Sort op %d/%d pre-check fail dst T%d/S%d: expected empty or %s, got %s",
                 myOpIndex, #state.plan.ops,
-                op.dstTab, op.dstSlot, op.itemID,
-                dstID, dstCount or 0))
+                op.dstTab, op.dstSlot,
+                GBL.DescribeItem and GBL:DescribeItem(op.itemID) or ("it:" .. op.itemID),
+                describeSlot(op.dstTab, op.dstSlot)))
+            -- Planner-expected dst at the moment THIS op was emitted.
+            -- A divergence between this and bank reality identifies an
+            -- earlier op that the planner thought would clear/transform
+            -- the dst slot but in practice didn't. plannerDstAt is set
+            -- on every emitted op (nil means the planner expected the
+            -- slot to be empty at emit time).
             GBL:AddAuditEntry(string.format(
-                "  op %d was: %s T%d/S%d -> T%d/S%d it:%d x%d",
+                "  planner expected dst at emit: %s",
+                describePlannerSlot(op.plannerDstAt)))
+            GBL:AddAuditEntry(string.format(
+                "  op %d was: %s T%d/S%d -> T%d/S%d %s x%d",
                 myOpIndex, op.op or "move",
                 op.srcTab, op.srcSlot, op.dstTab, op.dstSlot,
-                op.itemID, op.count))
+                GBL.DescribeItem and GBL:DescribeItem(op.itemID) or ("it:" .. op.itemID),
+                op.count))
             state.preCheckFails = state.preCheckFails + 1
             doReplan("dst occupied by wrong item at op " .. myOpIndex)
             return
@@ -337,8 +386,10 @@ step = function()
     -- advances us.
     state.waiting = {
         tabIndex = op.dstTab, slotIndex = op.dstSlot,
+        srcTab = op.srcTab, srcSlot = op.srcSlot,
         itemID = op.itemID, count = op.count,
         opIndex = myOpIndex,
+        opLabel = op.op or "move",
         startedAt = GetTime(),
     }
 
@@ -364,10 +415,12 @@ step = function()
         -- (covers sync paths and rare event-merge cases).
         if slotHasAtLeast(op.dstTab, op.dstSlot, op.itemID, op.count) and
            not (_G.CursorHasItem and _G.CursorHasItem()) then
+            local w = state.waiting
             state.done = state.done + 1
             state.waiting = nil
             state.opIndex = myOpIndex + 1
             state.gapUntil = GetTime() + INTER_MOVE_GAP
+            auditOpSuccess(w, "[sync]")
             emitProgress("complete", { completedOpIndex = myOpIndex })
             C_Timer.After(INTER_MOVE_GAP, function()
                 if isRunning() then step() end
@@ -402,6 +455,7 @@ step = function()
         if completedAtTimeout then
             state.done = state.done + 1
             state.lastTimedOutOp = nil
+            auditOpSuccess(state.waiting, "[late-poll]")
         else
             state.failed = state.failed + 1
             -- Record the timeout so a late GUILDBANKBAGSLOTS_CHANGED arriving
@@ -429,13 +483,21 @@ step = function()
                 "Sort: op %d timed out (no confirm within %ds) [%s]",
                 myOpIndex, MOVE_CONFIRM_TIMEOUT, class))
             GBL:AddAuditEntry(string.format(
-                "  op %d was: %s T%d/S%d -> T%d/S%d it:%d x%d",
+                "  op %d was: %s T%d/S%d -> T%d/S%d %s x%d",
                 myOpIndex, op.op or "move",
                 op.srcTab, op.srcSlot, op.dstTab, op.dstSlot,
-                op.itemID, op.count))
+                GBL.DescribeItem and GBL:DescribeItem(op.itemID) or ("it:" .. op.itemID),
+                op.count))
             GBL:AddAuditEntry(string.format(
                 "  observed: src %s, dst %s, cursor %s",
                 srcDesc, dstDesc, cursorHas and "held" or "empty"))
+            -- Planner-expected pre-state at emit time. Pairs with the
+            -- "observed" line above to show whether the planner's view
+            -- and the live bank diverge for THIS op specifically.
+            GBL:AddAuditEntry(string.format(
+                "  planner expected: src %s, dst %s",
+                describePlannerSlot(op.plannerSrcAt),
+                describePlannerSlot(op.plannerDstAt)))
         end
         state.waiting = nil
         state.opIndex = myOpIndex + 1
@@ -470,7 +532,7 @@ function GBL:_SortExecutor_OnSlotsChanged()
         state.failed = state.failed - 1
         state.reclassified = state.reclassified + 1
         GBL:AddAuditEntry(string.format(
-            "Sort: op %d confirmed by late event after timeout — reclassified as success",
+            "Sort: op %d confirmed by late event after timeout - reclassified as success",
             lto.opIndex))
         emitProgress("reclassify", { reclassifiedOpIndex = lto.opIndex })
         state.lastTimedOutOp = nil
@@ -488,6 +550,7 @@ function GBL:_SortExecutor_OnSlotsChanged()
             state.lastTimedOutOp = nil
             state.opIndex = state.opIndex + 1
             state.gapUntil = GetTime() + INTER_MOVE_GAP
+            auditOpSuccess(w)
             emitProgress("complete", { completedOpIndex = w.opIndex })
             step()
         end

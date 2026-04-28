@@ -1733,5 +1733,122 @@ describe("SortPlanner", function()
             assert.equals(1, plan.diag.demandExtendLeft)
             assert.equals(1, plan.diag.demandFirstEmpty)
         end)
+
+        it("items-only layout shows seed + extends, not all first-empty", function()
+            -- Pass 2b adjacency relabel: with empty slotOrder, the first
+            -- demand for an item is "first-empty"; subsequent same-item
+            -- demands at adjacent slots become "extend-right". A single
+            -- 5-slot item produces 1 first-empty + 4 extend-right (NOT
+            -- 5 first-empty as before v0.30.5).
+            local snap = snapshot({ [1] = {}, [2] = {} })
+            local layout = {
+                tabs = {
+                    [1] = displayTab(
+                        { [100] = { slots = 5, perSlot = 20 } },
+                        {}  -- empty slotOrder = items-only mode
+                    ),
+                    [2] = overflow(),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout)
+            assert.equals(0, plan.diag.demandPinned)
+            assert.equals(1, plan.diag.demandFirstEmpty)
+            assert.equals(4, plan.diag.demandExtendRight)
+            assert.equals(0, plan.diag.demandExtendLeft)
+            -- demandMap origins on the slots match: slot 1 first-empty,
+            -- slots 2-5 extend-right.
+            assert.equals("first-empty",  plan.demandMap[1][1].origin)
+            for s = 2, 5 do
+                assert.equals("extend-right", plan.demandMap[1][s].origin,
+                    "slot " .. s)
+            end
+        end)
+    end)
+
+    -- ------------------------------------------------------------------
+    -- Per-op planner-state stamping (v0.30.5)
+    -- ------------------------------------------------------------------
+    describe("op.plannerSrcAt / plannerDstAt", function()
+        local function emptyDisplayOverflow()
+            return {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                },
+            }
+        end
+
+        it("captures src state at emit time", function()
+            -- Move 20×item 100 from T1/S1 (which holds 20) to overflow T2.
+            -- plannerSrcAt should be {itemID=100, count=20}; plannerDstAt
+            -- nil because T2 is empty at emit.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 20 } },
+                [2] = {},
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout)
+            assert.is_true(#plan.ops > 0)
+            local op = plan.ops[1]
+            assert.is_not_nil(op.plannerSrcAt,
+                "expected plannerSrcAt to be populated")
+            assert.equals(100, op.plannerSrcAt.itemID)
+            assert.equals(20, op.plannerSrcAt.count)
+            -- dst is empty at emit so plannerDstAt is nil.
+            assert.is_nil(op.plannerDstAt)
+        end)
+
+        it("captures dst state when planner expects an occupant", function()
+            -- Two stacks of item 100 partial in overflow; Phase 0 merge
+            -- emits a pour from the smaller into the larger. The dst
+            -- (slot 1 holding 100×100) IS occupied at emit, so
+            -- plannerDstAt reflects that.
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [1] = { itemID = 100, count = 100 },
+                    [3] = { itemID = 100, count = 60 },
+                },
+            })
+            local opts = { maxStackByItem = { [100] = 200 } }
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(), opts)
+            assert.is_true(#plan.ops > 0)
+            -- The Phase 0 merge op pours from S3 into S1.
+            local merge = plan.ops[1]
+            assert.equals(2, merge.dstTab)
+            assert.equals(1, merge.dstSlot)
+            assert.is_not_nil(merge.plannerDstAt)
+            assert.equals(100, merge.plannerDstAt.itemID)
+            assert.equals(100, merge.plannerDstAt.count)
+        end)
+
+        it("planner stamps reflect evolving state across multi-op plans", function()
+            -- Three same-item full stacks scattered; Phase 4 packs them.
+            -- The planner's working state evolves between ops. A later
+            -- op's plannerDstAt should reflect post-prior-ops state.
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [4] = { itemID = 100, count = 200 },
+                    [6] = { itemID = 100, count = 200 },
+                    [8] = { itemID = 100, count = 200 },
+                },
+            })
+            local opts = { maxStackByItem = { [100] = 200 } }
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(), opts)
+            -- All ops target T2/S1, T2/S2, T2/S3 from S4/S6/S8. Each dst
+            -- starts EMPTY in the snapshot, so plannerDstAt is nil for
+            -- each — the planner doesn't expect any occupant at the canonical
+            -- positions when it emits these ops.
+            for _, op in ipairs(plan.ops) do
+                assert.is_nil(op.plannerDstAt,
+                    "expected packing dst to be empty at emit")
+            end
+        end)
     end)
 end)
