@@ -569,6 +569,13 @@ function MockWoW.install()
         return MockWoW.serverTime + 0.0
     end
 
+    -- High-resolution profiling timer (ms since engine load).
+    -- Tests don't assert against the value; we return GetTime()*1000 so
+    -- it remains monotonic if a test advances MockWoW.serverTime.
+    _G.debugprofilestop = function()
+        return (MockWoW.serverTime or 0) * 1000
+    end
+
     -- GetFramerate (for FPS-adaptive throttling)
     _G.GetFramerate = function()
         return MockWoW.framerate

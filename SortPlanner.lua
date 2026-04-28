@@ -157,6 +157,20 @@ function GBL:PlanSort(snapshot, layout, opts)
         return plan
     end
 
+    -- Diagnostic timing: record planner cost so /gbl synclog shows a
+    -- single line per plan. Replans on foreign-activity go through the
+    -- same path, so this captures both first-plan and replan latency.
+    local profileStart = debugprofilestop and debugprofilestop() or nil
+    local inputSlots, inputTabs = 0, 0
+    for _, tabResult in pairs(snapshot or {}) do
+        inputTabs = inputTabs + 1
+        if tabResult and tabResult.slots then
+            for _ in pairs(tabResult.slots) do
+                inputSlots = inputSlots + 1
+            end
+        end
+    end
+
     -- --------------------------------------------------------------
     -- Classify tabs.
     -- --------------------------------------------------------------
@@ -816,6 +830,20 @@ function GBL:PlanSort(snapshot, layout, opts)
                 origin = dem.origin,
             }
         end
+    end
+
+    -- Single-line planner timing diagnostic. Always emitted so the
+    -- audit log shows baseline cost for every sort and the slow tail
+    -- for replan hitch investigation. AddAuditEntry is provided by
+    -- Sync.lua; guard for partial test setups.
+    if profileStart and self.AddAuditEntry then
+        local elapsed = debugprofilestop() - profileStart
+        local deficitCount = 0
+        for _ in pairs(plan.deficits) do deficitCount = deficitCount + 1 end
+        self:AddAuditEntry(string.format(
+            "Sort plan: %.1fms, %d ops, %d deficits, %d unplaced (input: %d slots / %d tabs)",
+            elapsed, #plan.ops, deficitCount, #plan.unplaced,
+            inputSlots, inputTabs))
     end
 
     return plan

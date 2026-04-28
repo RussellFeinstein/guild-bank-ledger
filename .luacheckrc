@@ -63,6 +63,7 @@ read_globals = {
     "GetItemInfo",
     "GetRealmName",
     "GetTime",
+    "debugprofilestop",
     "format",
     "strsplit",
     "strtrim",

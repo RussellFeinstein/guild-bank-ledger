@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **`ItemCache` now caches `itemStackCount` (8th return of `GetItemInfo`)** alongside name and link, with a new `GBL:GetMaxStack(itemID)` accessor. Used by the sort planner; warm path is the existing `GetCachedItemInfo` call sites and the `GET_ITEM_INFO_RECEIVED` handler.
 - **`PlanSort(snapshot, layout, opts)`** gains an optional third argument used by tests. `opts.maxStackByItem` is an `{ [itemID]=number }` map that overrides the ItemCache lookup. Production callers continue to pass `(snapshot, layout)` and read max stack from ItemCache.
+- **Sort planner timing diagnostic.** Every call to `PlanSort` now writes a single line to the audit trail of the form `Sort plan: 12.3ms, 47 ops, 0 deficits, 1 unplaced (input: 240 slots / 4 tabs)`. Visible via `/gbl synclog`. Captures both first-plan and replan latency on the same code path. Motivation: in-game observation that large plans (and the replans triggered when the executor detects foreign activity) cause a single-frame hitch. The line gives concrete ms-per-input-size data points to inform whether the planner needs to be split across frames via coroutines.
 
 ## [0.30.3] - 2026-04-27
 

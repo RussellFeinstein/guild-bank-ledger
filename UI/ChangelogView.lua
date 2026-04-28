@@ -36,6 +36,7 @@ GBL.CHANGELOG_DATA = {
         },
         Added = {
             "ItemCache now caches itemStackCount alongside name and link, with a new GBL:GetMaxStack(itemID) accessor used by the sort planner.",
+            "Sort planner now writes a single timing line to the audit trail (visible in /gbl synclog) for every plan: Sort plan: 12.3ms, 47 ops, 0 deficits, 1 unplaced (input: 240 slots / 4 tabs). Captures both first-plan and replan latency on the same code path. Motivation: large plans and their replans cause a single-frame hitch in-game; this line gives the ms-per-input-size data needed to decide whether the planner needs to be split across frames.",
         },
     }},
 
