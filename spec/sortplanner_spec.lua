@@ -1186,5 +1186,168 @@ describe("SortPlanner", function()
             assert.is_not_nil(final[2][2]); assert.equals(100, final[2][2].itemID); assert.equals(3, final[2][2].count)
             assert.is_nil(final[2][3])
         end)
+
+        ----------------------------------------------------------------
+        -- Phase 4: partial-stack merging (v0.30.5)
+        ----------------------------------------------------------------
+
+        it("merges two partial stacks of one item into a single stack when sum < maxStack", function()
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [3] = { itemID = 100, count = 100 },
+                    [5] = { itemID = 100, count = 60 },
+                },
+            })
+            local opts = { maxStackByItem = { [100] = 200 } }
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(), opts)
+            local final = applyPlan(snap, plan)
+            assert.is_not_nil(final[2][1])
+            assert.equals(100, final[2][1].itemID)
+            assert.equals(160, final[2][1].count)
+            assert.is_nil(final[2][2])
+            assert.is_nil(final[2][3])
+            assert.is_nil(final[2][5])
+        end)
+
+        it("produces [full, partial] for three partials summing past one max stack", function()
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [3] = { itemID = 100, count = 160 },
+                    [5] = { itemID = 100, count = 160 },
+                    [7] = { itemID = 100, count = 100 },
+                },
+            })
+            local opts = { maxStackByItem = { [100] = 200 } }
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(), opts)
+            local final = applyPlan(snap, plan)
+            assert.equals(200, final[2][1].count)
+            assert.equals(200, final[2][2].count)
+            assert.equals(20,  final[2][3].count)
+            for s = 4, 10 do
+                assert.is_nil(final[2][s], "expected slot " .. s .. " empty")
+            end
+            -- Total preserved.
+            local total = final[2][1].count + final[2][2].count + final[2][3].count
+            assert.equals(420, total)
+        end)
+
+        it("is idempotent on a canonical [full, full, partial] run", function()
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [1] = { itemID = 100, count = 200 },
+                    [2] = { itemID = 100, count = 200 },
+                    [3] = { itemID = 100, count = 20 },
+                },
+            })
+            local opts = { maxStackByItem = { [100] = 200 } }
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(), opts)
+            assert.equals(0, #plan.ops)
+        end)
+
+        it("falls back to grouping (no merge) when maxStack is unknown", function()
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [3] = { itemID = 100, count = 100 },
+                    [5] = { itemID = 100, count = 60 },
+                },
+            })
+            -- Empty override map: getMaxStack returns nil for item 100.
+            local opts = { maxStackByItem = {} }
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(), opts)
+            local final = applyPlan(snap, plan)
+            -- Two stacks remain, packed contiguously, count DESC.
+            assert.equals(100, final[2][1].itemID); assert.equals(100, final[2][1].count)
+            assert.equals(100, final[2][2].itemID); assert.equals(60,  final[2][2].count)
+            assert.is_nil(final[2][3])
+        end)
+
+        it("merges only items with known maxStack and groups the rest", function()
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [1] = { itemID = 100, count = 100 },
+                    [2] = { itemID = 100, count = 60 },
+                    [5] = { itemID = 200, count = 5 },
+                    [6] = { itemID = 200, count = 3 },
+                },
+            })
+            -- Only item 100 has a known maxStack. Item 200 should remain unmerged.
+            local opts = { maxStackByItem = { [100] = 200 } }
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(), opts)
+            local final = applyPlan(snap, plan)
+            -- Item 100 collapsed into a single stack of 160 at slot 1.
+            assert.equals(100, final[2][1].itemID); assert.equals(160, final[2][1].count)
+            -- Item 200's two partials remain, count DESC, contiguous after item 100.
+            assert.equals(200, final[2][2].itemID); assert.equals(5, final[2][2].count)
+            assert.equals(200, final[2][3].itemID); assert.equals(3, final[2][3].count)
+            assert.is_nil(final[2][4])
+        end)
+
+        it("handles distinct per-item maxStacks in the same overflow tab", function()
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [1] = { itemID = 100, count = 150 },
+                    [2] = { itemID = 100, count = 60 },
+                    [4] = { itemID = 200, count = 700 },
+                    [5] = { itemID = 200, count = 400 },
+                },
+            })
+            local opts = {
+                maxStackByItem = { [100] = 200, [200] = 1000 },
+            }
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(), opts)
+            local final = applyPlan(snap, plan)
+            -- Item 100: 150+60=210 → [200, 10] (its 200 cap).
+            assert.equals(100, final[2][1].itemID); assert.equals(200, final[2][1].count)
+            assert.equals(100, final[2][2].itemID); assert.equals(10,  final[2][2].count)
+            -- Item 200: 700+400=1100 → [1000, 100] (its 1000 cap).
+            assert.equals(200, final[2][3].itemID); assert.equals(1000, final[2][3].count)
+            assert.equals(200, final[2][4].itemID); assert.equals(100,  final[2][4].count)
+            assert.is_nil(final[2][5])
+        end)
+
+        it("never merges items with maxStack == 1 (uniques)", function()
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [3] = { itemID = 999, count = 1 },
+                    [5] = { itemID = 999, count = 1 },
+                },
+            })
+            local opts = { maxStackByItem = { [999] = 1 } }
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(), opts)
+            local final = applyPlan(snap, plan)
+            -- Two separate stacks of 1, packed contiguously.
+            assert.equals(999, final[2][1].itemID); assert.equals(1, final[2][1].count)
+            assert.equals(999, final[2][2].itemID); assert.equals(1, final[2][2].count)
+            assert.is_nil(final[2][3])
+        end)
+
+        it("applyPlan helper merges counts when an op targets an occupied same-item slot", function()
+            -- Direct sanity check for the test simulator used by the merge cases above.
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [3] = { itemID = 100, count = 50 },
+                    [5] = { itemID = 100, count = 30 },
+                },
+            })
+            local fakePlan = {
+                ops = {
+                    { op = "move", srcTab = 2, srcSlot = 5, dstTab = 2, dstSlot = 3,
+                      itemID = 100, count = 30 },
+                },
+            }
+            local final = applyPlan(snap, fakePlan)
+            assert.is_not_nil(final[2][3])
+            assert.equals(100, final[2][3].itemID)
+            assert.equals(80, final[2][3].count)
+            assert.is_nil(final[2][5])
+        end)
     end)
 end)

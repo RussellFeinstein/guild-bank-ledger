@@ -29,6 +29,16 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.30.5
+    {"0.30.5", "2026-04-28", {
+        Changed = {
+            "Sort: the overflow tab now merges partial stacks of the same item up to that item's max stack size. A run that previously ended as two stacks of 160 Healing Potions (max 200) now ends as 200, then 20. Repeat sorts of the same bank remain no-ops. Items whose max stack size has not yet loaded into the client cache (cold cache after /reload) skip the merge for that item only and fall back to grouping; a second sort completes the merge once the data arrives. Sorts that emit extra merge moves take slightly longer because each move carries the 0.3s executor gap.",
+        },
+        Added = {
+            "ItemCache now caches itemStackCount alongside name and link, with a new GBL:GetMaxStack(itemID) accessor used by the sort planner.",
+        },
+    }},
+
     -- v0.30.3
     {"0.30.3", "2026-04-27", {
         Changed = {

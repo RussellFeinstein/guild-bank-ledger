@@ -493,11 +493,16 @@ function MockWoW.install()
                m.achievementPoints or 0, m.achievementRank or 0
     end
 
-    -- Item info (name/link lookup for ItemCache)
+    -- Item info (name/link/stackCount lookup for ItemCache).
+    -- Real GetItemInfo returns 16+ values; we model the slice ItemCache uses:
+    -- name (1), link (2), and stackCount (8). MockWoW.itemNames[id].stackCount
+    -- is optional — when absent, the 8th return is nil (matching legacy mock).
     _G.GetItemInfo = function(itemID)
         local info = MockWoW.itemNames[itemID]
         if info then
-            return info.name, info.link
+            return info.name, info.link,
+                   nil, nil, nil, nil, nil,
+                   info.stackCount
         end
         return nil
     end

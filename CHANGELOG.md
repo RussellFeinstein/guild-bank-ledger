@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.5] - 2026-04-28
+
+### Changed
+- **Sort: overflow tab now merges partial stacks of the same item.** Phase 4 of the planner walks each same-item run and pours partial stacks together up to the per-item max stack size, so a run that previously ended as `[160, 160, 100]` of Healing Potions (max stack 200) now ends as `[200, 200, 20]`. Repeat sorts remain idempotent (a fully merged run produces zero ops). Items whose max stack size has not yet loaded into the client cache (cold cache after `/reload`) skip the merge for that item only and fall back to grouping; a follow-up sort once the data finishes loading completes the merge. Sorts that result in additional merge moves take slightly longer in-game because each move carries the executor's 0.3 s gap; subsequent sorts of the same bank are no-ops.
+
+### Added
+- **`ItemCache` now caches `itemStackCount` (8th return of `GetItemInfo`)** alongside name and link, with a new `GBL:GetMaxStack(itemID)` accessor. Used by the sort planner; warm path is the existing `GetCachedItemInfo` call sites and the `GET_ITEM_INFO_RECEIVED` handler.
+- **`PlanSort(snapshot, layout, opts)`** gains an optional third argument used by tests. `opts.maxStackByItem` is an `{ [itemID]=number }` map that overrides the ItemCache lookup. Production callers continue to pass `(snapshot, layout)` and read max stack from ItemCache.
+
 ## [0.30.3] - 2026-04-27
 
 ### Changed

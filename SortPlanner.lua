@@ -45,19 +45,26 @@
 --       starting at slot 1, sorted by (itemID ASC, count DESC, slot ASC).
 --       Closes gaps, groups same-item stacks, and makes repeat sorts
 --       idempotent. Swap cycles resolve via the same findPivot used in
---       Phase 2. Partial-stack merging is out of scope (the planner has
---       no max-stack-size knowledge).
+--       Phase 2. Within each same-item run, partial stacks are merged
+--       up to the item's max stack size (read from ItemCache or the
+--       optional opts.maxStackByItem override) so each run ends as
+--       [full, full, ..., partial?]. Items with unknown max stack
+--       (cold cache) skip merging and fall back to grouping only.
 --
--- Public contract — identical to v0.29.x for drop-in compatibility with
--- SortExecutor and UI/SortView:
+-- Public contract — drop-in compatible with SortExecutor and UI/SortView.
+-- The optional third arg opts is read by tests; production callers omit it.
 --
---   PlanSort(snapshot, layout) -> {
+--   PlanSort(snapshot, layout, opts?) -> {
 --       ops = { {op="split"|"move", srcTab, srcSlot,
 --                dstTab, dstSlot, itemID, count}, ... },
 --       deficits = { [itemID] = count },
 --       unplaced = { {tabIndex, slotIndex, itemID, count, reason}, ... },
 --       overflowTab = tabIndex | nil,
 --   }
+--
+--   opts.maxStackByItem :: { [itemID]=number } | nil
+--       Per-item max stack override used by tests. When absent, the
+--       planner reads max stack via GBL:GetMaxStack(itemID).
 --
 -- Invariants:
 --   * Ignore tabs are never read as source nor written as destination.
@@ -135,7 +142,7 @@ end
 -- Main entry
 ------------------------------------------------------------------------
 
-function GBL:PlanSort(snapshot, layout)
+function GBL:PlanSort(snapshot, layout, opts)
     local plan = {
         ops = {}, deficits = {}, unplaced = {}, overflowTab = nil,
         -- demandMap is the authoritative expected layout: for each display
@@ -687,9 +694,11 @@ function GBL:PlanSort(snapshot, layout)
     -- from slot 1 with no gaps. Reuses the Phase-2 greedy drain and
     -- pivot-break loop by appending new assignments to `assignments` /
     -- `remaining` and re-running both. count-DESC puts a partial stack
-    -- at the tail of its item's group so a future stack-merge pass has
-    -- an easy adjacency to work with. Out of scope here: merging partial
-    -- stacks (the planner has no max-stack knowledge).
+    -- at the tail of its item's group, where a two-pointer merge then
+    -- pours partials into earlier same-item stacks up to the per-item
+    -- max stack size (looked up via opts.maxStackByItem or
+    -- GBL:GetMaxStack). Items with unknown max stack (cold cache) skip
+    -- the merge and fall back to grouping only — safe and idempotent.
     if overflowTab then
         local ovStacks = {}
         for s = 1, MAX_SLOTS do
@@ -709,6 +718,71 @@ function GBL:PlanSort(snapshot, layout)
             return a.origSlot < b.origSlot
         end)
 
+        -- Per-item max stack lookup. opts.maxStackByItem (test override)
+        -- wins; otherwise read the cached itemStackCount from ItemCache.
+        local function getMaxStack(itemID)
+            if opts and opts.maxStackByItem then
+                return opts.maxStackByItem[itemID]
+            end
+            if GBL.GetMaxStack then
+                return GBL:GetMaxStack(itemID)
+            end
+            return nil
+        end
+
+        -- Sub-phase 4a: merge partial stacks within each same-item run.
+        -- Two-pointer pour from the smallest stack at the tail into the
+        -- largest at the head until the head reaches maxStack, then
+        -- advance. Emits ops directly via emitAssignment so they appear
+        -- before positional moves in plan.ops. SortExecutor's pre-step
+        -- check already accepts moves onto an occupied same-item dst
+        -- (PickupGuildBankItem pair handles the merge natively).
+        local runStart = 1
+        while runStart <= #ovStacks do
+            local runEnd = runStart
+            while runEnd < #ovStacks
+                  and ovStacks[runEnd + 1].itemID == ovStacks[runStart].itemID do
+                runEnd = runEnd + 1
+            end
+
+            local maxStack = getMaxStack(ovStacks[runStart].itemID)
+            if maxStack and runEnd > runStart then
+                local L, R = runStart, runEnd
+                while L < R do
+                    local left  = ovStacks[L]
+                    local right = ovStacks[R]
+                    if left.count >= maxStack then
+                        L = L + 1
+                    elseif right.count == 0 then
+                        R = R - 1
+                    else
+                        local pour = math.min(maxStack - left.count,
+                                              right.count)
+                        emitAssignment({
+                            srcTab = overflowTab, srcSlot = right.origSlot,
+                            dstTab = overflowTab, dstSlot = left.origSlot,
+                            itemID = left.itemID, count = pour,
+                        })
+                        left.count  = left.count  + pour
+                        right.count = right.count - pour
+                    end
+                end
+            end
+
+            runStart = runEnd + 1
+        end
+
+        -- Drop emptied stacks so the position emission below packs
+        -- contiguously starting at slot 1.
+        local compacted = {}
+        for _, s in ipairs(ovStacks) do
+            if s.count > 0 then table.insert(compacted, s) end
+        end
+        ovStacks = compacted
+
+        -- Sub-phase 4b: positional moves. Each remaining stack heads to
+        -- its index in ovStacks; the merge step already mutated count
+        -- in place so this picks up the post-merge value.
         local phase4Added = false
         for i, stack in ipairs(ovStacks) do
             if stack.origSlot ~= i then

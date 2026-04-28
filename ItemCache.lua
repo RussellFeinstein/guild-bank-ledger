@@ -6,7 +6,7 @@
 local ADDON_NAME = "GuildBankLedger"
 local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 
--- In-memory cache: itemID → { name, link, loaded }
+-- In-memory cache: itemID → { name, link, stackCount, loaded }
 local cache = {}
 
 --- Get item name and link for an itemID.
@@ -29,9 +29,12 @@ function GBL:GetCachedItemInfo(itemID)
     end
 
     -- First request — try synchronous lookup
-    local name, link = GetItemInfo(itemID)
+    local name, link, _, _, _, _, _, stackCount = GetItemInfo(itemID)
     if name then
-        cache[itemID] = { name = name, link = link, loaded = true }
+        cache[itemID] = {
+            name = name, link = link,
+            stackCount = stackCount, loaded = true,
+        }
         return name, link
     end
 
@@ -41,15 +44,44 @@ function GBL:GetCachedItemInfo(itemID)
     return nil, nil
 end
 
+--- Get the maximum stack size for an itemID.
+-- Returns the cached stackCount when known. Triggers a warm/load via
+-- GetCachedItemInfo when the cache is cold; if the synchronous lookup
+-- populated the entry, the value is returned in this same call.
+-- Otherwise returns nil and a subsequent call after
+-- GET_ITEM_INFO_RECEIVED fires will return the value.
+-- @param itemID number
+-- @return number|nil stackCount
+function GBL:GetMaxStack(itemID)
+    if not itemID then return nil end
+
+    local entry = cache[itemID]
+    if entry and entry.loaded then
+        return entry.stackCount
+    end
+
+    -- Cold cache — warm it. Re-read in case the synchronous GetItemInfo
+    -- path populated the entry.
+    self:GetCachedItemInfo(itemID)
+    entry = cache[itemID]
+    if entry and entry.loaded then
+        return entry.stackCount
+    end
+    return nil
+end
+
 --- Handle GET_ITEM_INFO_RECEIVED event.
 -- Called when WoW finishes loading item data we requested.
 -- @param itemID number The item that was loaded
 function GBL:OnItemInfoReceived(_event, itemID)
     if not itemID or not cache[itemID] then return end
 
-    local name, link = GetItemInfo(itemID)
+    local name, link, _, _, _, _, _, stackCount = GetItemInfo(itemID)
     if name then
-        cache[itemID] = { name = name, link = link, loaded = true }
+        cache[itemID] = {
+            name = name, link = link,
+            stackCount = stackCount, loaded = true,
+        }
     end
 end
 
