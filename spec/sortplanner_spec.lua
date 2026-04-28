@@ -1349,5 +1349,227 @@ describe("SortPlanner", function()
             assert.equals(80, final[2][3].count)
             assert.is_nil(final[2][5])
         end)
+
+        ----------------------------------------------------------------
+        -- Phase 0 + Phase 1B partial-targeting (overflow capacity)
+        ----------------------------------------------------------------
+
+        it("Phase 0 frees a slot that Phase 1B then uses for an unrelated supply", function()
+            -- Overflow holds four 50-count partials of A (max 200) plus
+            -- a foreign B sitting in a non-overflow display tab. Phase 0
+            -- should merge A into a single 200-stack at slot 1, freeing
+            -- slots 2-4 so Phase 1B can place B at slot 2.
+            local snap = snapshot({
+                [1] = {
+                    [3] = { itemID = 200, count = 30 }, -- foreign B
+                },
+                [2] = {
+                    [1] = { itemID = 100, count = 50 },
+                    [2] = { itemID = 100, count = 50 },
+                    [3] = { itemID = 100, count = 50 },
+                    [4] = { itemID = 100, count = 50 },
+                },
+            })
+            -- Display tab demands NOTHING — B has no demand → spills to overflow.
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                },
+            }
+            local opts = { maxStackByItem = { [100] = 200, [200] = 200 } }
+            local plan = GBL:PlanSort(snap, layout, opts)
+            local final = applyPlan(snap, plan)
+            -- Slot 1: full stack of A.
+            assert.is_not_nil(final[2][1])
+            assert.equals(100, final[2][1].itemID)
+            assert.equals(200, final[2][1].count)
+            -- Slot 2: foreign B routed to slot freed by Phase 0.
+            assert.is_not_nil(final[2][2])
+            assert.equals(200, final[2][2].itemID)
+            assert.equals(30, final[2][2].count)
+            -- Slots 3+: empty.
+            assert.is_nil(final[2][3])
+            assert.is_nil(final[2][4])
+        end)
+
+        it("Phase 1B tops up an existing same-item partial in overflow", function()
+            -- Existing A:50@1 in overflow with capacity for 150 more.
+            -- An incoming A:30 supply from a non-overflow tab should land
+            -- in slot 1 (top up) rather than extending into a new slot.
+            local snap = snapshot({
+                [1] = {
+                    [5] = { itemID = 100, count = 30 },
+                },
+                [2] = {
+                    [1] = { itemID = 100, count = 50 },
+                },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                },
+            }
+            local opts = { maxStackByItem = { [100] = 200 } }
+            local plan = GBL:PlanSort(snap, layout, opts)
+            local final = applyPlan(snap, plan)
+            -- Slot 1 of overflow now holds 80 A.
+            assert.is_not_nil(final[2][1])
+            assert.equals(100, final[2][1].itemID)
+            assert.equals(80, final[2][1].count)
+            -- No new slot 2 entry.
+            assert.is_nil(final[2][2])
+        end)
+
+        it("Phase 1B splits a supply across a partial topup and a new slot", function()
+            -- Existing A:150@1 (capacity 50). Incoming A:80 supply has to
+            -- split: 50 tops up slot 1, 30 lands in first-empty slot 2.
+            local snap = snapshot({
+                [1] = {
+                    [5] = { itemID = 100, count = 80 },
+                },
+                [2] = {
+                    [1] = { itemID = 100, count = 150 },
+                },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                },
+            }
+            local opts = { maxStackByItem = { [100] = 200 } }
+            local plan = GBL:PlanSort(snap, layout, opts)
+            local final = applyPlan(snap, plan)
+            assert.is_not_nil(final[2][1])
+            assert.equals(200, final[2][1].count)
+            assert.is_not_nil(final[2][2])
+            assert.equals(100, final[2][2].itemID)
+            assert.equals(30, final[2][2].count)
+        end)
+
+        it("Phase 1B records unplaced when overflow capacity is exhausted", function()
+            -- Overflow with one A slot at maxStack 200, and EVERY other
+            -- slot occupied by a different item (also at maxStack to keep
+            -- topup unavailable). Incoming A:50 → can top up slot 1 with 0
+            -- (already at max → capacity 0); other slots blocked. Unplaced.
+            local snap = snapshot({
+                [1] = {
+                    [5] = { itemID = 100, count = 50 },
+                },
+                [2] = {},
+            })
+            -- Fill slot 1 with A at max stack, slots 2-98 with foreign full stacks.
+            for s = 1, 98 do
+                snap[2].slots[s] = {
+                    itemLink = Helpers.makeItemLink(s == 1 and 100 or (1000 + s),
+                        "Item" .. (s == 1 and 100 or (1000 + s)), 1),
+                    count = s == 1 and 200 or 200,
+                    slotIndex = s,
+                    tabIndex = 2,
+                }
+            end
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                },
+            }
+            local maxByItem = { [100] = 200 }
+            for s = 2, 98 do maxByItem[1000 + s] = 200 end
+            local opts = { maxStackByItem = maxByItem }
+            local plan = GBL:PlanSort(snap, layout, opts)
+            -- A:50 from display has no destination — unplaced.
+            assert.is_true(#plan.unplaced > 0)
+            local found = false
+            for _, u in ipairs(plan.unplaced) do
+                if u.itemID == 100 and u.count == 50 then found = true end
+            end
+            assert.is_true(found, "expected an unplaced entry for the 50 A supply")
+        end)
+
+        it("Phase 0 + Phase 1B together: pre-merge frees slots, partial topped up", function()
+            -- Overflow [A:50@1, A:50@2, A:50@3] (total 150). Display has
+            -- A:200 supply (a single stack). Phase 0 merges to A:150@1.
+            -- Phase 1B: top up slot 1 with 50 (capacity), then 150 spills
+            -- to first-empty slot 2.
+            local snap = snapshot({
+                [1] = {
+                    [5] = { itemID = 100, count = 200 },
+                },
+                [2] = {
+                    [1] = { itemID = 100, count = 50 },
+                    [2] = { itemID = 100, count = 50 },
+                    [3] = { itemID = 100, count = 50 },
+                },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                },
+            }
+            local opts = { maxStackByItem = { [100] = 200 } }
+            local plan = GBL:PlanSort(snap, layout, opts)
+            local final = applyPlan(snap, plan)
+            -- Slot 1 full. Slot 2 holds the residual.
+            assert.is_not_nil(final[2][1])
+            assert.equals(200, final[2][1].count)
+            assert.is_not_nil(final[2][2])
+            assert.equals(100, final[2][2].itemID)
+            assert.equals(150, final[2][2].count)
+        end)
+
+        it("cold cache: overflow with two 50-stacks of A and unset maxStack falls back", function()
+            -- opts.maxStackByItem is empty so Phase 0 skips merging A.
+            -- Phase 1B's pickOverflowSlot treats unknown-maxStack slots as
+            -- capacity=0 (no top-up). An A spill extends into a new slot.
+            local snap = snapshot({
+                [1] = {
+                    [5] = { itemID = 100, count = 30 },
+                },
+                [2] = {
+                    [1] = { itemID = 100, count = 50 },
+                    [2] = { itemID = 100, count = 50 },
+                },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                },
+            }
+            local opts = { maxStackByItem = {} }
+            local plan = GBL:PlanSort(snap, layout, opts)
+            local final = applyPlan(snap, plan)
+            -- Slots 1 and 2 retain their 50-count A stacks.
+            -- Phase 4 position-compaction may reorder by count DESC, but
+            -- since all three A stacks have the same count (50, 50, 30)
+            -- they pack as [50, 50, 30].
+            local total = 0
+            for s = 1, 98 do
+                if final[2][s] and final[2][s].itemID == 100 then
+                    total = total + final[2][s].count
+                end
+            end
+            assert.equals(130, total) -- 50 + 50 + 30
+        end)
+
+        it("idempotent on canonical merged + compacted overflow", function()
+            -- [A:200@1, A:200@2, A:20@3] is the canonical post-Phase-0
+            -- post-Phase-4 state. Re-running PlanSort emits zero ops.
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [1] = { itemID = 100, count = 200 },
+                    [2] = { itemID = 100, count = 200 },
+                    [3] = { itemID = 100, count = 20 },
+                },
+            })
+            local opts = { maxStackByItem = { [100] = 200 } }
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(), opts)
+            assert.equals(0, #plan.ops)
+        end)
     end)
 end)
