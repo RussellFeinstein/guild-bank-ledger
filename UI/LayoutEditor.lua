@@ -225,12 +225,24 @@ function GBL:BuildLayoutTab(container)
 end
 
 --- Build the content of the currently-selected inner tab.
--- Bank-tab inner tabs render the per-tab editor in a ScrollFrame plus
--- an always-visible footer save bar anchored to the bottom of the
--- inner tab's content area (so the Save / Discard buttons never get
--- pushed below the viewport on long display tabs). Sort Access inner
--- tab renders the access policy editor full-height; it has its own
--- immediate-save semantics and does not need the draft save bar.
+-- Bank-tab inner tabs render the save bar at the top of the scroll
+-- followed by the per-tab editor; Sort Access renders its access
+-- policy editor full-height (no draft save bar — it has its own
+-- immediate-save semantics).
+--
+-- Save-bar placement design notes:
+-- 1. Saved bar at the **bottom** of the scroll content vanished on
+--    long display tabs because AceGUI's content-height bookkeeping in
+--    a deeply-nested layout (item rows + slot map) didn't expose the
+--    trailing widgets via wheel-scroll.
+-- 2. Save bar pinned as an **anchored footer** outside the scroll
+--    (ClearAllPoints + four explicit SetPoints) collided with
+--    AceGUI's internal anchoring of the ScrollFrame and broke the
+--    scroll's content area entirely.
+-- 3. Save bar at the **top** of the scroll content — the current
+--    approach — sidesteps both problems: it always renders, it's
+--    always reachable via a quick scroll-to-top, and it doesn't
+--    fight the AceGUI ScrollFrame's auto-anchoring.
 --
 -- The per-tab ScrollFrame's status table is keyed by inner-tab value,
 -- so each inner tab keeps its own scroll position across rebuilds and
@@ -243,16 +255,20 @@ function GBL:_LayoutEditor_BuildInnerTabContent(parent, innerTabValue, writable,
     self._layoutScrollStatuses[innerTabValue] =
         self._layoutScrollStatuses[innerTabValue] or {}
 
-    -- Sort Access: full-height scroll, no save bar. Done.
+    local scroll = AceGUI:Create("ScrollFrame")
+    scroll:SetFullWidth(true)
+    scroll:SetFullHeight(true)
+    scroll:SetLayout("Flow")
+    scroll:SetStatusTable(self._layoutScrollStatuses[innerTabValue])
+    parent:AddChild(scroll)
+    -- Anchor the ScrollFrame to fill the TabGroup's content area —
+    -- same fill-remainder pattern as BuildTransactionsTab et al.
+    scroll.frame:SetPoint("BOTTOMRIGHT", parent.content, "BOTTOMRIGHT", 0, 0)
+    -- Track the active scroll for RefreshLayoutTab's next-frame
+    -- SetScroll fixup (see RefreshLayoutTab for why that fixup exists).
+    self._layoutContainer = scroll
+
     if innerTabValue == "sortaccess" then
-        local scroll = AceGUI:Create("ScrollFrame")
-        scroll:SetFullWidth(true)
-        scroll:SetFullHeight(true)
-        scroll:SetLayout("Flow")
-        scroll:SetStatusTable(self._layoutScrollStatuses[innerTabValue])
-        parent:AddChild(scroll)
-        scroll.frame:SetPoint("BOTTOMRIGHT", parent.content, "BOTTOMRIGHT", 0, 0)
-        self._layoutContainer = scroll
         self:_LayoutEditor_RenderSortAccess(scroll, isGM)
         return
     end
@@ -260,37 +276,7 @@ function GBL:_LayoutEditor_BuildInnerTabContent(parent, innerTabValue, writable,
     local tabIndex = tonumber(tostring(innerTabValue):match("^tab(%d+)$"))
     if not tabIndex then return end
 
-    -- Bank tab: footer save bar pinned to the bottom of parent.content,
-    -- ScrollFrame above it filling the rest. Building the save bar first
-    -- (with explicit anchors) lets us anchor the scroll's bottom to the
-    -- save bar's top so they tile cleanly without overlap.
-    local saveBar = AceGUI:Create("SimpleGroup")
-    saveBar:SetFullWidth(true)
-    saveBar:SetLayout("Flow")
-    parent:AddChild(saveBar)
-    saveBar.frame:ClearAllPoints()
-    saveBar.frame:SetPoint("BOTTOMLEFT", parent.content, "BOTTOMLEFT", 0, 0)
-    saveBar.frame:SetPoint("BOTTOMRIGHT", parent.content, "BOTTOMRIGHT", 0, 0)
-    -- Two rows in the save bar (status banner + button row); ~50 px
-    -- covers it. Hard-set so the layout doesn't depend on AceGUI
-    -- auto-sizing kicking in before our anchor takes effect.
-    saveBar.frame:SetHeight(50)
-    self:_LayoutEditor_RenderSaveBar(saveBar, writable)
-
-    local scroll = AceGUI:Create("ScrollFrame")
-    scroll:SetFullWidth(true)
-    scroll:SetLayout("Flow")
-    scroll:SetStatusTable(self._layoutScrollStatuses[innerTabValue])
-    parent:AddChild(scroll)
-    scroll.frame:ClearAllPoints()
-    scroll.frame:SetPoint("TOPLEFT", parent.content, "TOPLEFT", 0, 0)
-    scroll.frame:SetPoint("TOPRIGHT", parent.content, "TOPRIGHT", 0, 0)
-    scroll.frame:SetPoint("BOTTOMLEFT", saveBar.frame, "TOPLEFT", 0, 4)
-    scroll.frame:SetPoint("BOTTOMRIGHT", saveBar.frame, "TOPRIGHT", 0, 4)
-    -- Track the active scroll for RefreshLayoutTab's next-frame
-    -- SetScroll fixup (see RefreshLayoutTab for why that fixup exists).
-    self._layoutContainer = scroll
-
+    self:_LayoutEditor_RenderSaveBar(scroll, writable)
     self:_LayoutEditor_RenderSingleTab(scroll, tabIndex, writable)
 end
 

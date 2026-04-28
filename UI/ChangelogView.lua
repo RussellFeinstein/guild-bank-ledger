@@ -32,7 +32,7 @@ GBL.CHANGELOG_DATA = {
     -- v0.30.4
     {"0.30.4", "2026-04-28", {
         Changed = {
-            "Layout tab now uses nested tabs. The previous monolithic vertical scroll (eight bank-tab sections stacked above a Sort Access section) is replaced with an inner tab strip: one inner tab per bank tab (Tab 1..Tab 8) plus a final Sort Access tab. Editing one bank tab at a time keeps slot maps and item lists short, and Sort Access policy gets its own focused screen. The active inner tab persists across rebuilds so edits do not bounce the view back to Tab 1. Save and Discard sit in an always-visible footer at the bottom of each bank-tab inner tab — they no longer get pushed below the viewport on long display tabs — and operate on the full draft (changes across all bank tabs save together). Each inner tab keeps its own scroll position, so switching back to a tab returns the user to where they were. Mouse-wheel scrolling works inside every inner tab.",
+            "Layout tab now uses nested tabs. The previous monolithic vertical scroll (eight bank-tab sections stacked above a Sort Access section) is replaced with an inner tab strip: one inner tab per bank tab (Tab 1..Tab 8) plus a final Sort Access tab. Editing one bank tab at a time keeps slot maps and item lists short, and Sort Access policy gets its own focused screen. The active inner tab persists across rebuilds so edits do not bounce the view back to Tab 1. Save and Discard sit at the top of each bank-tab inner tab and operate on the full draft (changes across all bank tabs save together). Each inner tab keeps its own scroll position, so switching back to a tab returns the user to where they were. Mouse-wheel scrolling works inside every inner tab.",
         },
     }},
 
