@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.4] - 2026-04-28
+
+### Changed
+- **Layout tab now uses nested tabs.** The previous monolithic vertical scroll (eight bank-tab sections stacked above a Sort Access section) is replaced with an inner tab strip: one inner tab per bank tab (Tab 1..Tab 8) plus a final Sort Access tab. Editing one bank tab at a time keeps slot maps and item lists short, and Sort Access policy gets its own focused screen. The active inner tab persists across rebuilds so edits do not bounce the view back to Tab 1. Save and Discard live at the bottom of each bank-tab inner tab and operate on the full draft (changes across all bank tabs save together). Sort Access keeps its own immediate-save semantics. Each inner tab keeps its own scroll position, so switching back to a tab returns the user to where they were instead of scroll=0. Mouse-wheel scrolling works inside every inner tab (the ScrollFrame lives inside each inner tab's content rather than wrapping the whole TabGroup, which is the canonical AceGUI fill-remainder pattern used elsewhere in the addon).
+
 ## [0.30.3] - 2026-04-27
 
 ### Changed

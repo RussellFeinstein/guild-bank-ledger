@@ -122,6 +122,16 @@ end
 
 ------------------------------------------------------------------------
 -- Tab builder
+--
+-- Layout uses nested tabs: the outer tab strip selects "Layout", and an
+-- inner TabGroup inside picks one bank tab (1..8) or "Sort Access". This
+-- replaces the earlier monolithic vertical scroll. Editing one bank tab
+-- at a time keeps slot maps + item lists short, and Sort Access policy
+-- gets its own focused screen.
+--
+-- Cross-cutting state (draft, dirty flag, scroll position, active inner
+-- tab) lives on `self` so RefreshLayoutTab() can rebuild the entire tab
+-- after any edit and still land the user back where they were.
 ------------------------------------------------------------------------
 
 --- Build the Layout tab inside a container.
@@ -132,20 +142,23 @@ function GBL:BuildLayoutTab(container)
     local writable = self:HasLayoutWrite()
     local isGM = self:IsGuildMaster()
 
-    -- Root scroll. A persistent SetStatusTable lets the ScrollFrame's
-    -- scroll position survive RefreshLayoutTab rebuilds — without this,
-    -- pressing Enter on any EditBox would rebuild the whole tab and
-    -- scroll back to the top, making mid-page edits miserable.
-    if not self._layoutScrollStatus then
-        self._layoutScrollStatus = {}
+    -- No outer ScrollFrame around the inner TabGroup: an outer scroll
+    -- around an inner TabGroup eats the tab content's mouse-wheel events
+    -- (the TabGroup's content frame doesn't bubble wheel back up to the
+    -- parent ScrollFrame in a way users can rely on). Instead we put a
+    -- ScrollFrame *inside* each inner tab's content — the same pattern
+    -- BuildTransactionsTab / BuildGoldLogTab / BuildConsumptionTab use.
+    -- The outer container holds only the banner + the inner TabGroup
+    -- (anchored to fill the remainder under the banner).
+
+    -- Per-inner-tab scroll status tables. Each inner tab remembers its
+    -- own scroll position, so switching back to Tab 3 returns the user
+    -- to where they were, not to scroll=0. Edits trigger RefreshLayoutTab
+    -- which rebuilds the outer chrome — the per-tab status tables let
+    -- the active tab's scroll survive that rebuild.
+    if not self._layoutScrollStatuses then
+        self._layoutScrollStatuses = {}
     end
-    local scroll = AceGUI:Create("ScrollFrame")
-    scroll:SetFullWidth(true)
-    scroll:SetFullHeight(true)
-    scroll:SetLayout("Flow")
-    scroll:SetStatusTable(self._layoutScrollStatus)
-    container:AddChild(scroll)
-    self._layoutContainer = scroll
 
     -- Access summary banner
     local banner = AceGUI:Create("Label")
@@ -155,14 +168,14 @@ function GBL:BuildLayoutTab(container)
         banner:SetText(
             "|cffffcc00Read-only view.|r Only players with layout-write access " ..
             "(Guild Master or a delegated rank/character) can edit the layout. " ..
-            "Ask the GM to grant you Layout Write access via the Sort Access section below.")
+            "Ask the GM to grant you Layout Write access via the Sort Access tab.")
     else
         local why
         if self:IsGuildMaster() then why = "GM"
         else why = "rank-or-delegate" end
         banner:SetText(format("|cff00ff88Layout-write access:|r %s.", why))
     end
-    scroll:AddChild(banner)
+    container:AddChild(banner)
 
     -- Draft state — initialize from storage only if we don't already have
     -- one in progress. Refresh-on-mode-change must not wipe pending edits.
@@ -173,15 +186,92 @@ function GBL:BuildLayoutTab(container)
     end
 
     -- ------------------------------------------------------------------
-    -- Per-tab rows: mode picker + (if display) item template editor.
+    -- Inner TabGroup: one entry per bank tab + "Sort Access".
     -- ------------------------------------------------------------------
-    self:_LayoutEditor_RenderTabs(scroll, writable)
+    local innerTabs = {}
+    for i = 1, MAX_TABS do
+        innerTabs[#innerTabs + 1] = { value = "tab" .. i, text = "Tab " .. i }
+    end
+    innerTabs[#innerTabs + 1] = { value = "sortaccess", text = "Sort Access" }
 
-    -- ------------------------------------------------------------------
-    -- Save bar. Explicit save model: edits buffer in a draft until you
-    -- click Save Layout. Dirty-state indicator makes it obvious when
-    -- changes are pending.
-    -- ------------------------------------------------------------------
+    -- Validate persisted active inner tab against the current tab list.
+    -- Default to tab1 on first render or after the value goes stale.
+    local activeInner = self._layoutInnerTab or "tab1"
+    local validInner = false
+    for _, t in ipairs(innerTabs) do
+        if t.value == activeInner then validInner = true; break end
+    end
+    if not validInner then activeInner = "tab1" end
+    self._layoutInnerTab = activeInner
+
+    local innerTG = AceGUI:Create("TabGroup")
+    innerTG:SetFullWidth(true)
+    innerTG:SetFullHeight(true)
+    innerTG:SetLayout("Flow")
+    innerTG:SetTabs(innerTabs)
+    innerTG:SetCallback("OnGroupSelected", function(widget, _event, group)
+        self._layoutInnerTab = group
+        widget:ReleaseChildren()
+        self:_LayoutEditor_BuildInnerTabContent(widget, group, writable, isGM)
+    end)
+    container:AddChild(innerTG)
+    -- Fill the remainder under the banner. Same anchor trick used in
+    -- BuildTransactionsTab (UI/UI.lua:365) and friends.
+    innerTG.frame:SetPoint("BOTTOMRIGHT", container.content, "BOTTOMRIGHT", 0, 0)
+    self._layoutInnerTG = innerTG
+
+    -- Triggers OnGroupSelected, which builds the inner content.
+    innerTG:SelectTab(activeInner)
+end
+
+--- Build the content of the currently-selected inner tab.
+-- Bank-tab inner tabs render the per-tab editor + a save bar so the
+-- user can save without leaving the tab. Sort Access inner tab renders
+-- the access policy editor (which has its own immediate-save semantics
+-- and so does not need the Layout draft save bar).
+--
+-- A per-inner-tab ScrollFrame wraps the content. Mouse-wheel events
+-- have to land on a ScrollFrame inside the inner tab's content frame
+-- (an outer ScrollFrame around the TabGroup does not receive them
+-- reliably). The status table is keyed by inner-tab value so each
+-- inner tab keeps its own scroll position.
+function GBL:_LayoutEditor_BuildInnerTabContent(parent, innerTabValue, writable, isGM)
+    local AceGUI = LibStub("AceGUI-3.0")
+
+    self._layoutScrollStatuses[innerTabValue] =
+        self._layoutScrollStatuses[innerTabValue] or {}
+
+    local scroll = AceGUI:Create("ScrollFrame")
+    scroll:SetFullWidth(true)
+    scroll:SetFullHeight(true)
+    scroll:SetLayout("Flow")
+    scroll:SetStatusTable(self._layoutScrollStatuses[innerTabValue])
+    parent:AddChild(scroll)
+    -- Anchor the ScrollFrame to fill the TabGroup's content area —
+    -- same fill-remainder pattern as BuildTransactionsTab et al.
+    scroll.frame:SetPoint("BOTTOMRIGHT", parent.content, "BOTTOMRIGHT", 0, 0)
+    -- Track the active scroll for RefreshLayoutTab's next-frame
+    -- SetScroll fixup (see RefreshLayoutTab for why that fixup exists).
+    self._layoutContainer = scroll
+
+    if innerTabValue == "sortaccess" then
+        self:_LayoutEditor_RenderSortAccess(scroll, isGM)
+        return
+    end
+
+    local tabIndex = tonumber(tostring(innerTabValue):match("^tab(%d+)$"))
+    if not tabIndex then return end
+
+    self:_LayoutEditor_RenderSingleTab(scroll, tabIndex, writable)
+    self:_LayoutEditor_RenderSaveBar(scroll, writable)
+end
+
+--- Render the save/discard bar for a bank-tab inner tab.
+-- The draft spans all 8 bank tabs, so saving from any inner tab commits
+-- changes across all of them. Hidden on the Sort Access inner tab.
+function GBL:_LayoutEditor_RenderSaveBar(parent, writable)
+    local AceGUI = LibStub("AceGUI-3.0")
+
     local statusBanner = AceGUI:Create("Label")
     statusBanner:SetFullWidth(true)
     statusBanner:SetFontObject(GameFontNormalSmall)
@@ -192,18 +282,19 @@ function GBL:BuildLayoutTab(container)
         statusBanner:SetText(
             "|cffffcc00You have unsaved changes.|r " ..
             "Click |cffffffffSave Layout|r to commit them (and broadcast to the guild), " ..
-            "or |cffffffffDiscard changes|r to throw them away.")
+            "or |cffffffffDiscard changes|r to throw them away. " ..
+            "Edits across all bank tabs save together.")
     else
         statusBanner:SetText(
             "|cff888888Layout is up to date. " ..
             "Changes you make here buffer until you click Save Layout.|r")
     end
-    scroll:AddChild(statusBanner)
+    parent:AddChild(statusBanner)
 
     local saveRow = AceGUI:Create("SimpleGroup")
     saveRow:SetFullWidth(true)
     saveRow:SetLayout("Flow")
-    scroll:AddChild(saveRow)
+    parent:AddChild(saveRow)
 
     local spacer = AceGUI:Create("Label")
     spacer:SetWidth(20)
@@ -246,16 +337,6 @@ function GBL:BuildLayoutTab(container)
         self:RefreshLayoutTab()
     end)
     saveRow:AddChild(discardBtn)
-
-    -- ------------------------------------------------------------------
-    -- Sort Access section (GM-only to edit).
-    -- ------------------------------------------------------------------
-    local saHeading = AceGUI:Create("Heading")
-    saHeading:SetFullWidth(true)
-    saHeading:SetText("Sort Access")
-    scroll:AddChild(saHeading)
-
-    self:_LayoutEditor_RenderSortAccess(scroll, isGM)
 end
 
 --- Re-render the Layout tab (called after save / revert / capture /
@@ -277,8 +358,13 @@ function GBL:RefreshLayoutTab()
     if self.activeTab ~= "layout" then return end
     if not self.tabGroup then return end
 
-    local savedScroll = self._layoutScrollStatus
-        and self._layoutScrollStatus.scrollvalue or 0
+    -- Read the active inner tab's saved scroll position. Each inner tab
+    -- has its own status table in self._layoutScrollStatuses so
+    -- per-tab scroll survives both the rebuild and inner-tab switches.
+    local activeInner = self._layoutInnerTab or "tab1"
+    local statusTable = self._layoutScrollStatuses
+        and self._layoutScrollStatuses[activeInner]
+    local savedScroll = (statusTable and statusTable.scrollvalue) or 0
 
     local content = self.tabGroup.content
     if content and content.SetAlpha then content:SetAlpha(0) end
@@ -305,45 +391,43 @@ end
 -- Per-tab rendering
 ------------------------------------------------------------------------
 
-function GBL:_LayoutEditor_RenderTabs(parent, writable)
+--- Render the editor content for a single bank tab inside `parent`.
+-- The mode dropdown lives at the top; if mode == "display" the full
+-- per-tab details (capture, items, slot map, add-item) follow.
+function GBL:_LayoutEditor_RenderSingleTab(parent, tabIndex, writable)
     local AceGUI = LibStub("AceGUI-3.0")
     local draft = self._layoutDraft
+    local tab = draft.tabs[tabIndex] or { mode = "ignore" }
+    draft.tabs[tabIndex] = tab
 
-    for tabIndex = 1, MAX_TABS do
-        local tab = draft.tabs[tabIndex] or { mode = "ignore" }
-        draft.tabs[tabIndex] = tab
+    local heading = AceGUI:Create("Heading")
+    heading:SetFullWidth(true)
+    heading:SetText("Tab " .. tabIndex .. ": " .. bankTabName(tabIndex))
+    parent:AddChild(heading)
 
-        local group = AceGUI:Create("InlineGroup")
-        group:SetFullWidth(true)
-        group:SetLayout("Flow")
-        group:SetTitle("Tab " .. tabIndex .. ": " .. bankTabName(tabIndex))
-        parent:AddChild(group)
-
-        -- Mode dropdown
-        local dropdown = AceGUI:Create("Dropdown")
-        dropdown:SetLabel("Mode")
-        dropdown:SetList({
-            display  = MODE_LABELS.display,
-            overflow = MODE_LABELS.overflow,
-            ignore   = MODE_LABELS.ignore,
-        }, MODE_VALUES)
-        dropdown:SetValue(tab.mode)
-        dropdown:SetWidth(380)
-        dropdown:SetDisabled(not writable)
-        dropdown:SetCallback("OnValueChanged", function(_widget, _event, value)
-            draft.tabs[tabIndex] = { mode = value }
-            if value == "display" then
-                draft.tabs[tabIndex].items = {}
-                draft.tabs[tabIndex].slotOrder = {}
-            end
-            self._layoutDirty = true
-            self:RefreshLayoutTab()
-        end)
-        group:AddChild(dropdown)
-
-        if tab.mode == "display" then
-            self:_LayoutEditor_RenderDisplayDetails(group, tabIndex, writable)
+    local dropdown = AceGUI:Create("Dropdown")
+    dropdown:SetLabel("Mode")
+    dropdown:SetList({
+        display  = MODE_LABELS.display,
+        overflow = MODE_LABELS.overflow,
+        ignore   = MODE_LABELS.ignore,
+    }, MODE_VALUES)
+    dropdown:SetValue(tab.mode)
+    dropdown:SetWidth(380)
+    dropdown:SetDisabled(not writable)
+    dropdown:SetCallback("OnValueChanged", function(_widget, _event, value)
+        draft.tabs[tabIndex] = { mode = value }
+        if value == "display" then
+            draft.tabs[tabIndex].items = {}
+            draft.tabs[tabIndex].slotOrder = {}
         end
+        self._layoutDirty = true
+        self:RefreshLayoutTab()
+    end)
+    parent:AddChild(dropdown)
+
+    if tab.mode == "display" then
+        self:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
     end
 end
 
