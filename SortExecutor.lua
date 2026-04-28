@@ -171,7 +171,31 @@ function finish(ok, reason)
         failed = state.failed,
         total = #state.plan.ops,
         replans = state.replans,
+        reclassified = state.reclassified,
+        preCheckFails = state.preCheckFails,
+        cursorStuck = state.cursorStuck,
+        timeoutByClass = state.timeoutByClass,
     }
+
+    -- Single-line execution summary so the audit trail / chat log shows
+    -- the full picture per run without the reader scrolling. Wall-clock
+    -- elapsed since ExecuteSortPlan ran. Avg per-op uses ops attempted
+    -- (done + failed) so it reflects the real pacing the user observed,
+    -- not the planner's optimistic op count.
+    local elapsed = (GetTime() and state.startedAt) and (GetTime() - state.startedAt) or 0
+    local attempted = state.done + state.failed
+    local avg = attempted > 0 and (elapsed / attempted) or 0
+    local tbc = state.timeoutByClass
+    GBL:AddAuditEntry(string.format(
+        "Sort: %s in %.1fs — %d ops (%d done, %d failed, %d replans, %d reclass)"
+        .. " preCheck=%d cursor=%d timeout[n=%d,p=%d,c=%d,o=%d] avg %.2fs/op",
+        ok and "complete" or ("aborted (" .. (reason or "?") .. ")"),
+        elapsed, #state.plan.ops, state.done, state.failed,
+        state.replans, state.reclassified,
+        state.preCheckFails, state.cursorStuck,
+        tbc.none, tbc.partial, tbc.complete, tbc.other,
+        avg))
+
     -- Emit the final progress message BEFORE clearing state so listeners
     -- get the completion summary without needing a separate event shape.
     emitProgress("finish", { ok = ok, reason = reason })
@@ -280,6 +304,7 @@ step = function()
             myOpIndex, #state.plan.ops,
             op.srcTab, op.srcSlot, op.itemID, op.count,
             srcID and ("it:" .. srcID) or "empty", srcCount))
+        state.preCheckFails = state.preCheckFails + 1
         doReplan("src mismatch at op " .. myOpIndex)
         return
     end
@@ -300,6 +325,7 @@ step = function()
                 myOpIndex, op.op or "move",
                 op.srcTab, op.srcSlot, op.dstTab, op.dstSlot,
                 op.itemID, op.count))
+            state.preCheckFails = state.preCheckFails + 1
             doReplan("dst occupied by wrong item at op " .. myOpIndex)
             return
         end
@@ -354,6 +380,7 @@ step = function()
     if _G.CursorHasItem and _G.CursorHasItem() then
         ClearCursor()
         state.failed = state.failed + 1
+        state.cursorStuck = state.cursorStuck + 1
         state.waiting = nil
         GBL:AddAuditEntry(
             string.format("Sort: op %d failed (cursor stuck after placement)", myOpIndex))
@@ -393,6 +420,11 @@ step = function()
             local dstDesc = describeSlot(op.dstTab, op.dstSlot)
             local cursorHas = _G.CursorHasItem and _G.CursorHasItem() or false
             local class = classifyTimeoutState(op, srcDesc, dstDesc, cursorHas)
+            if state.timeoutByClass[class] then
+                state.timeoutByClass[class] = state.timeoutByClass[class] + 1
+            else
+                state.timeoutByClass.other = state.timeoutByClass.other + 1
+            end
             GBL:AddAuditEntry(string.format(
                 "Sort: op %d timed out (no confirm within %ds) [%s]",
                 myOpIndex, MOVE_CONFIRM_TIMEOUT, class))
@@ -436,6 +468,7 @@ function GBL:_SortExecutor_OnSlotsChanged()
        slotHasAtLeast(lto.dstTab, lto.dstSlot, lto.itemID, lto.count) then
         state.done = state.done + 1
         state.failed = state.failed - 1
+        state.reclassified = state.reclassified + 1
         GBL:AddAuditEntry(string.format(
             "Sort: op %d confirmed by late event after timeout — reclassified as success",
             lto.opIndex))
@@ -503,6 +536,12 @@ function GBL:ExecuteSortPlan(plan, onComplete, opts)
         waiting = nil,
         onComplete = onComplete,
         gapUntil = 0,
+        -- Diagnostic counters dumped by finish() into a single audit line.
+        startedAt = GetTime(),
+        reclassified = 0,
+        preCheckFails = 0,
+        cursorStuck = 0,
+        timeoutByClass = { none = 0, partial = 0, complete = 0, other = 0 },
     }
     registerBankEvents()
     GBL:AddAuditEntry(

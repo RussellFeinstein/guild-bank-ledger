@@ -307,6 +307,67 @@ describe("SortExecutor", function()
             drainTimers()
             assert.is_nil(MockWoW.cursor)
         end)
+
+        ----------------------------------------------------------------
+        -- Diagnostic counters in onComplete result (v0.30.5)
+        ----------------------------------------------------------------
+
+        it("onComplete result carries diagnostic counters", function()
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                },
+            }, function(r) result = r end)
+            drainTimers()
+            assert.is_not_nil(result)
+            assert.is_true(result.ok)
+            assert.equals(0, result.reclassified)
+            assert.equals(0, result.preCheckFails)
+            assert.equals(0, result.cursorStuck)
+            assert.is_not_nil(result.timeoutByClass)
+            assert.equals(0, result.timeoutByClass.none)
+            assert.equals(0, result.timeoutByClass.partial)
+            assert.equals(0, result.timeoutByClass.complete)
+            assert.equals(0, result.timeoutByClass.other)
+        end)
+
+        it("reclassified count reflects late-ACK reclassifications", function()
+            -- 2 ops so that state stays alive in the INTER_MOVE_GAP after
+            -- op 1 finishes, giving the inject + stray event a chance to
+            -- run before finish() clears state. With a 1-op plan, finish
+            -- fires synchronously inside step() and inject becomes a no-op.
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+                [2] = { itemID = 200, name = "Vial",  count = 20 },
+            })
+            Helpers.populateTab(2, {})
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 2, dstSlot = 2, itemID = 200, count = 20 },
+                },
+            }, function(r) result = r end)
+            GBL:_sortExecutorInjectTimeout({
+                opIndex = 99, dstTab = 2, dstSlot = 1,
+                itemID = 100, count = 20,
+            })
+            MockAce.fireEvent("GUILDBANKBAGSLOTS_CHANGED")
+            -- Advance past INTER_MOVE_GAP so the rescheduled step() can
+            -- proceed when drainTimers fires it.
+            MockWoW.serverTime = MockWoW.serverTime + 1.0
+            drainTimers()
+            assert.is_not_nil(result)
+            assert.is_true(result.ok)
+            assert.equals(1, result.reclassified)
+        end)
     end)
 
     describe("IsSortRunning", function()

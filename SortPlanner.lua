@@ -171,6 +171,24 @@ function GBL:PlanSort(snapshot, layout, opts)
         end
     end
 
+    -- Per-phase counters. Populated as each phase runs and dumped to the
+    -- audit trail at the end alongside the existing one-line summary.
+    -- This is the layer that lets a post-mortem distinguish "Phase 0
+    -- merged 4 stacks" from "Phase 1B spilled 4 fresh stacks to overflow"
+    -- when both produce 4 ops.
+    local diag = {
+        phase0Merges = 0, phase0SlotsFreed = 0,
+        phase1aAssignments = 0,
+        phase1bTopup = 0, phase1bExtendRight = 0,
+        phase1bExtendLeft = 0, phase1bFirstEmpty = 0,
+        phase1bUnplaced = 0,
+        phase2Pivots = 0, phase2CycleAborts = 0,
+        phase3Sweeps = 0,
+        phase4PositionShifts = 0,
+        demandPinned = 0, demandExtendRight = 0,
+        demandExtendLeft = 0, demandFirstEmpty = 0,
+    }
+
     -- --------------------------------------------------------------
     -- Classify tabs.
     -- --------------------------------------------------------------
@@ -307,6 +325,10 @@ function GBL:PlanSort(snapshot, layout, opts)
                         })
                         left.count  = left.count  + pour
                         right.count = right.count - pour
+                        diag.phase0Merges = diag.phase0Merges + 1
+                        if right.count == 0 then
+                            diag.phase0SlotsFreed = diag.phase0SlotsFreed + 1
+                        end
                     end
                 end
             end
@@ -349,6 +371,7 @@ function GBL:PlanSort(snapshot, layout, opts)
                 table.insert(demands, dem)
                 demandOfSlot[tabIndex][slotIndex] = dem
                 emitted[itemID] = (emitted[itemID] or 0) + 1
+                diag.demandPinned = diag.demandPinned + 1
             end
         end
 
@@ -390,6 +413,13 @@ function GBL:PlanSort(snapshot, layout, opts)
             claimedByItem[itemID] = claimedByItem[itemID] or {}
             claimedByItem[itemID][s] = true
             emitted[itemID] = (emitted[itemID] or 0) + 1
+            if origin == "extend-right" then
+                diag.demandExtendRight = diag.demandExtendRight + 1
+            elseif origin == "extend-left" then
+                diag.demandExtendLeft = diag.demandExtendLeft + 1
+            elseif origin == "first-empty" then
+                diag.demandFirstEmpty = diag.demandFirstEmpty + 1
+            end
         end
 
         for _, itemID in ipairs(sortedIDs) do
@@ -538,6 +568,7 @@ function GBL:PlanSort(snapshot, layout, opts)
             })
             sup.available = sup.available - take
             dem.filled = dem.filled + take
+            diag.phase1aAssignments = diag.phase1aAssignments + 1
         end
     end
 
@@ -618,14 +649,25 @@ function GBL:PlanSort(snapshot, layout, opts)
             if not overflowTab then
                 recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
                     sup.available, REASON_NO_OVERFLOW_DEFINED)
+                diag.phase1bUnplaced = diag.phase1bUnplaced + 1
             else
                 while sup.available > 0 do
-                    local ovSlot, take = pickOverflowSlot(sup.itemID, sup.available)
+                    local ovSlot, take, mode = pickOverflowSlot(sup.itemID, sup.available)
                     if not ovSlot or not take or take <= 0 then
                         recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
                             sup.available, REASON_OVERFLOW_FULL)
+                        diag.phase1bUnplaced = diag.phase1bUnplaced + 1
                         sup.available = 0
                         break
+                    end
+                    if mode == "topup" then
+                        diag.phase1bTopup = diag.phase1bTopup + 1
+                    elseif mode == "extend-right" then
+                        diag.phase1bExtendRight = diag.phase1bExtendRight + 1
+                    elseif mode == "extend-left" then
+                        diag.phase1bExtendLeft = diag.phase1bExtendLeft + 1
+                    elseif mode == "first-empty" then
+                        diag.phase1bFirstEmpty = diag.phase1bFirstEmpty + 1
                     end
                     table.insert(assignments, {
                         srcTab = sup.tabIndex, srcSlot = sup.slotIndex,
@@ -739,6 +781,7 @@ function GBL:PlanSort(snapshot, layout, opts)
                         recordUnplaced(a.srcTab, a.srcSlot, a.itemID, a.count,
                             REASON_CYCLE_NO_PIVOT)
                         remaining[i] = nil
+                        diag.phase2CycleAborts = diag.phase2CycleAborts + 1
                     end
                 end
                 break
@@ -753,6 +796,7 @@ function GBL:PlanSort(snapshot, layout, opts)
                         recordUnplaced(a.srcTab, a.srcSlot, a.itemID, a.count,
                             REASON_CYCLE_NO_PIVOT)
                         remaining[i] = nil
+                        diag.phase2CycleAborts = diag.phase2CycleAborts + 1
                     end
                 end
                 break
@@ -767,6 +811,7 @@ function GBL:PlanSort(snapshot, layout, opts)
             }
             table.insert(plan.ops, pivotOp)
             applyOpToState(state, pivotOp)
+            diag.phase2Pivots = diag.phase2Pivots + 1
 
             -- Redirect any still-remaining assignment whose src was the pivot's
             -- original source slot — the item now lives at the pivot.
@@ -826,6 +871,7 @@ function GBL:PlanSort(snapshot, layout, opts)
                             }
                             table.insert(plan.ops, sweepOp)
                             applyOpToState(state, sweepOp)
+                            diag.phase3Sweeps = diag.phase3Sweeps + 1
                             -- Mirror the placement into overflowSlotInfo so
                             -- a follow-up pick (later supply or sweep) sees
                             -- updated capacity.
@@ -889,6 +935,7 @@ function GBL:PlanSort(snapshot, layout, opts)
                 }
                 remaining[idx] = true
                 phase4Added = true
+                diag.phase4PositionShifts = diag.phase4PositionShifts + 1
             end
         end
 
@@ -913,19 +960,47 @@ function GBL:PlanSort(snapshot, layout, opts)
         end
     end
 
-    -- Single-line planner timing diagnostic. Always emitted so the
-    -- audit log shows baseline cost for every sort and the slow tail
-    -- for replan hitch investigation. AddAuditEntry is provided by
-    -- Sync.lua; guard for partial test setups.
-    if profileStart and self.AddAuditEntry then
-        local elapsed = debugprofilestop() - profileStart
+    -- Planner diagnostics. The first line is always emitted (baseline
+    -- timing + replan hitch investigation). The phase / demand breakdown
+    -- lines fire only when there's plan or demand activity, so quiet
+    -- replan-no-op cycles don't spam the audit trail. AddAuditEntry is
+    -- provided by Sync.lua; guard for partial test setups.
+    if self.AddAuditEntry then
+        local elapsed = profileStart and (debugprofilestop() - profileStart) or 0
         local deficitCount = 0
         for _ in pairs(plan.deficits) do deficitCount = deficitCount + 1 end
         self:AddAuditEntry(string.format(
             "Sort plan: %.1fms, %d ops, %d deficits, %d unplaced (input: %d slots / %d tabs)",
             elapsed, #plan.ops, deficitCount, #plan.unplaced,
             inputSlots, inputTabs))
+
+        local totalDemands = diag.demandPinned + diag.demandExtendRight
+            + diag.demandExtendLeft + diag.demandFirstEmpty
+        if #plan.ops > 0 or totalDemands > 0 then
+            self:AddAuditEntry(string.format(
+                "  phases: P0 merge=%d(free=%d) P1a assign=%d "
+                .. "P1b spill=%d(top=%d,r=%d,l=%d,fe=%d,unp=%d) "
+                .. "P2 pivot=%d(abort=%d) P3 sweep=%d P4 pack=%d",
+                diag.phase0Merges, diag.phase0SlotsFreed,
+                diag.phase1aAssignments,
+                diag.phase1bTopup + diag.phase1bExtendRight
+                    + diag.phase1bExtendLeft + diag.phase1bFirstEmpty,
+                diag.phase1bTopup, diag.phase1bExtendRight,
+                diag.phase1bExtendLeft, diag.phase1bFirstEmpty,
+                diag.phase1bUnplaced,
+                diag.phase2Pivots, diag.phase2CycleAborts,
+                diag.phase3Sweeps, diag.phase4PositionShifts))
+            self:AddAuditEntry(string.format(
+                "  demands: %d total (pinned=%d, ext-R=%d, ext-L=%d, first-empty=%d)",
+                totalDemands, diag.demandPinned, diag.demandExtendRight,
+                diag.demandExtendLeft, diag.demandFirstEmpty))
+        end
     end
+
+    -- Expose diagnostic counters on the plan so callers (UI, tests) can
+    -- read them without re-running the planner. Untyped to avoid forcing
+    -- consumers to handle a missing field on legacy plans.
+    plan.diag = diag
 
     return plan
 end

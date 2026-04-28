@@ -1572,4 +1572,166 @@ describe("SortPlanner", function()
             assert.equals(0, #plan.ops)
         end)
     end)
+
+    -- ------------------------------------------------------------------
+    -- Per-phase diagnostic counters (v0.30.5)
+    -- ------------------------------------------------------------------
+    describe("plan.diag counters", function()
+        local function emptyDisplayOverflow()
+            return {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                },
+            }
+        end
+
+        it("empty plan exposes zero counters", function()
+            local snap = snapshot({ [1] = {}, [2] = {} })
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow())
+            assert.is_not_nil(plan.diag)
+            assert.equals(0, plan.diag.phase0Merges)
+            assert.equals(0, plan.diag.phase1aAssignments)
+            assert.equals(0, plan.diag.phase1bTopup)
+            assert.equals(0, plan.diag.phase1bExtendRight)
+            assert.equals(0, plan.diag.phase1bExtendLeft)
+            assert.equals(0, plan.diag.phase1bFirstEmpty)
+            assert.equals(0, plan.diag.phase1bUnplaced)
+            assert.equals(0, plan.diag.phase2Pivots)
+            assert.equals(0, plan.diag.phase3Sweeps)
+            assert.equals(0, plan.diag.phase4PositionShifts)
+            assert.equals(0, plan.diag.demandPinned)
+        end)
+
+        it("counts Phase 0 merges and freed slots", function()
+            -- Two partials at slots 3 and 5 of overflow, summing to 160 < 200.
+            -- Phase 0 emits one merge that drains slot 5 → 1 merge, 1 freed.
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [3] = { itemID = 100, count = 100 },
+                    [5] = { itemID = 100, count = 60 },
+                },
+            })
+            local opts = { maxStackByItem = { [100] = 200 } }
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(), opts)
+            assert.equals(1, plan.diag.phase0Merges)
+            assert.equals(1, plan.diag.phase0SlotsFreed)
+        end)
+
+        it("counts Phase 1A assignments separately from Phase 1B spills", function()
+            -- Demand: tab 1 wants 1×item 100 at slot 1.
+            -- Supply: tab 1 already has it at slot 1 (keep) — no Phase 1A
+            -- assignment needed for the demand. Tab 1 also has an extra
+            -- item 200 at slot 2 that has no demand → Phase 1B spill to overflow.
+            local snap = snapshot({
+                [1] = {
+                    [1] = { itemID = 100, count = 20 },
+                    [2] = { itemID = 200, count = 5 },
+                },
+                [2] = {},
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab(
+                        { [100] = { slots = 1, perSlot = 20 } },
+                        { [1] = 100 }
+                    ),
+                    [2] = overflow(),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout)
+            -- 100 is keep-reserved at slot 1, no Phase 1A op.
+            assert.equals(0, plan.diag.phase1aAssignments)
+            -- 200 spills to overflow as a fresh slot.
+            assert.equals(1, plan.diag.phase1bFirstEmpty)
+        end)
+
+        it("counts Phase 1B topup vs extend vs first-empty modes", function()
+            -- Overflow has item 100 partial at slot 1 (cap=150 left).
+            -- Display tab 1 has spare item 100 (50) → topup picks slot 1.
+            -- Display tab 1 also has item 200 (5) with no overflow neighbor
+            -- → first-empty fallback picks the next free slot.
+            local snap = snapshot({
+                [1] = {
+                    [1] = { itemID = 100, count = 50 },
+                    [2] = { itemID = 200, count = 5 },
+                },
+                [2] = {
+                    [1] = { itemID = 100, count = 50 },
+                },
+            })
+            local opts = { maxStackByItem = { [100] = 200, [200] = 20 } }
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(), opts)
+            -- 100 from T1/S1 tops up T2/S1 (capacity 150 ≥ 50, single slot).
+            assert.equals(1, plan.diag.phase1bTopup)
+            -- 200 finds no same-item neighbor → first-empty.
+            assert.equals(1, plan.diag.phase1bFirstEmpty)
+        end)
+
+        it("records phase1bUnplaced when overflow is full", function()
+            -- Overflow tab is fully populated with unique items so neither
+            -- topup nor any extension can absorb the spill.
+            local overflowSlots = {}
+            for s = 1, 98 do
+                overflowSlots[s] = { itemID = 1000 + s, count = 1 }
+            end
+            local snap = snapshot({
+                [1] = {
+                    [1] = { itemID = 100, count = 5 },
+                },
+                [2] = overflowSlots,
+            })
+            local opts = {}
+            for s = 1, 98 do opts[1000 + s] = 1 end
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(),
+                { maxStackByItem = opts })
+            assert.is_true(plan.diag.phase1bUnplaced > 0)
+        end)
+
+        it("counts Phase 4 position shifts on a non-canonical overflow", function()
+            -- Three same-item full stacks scattered; Phase 4 packs to slots 1-3.
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [4] = { itemID = 100, count = 200 },
+                    [6] = { itemID = 100, count = 200 },
+                    [8] = { itemID = 100, count = 200 },
+                },
+            })
+            local opts = { maxStackByItem = { [100] = 200 } }
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(), opts)
+            -- Phase 0 emits no merges (all stacks are full).
+            assert.equals(0, plan.diag.phase0Merges)
+            -- Phase 4 shifts 3 stacks into slots 1-3.
+            assert.equals(3, plan.diag.phase4PositionShifts)
+        end)
+
+        it("counts demand origins matching the demandMap", function()
+            -- Same setup as the v0.29.17 demandMap test: produces 7 demands
+            -- with a known origin distribution.
+            local snap = snapshot({ [1] = {}, [2] = {} })
+            local layout = {
+                tabs = {
+                    [1] = displayTab(
+                        {
+                            [100] = { slots = 1, perSlot = 20 },
+                            [200] = { slots = 2, perSlot = 20 },
+                            [300] = { slots = 1, perSlot = 20 },
+                            [400] = { slots = 1, perSlot = 20 },
+                            [500] = { slots = 2, perSlot = 20 },
+                        },
+                        { [1] = 100, [3] = 200, [4] = 300, [6] = 500 }
+                    ),
+                    [2] = overflow(),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout)
+            -- 4 pinned (1, 3, 4, 6), 1 ext-R (7), 1 ext-L (2), 1 first-empty (5).
+            assert.equals(4, plan.diag.demandPinned)
+            assert.equals(1, plan.diag.demandExtendRight)
+            assert.equals(1, plan.diag.demandExtendLeft)
+            assert.equals(1, plan.diag.demandFirstEmpty)
+        end)
+    end)
 end)
