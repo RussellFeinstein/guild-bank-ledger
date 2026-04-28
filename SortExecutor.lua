@@ -81,6 +81,27 @@ local function describePlannerSlot(snap)
     return string.format("%s x%d", name, snap.count or 0)
 end
 
+--- Snapshot a live bank slot into a comparable {itemID, count} table.
+--- Used to capture the pre-op state right before Pickup so we can detect
+--- a later server-side reversion (the WoW client updates optimistically;
+--- the only authoritative signal is a follow-up GUILDBANKBAGSLOTS_CHANGED
+--- event reflecting the server's actual decision).
+local function snapshotLiveSlot(tabIndex, slotIndex)
+    local link = GetGuildBankItemLink(tabIndex, slotIndex)
+    if not link then return nil end
+    local id = extractItemID(link)
+    local _, c = GetGuildBankItemInfo(tabIndex, slotIndex)
+    return { itemID = id, count = c or 0 }
+end
+
+--- Compare two slot snapshots ({itemID, count} or nil). Returns true iff
+--- both are nil OR both have matching itemID and count.
+local function slotEquals(a, b)
+    if a == nil and b == nil then return true end
+    if a == nil or b == nil then return false end
+    return a.itemID == b.itemID and a.count == b.count
+end
+
 --- Classify a timeout's observed src/dst/cursor state into one of:
 --- "none"    — src unchanged, dst empty (server dropped the request outright)
 --- "partial" — src emptied, cursor holds item (pickup done, drop never landed)
@@ -151,24 +172,77 @@ function unregisterBankEvents()
     -- Our handler is idempotent when not running.
 end
 
+--- Project the EXPECTED post-op state for a slot, given the op intent
+--- and the pre-op state. For a "move" op, src ends empty and dst gains
+--- (or merges) the moved stack. For a "split" op, src loses op.count
+--- and dst gains op.count. Used by the foreign-activity branch later
+--- to compare actual bank state against what we'd see if the server
+--- had honored the op.
+local function projectPostSrc(w)
+    if not w or not w.srcPreOp then return nil end
+    if w.opLabel == "split" then
+        local remaining = (w.srcPreOp.count or 0) - (w.count or 0)
+        if remaining <= 0 then return nil end
+        return { itemID = w.srcPreOp.itemID, count = remaining }
+    end
+    return nil  -- move drains src
+end
+
+local function projectPostDst(w)
+    if not w then return nil end
+    local pre = w.dstPreOp
+    if not pre then
+        return { itemID = w.itemID, count = w.count }
+    end
+    if pre.itemID == w.itemID then
+        return { itemID = w.itemID, count = (pre.count or 0) + (w.count or 0) }
+    end
+    -- Foreign item at dst at pre-op time means a swap; we don't model that
+    -- in projection (rare and the planner shouldn't emit such ops post-fix).
+    return { itemID = w.itemID, count = w.count }
+end
+
 --- Emit a one-line audit entry for a successfully completed op. Captures
---- src→dst, item, count, op label, and wall-clock elapsed since the op
---- started so /gbl synclog can be replayed as a per-op timeline. Called
---- from every success path (sync-already-landed, async event, late-ACK
---- reclassify, timeout-but-actually-completed) so the line emits exactly
---- once per op regardless of which path resolved it.
+--- src→dst, item, count, op label, wall-clock elapsed, and the OBSERVED
+--- post-op state of both slots (which in real WoW reflects the client's
+--- optimistic model, not necessarily the server's authoritative answer).
+--- Side-effect: stashes a "last completed op" record on state so the
+--- foreign-activity branch can detect server reversion against the same
+--- post-op projection.
 local function auditOpSuccess(w, suffix)
     if not w then return end
     local elapsed = w.startedAt and (GetTime() - w.startedAt) or 0
     local itemDesc = (w.itemID and GBL.DescribeItem)
         and GBL:DescribeItem(w.itemID) or ("it:" .. tostring(w.itemID))
+    local srcPost = snapshotLiveSlot(w.srcTab or 0, w.srcSlot or 0)
+    local dstPost = snapshotLiveSlot(w.tabIndex, w.slotIndex)
     GBL:AddAuditEntry(string.format(
-        "Sort op %d done: %s T%d/S%d->T%d/S%d %s x%d (%.1fs)%s",
+        "Sort op %d done: %s T%d/S%d->T%d/S%d %s x%d (%.1fs)%s src=%s dst=%s",
         w.opIndex, w.opLabel or "move",
         w.srcTab or 0, w.srcSlot or 0,
         w.tabIndex, w.slotIndex,
         itemDesc, w.count, elapsed,
-        suffix and (" " .. suffix) or ""))
+        suffix and (" " .. suffix) or "",
+        describePlannerSlot(srcPost),
+        describePlannerSlot(dstPost)))
+
+    -- Stash for server-reversion detection on the next foreign-activity
+    -- event. We compare slot state at that future time against the
+    -- projected post-op state computed here.
+    if state then
+        state.lastCompletedOp = {
+            opIndex = w.opIndex,
+            opLabel = w.opLabel,
+            srcTab = w.srcTab, srcSlot = w.srcSlot,
+            dstTab = w.tabIndex, dstSlot = w.slotIndex,
+            itemID = w.itemID, count = w.count,
+            srcPreOp = w.srcPreOp,
+            dstPreOp = w.dstPreOp,
+            projectedSrc = projectPostSrc(w),
+            projectedDst = projectPostDst(w),
+            completedAt = GetTime(),
+        }
+    end
 end
 
 --- Emit a progress message for UI subscribers (notably UI/SortView).
@@ -391,6 +465,14 @@ step = function()
         opIndex = myOpIndex,
         opLabel = op.op or "move",
         startedAt = GetTime(),
+        -- Pre-op live state at the exact moment we're about to issue
+        -- the Pickup pair. Together with the post-op observed state and
+        -- the projected post-op state (computed from the op intent),
+        -- this lets the foreign-activity branch later detect server
+        -- reversion: if the dst slot snaps back to its pre-op contents
+        -- AFTER we advanced past this op, the server rejected the move.
+        srcPreOp = snapshotLiveSlot(op.srcTab, op.srcSlot),
+        dstPreOp = snapshotLiveSlot(op.dstTab, op.dstSlot),
     }
 
     -- Notify UI subscribers that this op is now executing. SortView uses
@@ -564,6 +646,40 @@ function GBL:_SortExecutor_OnSlotsChanged()
     -- No in-flight op. If we reclassified a late ACK, the event is fully
     -- explained. Otherwise it's genuine foreign activity → replan.
     if not reclassified then
+        -- Server-reversion detection: if the most recently advanced op's
+        -- src/dst slots no longer match the projected post-op state, the
+        -- server very likely rejected our previous Pickup pair and this
+        -- event is the rollback. The WoW client always optimistically
+        -- updates on Pickup so the [sync] / async success paths can't
+        -- tell apart "server processed" from "server will reject" — but
+        -- THIS event (the second one) carries the authoritative answer.
+        local lco = state.lastCompletedOp
+        if lco then
+            local liveSrc = snapshotLiveSlot(lco.srcTab, lco.srcSlot)
+            local liveDst = snapshotLiveSlot(lco.dstTab, lco.dstSlot)
+            local srcReverted = not slotEquals(liveSrc, lco.projectedSrc)
+            local dstReverted = not slotEquals(liveDst, lco.projectedDst)
+            if srcReverted or dstReverted then
+                GBL:AddAuditEntry(string.format(
+                    "Sort: server reversion suspected on op %d (%s T%d/S%d->T%d/S%d)",
+                    lco.opIndex, lco.opLabel or "move",
+                    lco.srcTab, lco.srcSlot, lco.dstTab, lco.dstSlot))
+                if srcReverted then
+                    GBL:AddAuditEntry(string.format(
+                        "  src T%d/S%d: projected %s, observed %s",
+                        lco.srcTab, lco.srcSlot,
+                        describePlannerSlot(lco.projectedSrc),
+                        describePlannerSlot(liveSrc)))
+                end
+                if dstReverted then
+                    GBL:AddAuditEntry(string.format(
+                        "  dst T%d/S%d: projected %s, observed %s",
+                        lco.dstTab, lco.dstSlot,
+                        describePlannerSlot(lco.projectedDst),
+                        describePlannerSlot(liveDst)))
+                end
+            end
+        end
         doReplan("foreign activity (unexpected event)")
     end
 end

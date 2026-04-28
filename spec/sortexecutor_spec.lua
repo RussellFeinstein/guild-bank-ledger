@@ -336,6 +336,76 @@ describe("SortExecutor", function()
             assert.equals(0, result.timeoutByClass.other)
         end)
 
+        it("audits server reversion when last op's dst slot reverts before next event", function()
+            -- 2 ops so state survives in the inter-move gap after op 1.
+            -- After op 1 advances, mutate the mock bank to simulate the
+            -- server rolling back op 1 (T2/S1 empty again), then fire a
+            -- foreign GUILDBANKBAGSLOTS_CHANGED. The handler should audit
+            -- a "server reversion suspected" line naming op 1.
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+                [2] = { itemID = 200, name = "Vial",  count = 20 },
+            })
+            Helpers.populateTab(2, {})
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 2, dstSlot = 2, itemID = 200, count = 20 },
+                },
+            }, function() end)
+            -- Op 1 has fired sync; lastCompletedOp is now set with
+            -- projectedDst = {itemID=100, count=20} for T2/S1. Now wipe
+            -- the bank's dst back to empty as if the server rolled back.
+            Helpers.populateTab(2, {})
+            -- Re-populate T1/S1 too (server rollback would restore src).
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+                [2] = {  -- T1/S2 was unchanged
+                    itemID = 200, name = "Vial", count = 20,
+                },
+            })
+            MockAce.fireEvent("GUILDBANKBAGSLOTS_CHANGED")
+            -- Look for the reversion-suspected audit line.
+            local trail = GBL:GetAuditTrail()
+            local found = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("server reversion suspected", 1, true) then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found,
+                "expected 'server reversion suspected' audit line; got " ..
+                tostring(#trail) .. " entries")
+        end)
+
+        it("does not audit reversion when projected post-state holds", function()
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+                [2] = { itemID = 200, name = "Vial",  count = 20 },
+            })
+            Helpers.populateTab(2, {})
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 2, dstSlot = 2, itemID = 200, count = 20 },
+                },
+            }, function() end)
+            -- Op 1 fires sync; the mock atomically applies it so the
+            -- live bank already matches projected post-state. No further
+            -- mutation. Fire a stray event.
+            MockAce.fireEvent("GUILDBANKBAGSLOTS_CHANGED")
+            local trail = GBL:GetAuditTrail()
+            for _, entry in ipairs(trail) do
+                assert.is_nil(entry.message:find("server reversion suspected", 1, true),
+                    "did not expect reversion audit but got: " .. entry.message)
+            end
+        end)
+
         it("reclassified count reflects late-ACK reclassifications", function()
             -- 2 ops so that state stays alive in the INTER_MOVE_GAP after
             -- op 1 finishes, giving the inject + stray event a chance to
