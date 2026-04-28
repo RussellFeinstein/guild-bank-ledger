@@ -147,4 +147,4 @@ These branches **do** get deleted after merge (manually, via `git push origin --
 
 ## Version
 
-Current: 0.30.2 (see `VERSION` file)
+Current: 0.30.3 (see `VERSION` file)

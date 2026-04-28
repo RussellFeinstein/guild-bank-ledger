@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.3] - 2026-04-27
+
 ### Changed
 - Repository workflow: disabled auto branch deletion on merge and adopted long-lived per-area topic branches (`ui`, `sync`, `accessibility`, `layout-sort`) for recurring maintainer work. Short-lived `chore/*`, `infra/*`, `hotfix/*` branches still cover one-off and cross-cutting changes. Documented in the new `CLAUDE.md` Branch Workflow section and reflected in `CONTRIBUTING.md`. No addon behavior change.
 
