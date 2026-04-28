@@ -66,6 +66,42 @@ luacheck .                 # lint production code
 - Saved variables: `GuildBankLedgerDB` (AceDB), data keyed per guild name
 - **Sync is guild-wide** — all members participate in HELLO/sync, not just officers. Officer rank only gates UI visibility (settings, admin features). Never add rank checks to the sync protocol.
 
+## Branch Workflow
+
+`main` is the integration target and is GitHub-protected (PR + `test-and-lint` CI required, merge commits only, force-push and deletion blocked). Auto branch deletion on merge is **off**, so topic branches survive their PRs and can be reused.
+
+### Topic branches (long-lived, per area)
+
+Recurring areas of work live on long-lived branches that accumulate multiple commits and PR to `main` as periodic checkpoints, similar to how an area-owning team would batch updates. Initial set:
+
+- `ui` for UI/*.lua (except UI/Accessibility.lua)
+- `sync` for Sync.lua, Fingerprint.lua, sync diagnostics, audit plumbing
+- `accessibility` for UI/Accessibility.lua and palette / font / keyboard work
+- `layout-sort` for BankLayout.lua, SortPlanner.lua, SortExecutor.lua, UI/LayoutEditor.lua, UI/SortView.lua
+
+Create a topic branch the first time work in that area appears, not preemptively. Add new topic branches when a fifth recurring area emerges.
+
+### Short-lived branches (one-off, off main)
+
+Cross-cutting work, infra changes, and one-off refactors still use short-lived branches off `main`:
+
+- `chore/<thing>` for maintainer chores, repo-config changes, doc-only updates
+- `infra/<thing>` for CI / build / tooling changes
+- `hotfix/<thing>` for urgent production-impact fixes (see Hotfix rule below)
+
+These branches **do** get deleted after merge (manually, via `git push origin --delete <branch>` or the GitHub UI button). Auto-delete is off so deletion is intentional, not implicit.
+
+### Rules
+
+- **Hotfix rule**: an urgent production-impact fix never goes on a topic branch. Open `hotfix/<thing>` off `main`, PR it, merge, then rebase any affected topic branches onto the new `main`.
+- **Cross-area rule**: when one feature spans two topic branches (e.g. a sync change that needs a UI tab), merge the upstream-of-the-dependency branch first, rebase the dependent branch onto the new `main`, then commit the dependent piece. Never PR both branches simultaneously hoping git resolves the order.
+- **Two-PR-from-same-topic rule**: a topic branch can only have one open PR at a time. If `ui` has a ready batch and unrelated WIP, checkpoint-PR the ready batch first, then continue WIP after the merge + rebase. Splitting WIP off to a temporary `ui-<thing>` is a fallback when the WIP must continue in parallel.
+- **Rebase cadence**: rebase each touched topic branch onto `origin/main` at the start of every working session in that area, and immediately after every merge. `git rebase origin/main` if conflicts are tame; fall back to `git merge origin/main` if not. Push back with `git push --force-with-lease` (allowed on topic branches since they are unprotected).
+- **CHANGELOG conflict policy**: a topic branch stamps its target version header (e.g. `## [0.31.0] - <pending>`) only when opening the PR, not during ongoing work. If two branches PR with the same target version, the second to merge rebases onto post-merge `main` and bumps to the next patch. The `[Unreleased]` block is fine for the lead branch but typically gets stamped on PR-open.
+- **CI cadence**: `.github/workflows/ci.yml` runs on `pull_request` and `push: main` only. Intermediate commits on a topic branch are unverified by CI. Run `bash run_tests.sh` and `bash run_tests.sh --lint` locally before each commit so topic branches stay green.
+- **Stale-branch policy**: if a topic branch has had no commits for 3 months, delete it and recreate fresh from `main` when work resumes. Long-lived does not mean immortal.
+- **Carve-out from the global "small, focused PRs" rule**: the user's global `~/.claude/CLAUDE.md` "Open Source / Public Repo Workflow" section says "Keep PRs small and focused, one concern per PR." That rule is for external-contributor PRs. For the maintainer's own topic-branch PRs in this repo, multiple related commits per PR is the intended pattern. External contributor PRs still follow the small-and-focused rule.
+
 ## Sync subsystem notes
 
 ### Protocol / transport
