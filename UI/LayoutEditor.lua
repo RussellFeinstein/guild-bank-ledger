@@ -100,6 +100,47 @@ end
 -- Expose the pure helper for the spec suite.
 GBL._layoutEditorComputeSlotRuns = computeSlotRuns
 
+--- Apply slots / per-slot to every item on a display tab in place.
+--
+-- Pure function over `tab` (mutates `tab.items` and `tab.slotOrder`).
+-- Either argument can be nil to leave that field untouched on every
+-- item — so the caller can bulk-set only slots, only per-slot, or
+-- both. When slots shrinks for an item, this trims that item's
+-- `slotOrder` pins from the highest slot down so a previously-
+-- captured layout doesn't keep dangling pins above the new count
+-- (mirrors the per-row OnEnterPressed shrink logic).
+--
+-- Returns the number of items mutated.
+local function applyBulkToItems(tab, newSlots, newPerSlot, maxSlots)
+    if type(tab) ~= "table" or type(tab.items) ~= "table" then return 0 end
+    tab.slotOrder = tab.slotOrder or {}
+    local applied = 0
+    for itemID, row in pairs(tab.items) do
+        if newSlots then
+            local old = row.slots or 0
+            row.slots = newSlots
+            if newSlots < old then
+                local toRemove = old - newSlots
+                for s = maxSlots, 1, -1 do
+                    if toRemove <= 0 then break end
+                    if tab.slotOrder[s] == itemID then
+                        tab.slotOrder[s] = nil
+                        toRemove = toRemove - 1
+                    end
+                end
+            end
+        end
+        if newPerSlot then
+            row.perSlot = newPerSlot
+        end
+        applied = applied + 1
+    end
+    return applied
+end
+
+-- Expose the pure helper for the spec suite.
+GBL._layoutEditorApplyBulkToItems = applyBulkToItems
+
 ------------------------------------------------------------------------
 -- Working-copy state
 --
@@ -577,6 +618,73 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
     local itemIDs = {}
     for itemID in pairs(tab.items) do itemIDs[#itemIDs + 1] = itemID end
     table.sort(itemIDs)
+
+    -- Bulk-apply row: set slots / per-slot for every item on this tab
+    -- at once. Useful when a tab has many items that should share the
+    -- same shape (e.g., a gems tab where every item is "5 slots × 1
+    -- per slot"). Hidden if there are no items to apply to.
+    if writable and #itemIDs > 0 then
+        local bulkRow = AceGUI:Create("SimpleGroup")
+        bulkRow:SetFullWidth(true)
+        bulkRow:SetLayout("Flow")
+        parent:AddChild(bulkRow)
+
+        local lbl = AceGUI:Create("Label")
+        lbl:SetWidth(120)
+        lbl:SetText("Set all items to:")
+        bulkRow:AddChild(lbl)
+
+        local slotsInput = AceGUI:Create("EditBox")
+        slotsInput:SetLabel("Slots")
+        slotsInput:SetWidth(80)
+        slotsInput:DisableButton(true)
+        bulkRow:AddChild(slotsInput)
+
+        local perSlotInput = AceGUI:Create("EditBox")
+        perSlotInput:SetLabel("Per slot")
+        perSlotInput:SetWidth(80)
+        perSlotInput:DisableButton(true)
+        bulkRow:AddChild(perSlotInput)
+
+        local applyBtn = AceGUI:Create("Button")
+        applyBtn:SetText("Apply to all")
+        applyBtn:SetWidth(110)
+        applyBtn:SetCallback("OnClick", function()
+            local newSlots = tonumber(slotsInput:GetText())
+            local newPerSlot = tonumber(perSlotInput:GetText())
+            if not newSlots and not newPerSlot then
+                self:Print("Enter at least one of Slots / Per slot to apply.")
+                return
+            end
+            if newSlots and newSlots < 1 then
+                self:Print("Slots must be >= 1.")
+                return
+            end
+            if newPerSlot and newPerSlot < 1 then
+                self:Print("Per slot must be >= 1.")
+                return
+            end
+            local applied = applyBulkToItems(tab, newSlots, newPerSlot, MAX_SLOTS)
+            local parts = {}
+            if newSlots then parts[#parts + 1] = format("slots=%d", newSlots) end
+            if newPerSlot then parts[#parts + 1] = format("perSlot=%d", newPerSlot) end
+            self:Print(format(
+                "|cff00ff88Applied %s to %d item(s) on tab %d.|r " ..
+                "Click |cffffffffSave Layout|r to commit.",
+                table.concat(parts, ", "), applied, tabIndex))
+            self._layoutDirty = true
+            self:RefreshLayoutTab()
+        end)
+        bulkRow:AddChild(applyBtn)
+
+        local hint = AceGUI:Create("Label")
+        hint:SetFullWidth(true)
+        hint:SetFontObject(GameFontNormalSmall)
+        hint:SetText("|cff888888Leave a field blank to keep its current " ..
+            "value for each item. Shrinking slots trims that item's " ..
+            "pinned positions from the highest slot down.|r")
+        parent:AddChild(hint)
+    end
 
     if #itemIDs == 0 then
         local empty = AceGUI:Create("Label")

@@ -121,3 +121,151 @@ describe("LayoutEditor.computeSlotRuns", function()
         assert.same({}, computeSlotRuns(nil))
     end)
 end)
+
+describe("LayoutEditor.applyBulkToItems", function()
+    local applyBulk
+    local MAX_SLOTS = 98
+
+    before_each(function()
+        Helpers.setupMocks()
+        local GBL = Helpers.loadAddon()
+        GBL:OnInitialize()
+        applyBulk = GBL._layoutEditorApplyBulkToItems
+        assert.is_function(applyBulk,
+            "expected GBL._layoutEditorApplyBulkToItems test hook")
+    end)
+
+    it("returns 0 and is a no-op for an empty items table", function()
+        local tab = { items = {}, slotOrder = {} }
+        assert.equals(0, applyBulk(tab, 5, 1, MAX_SLOTS))
+        assert.same({}, tab.items)
+        assert.same({}, tab.slotOrder)
+    end)
+
+    it("sets slots and perSlot on every item when both provided", function()
+        local tab = {
+            items = {
+                [100] = { slots = 1, perSlot = 20 },
+                [200] = { slots = 2, perSlot = 5 },
+                [300] = { slots = 3, perSlot = 10 },
+            },
+            slotOrder = {},
+        }
+        assert.equals(3, applyBulk(tab, 5, 1, MAX_SLOTS))
+        assert.equals(5, tab.items[100].slots)
+        assert.equals(1, tab.items[100].perSlot)
+        assert.equals(5, tab.items[200].slots)
+        assert.equals(1, tab.items[200].perSlot)
+        assert.equals(5, tab.items[300].slots)
+        assert.equals(1, tab.items[300].perSlot)
+    end)
+
+    it("leaves perSlot untouched when newPerSlot is nil", function()
+        local tab = {
+            items = {
+                [100] = { slots = 1, perSlot = 20 },
+                [200] = { slots = 2, perSlot = 5 },
+            },
+            slotOrder = {},
+        }
+        assert.equals(2, applyBulk(tab, 5, nil, MAX_SLOTS))
+        assert.equals(5, tab.items[100].slots)
+        assert.equals(20, tab.items[100].perSlot)
+        assert.equals(5, tab.items[200].slots)
+        assert.equals(5, tab.items[200].perSlot)
+    end)
+
+    it("leaves slots untouched when newSlots is nil", function()
+        local tab = {
+            items = {
+                [100] = { slots = 3, perSlot = 20 },
+            },
+            slotOrder = { [1] = 100, [2] = 100, [3] = 100 },
+        }
+        assert.equals(1, applyBulk(tab, nil, 1, MAX_SLOTS))
+        assert.equals(3, tab.items[100].slots)
+        assert.equals(1, tab.items[100].perSlot)
+        -- Pins untouched when only perSlot changes
+        assert.equals(100, tab.slotOrder[1])
+        assert.equals(100, tab.slotOrder[2])
+        assert.equals(100, tab.slotOrder[3])
+    end)
+
+    it("trims slotOrder pins from highest slot when shrinking slots", function()
+        local tab = {
+            items = {
+                [100] = { slots = 5, perSlot = 1 },
+            },
+            slotOrder = {
+                [10] = 100, [11] = 100, [12] = 100, [13] = 100, [14] = 100,
+            },
+        }
+        assert.equals(1, applyBulk(tab, 2, nil, MAX_SLOTS))
+        assert.equals(2, tab.items[100].slots)
+        -- 3 highest pins removed, 2 lowest kept
+        assert.equals(100, tab.slotOrder[10])
+        assert.equals(100, tab.slotOrder[11])
+        assert.is_nil(tab.slotOrder[12])
+        assert.is_nil(tab.slotOrder[13])
+        assert.is_nil(tab.slotOrder[14])
+    end)
+
+    it("trims pins per-item when shrinking many at once", function()
+        -- Bulk-shrink scenario where each item has its declared slot
+        -- count fully pinned: shrinking from 5 to 1 should drop 4 pins
+        -- per item (highest first) and leave each item's lowest pin
+        -- alone — pin removal must be scoped to the item being trimmed,
+        -- not bleed into adjacent items' pins.
+        local tab = {
+            items = {
+                [100] = { slots = 5, perSlot = 1 },
+                [200] = { slots = 5, perSlot = 1 },
+            },
+            slotOrder = {
+                [1] = 100, [2] = 100, [3] = 100, [4] = 100, [5] = 100,
+                [50] = 200, [51] = 200, [52] = 200, [53] = 200, [54] = 200,
+            },
+        }
+        assert.equals(2, applyBulk(tab, 1, nil, MAX_SLOTS))
+        -- Item 100: lowest pin (slot 1) kept, 4 highest removed.
+        assert.equals(100, tab.slotOrder[1])
+        assert.is_nil(tab.slotOrder[2])
+        assert.is_nil(tab.slotOrder[3])
+        assert.is_nil(tab.slotOrder[4])
+        assert.is_nil(tab.slotOrder[5])
+        -- Item 200: same — lowest (slot 50) kept, 4 highest removed.
+        assert.equals(200, tab.slotOrder[50])
+        assert.is_nil(tab.slotOrder[51])
+        assert.is_nil(tab.slotOrder[52])
+        assert.is_nil(tab.slotOrder[53])
+        assert.is_nil(tab.slotOrder[54])
+    end)
+
+    it("does not trim pins when growing slots", function()
+        local tab = {
+            items = {
+                [100] = { slots = 2, perSlot = 1 },
+            },
+            slotOrder = { [1] = 100, [2] = 100 },
+        }
+        assert.equals(1, applyBulk(tab, 5, nil, MAX_SLOTS))
+        assert.equals(5, tab.items[100].slots)
+        assert.equals(100, tab.slotOrder[1])
+        assert.equals(100, tab.slotOrder[2])
+    end)
+
+    it("is defensive against nil tab or missing items", function()
+        assert.equals(0, applyBulk(nil, 5, 1, MAX_SLOTS))
+        assert.equals(0, applyBulk({}, 5, 1, MAX_SLOTS))
+        assert.equals(0, applyBulk({ items = nil }, 5, 1, MAX_SLOTS))
+    end)
+
+    it("creates slotOrder when missing and shrinking", function()
+        local tab = {
+            items = { [100] = { slots = 5, perSlot = 1 } },
+            -- slotOrder intentionally absent
+        }
+        assert.equals(1, applyBulk(tab, 2, nil, MAX_SLOTS))
+        assert.is_table(tab.slotOrder)
+    end)
+end)
