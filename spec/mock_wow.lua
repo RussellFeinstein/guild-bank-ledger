@@ -351,10 +351,48 @@ function MockWoW.install()
                 MockWoW.cursor = nil
                 fireBankEvent()
             elseif extractItemID(slot.itemLink) == cur.itemID then
-                -- Same item: merge. No stack cap enforced in mock — fine for planner's purposes.
-                slot.count = slot.count + cur.count
-                MockWoW.cursor = nil
-                fireBankEvent()
+                -- Same item: try to merge, but respect maxStack when set on
+                -- the item. If merge would exceed it, refuse the drop and
+                -- bounce the cursor item back to its source slot — this
+                -- mirrors real WoW behavior. When stackCount is nil (the
+                -- legacy convention for tests that don't care about
+                -- max-stack semantics), merge unconditionally.
+                local info = MockWoW.itemNames and MockWoW.itemNames[cur.itemID]
+                local maxStack = info and info.stackCount
+                if maxStack and (slot.count + cur.count) > maxStack then
+                    -- Bounce: return the cursor item to its src slot. If
+                    -- the src slot is now empty, restore it; otherwise the
+                    -- src already holds the same item, merge back (capped
+                    -- at maxStack — leftover would be lost in real WoW too,
+                    -- but in practice the cursor was picked up from src so
+                    -- src had room for it before).
+                    local srcRef = cur.src
+                    if srcRef then
+                        local srcTab = MockWoW.guildBank.tabs[srcRef.tabIndex]
+                        if srcTab then
+                            local srcSlot = srcTab.slots[srcRef.slotIndex]
+                            if not srcSlot then
+                                srcTab.slots[srcRef.slotIndex] = {
+                                    itemLink = cur.itemLink,
+                                    texture = cur.texture,
+                                    count = cur.count,
+                                    quality = cur.quality,
+                                    locked = false,
+                                    isFiltered = false,
+                                    itemID = cur.itemID,
+                                }
+                            else
+                                srcSlot.count = srcSlot.count + cur.count
+                            end
+                        end
+                    end
+                    MockWoW.cursor = nil
+                    fireBankEvent()
+                else
+                    slot.count = slot.count + cur.count
+                    MockWoW.cursor = nil
+                    fireBankEvent()
+                end
             else
                 -- Different item: swap. Cursor gets dest's contents; dest gets cursor's.
                 local prev = slot
@@ -493,11 +531,16 @@ function MockWoW.install()
                m.achievementPoints or 0, m.achievementRank or 0
     end
 
-    -- Item info (name/link lookup for ItemCache)
+    -- Item info (name/link/stackCount lookup for ItemCache).
+    -- Real GetItemInfo returns 16+ values; we model the slice ItemCache uses:
+    -- name (1), link (2), and stackCount (8). MockWoW.itemNames[id].stackCount
+    -- is optional — when absent, the 8th return is nil (matching legacy mock).
     _G.GetItemInfo = function(itemID)
         local info = MockWoW.itemNames[itemID]
         if info then
-            return info.name, info.link
+            return info.name, info.link,
+                   nil, nil, nil, nil, nil,
+                   info.stackCount
         end
         return nil
     end
@@ -562,6 +605,13 @@ function MockWoW.install()
     -- GetTime (game time in seconds, fractional)
     _G.GetTime = function()
         return MockWoW.serverTime + 0.0
+    end
+
+    -- High-resolution profiling timer (ms since engine load).
+    -- Tests don't assert against the value; we return GetTime()*1000 so
+    -- it remains monotonic if a test advances MockWoW.serverTime.
+    _G.debugprofilestop = function()
+        return (MockWoW.serverTime or 0) * 1000
     end
 
     -- GetFramerate (for FPS-adaptive throttling)
