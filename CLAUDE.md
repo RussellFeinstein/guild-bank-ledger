@@ -81,15 +81,17 @@ Recurring areas of work live on long-lived branches that accumulate multiple com
 
 Create a topic branch the first time work in that area appears, not preemptively. Add new topic branches when a fifth recurring area emerges.
 
-### Short-lived branches (one-off, off main)
+### Single-purpose branches (frozen after PR closes)
 
-Cross-cutting work, infra changes, and one-off refactors still use short-lived branches off `main`:
+Cross-cutting work, infra changes, and one-off refactors use single-purpose branches off `main`:
 
 - `chore/<thing>` for maintainer chores, repo-config changes, doc-only updates
 - `infra/<thing>` for CI / build / tooling changes
 - `hotfix/<thing>` for urgent production-impact fixes (see Hotfix rule below)
 
-These branches **do** get deleted after merge (manually, via `git push origin --delete <branch>` or the GitHub UI button). Auto-delete is off so deletion is intentional, not implicit.
+These branches are **frozen** once their PR closes (merged, closed without merge, or declared done by the user). Frozen means no new commits land on the branch; follow-up work goes on a new branch off `main`. Nothing is deleted: the branch and its history are retained both locally and on the remote, and auto-delete-on-merge stays disabled. The user can unfreeze a branch at any point by explicit decision (typically by rebasing onto the current `main` and resuming work). Agents do not unfreeze on their own initiative.
+
+See **Branch lifecycle: frozen vs long-lived** in `~/.claude/CLAUDE.md` for the full taxonomy and the agent-side decision rule.
 
 ### Rules
 
