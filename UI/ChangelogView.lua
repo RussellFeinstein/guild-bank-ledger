@@ -29,6 +29,16 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.30.4
+    {"0.30.4", "2026-04-28", {
+        Added = {
+            "Bulk-apply slots / per-slot to every item on a display tab. A new 'Set all items to:' row in the Layout tab editor lets you set every item on a tab to a common shape in one action — fill in Slots and/or Per slot, click Apply to all, and every existing item on that tab gets the new values. Useful for tabs where every item should match (e.g. set every gem on the gems tab to '5 slots × 1 per slot' instead of editing each row by hand). Leave a field blank to keep its current value for each item. Shrinking slots trims that item's pinned positions from the highest slot down. Edits buffer in the draft until Save Layout.",
+        },
+        Changed = {
+            "Layout tab now uses nested tabs. The previous monolithic vertical scroll (eight bank-tab sections stacked above a Sort Access section) is replaced with an inner tab strip: one inner tab per bank tab (Tab 1..Tab 8) plus a final Sort Access tab. Editing one bank tab at a time keeps slot maps and item lists short, and Sort Access policy gets its own focused screen. The active inner tab persists across rebuilds so edits do not bounce the view back to Tab 1. Save and Discard sit at the top of each bank-tab inner tab and operate on the full draft (changes across all bank tabs save together). Each inner tab keeps its own scroll position, so switching back to a tab returns the user to where they were. Mouse-wheel scrolling works inside every inner tab.",
+        },
+    }},
+
     -- v0.30.3
     {"0.30.3", "2026-04-27", {
         Changed = {
