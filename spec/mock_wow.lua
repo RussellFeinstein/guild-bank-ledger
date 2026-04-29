@@ -351,10 +351,48 @@ function MockWoW.install()
                 MockWoW.cursor = nil
                 fireBankEvent()
             elseif extractItemID(slot.itemLink) == cur.itemID then
-                -- Same item: merge. No stack cap enforced in mock — fine for planner's purposes.
-                slot.count = slot.count + cur.count
-                MockWoW.cursor = nil
-                fireBankEvent()
+                -- Same item: try to merge, but respect maxStack when set on
+                -- the item. If merge would exceed it, refuse the drop and
+                -- bounce the cursor item back to its source slot — this
+                -- mirrors real WoW behavior. When stackCount is nil (the
+                -- legacy convention for tests that don't care about
+                -- max-stack semantics), merge unconditionally.
+                local info = MockWoW.itemNames and MockWoW.itemNames[cur.itemID]
+                local maxStack = info and info.stackCount
+                if maxStack and (slot.count + cur.count) > maxStack then
+                    -- Bounce: return the cursor item to its src slot. If
+                    -- the src slot is now empty, restore it; otherwise the
+                    -- src already holds the same item, merge back (capped
+                    -- at maxStack — leftover would be lost in real WoW too,
+                    -- but in practice the cursor was picked up from src so
+                    -- src had room for it before).
+                    local srcRef = cur.src
+                    if srcRef then
+                        local srcTab = MockWoW.guildBank.tabs[srcRef.tabIndex]
+                        if srcTab then
+                            local srcSlot = srcTab.slots[srcRef.slotIndex]
+                            if not srcSlot then
+                                srcTab.slots[srcRef.slotIndex] = {
+                                    itemLink = cur.itemLink,
+                                    texture = cur.texture,
+                                    count = cur.count,
+                                    quality = cur.quality,
+                                    locked = false,
+                                    isFiltered = false,
+                                    itemID = cur.itemID,
+                                }
+                            else
+                                srcSlot.count = srcSlot.count + cur.count
+                            end
+                        end
+                    end
+                    MockWoW.cursor = nil
+                    fireBankEvent()
+                else
+                    slot.count = slot.count + cur.count
+                    MockWoW.cursor = nil
+                    fireBankEvent()
+                end
             else
                 -- Different item: swap. Cursor gets dest's contents; dest gets cursor's.
                 local prev = slot

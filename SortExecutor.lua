@@ -102,6 +102,50 @@ local function slotEquals(a, b)
     return a.itemID == b.itemID and a.count == b.count
 end
 
+--- Verify the operation's src actually drained as expected.
+--- Returns true iff the live src state shows the move/split happened.
+---
+--- The WoW client optimistically updates bank slots on Pickup, so the
+--- executor's existing dst+cursor success check (`slotHasAtLeast(dst) and
+--- not CursorHasItem()`) trivially passes when dst already held the same
+--- item at max-stack capacity — a same-item full-merge is a true no-op
+--- (drop refused, cursor returns to src) but looks like success from the
+--- dst+cursor predicate alone. This src-drained predicate is what
+--- distinguishes a real success from a phantom one:
+---
+---   * "move" op:  src must be empty OR hold a different item.
+---   * "split" op: src.count must have decreased by at least op.count.
+---
+--- Used by every advance path in the executor (sync, async, late-poll).
+local function srcDrainedAsExpected(w)
+    if not w then return false end
+    local srcPost = snapshotLiveSlot(w.srcTab or 0, w.srcSlot or 0)
+    if w.opLabel == "split" then
+        local pre = (w.srcPreOp and w.srcPreOp.count) or 0
+        local post = (srcPost and srcPost.count) or 0
+        return (pre - post) >= (w.count or 0)
+    end
+    -- Move (default): src empty OR different item.
+    return (srcPost == nil) or (srcPost.itemID ~= w.itemID)
+end
+
+--- Audit a "no-op suspected" line for an op whose dst+cursor look like
+--- success but whose src never drained. Surfaces phantom success cases
+--- so the post-mortem identifies which op was rejected by the server
+--- without the executor advancing past it.
+local function auditOpNoop(w, branch)
+    if not w then return end
+    local itemDesc = (w.itemID and GBL.DescribeItem)
+        and GBL:DescribeItem(w.itemID) or ("it:" .. tostring(w.itemID))
+    GBL:AddAuditEntry(string.format(
+        "Sort op %d no-op suspected [%s]: %s T%d/S%d->T%d/S%d %s x%d "
+        .. "(dst already held expected item; src unchanged)",
+        w.opIndex, branch, w.opLabel or "move",
+        w.srcTab or 0, w.srcSlot or 0,
+        w.tabIndex, w.slotIndex,
+        itemDesc, w.count or 0))
+end
+
 --- Classify a timeout's observed src/dst/cursor state into one of:
 --- "none"    — src unchanged, dst empty (server dropped the request outright)
 --- "partial" — src emptied, cursor holds item (pickup done, drop never landed)
@@ -494,20 +538,32 @@ step = function()
     -- effectively just schedules the fallback timer.
     if state and state.waiting and state.waiting.opIndex == myOpIndex then
         -- Final direct check — if the mutation already landed, advance now
-        -- (covers sync paths and rare event-merge cases).
+        -- (covers sync paths and rare event-merge cases). Both predicates
+        -- (dst has expected item AND cursor empty) trivially pass when dst
+        -- already held same-item at max-stack capacity (a no-op merge);
+        -- the additional src-drained predicate is what distinguishes a real
+        -- success from a phantom one. When it fails, fall through to the
+        -- timeout-poll path which will classify as [other] failure and
+        -- replan rather than advance past a no-op.
         if slotHasAtLeast(op.dstTab, op.dstSlot, op.itemID, op.count) and
            not (_G.CursorHasItem and _G.CursorHasItem()) then
             local w = state.waiting
-            state.done = state.done + 1
-            state.waiting = nil
-            state.opIndex = myOpIndex + 1
-            state.gapUntil = GetTime() + INTER_MOVE_GAP
-            auditOpSuccess(w, "[sync]")
-            emitProgress("complete", { completedOpIndex = myOpIndex })
-            C_Timer.After(INTER_MOVE_GAP, function()
-                if isRunning() then step() end
-            end)
-            return
+            if srcDrainedAsExpected(w) then
+                state.done = state.done + 1
+                state.waiting = nil
+                state.opIndex = myOpIndex + 1
+                state.gapUntil = GetTime() + INTER_MOVE_GAP
+                auditOpSuccess(w, "[sync]")
+                emitProgress("complete", { completedOpIndex = myOpIndex })
+                C_Timer.After(INTER_MOVE_GAP, function()
+                    if isRunning() then step() end
+                end)
+                return
+            else
+                auditOpNoop(w, "sync")
+                -- Fall through: timeout-poll path will catch this as a
+                -- real failure and trigger replan.
+            end
         end
     end
 
@@ -533,7 +589,13 @@ step = function()
         if not state or not state.waiting or state.waiting.opIndex ~= myOpIndex then
             return  -- already advanced
         end
-        local completedAtTimeout = slotHasAtLeast(op.dstTab, op.dstSlot, op.itemID, op.count)
+        -- The dst-has-expected-item check is necessary but not sufficient:
+        -- when dst already held same-item at max-stack capacity, a no-op
+        -- looks identical to a success. The src-drained predicate
+        -- distinguishes real completion from a phantom.
+        local completedAtTimeout =
+            slotHasAtLeast(op.dstTab, op.dstSlot, op.itemID, op.count)
+            and srcDrainedAsExpected(state.waiting)
         if completedAtTimeout then
             state.done = state.done + 1
             state.lastTimedOutOp = nil
@@ -545,8 +607,11 @@ step = function()
             -- than triggering a foreign-activity replan.
             state.lastTimedOutOp = {
                 opIndex = myOpIndex,
+                srcTab = op.srcTab, srcSlot = op.srcSlot,
                 dstTab = op.dstTab, dstSlot = op.dstSlot,
                 itemID = op.itemID, count = op.count,
+                opLabel = op.op or "move",
+                srcPreOp = state.waiting and state.waiting.srcPreOp,
                 at = GetTime(),
             }
             -- Dump live state so the audit trail reveals WHY the timeout
@@ -609,7 +674,8 @@ function GBL:_SortExecutor_OnSlotsChanged()
     local reclassified = false
     local lto = state.lastTimedOutOp
     if lto and (GetTime() - lto.at) <= LATE_ACK_GRACE and
-       slotHasAtLeast(lto.dstTab, lto.dstSlot, lto.itemID, lto.count) then
+       slotHasAtLeast(lto.dstTab, lto.dstSlot, lto.itemID, lto.count) and
+       srcDrainedAsExpected(lto) then
         state.done = state.done + 1
         state.failed = state.failed - 1
         state.reclassified = state.reclassified + 1
@@ -626,15 +692,34 @@ function GBL:_SortExecutor_OnSlotsChanged()
 
     local w = state.waiting
     if w then
-        if slotHasAtLeast(w.tabIndex, w.slotIndex, w.itemID, w.count) then
-            state.done = state.done + 1
-            state.waiting = nil
-            state.lastTimedOutOp = nil
-            state.opIndex = state.opIndex + 1
-            state.gapUntil = GetTime() + INTER_MOVE_GAP
-            auditOpSuccess(w)
-            emitProgress("complete", { completedOpIndex = w.opIndex })
-            step()
+        -- Cursor-empty gate: the pickup half of a Pickup pair fires its
+        -- own GUILDBANKBAGSLOTS_CHANGED before the drop. At that moment
+        -- src is empty (just emptied) AND cursor is held. Without this
+        -- guard, srcDrainedAsExpected vacuously passes (src empty for a
+        -- "move"), the executor advances mid-operation, and the still-
+        -- pending drop runs against a torn-down state. Only advance once
+        -- the drop has resolved (cursor empty).
+        local cursorHeld = _G.CursorHasItem and _G.CursorHasItem()
+        if slotHasAtLeast(w.tabIndex, w.slotIndex, w.itemID, w.count)
+           and not cursorHeld then
+            -- Same caveat as the [sync] path: dst-has-item passes trivially
+            -- when dst already held same-item at max-stack capacity. The
+            -- src-drained predicate is what distinguishes real ACK from
+            -- the optimistic-but-rejected client update.
+            if srcDrainedAsExpected(w) then
+                state.done = state.done + 1
+                state.waiting = nil
+                state.lastTimedOutOp = nil
+                state.opIndex = state.opIndex + 1
+                state.gapUntil = GetTime() + INTER_MOVE_GAP
+                auditOpSuccess(w)
+                emitProgress("complete", { completedOpIndex = w.opIndex })
+                step()
+            else
+                auditOpNoop(w, "async")
+                -- Don't advance; let MOVE_CONFIRM_TIMEOUT resolve this as
+                -- a real failure. state.waiting stays armed.
+            end
         end
         -- Slot doesn't match the in-flight op yet — still mid-sequence
         -- (pickup fired, place hasn't) or unrelated event. The

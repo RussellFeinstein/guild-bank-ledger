@@ -1766,6 +1766,119 @@ describe("SortPlanner", function()
     end)
 
     -- ------------------------------------------------------------------
+    -- Max-stack guards in canExecute / applyOpToState (v0.30.5)
+    -- ------------------------------------------------------------------
+    describe("max-stack guard", function()
+        local function emptyDisplayOverflow()
+            return {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                },
+            }
+        end
+
+        it("canExecute rejects merge that would exceed maxStack", function()
+            local state = {
+                [2] = {
+                    [1] = { itemID = 100, count = 200 },
+                    [3] = { itemID = 100, count = 60 },
+                },
+            }
+            local op = {
+                srcTab = 2, srcSlot = 3,
+                dstTab = 2, dstSlot = 1,
+                itemID = 100, count = 60,
+            }
+            local function getMaxStack(id) return id == 100 and 200 or nil end
+            -- Without guard: same-item dst, would normally pass.
+            assert.is_true(GBL._sortPlannerCanExecute(op, state))
+            -- With guard: 200 + 60 = 260 > 200 → reject.
+            assert.is_false(GBL._sortPlannerCanExecute(op, state, getMaxStack))
+        end)
+
+        it("canExecute allows merge that fits within maxStack", function()
+            local state = {
+                [2] = {
+                    [1] = { itemID = 100, count = 100 },
+                    [3] = { itemID = 100, count = 60 },
+                },
+            }
+            local op = {
+                srcTab = 2, srcSlot = 3,
+                dstTab = 2, dstSlot = 1,
+                itemID = 100, count = 60,
+            }
+            local function getMaxStack(id) return id == 100 and 200 or nil end
+            -- 100 + 60 = 160 <= 200 → allow.
+            assert.is_true(GBL._sortPlannerCanExecute(op, state, getMaxStack))
+        end)
+
+        it("canExecute cold-cache (nil maxStack) preserves prior behavior", function()
+            local state = {
+                [2] = {
+                    [1] = { itemID = 100, count = 200 },
+                    [3] = { itemID = 100, count = 60 },
+                },
+            }
+            local op = {
+                srcTab = 2, srcSlot = 3,
+                dstTab = 2, dstSlot = 1,
+                itemID = 100, count = 60,
+            }
+            local function getMaxStack() return nil end
+            -- maxStack unknown → guard skipped → would-be-over-stack passes.
+            assert.is_true(GBL._sortPlannerCanExecute(op, state, getMaxStack))
+        end)
+
+        it("applyOpToState asserts when merge would exceed maxStack", function()
+            local state = {
+                [2] = {
+                    [1] = { itemID = 100, count = 200 },
+                    [3] = { itemID = 100, count = 60 },
+                },
+            }
+            local op = {
+                srcTab = 2, srcSlot = 3,
+                dstTab = 2, dstSlot = 1,
+                itemID = 100, count = 60,
+            }
+            local function getMaxStack(id) return id == 100 and 200 or nil end
+            local ok, err = pcall(GBL._sortPlannerApplyOpToState,
+                state, op, getMaxStack)
+            assert.is_false(ok)
+            assert.matches("maxStack", err)
+        end)
+
+        it("Phase 4 with same-item full collision produces a clean plan", function()
+            -- Two same-item full stacks at S30, S36 in overflow with maxStack
+            -- 200. Without the guard, Phase 4 would emit cascading ops that
+            -- accumulate to count=400 in working state. With the guard,
+            -- canExecute rejects the over-stack merge and greedyDrain
+            -- reorders so each move drains into a truly-empty slot. Final
+            -- bank state: no stack exceeds 200.
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [30] = { itemID = 100, count = 200 },
+                    [36] = { itemID = 100, count = 200 },
+                },
+            })
+            local opts = { maxStackByItem = { [100] = 200 } }
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(), opts)
+            local final = applyPlan(snap, plan)
+            for s = 1, 98 do
+                local sl = final[2] and final[2][s]
+                if sl then
+                    assert.is_true(sl.count <= 200,
+                        "slot " .. s .. " count=" .. sl.count
+                        .. " exceeds maxStack 200")
+                end
+            end
+        end)
+    end)
+
+    -- ------------------------------------------------------------------
     -- Per-op planner-state stamping (v0.30.5)
     -- ------------------------------------------------------------------
     describe("op.plannerSrcAt / plannerDstAt", function()

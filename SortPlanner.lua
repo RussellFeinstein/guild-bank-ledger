@@ -100,7 +100,12 @@ local function extractItemID(itemLink)
 end
 
 --- Apply a planned op to a working state (mutates in place).
-local function applyOpToState(state, op)
+--- @param getMaxStack function|nil Optional `(itemID) -> maxStack|nil` lookup.
+---     When provided AND maxStack is known, asserts that merging into a
+---     same-item dst would not exceed maxStack — surfaces planner bugs
+---     that bypass canExecute. When nil OR the lookup returns nil, the
+---     guard is skipped (cold-cache fallback).
+local function applyOpToState(state, op, getMaxStack)
     if not state[op.srcTab] then state[op.srcTab] = {} end
     if not state[op.dstTab] then state[op.dstTab] = {} end
     local src = state[op.srcTab][op.srcSlot]
@@ -112,6 +117,14 @@ local function applyOpToState(state, op)
     if dst then
         assert(dst.itemID == op.itemID,
             "applyOpToState: dst occupied by wrong item")
+        if getMaxStack then
+            local m = getMaxStack(op.itemID)
+            if m then
+                assert((dst.count + op.count) <= m,
+                    "applyOpToState: would exceed maxStack for itemID "
+                    .. tostring(op.itemID))
+            end
+        end
         dst.count = dst.count + op.count
     else
         state[op.dstTab][op.dstSlot] = { itemID = op.itemID, count = op.count }
@@ -119,14 +132,23 @@ local function applyOpToState(state, op)
 end
 
 --- Return true iff an op can fire against `state`.
-local function canExecute(op, state)
+--- @param getMaxStack function|nil Optional `(itemID) -> maxStack|nil` lookup.
+---     When provided AND maxStack is known AND dst is same-item, returns
+---     false if merging would exceed maxStack. This is the guard that
+---     prevents Phase 4 packing from emitting cascades that depend on
+---     illegal in-state over-stack accumulations.
+local function canExecute(op, state, getMaxStack)
     local src = state[op.srcTab] and state[op.srcTab][op.srcSlot]
     if not src or src.itemID ~= op.itemID or src.count < op.count then
         return false
     end
     local dst = state[op.dstTab] and state[op.dstTab][op.dstSlot]
-    if dst and dst.itemID ~= op.itemID then
-        return false
+    if dst then
+        if dst.itemID ~= op.itemID then return false end
+        if getMaxStack then
+            local m = getMaxStack(op.itemID)
+            if m and (dst.count + op.count) > m then return false end
+        end
     end
     return true
 end
@@ -284,7 +306,7 @@ function GBL:PlanSort(snapshot, layout, opts)
             plannerDstAt = snapshotSlot(ass.dstTab, ass.dstSlot),
         }
         table.insert(plan.ops, op)
-        applyOpToState(state, op)
+        applyOpToState(state, op, getMaxStack)
     end
 
     -- --------------------------------------------------------------
@@ -736,7 +758,7 @@ function GBL:PlanSort(snapshot, layout, opts)
             for i = 1, #assignments do
                 if remaining[i] then
                     local ass = assignments[i]
-                    if canExecute(ass, state) then
+                    if canExecute(ass, state, getMaxStack) then
                         emitAssignment(ass)
                         remaining[i] = nil
                         progressed = true
@@ -841,7 +863,7 @@ function GBL:PlanSort(snapshot, layout, opts)
                 plannerDstAt = snapshotSlot(pivotTab, pivotSlot),
             }
             table.insert(plan.ops, pivotOp)
-            applyOpToState(state, pivotOp)
+            applyOpToState(state, pivotOp, getMaxStack)
             diag.phase2Pivots = diag.phase2Pivots + 1
 
             -- Redirect any still-remaining assignment whose src was the pivot's
@@ -903,7 +925,7 @@ function GBL:PlanSort(snapshot, layout, opts)
                                 plannerDstAt = snapshotSlot(overflowTab, ovSlot),
                             }
                             table.insert(plan.ops, sweepOp)
-                            applyOpToState(state, sweepOp)
+                            applyOpToState(state, sweepOp, getMaxStack)
                             diag.phase3Sweeps = diag.phase3Sweeps + 1
                             -- Mirror the placement into overflowSlotInfo so
                             -- a follow-up pick (later supply or sweep) sees
@@ -1079,6 +1101,8 @@ end
 
 -- Expose helper for tests.
 GBL._sortPlannerExtractItemID = extractItemID
+GBL._sortPlannerCanExecute = canExecute
+GBL._sortPlannerApplyOpToState = applyOpToState
 
 -- Expose reason codes for tests/UI.
 GBL._sortPlannerReasons = {

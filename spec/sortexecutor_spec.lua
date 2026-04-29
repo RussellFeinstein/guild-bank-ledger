@@ -438,6 +438,105 @@ describe("SortExecutor", function()
             assert.is_true(result.ok)
             assert.equals(1, result.reclassified)
         end)
+
+        ----------------------------------------------------------------
+        -- Tier A: src-drained predicate detects no-op moves (v0.30.5)
+        ----------------------------------------------------------------
+
+        it("[sync] does not advance when same-item full merge is a no-op", function()
+            -- Set up a guaranteed no-op: T1/S1 has item 100 x20, T2/S1
+            -- already has item 100 x20, both at maxStack 20. The mock now
+            -- refuses the merge (drop > maxStack) and bounces the cursor
+            -- back to src. Pre-Tier-A: executor would advance via [sync]
+            -- because dst has item 100 and cursor is empty. Post-Tier-A:
+            -- src-drained predicate sees src still holds the item with
+            -- the same count, audits "no-op suspected", and falls through
+            -- to the timeout path which records the op as failed.
+            MockWoW.itemNames[100] = {
+                name = "MaxStack20", link = "MaxStack20", stackCount = 20,
+            }
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "MaxStack20", count = 20 },
+            })
+            Helpers.populateTab(2, {
+                [1] = { itemID = 100, name = "MaxStack20", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                },
+            }, function(r) result = r end)
+            -- Drain past the move-confirm timeout so the timeout-poll
+            -- branch fires, sees src not drained, and records as failed.
+            MockWoW.serverTime = MockWoW.serverTime + 5.0
+            drainTimers()
+            assert.is_not_nil(result)
+            assert.equals(0, result.done,
+                "no-op should not be counted as done")
+            assert.is_true(result.failed > 0 or not result.ok,
+                "no-op should be classified as failure or abort")
+            -- Audit log should contain a "no-op suspected" line.
+            local trail = GBL:GetAuditTrail()
+            local found = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("no-op suspected", 1, true) then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found,
+                "expected 'no-op suspected' audit entry")
+        end)
+
+        it("[sync] still advances on a clean move (regression check)", function()
+            -- Same item but dst empty: the move should succeed and advance
+            -- normally. Verifies Tier A doesn't false-positive on real ops.
+            MockWoW.itemNames[100] = {
+                name = "MaxStack20", link = "MaxStack20", stackCount = 20,
+            }
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "MaxStack20", count = 20 },
+            })
+            Helpers.populateTab(2, {})
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                },
+            }, function(r) result = r end)
+            drainTimers()
+            assert.is_not_nil(result)
+            assert.is_true(result.ok)
+            assert.equals(1, result.done)
+        end)
+
+        it("[sync] split advances when src.count decreases by op.count", function()
+            -- Split 10 from a stack of 30 in T1/S1 to T2/S1 (empty). Mock
+            -- handles split correctly: src goes 30 -> 20, dst gets 10.
+            -- src-drained predicate sees pre.count=30, post.count=20, so
+            -- (30-20) >= 10 → drained → advance.
+            MockWoW.itemNames[100] = {
+                name = "MaxStack50", link = "MaxStack50", stackCount = 50,
+            }
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "MaxStack50", count = 30 },
+            })
+            Helpers.populateTab(2, {})
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "split", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 10 },
+                },
+            }, function(r) result = r end)
+            drainTimers()
+            assert.is_not_nil(result)
+            assert.is_true(result.ok)
+            assert.equals(1, result.done)
+        end)
     end)
 
     describe("IsSortRunning", function()
