@@ -45,19 +45,26 @@
 --       starting at slot 1, sorted by (itemID ASC, count DESC, slot ASC).
 --       Closes gaps, groups same-item stacks, and makes repeat sorts
 --       idempotent. Swap cycles resolve via the same findPivot used in
---       Phase 2. Partial-stack merging is out of scope (the planner has
---       no max-stack-size knowledge).
+--       Phase 2. Within each same-item run, partial stacks are merged
+--       up to the item's max stack size (read from ItemCache or the
+--       optional opts.maxStackByItem override) so each run ends as
+--       [full, full, ..., partial?]. Items with unknown max stack
+--       (cold cache) skip merging and fall back to grouping only.
 --
--- Public contract — identical to v0.29.x for drop-in compatibility with
--- SortExecutor and UI/SortView:
+-- Public contract — drop-in compatible with SortExecutor and UI/SortView.
+-- The optional third arg opts is read by tests; production callers omit it.
 --
---   PlanSort(snapshot, layout) -> {
+--   PlanSort(snapshot, layout, opts?) -> {
 --       ops = { {op="split"|"move", srcTab, srcSlot,
 --                dstTab, dstSlot, itemID, count}, ... },
 --       deficits = { [itemID] = count },
 --       unplaced = { {tabIndex, slotIndex, itemID, count, reason}, ... },
 --       overflowTab = tabIndex | nil,
 --   }
+--
+--   opts.maxStackByItem :: { [itemID]=number } | nil
+--       Per-item max stack override used by tests. When absent, the
+--       planner reads max stack via GBL:GetMaxStack(itemID).
 --
 -- Invariants:
 --   * Ignore tabs are never read as source nor written as destination.
@@ -93,7 +100,12 @@ local function extractItemID(itemLink)
 end
 
 --- Apply a planned op to a working state (mutates in place).
-local function applyOpToState(state, op)
+--- @param getMaxStack function|nil Optional `(itemID) -> maxStack|nil` lookup.
+---     When provided AND maxStack is known, asserts that merging into a
+---     same-item dst would not exceed maxStack — surfaces planner bugs
+---     that bypass canExecute. When nil OR the lookup returns nil, the
+---     guard is skipped (cold-cache fallback).
+local function applyOpToState(state, op, getMaxStack)
     if not state[op.srcTab] then state[op.srcTab] = {} end
     if not state[op.dstTab] then state[op.dstTab] = {} end
     local src = state[op.srcTab][op.srcSlot]
@@ -105,6 +117,14 @@ local function applyOpToState(state, op)
     if dst then
         assert(dst.itemID == op.itemID,
             "applyOpToState: dst occupied by wrong item")
+        if getMaxStack then
+            local m = getMaxStack(op.itemID)
+            if m then
+                assert((dst.count + op.count) <= m,
+                    "applyOpToState: would exceed maxStack for itemID "
+                    .. tostring(op.itemID))
+            end
+        end
         dst.count = dst.count + op.count
     else
         state[op.dstTab][op.dstSlot] = { itemID = op.itemID, count = op.count }
@@ -112,14 +132,23 @@ local function applyOpToState(state, op)
 end
 
 --- Return true iff an op can fire against `state`.
-local function canExecute(op, state)
+--- @param getMaxStack function|nil Optional `(itemID) -> maxStack|nil` lookup.
+---     When provided AND maxStack is known AND dst is same-item, returns
+---     false if merging would exceed maxStack. This is the guard that
+---     prevents Phase 4 packing from emitting cascades that depend on
+---     illegal in-state over-stack accumulations.
+local function canExecute(op, state, getMaxStack)
     local src = state[op.srcTab] and state[op.srcTab][op.srcSlot]
     if not src or src.itemID ~= op.itemID or src.count < op.count then
         return false
     end
     local dst = state[op.dstTab] and state[op.dstTab][op.dstSlot]
-    if dst and dst.itemID ~= op.itemID then
-        return false
+    if dst then
+        if dst.itemID ~= op.itemID then return false end
+        if getMaxStack then
+            local m = getMaxStack(op.itemID)
+            if m and (dst.count + op.count) > m then return false end
+        end
     end
     return true
 end
@@ -135,7 +164,7 @@ end
 -- Main entry
 ------------------------------------------------------------------------
 
-function GBL:PlanSort(snapshot, layout)
+function GBL:PlanSort(snapshot, layout, opts)
     local plan = {
         ops = {}, deficits = {}, unplaced = {}, overflowTab = nil,
         -- demandMap is the authoritative expected layout: for each display
@@ -149,6 +178,38 @@ function GBL:PlanSort(snapshot, layout)
     if type(layout) ~= "table" or type(layout.tabs) ~= "table" then
         return plan
     end
+
+    -- Diagnostic timing: record planner cost so /gbl synclog shows a
+    -- single line per plan. Replans on foreign-activity go through the
+    -- same path, so this captures both first-plan and replan latency.
+    local profileStart = debugprofilestop and debugprofilestop() or nil
+    local inputSlots, inputTabs = 0, 0
+    for _, tabResult in pairs(snapshot or {}) do
+        inputTabs = inputTabs + 1
+        if tabResult and tabResult.slots then
+            for _ in pairs(tabResult.slots) do
+                inputSlots = inputSlots + 1
+            end
+        end
+    end
+
+    -- Per-phase counters. Populated as each phase runs and dumped to the
+    -- audit trail at the end alongside the existing one-line summary.
+    -- This is the layer that lets a post-mortem distinguish "Phase 0
+    -- merged 4 stacks" from "Phase 1B spilled 4 fresh stacks to overflow"
+    -- when both produce 4 ops.
+    local diag = {
+        phase0Merges = 0, phase0SlotsFreed = 0,
+        phase1aAssignments = 0,
+        phase1bTopup = 0, phase1bExtendRight = 0,
+        phase1bExtendLeft = 0, phase1bFirstEmpty = 0,
+        phase1bUnplaced = 0,
+        phase2Pivots = 0, phase2CycleAborts = 0,
+        phase3Sweeps = 0,
+        phase4PositionShifts = 0,
+        demandPinned = 0, demandExtendRight = 0,
+        demandExtendLeft = 0, demandFirstEmpty = 0,
+    }
 
     -- --------------------------------------------------------------
     -- Classify tabs.
@@ -191,6 +252,132 @@ function GBL:PlanSort(snapshot, layout)
     if overflowTab and not bank[overflowTab] then bank[overflowTab] = {} end
 
     -- --------------------------------------------------------------
+    -- Working state + emit machinery (used by Phase 0 onward).
+    -- --------------------------------------------------------------
+    -- Deep-copy bank into a mutable working state. Phases 0-4 all
+    -- mutate this; bank is treated as read-only after this point.
+    local state = {}
+    for tabIndex, tab in pairs(bank) do
+        state[tabIndex] = {}
+        for slotIndex, slot in pairs(tab) do
+            state[tabIndex][slotIndex] = {
+                itemID = slot.itemID, count = slot.count,
+            }
+        end
+    end
+
+    -- Per-item max stack lookup. opts.maxStackByItem (test override)
+    -- wins; otherwise read the cached itemStackCount from ItemCache.
+    -- Hoisted from Phase 4 so Phase 0 (overflow pre-merge) and Phase
+    -- 1B (capacity-aware spill routing) can both consume it.
+    local function getMaxStack(itemID)
+        if opts and opts.maxStackByItem then
+            return opts.maxStackByItem[itemID]
+        end
+        if GBL.GetMaxStack then
+            return GBL:GetMaxStack(itemID)
+        end
+        return nil
+    end
+
+    -- Snapshot what the planner sees at a slot RIGHT NOW (before applying
+    -- the op). The returned table is independent of state, so subsequent
+    -- mutations don't disturb it. Returning nil means the planner expected
+    -- the slot to be empty at this point in the plan.
+    local function snapshotSlot(t, s)
+        local v = state[t] and state[t][s]
+        if v then return { itemID = v.itemID, count = v.count } end
+        return nil
+    end
+
+    local function emitAssignment(ass)
+        local op = {
+            op = opLabel(state, ass),
+            srcTab = ass.srcTab, srcSlot = ass.srcSlot,
+            dstTab = ass.dstTab, dstSlot = ass.dstSlot,
+            itemID = ass.itemID, count = ass.count,
+            -- plannerSrcAt / plannerDstAt freeze what the planner THOUGHT
+            -- the src/dst slots held at the moment this op was emitted.
+            -- The executor compares these against live bank state on a
+            -- pre-check fail to distinguish stale-snapshot bugs from
+            -- execution drift (an earlier op didn't actually clear the
+            -- slot the way the planner projected).
+            plannerSrcAt = snapshotSlot(ass.srcTab, ass.srcSlot),
+            plannerDstAt = snapshotSlot(ass.dstTab, ass.dstSlot),
+        }
+        table.insert(plan.ops, op)
+        applyOpToState(state, op, getMaxStack)
+    end
+
+    -- --------------------------------------------------------------
+    -- PHASE 0: Overflow pre-merge
+    -- --------------------------------------------------------------
+    -- Before Phase 1 builds supplies and Phase 1B routes spills to
+    -- overflow, walk each same-item run on the overflow tab and pour
+    -- partial stacks together up to the per-item max stack size.
+    -- This compacts the overflow tab to its minimum slot count so
+    -- pickOverflowSlot has maximum free slots to work with — fixes
+    -- the "out of space" cascade where partial stacks consumed slots
+    -- that could be merged. Items with unknown maxStack (cold cache)
+    -- skip the merge for that item only and fall back to grouping.
+    if overflowTab then
+        local ovStacks = {}
+        for s = 1, MAX_SLOTS do
+            local slot = state[overflowTab] and state[overflowTab][s]
+            if slot then
+                table.insert(ovStacks, {
+                    origSlot = s, itemID = slot.itemID, count = slot.count,
+                })
+            end
+        end
+
+        table.sort(ovStacks, function(a, b)
+            if a.itemID ~= b.itemID then return a.itemID < b.itemID end
+            if a.count ~= b.count then return a.count > b.count end
+            return a.origSlot < b.origSlot
+        end)
+
+        local runStart = 1
+        while runStart <= #ovStacks do
+            local runEnd = runStart
+            while runEnd < #ovStacks
+                  and ovStacks[runEnd + 1].itemID == ovStacks[runStart].itemID do
+                runEnd = runEnd + 1
+            end
+
+            local maxStack = getMaxStack(ovStacks[runStart].itemID)
+            if maxStack and runEnd > runStart then
+                local L, R = runStart, runEnd
+                while L < R do
+                    local left  = ovStacks[L]
+                    local right = ovStacks[R]
+                    if left.count >= maxStack then
+                        L = L + 1
+                    elseif right.count == 0 then
+                        R = R - 1
+                    else
+                        local pour = math.min(maxStack - left.count,
+                                              right.count)
+                        emitAssignment({
+                            srcTab = overflowTab, srcSlot = right.origSlot,
+                            dstTab = overflowTab, dstSlot = left.origSlot,
+                            itemID = left.itemID, count = pour,
+                        })
+                        left.count  = left.count  + pour
+                        right.count = right.count - pour
+                        diag.phase0Merges = diag.phase0Merges + 1
+                        if right.count == 0 then
+                            diag.phase0SlotsFreed = diag.phase0SlotsFreed + 1
+                        end
+                    end
+                end
+            end
+
+            runStart = runEnd + 1
+        end
+    end
+
+    -- --------------------------------------------------------------
     -- PHASE 1: Assignment
     -- --------------------------------------------------------------
 
@@ -224,6 +411,7 @@ function GBL:PlanSort(snapshot, layout)
                 table.insert(demands, dem)
                 demandOfSlot[tabIndex][slotIndex] = dem
                 emitted[itemID] = (emitted[itemID] or 0) + 1
+                diag.demandPinned = diag.demandPinned + 1
             end
         end
 
@@ -265,6 +453,13 @@ function GBL:PlanSort(snapshot, layout)
             claimedByItem[itemID] = claimedByItem[itemID] or {}
             claimedByItem[itemID][s] = true
             emitted[itemID] = (emitted[itemID] or 0) + 1
+            if origin == "extend-right" then
+                diag.demandExtendRight = diag.demandExtendRight + 1
+            elseif origin == "extend-left" then
+                diag.demandExtendLeft = diag.demandExtendLeft + 1
+            elseif origin == "first-empty" then
+                diag.demandFirstEmpty = diag.demandFirstEmpty + 1
+            end
         end
 
         for _, itemID in ipairs(sortedIDs) do
@@ -301,16 +496,27 @@ function GBL:PlanSort(snapshot, layout)
                     end
 
                     -- Phase 2b — fall back to any unclaimed slot (used
-                    -- only when the item has no existing claim to extend
-                    -- from, or both ends are blocked). This is the path
-                    -- that scatters restock stacks to the end of a dense
-                    -- captured tab — surfacing it as a distinct origin
-                    -- lets diagnostics flag it specifically.
+                    -- when the item has no existing claim to extend from,
+                    -- or both ends are blocked). Each add re-checks
+                    -- adjacency to existing claims, so an items-only
+                    -- layout (slotOrder empty, all demands fall through
+                    -- here) surfaces as one "first-empty" seed per item
+                    -- followed by "extend-right"/"extend-left" rather
+                    -- than every demand collapsing to "first-empty".
                     if need > 0 then
                         for s = 1, MAX_SLOTS do
                             if need <= 0 then break end
                             if not usedSlots[s] then
-                                addDemandAt(s, itemID, row, "first-empty")
+                                local mine = claimedByItem[itemID]
+                                local origin
+                                if mine and mine[s - 1] then
+                                    origin = "extend-right"
+                                elseif mine and mine[s + 1] then
+                                    origin = "extend-left"
+                                else
+                                    origin = "first-empty"
+                                end
+                                addDemandAt(s, itemID, row, origin)
                                 need = need - 1
                             end
                         end
@@ -328,9 +534,12 @@ function GBL:PlanSort(snapshot, layout)
     if overflowTab then table.insert(tabOrder, overflowTab) end
     table.sort(tabOrder)
 
+    -- Read supplies from POST-Phase-0 state (not bank): if Phase 0
+    -- merged overflow partials, the source slots no longer exist as
+    -- supply. bank stays as the original snapshot for unrelated reads.
     local supplies = {}
     for _, tabIndex in ipairs(tabOrder) do
-        local tab = bank[tabIndex]
+        local tab = state[tabIndex]
         if tab then
             for slotIndex = 1, MAX_SLOTS do
                 local slot = tab[slotIndex]
@@ -410,42 +619,68 @@ function GBL:PlanSort(snapshot, layout)
             })
             sup.available = sup.available - take
             dem.filled = dem.filled + take
+            diag.phase1aAssignments = diag.phase1aAssignments + 1
         end
     end
 
     -- Phase 1B — route leftover non-overflow supply to overflow.
     --
-    -- Virtual overflow layout: starts with the initial bank state and is
-    -- extended as we plan spills. Used by pickOverflowSlot to group stacks
-    -- by item — a spill of X lands adjacent to an existing X stack rather
-    -- than in the first empty slot, so the stock tab stays organized.
-    local overflowVirtual = {}
+    -- Capacity-aware virtual overflow: starts from POST-Phase-0 state
+    -- and tracks {itemID, count, capacity} per slot. pickOverflowSlot
+    -- prefers (1) topping up an existing same-item partial with
+    -- remaining capacity, then (2) right-extend, (3) left-extend,
+    -- (4) first-empty. The supply loop iterates while sup.available
+    -- > 0 so a single supply can split across a partial-target plus
+    -- a fresh slot when the partial doesn't fully absorb it.
+    --
+    -- capacity = max(0, maxStack - count) when maxStack is known;
+    -- 0 (treated as full, can't top up) when maxStack is unknown
+    -- (cold cache). This is the conservative fallback — a future
+    -- sort after the item info loads will route through the top-up
+    -- branch instead of always extending.
+    local overflowSlotInfo = {}
     if overflowTab then
         for s = 1, MAX_SLOTS do
-            local slot = bank[overflowTab] and bank[overflowTab][s]
+            local slot = state[overflowTab] and state[overflowTab][s]
             if slot then
-                overflowVirtual[s] = slot.itemID
+                local m = getMaxStack(slot.itemID)
+                overflowSlotInfo[s] = {
+                    itemID = slot.itemID,
+                    count = slot.count,
+                    capacity = m and math.max(0, m - slot.count) or 0,
+                }
             end
         end
     end
 
-    local function pickOverflowSlot(itemID)
+    local function pickOverflowSlot(itemID, want)
         if not overflowTab then return nil end
-        -- Right-extend an existing same-item group first (natural reading order).
-        for s = 2, MAX_SLOTS do
-            if not overflowVirtual[s] and overflowVirtual[s - 1] == itemID then
-                return s
-            end
-        end
-        -- Left-extend if no right-extension is possible.
-        for s = MAX_SLOTS - 1, 1, -1 do
-            if not overflowVirtual[s] and overflowVirtual[s + 1] == itemID then
-                return s
-            end
-        end
-        -- First empty slot (new item in overflow).
+        -- 1. Top up an existing same-item partial with capacity.
         for s = 1, MAX_SLOTS do
-            if not overflowVirtual[s] then return s end
+            local info = overflowSlotInfo[s]
+            if info and info.itemID == itemID and info.capacity > 0 then
+                return s, math.min(want, info.capacity), "topup"
+            end
+        end
+        -- 2. Right-extend an existing same-item group.
+        for s = 2, MAX_SLOTS do
+            local prev = overflowSlotInfo[s - 1]
+            if not overflowSlotInfo[s] and prev and prev.itemID == itemID then
+                return s, want, "extend-right"
+            end
+        end
+        -- 3. Left-extend if no right-extension is possible.
+        for s = MAX_SLOTS - 1, 1, -1 do
+            local nextInfo = overflowSlotInfo[s + 1]
+            if not overflowSlotInfo[s] and nextInfo and nextInfo.itemID == itemID then
+                return s, want, "extend-left"
+            end
+        end
+        -- 4. First empty slot (new item in overflow).
+        for s = 1, MAX_SLOTS do
+            if not overflowSlotInfo[s] then
+                return s, want, "first-empty"
+            end
         end
         return nil
     end
@@ -465,19 +700,45 @@ function GBL:PlanSort(snapshot, layout)
             if not overflowTab then
                 recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
                     sup.available, REASON_NO_OVERFLOW_DEFINED)
+                diag.phase1bUnplaced = diag.phase1bUnplaced + 1
             else
-                local ovSlot = pickOverflowSlot(sup.itemID)
-                if not ovSlot then
-                    recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
-                        sup.available, REASON_OVERFLOW_FULL)
-                else
-                    overflowVirtual[ovSlot] = sup.itemID
+                while sup.available > 0 do
+                    local ovSlot, take, mode = pickOverflowSlot(sup.itemID, sup.available)
+                    if not ovSlot or not take or take <= 0 then
+                        recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
+                            sup.available, REASON_OVERFLOW_FULL)
+                        diag.phase1bUnplaced = diag.phase1bUnplaced + 1
+                        sup.available = 0
+                        break
+                    end
+                    if mode == "topup" then
+                        diag.phase1bTopup = diag.phase1bTopup + 1
+                    elseif mode == "extend-right" then
+                        diag.phase1bExtendRight = diag.phase1bExtendRight + 1
+                    elseif mode == "extend-left" then
+                        diag.phase1bExtendLeft = diag.phase1bExtendLeft + 1
+                    elseif mode == "first-empty" then
+                        diag.phase1bFirstEmpty = diag.phase1bFirstEmpty + 1
+                    end
                     table.insert(assignments, {
                         srcTab = sup.tabIndex, srcSlot = sup.slotIndex,
                         dstTab = overflowTab, dstSlot = ovSlot,
-                        itemID = sup.itemID, count = sup.available,
+                        itemID = sup.itemID, count = take,
                     })
-                    sup.available = 0
+                    -- Update overflowSlotInfo so the next pick sees the new
+                    -- capacity. Required for split-across-multiple-slots.
+                    local info = overflowSlotInfo[ovSlot]
+                    if info then
+                        info.count    = info.count + take
+                        info.capacity = math.max(0, info.capacity - take)
+                    else
+                        local m = getMaxStack(sup.itemID)
+                        overflowSlotInfo[ovSlot] = {
+                            itemID = sup.itemID, count = take,
+                            capacity = m and math.max(0, m - take) or 0,
+                        }
+                    end
+                    sup.available = sup.available - take
                 end
             end
         end
@@ -487,30 +748,8 @@ function GBL:PlanSort(snapshot, layout)
     -- PHASE 2: Schedule
     -- --------------------------------------------------------------
 
-    -- Deep-copy bank into a mutable working state for Phase 2.
-    local state = {}
-    for tabIndex, tab in pairs(bank) do
-        state[tabIndex] = {}
-        for slotIndex, slot in pairs(tab) do
-            state[tabIndex][slotIndex] = {
-                itemID = slot.itemID, count = slot.count,
-            }
-        end
-    end
-
     local remaining = {}
     for i = 1, #assignments do remaining[i] = true end
-
-    local function emitAssignment(ass)
-        local op = {
-            op = opLabel(state, ass),
-            srcTab = ass.srcTab, srcSlot = ass.srcSlot,
-            dstTab = ass.dstTab, dstSlot = ass.dstSlot,
-            itemID = ass.itemID, count = ass.count,
-        }
-        table.insert(plan.ops, op)
-        applyOpToState(state, op)
-    end
 
     local function greedyDrain()
         local progressed
@@ -519,7 +758,7 @@ function GBL:PlanSort(snapshot, layout)
             for i = 1, #assignments do
                 if remaining[i] then
                     local ass = assignments[i]
-                    if canExecute(ass, state) then
+                    if canExecute(ass, state, getMaxStack) then
                         emitAssignment(ass)
                         remaining[i] = nil
                         progressed = true
@@ -593,6 +832,7 @@ function GBL:PlanSort(snapshot, layout)
                         recordUnplaced(a.srcTab, a.srcSlot, a.itemID, a.count,
                             REASON_CYCLE_NO_PIVOT)
                         remaining[i] = nil
+                        diag.phase2CycleAborts = diag.phase2CycleAborts + 1
                     end
                 end
                 break
@@ -607,6 +847,7 @@ function GBL:PlanSort(snapshot, layout)
                         recordUnplaced(a.srcTab, a.srcSlot, a.itemID, a.count,
                             REASON_CYCLE_NO_PIVOT)
                         remaining[i] = nil
+                        diag.phase2CycleAborts = diag.phase2CycleAborts + 1
                     end
                 end
                 break
@@ -618,9 +859,12 @@ function GBL:PlanSort(snapshot, layout)
                 srcTab = stuck.dstTab, srcSlot = stuck.dstSlot,
                 dstTab = pivotTab, dstSlot = pivotSlot,
                 itemID = blockerSlot.itemID, count = blockerSlot.count,
+                plannerSrcAt = snapshotSlot(stuck.dstTab, stuck.dstSlot),
+                plannerDstAt = snapshotSlot(pivotTab, pivotSlot),
             }
             table.insert(plan.ops, pivotOp)
-            applyOpToState(state, pivotOp)
+            applyOpToState(state, pivotOp, getMaxStack)
+            diag.phase2Pivots = diag.phase2Pivots + 1
 
             -- Redirect any still-remaining assignment whose src was the pivot's
             -- original source slot — the item now lives at the pivot.
@@ -644,6 +888,8 @@ function GBL:PlanSort(snapshot, layout)
     -- --------------------------------------------------------------
     -- PHASE 3: Sweep (defensive)
     -- --------------------------------------------------------------
+    -- Same multi-destination loop pattern as Phase 1B: a stragglers
+    -- stack may need to split across a topup and a fresh slot.
     for _, entry in ipairs(displayTabs) do
         local tabIndex = entry.tabIndex
         for slotIndex = 1, MAX_SLOTS do
@@ -658,21 +904,45 @@ function GBL:PlanSort(snapshot, layout)
                     and demandOfSlot[tabIndex][slotIndex]
                 local fits = (dem and dem.itemID == slot.itemID)
                 if not fits then
-                    local ovSlot = pickOverflowSlot(slot.itemID)
-                    if overflowTab and ovSlot then
-                        overflowVirtual[ovSlot] = slot.itemID
-                        local sweepOp = {
-                            op = "move",
-                            srcTab = tabIndex, srcSlot = slotIndex,
-                            dstTab = overflowTab, dstSlot = ovSlot,
-                            itemID = slot.itemID, count = slot.count,
-                        }
-                        table.insert(plan.ops, sweepOp)
-                        applyOpToState(state, sweepOp)
-                    else
+                    if not overflowTab then
                         recordUnplaced(tabIndex, slotIndex, slot.itemID, slot.count,
-                            overflowTab and REASON_OVERFLOW_FULL
-                            or REASON_NO_OVERFLOW_DEFINED)
+                            REASON_NO_OVERFLOW_DEFINED)
+                    else
+                        local remaining_ = slot.count
+                        while remaining_ > 0 do
+                            local ovSlot, take = pickOverflowSlot(slot.itemID, remaining_)
+                            if not ovSlot or not take or take <= 0 then
+                                recordUnplaced(tabIndex, slotIndex, slot.itemID,
+                                    remaining_, REASON_OVERFLOW_FULL)
+                                break
+                            end
+                            local sweepOp = {
+                                op = "move",
+                                srcTab = tabIndex, srcSlot = slotIndex,
+                                dstTab = overflowTab, dstSlot = ovSlot,
+                                itemID = slot.itemID, count = take,
+                                plannerSrcAt = snapshotSlot(tabIndex, slotIndex),
+                                plannerDstAt = snapshotSlot(overflowTab, ovSlot),
+                            }
+                            table.insert(plan.ops, sweepOp)
+                            applyOpToState(state, sweepOp, getMaxStack)
+                            diag.phase3Sweeps = diag.phase3Sweeps + 1
+                            -- Mirror the placement into overflowSlotInfo so
+                            -- a follow-up pick (later supply or sweep) sees
+                            -- updated capacity.
+                            local info = overflowSlotInfo[ovSlot]
+                            if info then
+                                info.count    = info.count + take
+                                info.capacity = math.max(0, info.capacity - take)
+                            else
+                                local m = getMaxStack(slot.itemID)
+                                overflowSlotInfo[ovSlot] = {
+                                    itemID = slot.itemID, count = take,
+                                    capacity = m and math.max(0, m - take) or 0,
+                                }
+                            end
+                            remaining_ = remaining_ - take
+                        end
                     end
                 end
             end
@@ -680,16 +950,16 @@ function GBL:PlanSort(snapshot, layout)
     end
 
     -- --------------------------------------------------------------
-    -- PHASE 4: Overflow Compaction
+    -- PHASE 4: Overflow Position Compaction
     -- --------------------------------------------------------------
-    -- Reshape the overflow tab into a deterministic contiguous layout:
-    -- stacks sorted by (itemID ASC, count DESC, origSlot ASC), packed
-    -- from slot 1 with no gaps. Reuses the Phase-2 greedy drain and
-    -- pivot-break loop by appending new assignments to `assignments` /
-    -- `remaining` and re-running both. count-DESC puts a partial stack
-    -- at the tail of its item's group so a future stack-merge pass has
-    -- an easy adjacency to work with. Out of scope here: merging partial
-    -- stacks (the planner has no max-stack knowledge).
+    -- Pack overflow stacks into a contiguous run from slot 1, sorted
+    -- by (itemID ASC, count DESC, origSlot ASC). Phase 0 has already
+    -- merged same-item partials within overflow, and Phase 1B has
+    -- topped up existing partials before extending, so by the time
+    -- this phase runs the only work left is positional: shifting
+    -- stacks into a deterministic packing. Reuses the Phase-2 greedy
+    -- drain and pivot-break loop by appending new assignments to
+    -- `assignments` / `remaining` and re-running both.
     if overflowTab then
         local ovStacks = {}
         for s = 1, MAX_SLOTS do
@@ -720,6 +990,7 @@ function GBL:PlanSort(snapshot, layout)
                 }
                 remaining[idx] = true
                 phase4Added = true
+                diag.phase4PositionShifts = diag.phase4PositionShifts + 1
             end
         end
 
@@ -743,6 +1014,48 @@ function GBL:PlanSort(snapshot, layout)
             }
         end
     end
+
+    -- Planner diagnostics. The first line is always emitted (baseline
+    -- timing + replan hitch investigation). The phase / demand breakdown
+    -- lines fire only when there's plan or demand activity, so quiet
+    -- replan-no-op cycles don't spam the audit trail. AddAuditEntry is
+    -- provided by Sync.lua; guard for partial test setups.
+    if self.AddAuditEntry then
+        local elapsed = profileStart and (debugprofilestop() - profileStart) or 0
+        local deficitCount = 0
+        for _ in pairs(plan.deficits) do deficitCount = deficitCount + 1 end
+        self:AddAuditEntry(string.format(
+            "Sort plan: %.1fms, %d ops, %d deficits, %d unplaced (input: %d slots / %d tabs)",
+            elapsed, #plan.ops, deficitCount, #plan.unplaced,
+            inputSlots, inputTabs))
+
+        local totalDemands = diag.demandPinned + diag.demandExtendRight
+            + diag.demandExtendLeft + diag.demandFirstEmpty
+        if #plan.ops > 0 or totalDemands > 0 then
+            self:AddAuditEntry(string.format(
+                "  phases: P0 merge=%d(free=%d) P1a assign=%d "
+                .. "P1b spill=%d(top=%d,r=%d,l=%d,fe=%d,unp=%d) "
+                .. "P2 pivot=%d(abort=%d) P3 sweep=%d P4 pack=%d",
+                diag.phase0Merges, diag.phase0SlotsFreed,
+                diag.phase1aAssignments,
+                diag.phase1bTopup + diag.phase1bExtendRight
+                    + diag.phase1bExtendLeft + diag.phase1bFirstEmpty,
+                diag.phase1bTopup, diag.phase1bExtendRight,
+                diag.phase1bExtendLeft, diag.phase1bFirstEmpty,
+                diag.phase1bUnplaced,
+                diag.phase2Pivots, diag.phase2CycleAborts,
+                diag.phase3Sweeps, diag.phase4PositionShifts))
+            self:AddAuditEntry(string.format(
+                "  demands: %d total (pinned=%d, ext-R=%d, ext-L=%d, first-empty=%d)",
+                totalDemands, diag.demandPinned, diag.demandExtendRight,
+                diag.demandExtendLeft, diag.demandFirstEmpty))
+        end
+    end
+
+    -- Expose diagnostic counters on the plan so callers (UI, tests) can
+    -- read them without re-running the planner. Untyped to avoid forcing
+    -- consumers to handle a missing field on legacy plans.
+    plan.diag = diag
 
     return plan
 end
@@ -788,6 +1101,8 @@ end
 
 -- Expose helper for tests.
 GBL._sortPlannerExtractItemID = extractItemID
+GBL._sortPlannerCanExecute = canExecute
+GBL._sortPlannerApplyOpToState = applyOpToState
 
 -- Expose reason codes for tests/UI.
 GBL._sortPlannerReasons = {
