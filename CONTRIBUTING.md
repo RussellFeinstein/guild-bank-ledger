@@ -41,7 +41,7 @@ GuildBankLedger is a Lua 5.1 WoW addon tested with [busted](https://lunarmodules
 
 `main` is protected: direct pushes are blocked, merge is gated on CI, and the only merge style is a merge commit (so your commits are preserved on `main` with your authorship).
 
-**Maintainer note**: the repo uses long-lived per-area topic branches (`ui`, `sync`, `accessibility`, `layout-sort`) for recurring work, alongside short-lived `chore/*`, `infra/*`, and `hotfix/*` branches for one-off changes. See the **Branch Workflow** section in [CLAUDE.md](CLAUDE.md) for the full set of rules (rebase cadence, hotfix path, cross-area sequencing, CHANGELOG conflict policy). External contributors don't need to think about this; just branch from `main` and open a PR as described above.
+**Maintainer note**: the repo uses long-lived per-area topic branches (`ui`, `sync`, `accessibility`, `layout-sort`) for recurring work, alongside single-purpose `chore/*`, `infra/*`, and `hotfix/*` branches that are frozen once their PR closes (no new commits land on them; follow-up work goes on a new branch off `main`). See the **Branch Workflow** section in [CLAUDE.md](CLAUDE.md) for the full set of rules (rebase cadence, hotfix path, cross-area sequencing, CHANGELOG conflict policy, freeze contract). External contributors don't need to think about this; just branch from `main` and open a PR as described above.
 
 ## Commit message format
 
