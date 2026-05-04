@@ -761,6 +761,47 @@ describe("Core", function()
         end)
     end)
 
+    describe("CanonicalPeerKey roster fallback (bare-name re-realming)", function()
+        local guildData
+        before_each(function()
+            GBL:OnInitialize()
+            MockWoW.guild.name = "Test Guild"
+            GBL:OnEnable()
+            guildData = GBL:GetGuildData()
+            MockWoW.player.realm = "TestRealm"
+        end)
+
+        it("re-realms a bare name with a cross-realm playerRealms entry", function()
+            guildData.playerRealms = { ["Katorriwl"] = "Stormrage" }
+            assert.equals("Katorriwl-Stormrage", GBL:CanonicalPeerKey("Katorriwl"))
+        end)
+
+        it("collapses a bare name with a same-realm playerRealms entry", function()
+            guildData.playerRealms = { ["Bob"] = "TestRealm" }
+            -- Roster says Bob is local-realm; helper re-realms then Ambiguate("guild")
+            -- collapses back to bare. Net: bare in, bare out (canonical for same-realm).
+            assert.equals("Bob", GBL:CanonicalPeerKey("Bob"))
+        end)
+
+        it("returns bare unchanged when playerRealms has no entry", function()
+            guildData.playerRealms = {}
+            assert.equals("Ghost", GBL:CanonicalPeerKey("Ghost"))
+        end)
+
+        it("returns bare unchanged when playerRealms is absent on guildData", function()
+            guildData.playerRealms = nil
+            assert.equals("Loner", GBL:CanonicalPeerKey("Loner"))
+        end)
+
+        it("qualified name path is unaffected by playerRealms", function()
+            guildData.playerRealms = { ["Katorriwl"] = "Stormrage" }
+            -- Cross-realm qualified arrival: Ambiguate("guild") preserves
+            assert.equals("Katorriwl-Stormrage", GBL:CanonicalPeerKey("Katorriwl-Stormrage"))
+            -- Same-realm qualified arrival: Ambiguate("guild") strips
+            assert.equals("Alice", GBL:CanonicalPeerKey("Alice-TestRealm"))
+        end)
+    end)
+
     describe("MigrateNormalizePeerNames (schema 8 -> 9, realm-aware)", function()
         local guildData
         before_each(function()
@@ -1020,6 +1061,90 @@ describe("Core", function()
             assert.equals(0, rewrites)
             assert.equals(9, guildData.schemaVersion)
             assert.is_not_nil(guildData.knownPeers["Alice"])
+        end)
+
+        it("returns early without bumping when roster is cold (numMembers == 0)", function()
+            -- Reproduces the v0.30.5 premature-bump bug: when the realm API is
+            -- valid but the roster API is still cold at OnEnable time, the
+            -- migration walked an empty roster, recovered nothing, and still
+            -- bumped to 11. Fix: return 0 without bumping so the migration
+            -- retries on a later session or via the GUILD_ROSTER_UPDATE retrigger.
+            guildData.schemaVersion = 10
+            guildData.knownPeers = { ["Alice"] = { lastSeen = 1000 } }
+            MockWoW.guildRoster = {}  -- numMembers will be 0
+
+            local rewrites = GBL:MigrateRecoverPeerRealms(guildData)
+
+            assert.equals(0, rewrites)
+            assert.equals(10, guildData.schemaVersion)  -- NOT bumped
+            assert.is_not_nil(guildData.knownPeers["Alice"])
+        end)
+    end)
+
+    describe("GUILD_ROSTER_UPDATE migration retrigger", function()
+        local guildData
+        before_each(function()
+            GBL:OnInitialize()
+            MockWoW.guild.name = "Test Guild"
+            GBL:OnEnable()
+            guildData = GBL:GetGuildData()
+            MockWoW.player.realm = "TestRealm"
+            -- Reset retrigger flags so each test starts from cold state
+            GBL._migrationsRetried = nil
+            GBL._playerNamesRepaired = nil
+            GBL._sentPostLoginHello = nil
+        end)
+
+        it("does not retrigger MigrateAllGuilds when roster is still cold", function()
+            guildData.schemaVersion = 10
+            guildData.knownPeers = { ["Katorriwl"] = { lastSeen = 1000 } }
+            MockWoW.guildRoster = {}  -- cold
+
+            GBL:GUILD_ROSTER_UPDATE()
+
+            -- Migration didn't get a chance, schema unchanged
+            assert.equals(10, guildData.schemaVersion)
+            assert.is_nil(GBL._migrationsRetried)
+        end)
+
+        it("retriggers MigrateAllGuilds once when roster warms up", function()
+            guildData.schemaVersion = 10
+            guildData.knownPeers = { ["Katorriwl"] = { lastSeen = 1000 } }
+            MockWoW.guildRoster = {
+                { name = "Katorriwl-Stormrage", isOnline = true },
+            }
+
+            GBL:GUILD_ROSTER_UPDATE()
+
+            -- Migration ran on the warm roster, schema reached 11, bare key recovered
+            assert.equals(11, guildData.schemaVersion)
+            assert.is_true(GBL._migrationsRetried)
+            assert.is_nil(guildData.knownPeers["Katorriwl"])
+            assert.is_not_nil(guildData.knownPeers["Katorriwl-Stormrage"])
+        end)
+
+        it("does not retrigger again after the first warm GUILD_ROSTER_UPDATE", function()
+            guildData.schemaVersion = 10
+            MockWoW.guildRoster = {
+                { name = "Katorriwl-Stormrage", isOnline = true },
+            }
+
+            GBL:GUILD_ROSTER_UPDATE()  -- first fire: retriggers
+            assert.is_true(GBL._migrationsRetried)
+            assert.equals(11, guildData.schemaVersion)
+
+            -- Mutate guildData to detect a second migration run if it happens
+            guildData.schemaVersion = 10
+            guildData.knownPeers = { ["Loner"] = { lastSeen = 1000 } }
+            MockWoW.guildRoster = {
+                { name = "Loner-OtherRealm", isOnline = true },
+            }
+
+            GBL:GUILD_ROSTER_UPDATE()  -- second fire: should NOT re-run
+
+            -- Schema stays at 10 because the retrigger is one-shot
+            assert.equals(10, guildData.schemaVersion)
+            assert.is_not_nil(guildData.knownPeers["Loner"])
         end)
     end)
 end)

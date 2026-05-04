@@ -282,16 +282,36 @@ function GBL:InitSync()
     -- Seeded peers keep their original lastSeen (stale), so they won't be
     -- targeted for sync. The roster fallback in GetSyncPeers shows them
     -- as "online (no HELLO)" if the guild roster confirms they're online.
+    -- Each key is run through CanonicalPeerKey so stale bare entries from
+    -- pre-v0.30.5 saved variables (or from the buggy schema-11 cold-roster
+    -- premature-bump) consolidate into their qualified form once playerRealms
+    -- is warm. knownPeers itself is rewritten in place to converge persistent
+    -- state too.
     local guildData = self:GetGuildData()
     if guildData and guildData.knownPeers then
         local now = GetServerTime()
-        for name, info in pairs(guildData.knownPeers) do
-            if now - (info.lastSeen or 0) < KNOWN_PEER_EXPIRE_SECONDS then
-                syncState.peers[name] = {
+        local rawKeys = {}
+        for k in pairs(guildData.knownPeers) do rawKeys[#rawKeys+1] = k end
+        for _, name in ipairs(rawKeys) do
+            local info = guildData.knownPeers[name]
+            if info and now - (info.lastSeen or 0) < KNOWN_PEER_EXPIRE_SECONDS then
+                local clean = self:CanonicalPeerKey(name)
+                syncState.peers[clean] = {
                     version = info.version,
                     txCount = info.txCount or 0,
                     lastSeen = info.lastSeen or 0,
                 }
+                if clean ~= name then
+                    local existing = guildData.knownPeers[clean]
+                    if existing then
+                        if (info.lastSeen or 0) > (existing.lastSeen or 0) then
+                            guildData.knownPeers[clean] = info
+                        end
+                    else
+                        guildData.knownPeers[clean] = info
+                    end
+                    guildData.knownPeers[name] = nil
+                end
             else
                 guildData.knownPeers[name] = nil
             end

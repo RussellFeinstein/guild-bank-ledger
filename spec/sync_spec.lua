@@ -4613,6 +4613,96 @@ describe("Sync", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- InitSync knownPeers seed consolidation (connected-realm follow-up)
+    ---------------------------------------------------------------------------
+    --
+    -- Self-heals stuck-at-11 users: stale bare keys in knownPeers (left over
+    -- from pre-v0.30.5 saved variables, or from the v0.30.5 schema-11
+    -- premature-bump cold-roster bug) get re-canonicalized via playerRealms at
+    -- session start, persistent state consolidates, runtime view is correct.
+
+    describe("InitSync knownPeers seed consolidation", function()
+        before_each(function()
+            MockWoW.player.realm = "TestRealm"
+            MockWoW.serverTime = 100000
+            guildData.knownPeers = {}
+            guildData.playerRealms = {}
+            GBL:ResetSyncState()
+        end)
+
+        it("re-realms a stale bare cross-realm key via playerRealms", function()
+            -- Setup: bare Katorriwl in knownPeers (from buggy schema-11),
+            -- playerRealms knows the real realm.
+            guildData.knownPeers["Katorriwl"] = {
+                version = "0.30.4", txCount = 5, lastSeen = 99500,
+            }
+            guildData.playerRealms["Katorriwl"] = "Stormrage"
+
+            GBL:InitSync()
+
+            -- knownPeers consolidated: bare gone, qualified present
+            assert.is_nil(guildData.knownPeers["Katorriwl"])
+            assert.is_not_nil(guildData.knownPeers["Katorriwl-Stormrage"])
+            assert.equals(5, guildData.knownPeers["Katorriwl-Stormrage"].txCount)
+
+            -- syncState.peers seeded with the canonical key only
+            local peers = GBL:GetAllPeers()
+            assert.is_not_nil(peers["Katorriwl-Stormrage"])
+            assert.is_nil(peers["Katorriwl"])
+        end)
+
+        it("collapses a bare same-realm key to bare (idempotent)", function()
+            -- Bare entry that's actually a local-realm member: roster says local,
+            -- helper re-realms then Ambiguate('guild') strips back to bare.
+            guildData.knownPeers["Bob"] = {
+                version = "0.30.5", txCount = 3, lastSeen = 99500,
+            }
+            guildData.playerRealms["Bob"] = "TestRealm"
+
+            GBL:InitSync()
+
+            -- Stays bare, no rewrite needed
+            assert.is_not_nil(guildData.knownPeers["Bob"])
+            assert.is_nil(guildData.knownPeers["Bob-TestRealm"])
+            assert.is_not_nil(GBL:GetAllPeers()["Bob"])
+        end)
+
+        it("merges bare + qualified collision by recency", function()
+            -- Both forms of the same character coexist in knownPeers (the bug).
+            -- Bare form is older, qualified is newer; result should keep newer.
+            guildData.knownPeers["Katorriwl"] = {
+                version = "0.30.4", txCount = 5, lastSeen = 99000,
+            }
+            guildData.knownPeers["Katorriwl-Stormrage"] = {
+                version = "0.30.5", txCount = 8, lastSeen = 99800,
+            }
+            guildData.playerRealms["Katorriwl"] = "Stormrage"
+
+            GBL:InitSync()
+
+            -- Only the qualified key survives, holding the newer record
+            assert.is_nil(guildData.knownPeers["Katorriwl"])
+            local kp = guildData.knownPeers["Katorriwl-Stormrage"]
+            assert.is_not_nil(kp)
+            assert.equals(8, kp.txCount)
+            assert.equals("0.30.5", kp.version)
+        end)
+
+        it("keeps bare key when playerRealms has no entry for it", function()
+            -- Departed peer or non-guildmate: no roster mapping, stays bare.
+            guildData.knownPeers["Ghost"] = {
+                version = "0.30.4", txCount = 1, lastSeen = 99000,
+            }
+            -- No playerRealms entry for Ghost
+
+            GBL:InitSync()
+
+            assert.is_not_nil(guildData.knownPeers["Ghost"])
+            assert.is_not_nil(GBL:GetAllPeers()["Ghost"])
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Compression
     ---------------------------------------------------------------------------
 

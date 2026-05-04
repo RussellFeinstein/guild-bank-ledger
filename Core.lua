@@ -344,7 +344,19 @@ end
 -- @return string|nil Canonical peer key (input unchanged for nil/empty)
 function GBL:CanonicalPeerKey(name)
     if not name or name == "" then return name end
-    return Ambiguate(name, "guild")
+    if name:find("-", 1, true) then
+        return Ambiguate(name, "guild")
+    end
+    -- Bare name: re-realm via the persistent roster cache when uniquely known.
+    -- Ambiguate("guild") cannot recover a missing realm on its own, so without
+    -- this fallback a bare arrival from a connected-realm peer would key
+    -- distinctly from the same character's qualified arrivals.
+    local guildData = self:GetGuildData()
+    local realm = guildData and guildData.playerRealms and guildData.playerRealms[name]
+    if realm then
+        return Ambiguate(name .. "-" .. realm, "guild")
+    end
+    return name
 end
 
 --- Build/update the persistent guild roster cache.
@@ -1291,7 +1303,10 @@ end
 -- (same name on multiple realms in the roster) and no-match (offline /
 -- departed peer) keys are left bare and live with the collision risk.
 --
--- Same UnknownRealm short-circuit as MigrateNormalizePeerNames. Idempotent:
+-- Cold-API short-circuits: returns early without bumping schemaVersion when
+-- either GetLocalRealm() reports "UnknownRealm" or GetNumGuildMembers() is 0
+-- (cold roster). The migration retries on the next session, or sooner via the
+-- warm-roster retrigger of MigrateAllGuilds in GUILD_ROSTER_UPDATE. Idempotent:
 -- on a second run the roster lookup either finds the same realm (re-rewrites
 -- to the same key) or is unavailable (key stays put).
 --
@@ -1314,6 +1329,11 @@ function GBL:MigrateRecoverPeerRealms(guildData)
     local lookup = {}
     local ambiguous = {}
     local numMembers = GetNumGuildMembers and GetNumGuildMembers() or 0
+    -- Cold roster (numMembers == 0) means the lookup would build empty and
+    -- recovery would no-op. Returning early without bumping schemaVersion
+    -- lets the migration retry on a later session (or via the warm-roster
+    -- retrigger in GUILD_ROSTER_UPDATE).
+    if numMembers == 0 then return 0 end
     for i = 1, numMembers do
         local fullName = GetGuildRosterInfo(i)
         if fullName then
@@ -1561,6 +1581,18 @@ end
 function GBL:GUILD_ROSTER_UPDATE()
     -- Update the persistent player→realm mapping
     self:BuildRosterCache()
+
+    -- One-time retrigger of the migration ladder once roster is warm. Closes
+    -- the cold-roster gap for migrations like MigrateRecoverPeerRealms that
+    -- short-circuit on cold APIs at OnEnable time. Strict-gated migrations
+    -- whose schemaVersion already advanced are no-ops.
+    if not self._migrationsRetried then
+        local n = GetNumGuildMembers and GetNumGuildMembers() or 0
+        if n > 0 then
+            self._migrationsRetried = true
+            self:MigrateAllGuilds()
+        end
+    end
 
     -- One-time repair: fix player names that got wrong realm during early migration
     if not self._playerNamesRepaired then
