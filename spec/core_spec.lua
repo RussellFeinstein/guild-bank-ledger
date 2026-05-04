@@ -808,6 +808,29 @@ describe("Core", function()
             guildData.playerRealms = { ["Katorriwl"] = "Stormrage-Stormrage-Stormrage" }
             assert.equals("Katorriwl", GBL:CanonicalPeerKey("Katorriwl"))
         end)
+
+        it("keeps two distinct same-name peers on connected realms distinct", function()
+            -- The original motivation for not delegating to Ambiguate("guild"):
+            -- retail's Ambiguate("guild") strips realm for ALL guildmates of a
+            -- connected-realm group, collapsing two distinct Alices into one
+            -- bare key. Custom local-realm-only strip preserves them.
+            MockWoW.player.realm = "Tichondrius"
+            assert.equals("Alice-Stormrage", GBL:CanonicalPeerKey("Alice-Stormrage"))
+            assert.equals("Alice-Area52", GBL:CanonicalPeerKey("Alice-Area52"))
+            -- Same-realm Alice still strips to bare
+            assert.equals("Alice", GBL:CanonicalPeerKey("Alice-Tichondrius"))
+        end)
+
+        it("re-realms a bare name to its actual realm even in connected-realm guild", function()
+            -- Bare "Katorriwl" arriving from a connected-realm peer (e.g. when
+            -- the chat system stripped the realm during delivery) must re-realm
+            -- via playerRealms so the canonical key matches qualified arrivals.
+            MockWoW.player.realm = "Tichondrius"
+            guildData.playerRealms = { ["Katorriwl"] = "Stormrage" }
+            assert.equals("Katorriwl-Stormrage", GBL:CanonicalPeerKey("Katorriwl"))
+            -- Same input, qualified, also keys to the same canonical form
+            assert.equals("Katorriwl-Stormrage", GBL:CanonicalPeerKey("Katorriwl-Stormrage"))
+        end)
     end)
 
     describe("RepairCorruptedPlayerRealms", function()

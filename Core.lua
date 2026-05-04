@@ -342,23 +342,47 @@ end
 -- use StripRealm directly, not this helper.
 -- @param name string|nil Sender / target name in any qualification
 -- @return string|nil Canonical peer key (input unchanged for nil/empty)
+--- True when the given realm string matches the local realm (raw or normalized).
+-- Used by CanonicalPeerKey to decide whether to strip the realm suffix. We
+-- can't delegate this to Ambiguate("guild") because retail's Ambiguate strips
+-- realm for ALL guildmates of a connected-realm group, collapsing distinct
+-- same-name characters across realms; this helper restricts stripping to the
+-- local realm only, preserving cross-realm distinguishability.
+-- @param realm string|nil Realm portion of a Name-Realm pair
+-- @return boolean true if realm == local realm (raw or normalized)
+function GBL:_isLocalRealm(realm)
+    if type(realm) ~= "string" or realm == "" then return false end
+    local localRealm = self:GetLocalRealm()
+    if not localRealm or localRealm == "" or localRealm == "UnknownRealm" then
+        return false
+    end
+    if realm == localRealm then return true end
+    return self:NormalizeRealm(realm) == self:NormalizeRealm(localRealm)
+end
+
 function GBL:CanonicalPeerKey(name)
     if not name or name == "" then return name end
     if name:find("-", 1, true) then
-        return Ambiguate(name, "guild")
+        local base, realm = name:match("^([^%-]+)%-(.+)$")
+        if base and realm and self:_isLocalRealm(realm) then
+            return base
+        end
+        -- Cross-realm or unparseable: preserve full Name-Realm form so two
+        -- distinct same-name characters across connected realms stay distinct.
+        return name
     end
     -- Bare name: re-realm via the persistent roster cache when uniquely known.
-    -- Ambiguate("guild") cannot recover a missing realm on its own, so without
-    -- this fallback a bare arrival from a connected-realm peer would key
+    -- Without this, a bare arrival from a connected-realm peer would key
     -- distinctly from the same character's qualified arrivals.
     local guildData = self:GetGuildData()
     local realm = guildData and guildData.playerRealms and guildData.playerRealms[name]
     -- Defensive: reject corrupt realms (hyphen-bearing strings from a
     -- long-since-fixed code path; retail realms never contain hyphens). Falls
-    -- through to bare passthrough, which is the safe default. RepairCorrupted
-    -- PlayerRealms cleans these up at the next BuildRosterCache.
+    -- through to bare passthrough, which is the safe default.
+    -- RepairCorruptedPlayerRealms cleans these up at the next BuildRosterCache.
     if realm and not realm:find("-", 1, true) then
-        return Ambiguate(name .. "-" .. realm, "guild")
+        if self:_isLocalRealm(realm) then return name end
+        return name .. "-" .. realm
     end
     return name
 end
