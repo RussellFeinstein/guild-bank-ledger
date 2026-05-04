@@ -353,10 +353,44 @@ function GBL:CanonicalPeerKey(name)
     -- distinctly from the same character's qualified arrivals.
     local guildData = self:GetGuildData()
     local realm = guildData and guildData.playerRealms and guildData.playerRealms[name]
-    if realm then
+    -- Defensive: reject corrupt realms (hyphen-bearing strings from a
+    -- long-since-fixed code path; retail realms never contain hyphens). Falls
+    -- through to bare passthrough, which is the safe default. RepairCorrupted
+    -- PlayerRealms cleans these up at the next BuildRosterCache.
+    if realm and not realm:find("-", 1, true) then
         return Ambiguate(name .. "-" .. realm, "guild")
     end
     return name
+end
+
+--- Repair corrupted playerRealms entries in place.
+-- Realm strings with embedded hyphens ("Stormrage-Stormrage-Stormrage...")
+-- are corruption from a long-since-fixed code path; retail realm names never
+-- contain hyphens. BuildRosterCache only overwrites entries for currently-
+-- rostered (and present at scan time) members, so corrupt entries for offline
+-- or departed peers can persist indefinitely. Fix: extract the first
+-- hyphen-free segment as the canonical realm; drop the entry if no segment is
+-- recoverable.
+-- @param playerRealms table The playerRealms table to repair (mutated in place)
+-- @return number Number of entries repaired or removed
+function GBL:RepairCorruptedPlayerRealms(playerRealms)
+    if type(playerRealms) ~= "table" then return 0 end
+    local repaired = 0
+    local keys = {}
+    for k in pairs(playerRealms) do keys[#keys+1] = k end
+    for _, k in ipairs(keys) do
+        local v = playerRealms[k]
+        if type(v) == "string" and v:find("-", 1, true) then
+            local cleaned = v:match("^([^%-]+)")
+            if cleaned and cleaned ~= "" then
+                playerRealms[k] = cleaned
+            else
+                playerRealms[k] = nil
+            end
+            repaired = repaired + 1
+        end
+    end
+    return repaired
 end
 
 --- Build/update the persistent guild roster cache.
@@ -368,6 +402,9 @@ function GBL:BuildRosterCache()
     local guildData = self:GetGuildData()
     if not guildData or not numMembers or numMembers == 0 then return end
     if not guildData.playerRealms then guildData.playerRealms = {} end
+    -- Repair any corrupt realm strings before adding fresh roster entries so
+    -- offline/departed peers don't carry corruption forward.
+    self:RepairCorruptedPlayerRealms(guildData.playerRealms)
     local localRealm = self:GetLocalRealm()
     for i = 1, numMembers do
         local fullName = GetGuildRosterInfo(i)

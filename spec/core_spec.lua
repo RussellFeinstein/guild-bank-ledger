@@ -800,6 +800,75 @@ describe("Core", function()
             -- Same-realm qualified arrival: Ambiguate("guild") strips
             assert.equals("Alice", GBL:CanonicalPeerKey("Alice-TestRealm"))
         end)
+
+        it("rejects a corrupt (hyphen-bearing) realm and passes bare through", function()
+            -- Live observation: playerRealms["Katorriwl"] = "Stormrage-Stormrage-Stormrage..."
+            -- (corruption from a long-fixed code path). The helper must NOT propagate
+            -- the corrupt realm into the canonical key.
+            guildData.playerRealms = { ["Katorriwl"] = "Stormrage-Stormrage-Stormrage" }
+            assert.equals("Katorriwl", GBL:CanonicalPeerKey("Katorriwl"))
+        end)
+    end)
+
+    describe("RepairCorruptedPlayerRealms", function()
+        before_each(function()
+            GBL:OnInitialize()
+            MockWoW.guild.name = "Test Guild"
+            GBL:OnEnable()
+        end)
+
+        it("trims a hyphen-bearing realm to its first segment", function()
+            local pr = { ["Katorriwl"] = "Stormrage-Stormrage-Stormrage-Stormrage" }
+            local repaired = GBL:RepairCorruptedPlayerRealms(pr)
+            assert.equals(1, repaired)
+            assert.equals("Stormrage", pr["Katorriwl"])
+        end)
+
+        it("leaves clean realm strings alone", function()
+            local pr = { ["Alice"] = "Stormrage", ["Bob"] = "Tichondrius" }
+            local repaired = GBL:RepairCorruptedPlayerRealms(pr)
+            assert.equals(0, repaired)
+            assert.equals("Stormrage", pr["Alice"])
+            assert.equals("Tichondrius", pr["Bob"])
+        end)
+
+        it("removes entries whose corrupt value has no recoverable segment", function()
+            local pr = { ["Ghost"] = "-" }  -- can't extract anything useful
+            local repaired = GBL:RepairCorruptedPlayerRealms(pr)
+            assert.equals(1, repaired)
+            assert.is_nil(pr["Ghost"])
+        end)
+
+        it("handles a mixed table (some corrupt, some clean)", function()
+            local pr = {
+                ["Katorriwl"] = "Stormrage-Stormrage",  -- corrupt
+                ["Alice"] = "Stormrage",                -- clean
+                ["Bob"] = "Tichondrius-Tichondrius",    -- corrupt
+            }
+            local repaired = GBL:RepairCorruptedPlayerRealms(pr)
+            assert.equals(2, repaired)
+            assert.equals("Stormrage", pr["Katorriwl"])
+            assert.equals("Stormrage", pr["Alice"])
+            assert.equals("Tichondrius", pr["Bob"])
+        end)
+
+        it("is invoked by BuildRosterCache before adding fresh entries", function()
+            MockWoW.player.realm = "Tichondrius"
+            local guildData = GBL:GetGuildData()
+            -- Pre-existing corrupt entry for an offline peer
+            guildData.playerRealms["Katorriwl"] = "Stormrage-Stormrage-Stormrage"
+            -- Roster includes only Alice (Katorriwl is offline / not present)
+            MockWoW.guildRoster = {
+                { name = "Alice-Stormrage", isOnline = true },
+            }
+
+            GBL:BuildRosterCache()
+
+            -- Corrupt entry repaired even though Katorriwl wasn't in the roster
+            assert.equals("Stormrage", guildData.playerRealms["Katorriwl"])
+            -- Fresh entry added from the roster
+            assert.equals("Stormrage", guildData.playerRealms["Alice"])
+        end)
     end)
 
     describe("MigrateNormalizePeerNames (schema 8 -> 9, realm-aware)", function()
