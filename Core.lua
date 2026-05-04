@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.30.4"
+local VERSION = "0.30.5"
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -295,21 +295,56 @@ function GBL:ResolvePlayerName(name, playerRealms)
             end
         end
     end
-    -- Fallback: append local realm
-    local realm = GetNormalizedRealmName()
-        or (GetRealmName and GetRealmName() and GetRealmName():gsub("%s", ""))
-        or "UnknownRealm"
-    return name .. "-" .. realm
+    -- Fallback: append local realm (always normalized via GetLocalRealm)
+    return name .. "-" .. self:GetLocalRealm()
 end
 
 --- Strip realm suffix from a character name.
--- For peer matching and filter comparison only — records should always
+-- For peer matching and filter comparison only - records should always
 -- store the full Name-Realm format.
 -- @param name string Character name, possibly realm-qualified
 -- @return string Base name without realm suffix
 function GBL:StripRealm(name)
     if not name then return "" end
     return name:match("^([^%-]+)") or name
+end
+
+--- Normalize a realm name to its no-space form.
+-- Real WoW APIs return realm in two shapes: GetNormalizedRealmName() drops
+-- spaces ("AeriePeak"), while GetRealmName() and the realm portion of a
+-- hyphenated name from GetGuildRosterInfo can keep them ("Aerie Peak").
+-- Persisted realm strings must use the normalized form so that records
+-- arriving from sync (potentially raw realm) collapse against locally-scanned
+-- records (already normalized via the GetNormalizedRealmName fallback path).
+-- @param realm string|nil Realm name in any form
+-- @return string|nil Realm with whitespace stripped
+function GBL:NormalizeRealm(realm)
+    if not realm or realm == "" then return realm end
+    return (realm:gsub("%s", ""))
+end
+
+--- Return the local realm name in normalized (no-space) form.
+-- Centralizes the GetNormalizedRealmName -> GetRealmName fallback so all
+-- callers use identical logic and cannot drift apart.
+-- @return string Normalized local realm name, or "UnknownRealm" if neither API resolves
+function GBL:GetLocalRealm()
+    local realm = GetNormalizedRealmName()
+        or (GetRealmName and GetRealmName() and GetRealmName():gsub("%s", ""))
+    return realm or "UnknownRealm"
+end
+
+--- Canonicalize a sender / target name for peer identity keying.
+-- Uses Ambiguate("guild"): strips realm only when it matches the local
+-- realm. Cross-realm names (different connected-realm) keep their realm
+-- suffix, preserving identity for connected-realm guilds where two
+-- characters can share a first name across realms.
+-- For genuine bare-name semantics (recentWhisperTargets chat-suppression)
+-- use StripRealm directly, not this helper.
+-- @param name string|nil Sender / target name in any qualification
+-- @return string|nil Canonical peer key (input unchanged for nil/empty)
+function GBL:CanonicalPeerKey(name)
+    if not name or name == "" then return name end
+    return Ambiguate(name, "guild")
 end
 
 --- Build/update the persistent guild roster cache.
@@ -321,14 +356,13 @@ function GBL:BuildRosterCache()
     local guildData = self:GetGuildData()
     if not guildData or not numMembers or numMembers == 0 then return end
     if not guildData.playerRealms then guildData.playerRealms = {} end
-    local localRealm = GetNormalizedRealmName()
-        or (GetRealmName and GetRealmName() and GetRealmName():gsub("%s", ""))
+    local localRealm = self:GetLocalRealm()
     for i = 1, numMembers do
         local fullName = GetGuildRosterInfo(i)
         if fullName then
             local base, realm = fullName:match("^([^%-]+)%-(.+)$")
             if base and realm then
-                guildData.playerRealms[base] = realm
+                guildData.playerRealms[base] = self:NormalizeRealm(realm)
             elseif localRealm then
                 guildData.playerRealms[fullName] = localRealm
             end
@@ -362,7 +396,7 @@ function GBL:MigrateSchemaV2ToV3(guildData)
         if record.player then
             local base, realm = record.player:match("^([^%-]+)%-(.+)$")
             if base and realm then
-                guildData.playerRealms[base] = realm
+                guildData.playerRealms[base] = self:NormalizeRealm(realm)
             end
         end
         if record.scannedBy then
@@ -370,7 +404,7 @@ function GBL:MigrateSchemaV2ToV3(guildData)
             if senderPart then
                 local base, realm = senderPart:match("^([^%-]+)%-(.+)$")
                 if base and realm then
-                    guildData.playerRealms[base] = realm
+                    guildData.playerRealms[base] = self:NormalizeRealm(realm)
                 end
             end
         end
@@ -1083,6 +1117,208 @@ function GBL:MigrateRepairEpochTimestamps(guildData)
     guildData.schemaVersion = 8
 end
 
+--- Schema 8 -> 9: collapse same-realm-qualified peer keys to bare names.
+-- The sync layer originally keyed peers via Ambiguate(name, "none"), which in
+-- production WoW does NOT strip realm. Result: knownPeers and syncState.peers
+-- accumulated multiple entries for the same player ("Rexxybear" vs
+-- "Rexxybear-Tichondrius") whenever AceComm delivered the sender with a
+-- different qualification across messages. This migration walks both tables
+-- and collapses keys whose realm portion equals the local realm; cross-realm
+-- keys (different connected-realm) are preserved so that two characters
+-- sharing a first name across realms stay distinct. Same-realm collisions are
+-- merged by keeping the entry with the highest recency timestamp (lastSeen
+-- for knownPeers, lastSync for the post-sync checkpoint table).
+--
+-- If the local realm cannot be resolved (GetLocalRealm returns the
+-- "UnknownRealm" sentinel because realm APIs are not warm yet) the migration
+-- returns early without bumping schemaVersion, so the next session retries
+-- when realm info is available.
+--
+-- Idempotent: bare keys and cross-realm keys pass through untouched.
+function GBL:MigrateNormalizePeerNames(guildData)
+    if not guildData or (guildData.schemaVersion or 0) >= 9 then return 0 end
+
+    local localRealm = self:GetLocalRealm()
+    if localRealm == "UnknownRealm" then return 0 end
+    local localNormalized = self:NormalizeRealm(localRealm)
+
+    local function normalize(t, recencyField)
+        if type(t) ~= "table" then return 0 end
+        local merged = 0
+        local keys = {}
+        for k in pairs(t) do keys[#keys+1] = k end
+        for _, k in ipairs(keys) do
+            local base, realm = k:match("^([^%-]+)%-(.+)$")
+            if base and realm then
+                local realmNormalized = self:NormalizeRealm(realm)
+                if realm == localRealm or realmNormalized == localNormalized then
+                    local existing = t[base]
+                    local incoming = t[k]
+                    if not existing then
+                        t[base] = incoming
+                    elseif (incoming[recencyField] or 0) > (existing[recencyField] or 0) then
+                        t[base] = incoming
+                    end
+                    t[k] = nil
+                    merged = merged + 1
+                end
+                -- Cross-realm key: leave alone so distinct same-name peers stay distinct.
+            end
+            -- Bare key: pass through.
+        end
+        return merged
+    end
+
+    local mergedKnown = normalize(guildData.knownPeers, "lastSeen")
+    local mergedPersisted = 0
+    if guildData.syncState then
+        mergedPersisted = normalize(guildData.syncState.peers, "lastSync")
+    end
+
+    guildData.schemaVersion = 9
+    return mergedKnown + mergedPersisted
+end
+
+--- Schema 9 -> 10: collapse spaced-realm strings stored from older code paths.
+-- Pre-NormalizeRealm, BuildRosterCache and MigrateSchemaV2ToV3 stored realm
+-- portions raw (e.g. "Aerie Peak") while the local-realm fallback in
+-- ResolvePlayerName always produced normalized form ("AeriePeak"). The
+-- asymmetry let the same player surface as two different record.player values
+-- ("Alice-Aerie Peak" vs "Alice-AeriePeak") and as two playerRealms entries
+-- with the same key but different realm. This migration walks both
+-- guildData.playerRealms and the record.player / record.scannedBy fields,
+-- normalizes any space-bearing realm portion in place, and merges colliding
+-- playerRealms entries by keeping the first encountered value (post-fix the
+-- normalized form should agree).
+-- Idempotent: realm strings without spaces pass through untouched.
+-- @return number Number of strings rewritten across playerRealms + records
+function GBL:MigrateNormalizeStoredRealms(guildData)
+    if not guildData or (guildData.schemaVersion or 0) >= 10 then return 0 end
+
+    local rewrites = 0
+
+    if type(guildData.playerRealms) == "table" then
+        local keys = {}
+        for k in pairs(guildData.playerRealms) do keys[#keys+1] = k end
+        for _, base in ipairs(keys) do
+            local realm = guildData.playerRealms[base]
+            if type(realm) == "string" and realm:find("%s") then
+                guildData.playerRealms[base] = self:NormalizeRealm(realm)
+                rewrites = rewrites + 1
+            end
+        end
+    end
+
+    local function rewriteRecordRealms(records)
+        if type(records) ~= "table" then return end
+        for _, record in ipairs(records) do
+            if type(record.player) == "string" then
+                local base, realm = record.player:match("^([^%-]+)%-(.+)$")
+                if base and realm and realm:find("%s") then
+                    record.player = base .. "-" .. self:NormalizeRealm(realm)
+                    rewrites = rewrites + 1
+                end
+            end
+            if type(record.scannedBy) == "string" then
+                local senderPart = record.scannedBy:match("^sync:(.+)$")
+                if senderPart then
+                    local base, realm = senderPart:match("^([^%-]+)%-(.+)$")
+                    if base and realm and realm:find("%s") then
+                        record.scannedBy = "sync:" .. base .. "-" .. self:NormalizeRealm(realm)
+                        rewrites = rewrites + 1
+                    end
+                end
+            end
+        end
+    end
+
+    rewriteRecordRealms(guildData.transactions)
+    rewriteRecordRealms(guildData.moneyTransactions)
+
+    guildData.schemaVersion = 10
+    return rewrites
+end
+
+--- Schema 10 -> 11: best-effort recovery of peer realms after the v0.30.5
+-- unconditional-strip schema-9 migration ran (which lost the realm portion
+-- of every peer key). Walks bare keys in knownPeers and syncState.peers,
+-- consults the live guild roster, and re-realms keys whose bare name maps
+-- to exactly one roster entry. Cross-realm matches get their realm; same-realm
+-- matches re-canonicalize back to bare via CanonicalPeerKey. Multi-match
+-- (same name on multiple realms in the roster) and no-match (offline /
+-- departed peer) keys are left bare and live with the collision risk.
+--
+-- Same UnknownRealm short-circuit as MigrateNormalizePeerNames. Idempotent:
+-- on a second run the roster lookup either finds the same realm (re-rewrites
+-- to the same key) or is unavailable (key stays put).
+--
+-- Best-effort by design: the lost realm info is unrecoverable for offline
+-- peers and ambiguous for multi-realm name collisions.
+-- @return number Number of keys rewritten across knownPeers + syncState.peers
+function GBL:MigrateRecoverPeerRealms(guildData)
+    if not guildData or (guildData.schemaVersion or 0) >= 11 then return 0 end
+
+    local localRealm = self:GetLocalRealm()
+    if localRealm == "UnknownRealm" then return 0 end
+
+    -- Build bareName -> realm lookup, but only for unambiguous matches.
+    -- A name appearing at two realms in the roster (rare but possible in
+    -- connected-realm guilds) drops out of the lookup so we don't guess.
+    local lookup = {}
+    local ambiguous = {}
+    local numMembers = GetNumGuildMembers and GetNumGuildMembers() or 0
+    for i = 1, numMembers do
+        local fullName = GetGuildRosterInfo(i)
+        if fullName then
+            local base, realm = fullName:match("^([^%-]+)%-(.+)$")
+            if not base then
+                base = fullName
+                realm = localRealm
+            end
+            if not ambiguous[base] then
+                if lookup[base] and lookup[base] ~= realm then
+                    lookup[base] = nil
+                    ambiguous[base] = true
+                else
+                    lookup[base] = realm
+                end
+            end
+        end
+    end
+
+    local rewrites = 0
+    local function recover(t)
+        if type(t) ~= "table" then return end
+        local keys = {}
+        for k in pairs(t) do keys[#keys+1] = k end
+        for _, k in ipairs(keys) do
+            if not k:find("%-") then  -- only consider bare keys
+                local realm = lookup[k]
+                if realm then
+                    local rewritten = self:CanonicalPeerKey(k .. "-" .. realm)
+                    if rewritten ~= k then
+                        if not t[rewritten] then
+                            t[rewritten] = t[k]
+                            t[k] = nil
+                            rewrites = rewrites + 1
+                        end
+                        -- If t[rewritten] already exists, leave both for now;
+                        -- shouldn't happen in practice (we just stripped to bare).
+                    end
+                end
+            end
+        end
+    end
+
+    recover(guildData.knownPeers)
+    if guildData.syncState then
+        recover(guildData.syncState.peers)
+    end
+
+    guildData.schemaVersion = 11
+    return rewrites
+end
+
 --- Run migration for all guild data namespaces.
 function GBL:MigrateAllGuilds()
     if not self.db or not self.db.global or not self.db.global.guilds then return end
@@ -1095,6 +1331,9 @@ function GBL:MigrateAllGuilds()
         self:MigrateAccessControl(guildData)
         self:MigrateRepairEpochTimestamps(guildData)
         self:MigrateSortAccessShape(guildData)
+        self:MigrateNormalizePeerNames(guildData)
+        self:MigrateNormalizeStoredRealms(guildData)
+        self:MigrateRecoverPeerRealms(guildData)
     end
 end
 

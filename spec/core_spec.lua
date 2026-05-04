@@ -115,7 +115,7 @@ describe("Core", function()
         it("status prints version and guild info", function()
             MockWoW.guild.name = "Test Guild"
             GBL:HandleSlashCommand("status")
-            assert.is_true(Helpers.printContains("0.30.4"))
+            assert.is_true(Helpers.printContains("0.30.5"))
             assert.is_true(Helpers.printContains("Test Guild"))
         end)
 
@@ -473,6 +473,450 @@ describe("Core", function()
 
             -- The early pass should have caught the duplicate
             assert.equals(1, #testGuildData.transactions)
+        end)
+    end)
+
+    describe("realm normalization (NormalizeRealm / GetLocalRealm)", function()
+        before_each(function()
+            GBL:OnInitialize()
+            MockWoW.guild.name = "Test Guild"
+            GBL:OnEnable()
+        end)
+
+        it("NormalizeRealm strips internal whitespace", function()
+            assert.equals("AeriePeak", GBL:NormalizeRealm("Aerie Peak"))
+            assert.equals("Area52", GBL:NormalizeRealm("Area 52"))
+        end)
+
+        it("NormalizeRealm passes through already-normalized realms", function()
+            assert.equals("Tichondrius", GBL:NormalizeRealm("Tichondrius"))
+            assert.equals("MalGanis", GBL:NormalizeRealm("MalGanis"))
+        end)
+
+        it("NormalizeRealm handles nil and empty input", function()
+            assert.is_nil(GBL:NormalizeRealm(nil))
+            assert.equals("", GBL:NormalizeRealm(""))
+        end)
+
+        it("GetLocalRealm prefers GetNormalizedRealmName output", function()
+            MockWoW.player.realm = "Aerie Peak"
+            -- Mock derives normalized form by stripping whitespace
+            assert.equals("AeriePeak", GBL:GetLocalRealm())
+        end)
+
+        it("GetLocalRealm falls back to UnknownRealm when both APIs are nil", function()
+            local origN = _G.GetNormalizedRealmName
+            local origR = _G.GetRealmName
+            _G.GetNormalizedRealmName = function() return nil end
+            _G.GetRealmName = function() return nil end
+            local result = GBL:GetLocalRealm()
+            _G.GetNormalizedRealmName = origN
+            _G.GetRealmName = origR
+            assert.equals("UnknownRealm", result)
+        end)
+
+        it("ResolvePlayerName fallback returns Name-NormalizedRealm for spaced realms", function()
+            MockWoW.player.realm = "Aerie Peak"
+            -- No playerRealms entry for Charlie, so ResolvePlayerName falls back
+            local guildData = GBL:GetGuildData()
+            guildData.playerRealms = {}
+            assert.equals("Charlie-AeriePeak", GBL:ResolvePlayerName("Charlie"))
+        end)
+
+        it("BuildRosterCache stores normalized realm for cross-realm members", function()
+            MockWoW.player.realm = "Tichondrius"
+            MockWoW.guildRoster = {
+                { name = "Alice-Aerie Peak", isOnline = true },
+                { name = "Bob", isOnline = true },
+            }
+            GBL:BuildRosterCache()
+
+            local guildData = GBL:GetGuildData()
+            assert.equals("AeriePeak", guildData.playerRealms["Alice"])
+            -- Same-realm member ("Bob" with no hyphen) gets the normalized local realm
+            assert.equals("Tichondrius", guildData.playerRealms["Bob"])
+        end)
+
+        it("BuildRosterCache normalizes spaced local realms for bare-name members", function()
+            MockWoW.player.realm = "Aerie Peak"
+            MockWoW.guildRoster = {
+                { name = "Alice", isOnline = true },
+            }
+            GBL:BuildRosterCache()
+
+            local guildData = GBL:GetGuildData()
+            -- The local-realm fallback path also runs through GetLocalRealm
+            assert.equals("AeriePeak", guildData.playerRealms["Alice"])
+        end)
+
+        it("GetGuildRosterInfo mock returns 14 values including lastLogoff", function()
+            MockWoW.guildRoster = {
+                { name = "Alice", isOnline = true, lastLogoff = 0 },
+                { name = "Bob", isOnline = false, lastLogoff = 86400 },
+            }
+            local _, _, _, _, _, _, _, _, _, _, _, _, _, aliceLastLogoff = GetGuildRosterInfo(1)
+            local _, _, _, _, _, _, _, _, _, _, _, _, _, bobLastLogoff = GetGuildRosterInfo(2)
+            assert.equals(0, aliceLastLogoff)
+            assert.equals(86400, bobLastLogoff)
+        end)
+    end)
+
+    describe("MigrateNormalizeStoredRealms (schema 9 -> 10)", function()
+        local guildData
+        before_each(function()
+            GBL:OnInitialize()
+            MockWoW.guild.name = "Test Guild"
+            GBL:OnEnable()
+            guildData = GBL:GetGuildData()
+        end)
+
+        it("normalizes spaced realm strings in playerRealms", function()
+            guildData.schemaVersion = 9
+            guildData.playerRealms = {
+                ["Alice"] = "Aerie Peak",
+                ["Bob"] = "Area 52",
+                ["Charlie"] = "Tichondrius",
+            }
+
+            local rewrites = GBL:MigrateNormalizeStoredRealms(guildData)
+
+            assert.equals(2, rewrites)
+            assert.equals(10, guildData.schemaVersion)
+            assert.equals("AeriePeak", guildData.playerRealms["Alice"])
+            assert.equals("Area52", guildData.playerRealms["Bob"])
+            assert.equals("Tichondrius", guildData.playerRealms["Charlie"])
+        end)
+
+        it("normalizes record.player realm portion", function()
+            guildData.schemaVersion = 9
+            guildData.transactions = {
+                { player = "Alice-Aerie Peak", type = "deposit", timestamp = 1000 },
+                { player = "Bob-Tichondrius", type = "deposit", timestamp = 1001 },
+            }
+            guildData.moneyTransactions = {
+                { player = "Charlie-Area 52", type = "deposit", timestamp = 1002 },
+            }
+
+            local rewrites = GBL:MigrateNormalizeStoredRealms(guildData)
+
+            assert.equals(2, rewrites)
+            assert.equals("Alice-AeriePeak", guildData.transactions[1].player)
+            assert.equals("Bob-Tichondrius", guildData.transactions[2].player)
+            assert.equals("Charlie-Area52", guildData.moneyTransactions[1].player)
+        end)
+
+        it("normalizes scannedBy sender realm portion", function()
+            guildData.schemaVersion = 9
+            guildData.transactions = {
+                {
+                    player = "Alice-AeriePeak",
+                    scannedBy = "sync:Bob-Aerie Peak",
+                    type = "deposit",
+                    timestamp = 1000,
+                },
+            }
+
+            local rewrites = GBL:MigrateNormalizeStoredRealms(guildData)
+
+            assert.equals(1, rewrites)
+            assert.equals("sync:Bob-AeriePeak", guildData.transactions[1].scannedBy)
+        end)
+
+        it("is idempotent", function()
+            guildData.schemaVersion = 9
+            guildData.playerRealms = { ["Alice"] = "Aerie Peak" }
+
+            local first = GBL:MigrateNormalizeStoredRealms(guildData)
+            local second = GBL:MigrateNormalizeStoredRealms(guildData)
+
+            assert.equals(1, first)
+            assert.equals(0, second)
+            assert.equals(10, guildData.schemaVersion)
+        end)
+
+        it("skips already-migrated guilds (schemaVersion >= 10)", function()
+            guildData.schemaVersion = 10
+            guildData.playerRealms = { ["Alice"] = "Aerie Peak" }
+
+            GBL:MigrateNormalizeStoredRealms(guildData)
+
+            -- Already at schema 10 so the function returns without rewriting
+            assert.equals("Aerie Peak", guildData.playerRealms["Alice"])
+        end)
+
+        it("handles missing playerRealms / transactions gracefully", function()
+            guildData.schemaVersion = 9
+            guildData.playerRealms = nil
+            guildData.transactions = nil
+            guildData.moneyTransactions = nil
+
+            local rewrites = GBL:MigrateNormalizeStoredRealms(guildData)
+
+            assert.equals(0, rewrites)
+            assert.equals(10, guildData.schemaVersion)
+        end)
+    end)
+
+    describe("CanonicalPeerKey", function()
+        before_each(function()
+            GBL:OnInitialize()
+            MockWoW.guild.name = "Test Guild"
+            GBL:OnEnable()
+        end)
+
+        it("strips realm when it matches the local realm", function()
+            MockWoW.player.realm = "TestRealm"
+            assert.equals("Alice", GBL:CanonicalPeerKey("Alice-TestRealm"))
+        end)
+
+        it("preserves cross-realm suffix", function()
+            MockWoW.player.realm = "TestRealm"
+            assert.equals("Alice-OtherRealm", GBL:CanonicalPeerKey("Alice-OtherRealm"))
+        end)
+
+        it("passes bare names through unchanged", function()
+            assert.equals("Alice", GBL:CanonicalPeerKey("Alice"))
+        end)
+
+        it("returns nil and empty input as-is without invoking Ambiguate", function()
+            assert.is_nil(GBL:CanonicalPeerKey(nil))
+            assert.equals("", GBL:CanonicalPeerKey(""))
+        end)
+
+        it("strips spaced same-realm via mock normalization fallback", function()
+            MockWoW.player.realm = "Aerie Peak"
+            -- Sender carries normalized form; mock compares both raw and normalized
+            assert.equals("Alice", GBL:CanonicalPeerKey("Alice-AeriePeak"))
+        end)
+    end)
+
+    describe("MigrateNormalizePeerNames (schema 8 -> 9, realm-aware)", function()
+        local guildData
+        before_each(function()
+            GBL:OnInitialize()
+            MockWoW.guild.name = "Test Guild"
+            GBL:OnEnable()
+            guildData = GBL:GetGuildData()
+            MockWoW.player.realm = "TestRealm"
+        end)
+
+        it("collapses same-realm key to bare and merges by recency", function()
+            guildData.schemaVersion = 8
+            guildData.knownPeers = {
+                ["Rexxybear"] = { version = "0.30.4", txCount = 5, lastSeen = 99000 },
+                ["Rexxybear-TestRealm"] = { version = "0.30.4", txCount = 8, lastSeen = 99500 },
+            }
+
+            local merged = GBL:MigrateNormalizePeerNames(guildData)
+
+            assert.equals(1, merged)
+            assert.equals(9, guildData.schemaVersion)
+            assert.is_nil(guildData.knownPeers["Rexxybear-TestRealm"])
+            assert.equals(99500, guildData.knownPeers["Rexxybear"].lastSeen)
+            assert.equals(8, guildData.knownPeers["Rexxybear"].txCount)
+        end)
+
+        it("preserves cross-realm key untouched", function()
+            guildData.schemaVersion = 8
+            guildData.knownPeers = {
+                ["Otherguy-OtherRealm"] = { version = "0.30.4", txCount = 3, lastSeen = 98000 },
+            }
+
+            local merged = GBL:MigrateNormalizePeerNames(guildData)
+
+            assert.equals(0, merged)
+            assert.equals(9, guildData.schemaVersion)
+            assert.is_not_nil(guildData.knownPeers["Otherguy-OtherRealm"])
+            assert.is_nil(guildData.knownPeers["Otherguy"])
+        end)
+
+        it("mixed: same-realm collapses, cross-realm preserved", function()
+            guildData.schemaVersion = 8
+            guildData.knownPeers = {
+                ["Bob-TestRealm"] = { version = "0.30.4", txCount = 7, lastSeen = 99000 },
+                ["Bob-OtherRealm"] = { version = "0.30.4", txCount = 4, lastSeen = 99000 },
+            }
+
+            GBL:MigrateNormalizePeerNames(guildData)
+
+            assert.is_nil(guildData.knownPeers["Bob-TestRealm"])
+            assert.is_not_nil(guildData.knownPeers["Bob"])
+            assert.is_not_nil(guildData.knownPeers["Bob-OtherRealm"])
+        end)
+
+        it("normalizes guildData.syncState.peers in the same pass", function()
+            guildData.schemaVersion = 8
+            guildData.syncState.peers = {
+                ["Rexxybear-TestRealm"] = { lastSync = 99500, stored = 100 },
+            }
+
+            GBL:MigrateNormalizePeerNames(guildData)
+
+            assert.is_nil(guildData.syncState.peers["Rexxybear-TestRealm"])
+            assert.equals(99500, guildData.syncState.peers["Rexxybear"].lastSync)
+        end)
+
+        it("is idempotent", function()
+            guildData.schemaVersion = 8
+            guildData.knownPeers = {
+                ["Rexxybear-TestRealm"] = { version = "0.30.4", txCount = 8, lastSeen = 99500 },
+            }
+
+            local first = GBL:MigrateNormalizePeerNames(guildData)
+            local second = GBL:MigrateNormalizePeerNames(guildData)
+
+            assert.equals(1, first)
+            assert.equals(0, second)
+            assert.equals(9, guildData.schemaVersion)
+        end)
+
+        it("skips already-migrated guilds (schemaVersion >= 9)", function()
+            guildData.schemaVersion = 9
+            guildData.knownPeers = {
+                ["Stale-TestRealm"] = { version = "0.20.0", txCount = 1, lastSeen = 1 },
+            }
+
+            GBL:MigrateNormalizePeerNames(guildData)
+
+            assert.is_not_nil(guildData.knownPeers["Stale-TestRealm"])
+        end)
+
+        it("returns early when local realm is unknown (cold APIs)", function()
+            guildData.schemaVersion = 8
+            guildData.knownPeers = {
+                ["Rexxybear-TestRealm"] = { version = "0.30.4", txCount = 8, lastSeen = 99500 },
+            }
+            local origN, origR = _G.GetNormalizedRealmName, _G.GetRealmName
+            _G.GetNormalizedRealmName = function() return nil end
+            _G.GetRealmName = function() return nil end
+
+            local merged = GBL:MigrateNormalizePeerNames(guildData)
+
+            _G.GetNormalizedRealmName, _G.GetRealmName = origN, origR
+
+            assert.equals(0, merged)
+            assert.equals(8, guildData.schemaVersion)
+            -- Realm-qualified key untouched; next session (warm APIs) retries
+            assert.is_not_nil(guildData.knownPeers["Rexxybear-TestRealm"])
+        end)
+    end)
+
+    describe("MigrateRecoverPeerRealms (schema 10 -> 11)", function()
+        local guildData
+        before_each(function()
+            GBL:OnInitialize()
+            MockWoW.guild.name = "Test Guild"
+            GBL:OnEnable()
+            guildData = GBL:GetGuildData()
+            MockWoW.player.realm = "TestRealm"
+        end)
+
+        it("bare key matching one same-realm roster entry stays bare", function()
+            guildData.schemaVersion = 10
+            guildData.knownPeers = { ["Alice"] = { lastSeen = 1000 } }
+            MockWoW.guildRoster = {
+                { name = "Alice", isOnline = true },  -- bare = same-realm
+            }
+
+            GBL:MigrateRecoverPeerRealms(guildData)
+
+            assert.is_not_nil(guildData.knownPeers["Alice"])
+            assert.is_nil(guildData.knownPeers["Alice-TestRealm"])
+            assert.equals(11, guildData.schemaVersion)
+        end)
+
+        it("bare key matching one cross-realm roster entry gets re-realmed", function()
+            guildData.schemaVersion = 10
+            guildData.knownPeers = { ["Alice"] = { lastSeen = 1000 } }
+            MockWoW.guildRoster = {
+                { name = "Alice-OtherRealm", isOnline = true },
+            }
+
+            GBL:MigrateRecoverPeerRealms(guildData)
+
+            assert.is_nil(guildData.knownPeers["Alice"])
+            assert.is_not_nil(guildData.knownPeers["Alice-OtherRealm"])
+            assert.equals(11, guildData.schemaVersion)
+        end)
+
+        it("bare key matching multiple roster entries (different realms) stays bare", function()
+            guildData.schemaVersion = 10
+            guildData.knownPeers = { ["Alice"] = { lastSeen = 1000 } }
+            MockWoW.guildRoster = {
+                { name = "Alice", isOnline = true },           -- local realm
+                { name = "Alice-OtherRealm", isOnline = true }, -- cross-realm
+            }
+
+            GBL:MigrateRecoverPeerRealms(guildData)
+
+            -- Ambiguous: stays bare, no rewrite
+            assert.is_not_nil(guildData.knownPeers["Alice"])
+            assert.is_nil(guildData.knownPeers["Alice-OtherRealm"])
+            assert.equals(11, guildData.schemaVersion)
+        end)
+
+        it("bare key with no roster match stays bare (offline / departed)", function()
+            guildData.schemaVersion = 10
+            guildData.knownPeers = { ["Ghost"] = { lastSeen = 1000 } }
+            MockWoW.guildRoster = {
+                { name = "Alice", isOnline = true },
+            }
+
+            GBL:MigrateRecoverPeerRealms(guildData)
+
+            assert.is_not_nil(guildData.knownPeers["Ghost"])
+            assert.equals(11, guildData.schemaVersion)
+        end)
+
+        it("returns early when local realm is unknown (cold APIs)", function()
+            guildData.schemaVersion = 10
+            guildData.knownPeers = { ["Alice"] = { lastSeen = 1000 } }
+            MockWoW.guildRoster = {
+                { name = "Alice-OtherRealm", isOnline = true },
+            }
+            local origN, origR = _G.GetNormalizedRealmName, _G.GetRealmName
+            _G.GetNormalizedRealmName = function() return nil end
+            _G.GetRealmName = function() return nil end
+
+            local rewrites = GBL:MigrateRecoverPeerRealms(guildData)
+
+            _G.GetNormalizedRealmName, _G.GetRealmName = origN, origR
+
+            assert.equals(0, rewrites)
+            assert.equals(10, guildData.schemaVersion)
+            assert.is_not_nil(guildData.knownPeers["Alice"])
+        end)
+
+        it("is idempotent (second run produces no rewrites)", function()
+            guildData.schemaVersion = 10
+            guildData.knownPeers = { ["Alice"] = { lastSeen = 1000 } }
+            MockWoW.guildRoster = {
+                { name = "Alice-OtherRealm", isOnline = true },
+            }
+
+            local first = GBL:MigrateRecoverPeerRealms(guildData)
+            -- Reset schemaVersion so the migration's guard doesn't short-circuit
+            -- the second invocation; we want to verify the migration logic
+            -- itself doesn't double-rewrite.
+            guildData.schemaVersion = 10
+            local second = GBL:MigrateRecoverPeerRealms(guildData)
+
+            assert.equals(1, first)
+            assert.equals(0, second)
+            assert.is_not_nil(guildData.knownPeers["Alice-OtherRealm"])
+        end)
+
+        it("recovers entries in guildData.syncState.peers too", function()
+            guildData.schemaVersion = 10
+            guildData.syncState.peers = { ["Alice"] = { lastSync = 99000 } }
+            MockWoW.guildRoster = {
+                { name = "Alice-OtherRealm", isOnline = true },
+            }
+
+            GBL:MigrateRecoverPeerRealms(guildData)
+
+            assert.is_nil(guildData.syncState.peers["Alice"])
+            assert.is_not_nil(guildData.syncState.peers["Alice-OtherRealm"])
         end)
     end)
 end)

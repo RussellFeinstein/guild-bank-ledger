@@ -189,7 +189,12 @@ end
 
 -- Track names we're actively whispering via sync, so the system message
 -- filter can distinguish addon-caused errors from user-caused errors.
-local recentWhisperTargets = {}  -- stripped_name → GetServerTime()
+-- Keyed by StripRealm output, NOT CanonicalPeerKey: a "no player named X"
+-- system message arrives bare and we want the suppression window to cover
+-- all qualifications of that name (same name on either realm both share
+-- the suppression). Bare-name semantics is intentional here; for peer
+-- identity use CanonicalPeerKey.
+local recentWhisperTargets = {}  -- stripped_name -> GetServerTime()
 
 -- Expose for testing
 GBL._recentWhisperTargets = recentWhisperTargets
@@ -493,7 +498,7 @@ end
 function GBL:HandleManifest(sender, data)
     if not data.buckets then return end
 
-    local clean = Ambiguate(sender, "none")
+    local clean = self:CanonicalPeerKey(sender)
     syncState.peerManifests[clean] = {
         buckets = data.buckets,
         txCount = data.txCount or 0,
@@ -559,9 +564,19 @@ end
 function GBL:OnSyncMessage(_prefix, message, distribution, sender)
     if not self.db.profile.sync.enabled then return end
 
-    -- Ignore our own messages (Ambiguate handles realm-qualified names in retail)
+    -- Ignore our own messages. AceComm passes sender as "Name-Realm" in retail
+    -- when cross-realm, "Name" or "Name-Realm" inconsistently for same-realm.
+    -- CanonicalPeerKey wraps Ambiguate("guild") which strips realm only when
+    -- it matches the local realm, so own broadcasts always reduce to the bare
+    -- name returned by UnitName("player"). For peer-identity keying elsewhere
+    -- in this file always use CanonicalPeerKey, never raw StripRealm: the
+    -- latter would silently collapse cross-realm same-name peers in connected
+    -- realm guilds. Historical note: pre-v0.30.5 this site used Ambiguate(_,
+    -- "none") which is identity in retail (peer-list bloat); v0.30.5 switched
+    -- to StripRealm (cross-realm collision risk); the v0.30.5 follow-up
+    -- landed CanonicalPeerKey.
     local myName = UnitName("player")
-    if Ambiguate(sender, "none") == myName then return end
+    if self:CanonicalPeerKey(sender) == myName then return end
 
     local decompressed = decompressMessage(message)
     if not decompressed then return end
@@ -581,7 +596,7 @@ function GBL:OnSyncMessage(_prefix, message, distribution, sender)
     -- so they appear in the Online Peers UI as "outdated (no sync)".
     if data.protocolVersion and data.protocolVersion ~= PROTOCOL_VERSION then
         if msgType == "HELLO" then
-            local cleanSender = Ambiguate(sender, "none")
+            local cleanSender = self:CanonicalPeerKey(sender)
             local peerVer = data.version or "?"
             local relation = "peer_behind"
             if peerVer ~= "?" and self:CompareSemver(self.version, peerVer) < 0 then
@@ -612,7 +627,7 @@ function GBL:OnSyncMessage(_prefix, message, distribution, sender)
 
     -- Track peer liveness from ANY valid message, not just HELLO.
     -- Ensures peers appear in the online list even if their HELLO was missed.
-    local cleanSender = Ambiguate(sender, "none")
+    local cleanSender = self:CanonicalPeerKey(sender)
     if syncState.peers[cleanSender] then
         syncState.peers[cleanSender].lastSeen = GetServerTime()
     elseif msgType ~= "HELLO" then
@@ -686,7 +701,7 @@ function GBL:HandleHello(sender, data)
     -- Hash-gated: only reply when our data changed since we last told this peer,
     -- or on first contact. Suppresses O(N²) reply traffic in large guilds.
     if not data.isReply then
-        local cleanSenderReply = Ambiguate(sender, "none")
+        local cleanSenderReply = self:CanonicalPeerKey(sender)
         local gd = self:GetGuildData()
         local currentHash = gd and self:GetDataHash(gd) or 0
         local lastHash = syncState.lastHelloReplyHash[cleanSenderReply]
@@ -705,7 +720,7 @@ function GBL:HandleHello(sender, data)
 
     -- Exact version match — refuse sync on any version difference
     if data.version and data.version ~= self.version then
-        local cleanSender = Ambiguate(sender, "none")
+        local cleanSender = self:CanonicalPeerKey(sender)
         if syncState.peers[cleanSender] then
             syncState.peers[cleanSender].outdated = true
             local cmp = self:CompareSemver(self.version, data.version)
@@ -811,7 +826,10 @@ end
 -- Payload helpers
 ------------------------------------------------------------------------
 
--- baseName is now GBL:StripRealm() in Core.lua — used at call sites below
+-- For peer identity, all sites below call GBL:CanonicalPeerKey (Core.lua),
+-- which wraps Ambiguate("guild"): bare for same-realm, realm-qualified for
+-- cross-realm. GBL:StripRealm is reserved for genuine bare-name use cases
+-- (recentWhisperTargets chat-suppression; see comment near its declaration).
 
 --- Strip reconstructable fields from a transaction record for sync.
 -- Removes itemLink (large, reconstructable from itemID) to reduce payload.
@@ -915,7 +933,7 @@ function GBL:RequestSync(target, sinceTimestamp)
     if syncState.receiving then return end
 
     syncState.receiving = true
-    syncState.receiveSource = target
+    syncState.receiveSource = self:CanonicalPeerKey(target)
     syncState.receiveGot = 0
     syncState.receiveStored = 0
     syncState.receiveDuped = 0
@@ -1095,7 +1113,7 @@ function GBL:HandleSyncRequest(sender, data)
     end
 
     syncState.sending = true
-    syncState.sendTarget = sender
+    syncState.sendTarget = self:CanonicalPeerKey(sender)
     syncState.sendChunks = chunks
     syncState.sendChunkIndex = 0
     syncState.sendStartTime = GetServerTime()
@@ -1536,7 +1554,7 @@ function GBL:FinishSending()
 
     -- Bidirectional check: after sending, do we need data from this peer?
     -- Brief delay to let the peer process our data (their FinishReceiving).
-    local cleanTarget = Ambiguate(target, "none")
+    local cleanTarget = self:CanonicalPeerKey(target)
     if self.db.profile.sync.autoSync then
         C_Timer.After(0.5, function()
             if syncState.receiving then return end
@@ -1636,7 +1654,7 @@ function GBL:HandleSyncData(sender, data)
         -- Unexpected but valid data — start receiving
         if not data.transactions and not data.moneyTransactions then return end
         syncState.receiving = true
-        syncState.receiveSource = sender
+        syncState.receiveSource = self:CanonicalPeerKey(sender)
         syncState.receiveGot = 0
         syncState.receiveStored = 0
         if data.chunk and data.chunk > 1 then
@@ -1644,7 +1662,7 @@ function GBL:HandleSyncData(sender, data)
                 .. " from " .. sender
                 .. " (prior abort signal likely missed)")
         end
-    elseif self:StripRealm(sender) ~= self:StripRealm(syncState.receiveSource) then
+    elseif self:CanonicalPeerKey(sender) ~= self:CanonicalPeerKey(syncState.receiveSource) then
         -- Reject data from a different sender during active receive
         self:AddAuditEntry("Ignored SYNC_DATA from " .. sender
             .. " (receiving from " .. (syncState.receiveSource or "?") .. ")")
@@ -1806,7 +1824,8 @@ end
 -- @param sender string Sender name
 -- @param data table Deserialized ACK payload
 function GBL:HandleAck(sender, data)
-    if not syncState.sending or self:StripRealm(sender) ~= self:StripRealm(syncState.sendTarget) then return end
+    if not syncState.sending then return end
+    if self:CanonicalPeerKey(sender) ~= self:CanonicalPeerKey(syncState.sendTarget) then return end
 
     local ackedChunk = data and data.chunk or syncState.sendChunkIndex
     -- Discard stale ACKs from retried chunks to prevent orphaning active timers
@@ -1862,7 +1881,7 @@ function GBL:FinishReceiving(sender)
         -- everything on the next sync after a partial failure.
         guildData.syncState.lastSyncTimestamp = GetServerTime()
 
-        guildData.syncState.peers[Ambiguate(sender, "none")] = {
+        guildData.syncState.peers[self:CanonicalPeerKey(sender)] = {
             lastSync = GetServerTime(),
             stored = totalStored,
         }
@@ -1988,7 +2007,7 @@ end
 -- @param sender string Peer name
 -- @param data table HELLO payload
 function GBL:UpdatePeer(sender, data)
-    local clean = Ambiguate(sender, "none")
+    local clean = self:CanonicalPeerKey(sender)
     syncState.peers[clean] = {
         version = data.version,
         txCount = data.txCount or 0,
@@ -2016,7 +2035,7 @@ end
 -- and processed after the current sync completes.
 -- @param name string Peer character name
 function GBL:AddPendingPeer(name)
-    local clean = Ambiguate(name, "none")
+    local clean = self:CanonicalPeerKey(name)
     if syncState.pendingPeers[clean] then return end
     if syncState.pendingPeersCount >= MAX_PENDING_PEERS then return end
 
@@ -2043,7 +2062,7 @@ end
 --- Remove a peer from the pending sync queue.
 -- @param name string Peer character name
 function GBL:RemovePendingPeer(name)
-    local clean = Ambiguate(name, "none")
+    local clean = self:CanonicalPeerKey(name)
     if syncState.pendingPeers[clean] then
         syncState.pendingPeers[clean] = nil
         syncState.pendingPeersCount = syncState.pendingPeersCount - 1
@@ -2196,19 +2215,19 @@ function GBL:AddAuditEntry(message, chatOnly)
 end
 
 --- Check if a guild member is currently online via the guild roster.
+-- Compares names via CanonicalPeerKey on both the parameter and each roster
+-- fullName, so connected-realm same-name members stay distinct (a query for
+-- "Alice-OtherRealm" does not match the local-realm "Alice").
 -- @param name string Character name (bare or realm-qualified)
 -- @return boolean|nil true if online, false if offline, nil if not found
 function GBL:IsGuildMemberOnline(name)
-    local target = self:StripRealm(name)
+    local target = self:CanonicalPeerKey(name)
     local numMembers = GetNumGuildMembers()
     if not numMembers or numMembers == 0 then return nil end
     for i = 1, numMembers do
         local fullName, _, _, _, _, _, _, _, isOnline = GetGuildRosterInfo(i)
-        if fullName then
-            local base = self:StripRealm(fullName)
-            if base == target then
-                return isOnline
-            end
+        if fullName and self:CanonicalPeerKey(fullName) == target then
+            return isOnline
         end
     end
     return nil  -- not found in roster
@@ -2471,7 +2490,7 @@ end
 -- @param sender string Sender name
 -- @param data table Deserialized NACK payload
 function GBL:HandleNack(sender, data)
-    if not syncState.sending or self:StripRealm(sender) ~= self:StripRealm(syncState.sendTarget) then
+    if not syncState.sending or self:CanonicalPeerKey(sender) ~= self:CanonicalPeerKey(syncState.sendTarget) then
         return
     end
 
@@ -2520,13 +2539,13 @@ end
 -- @param sender string Peer who is busy
 -- @param data table Deserialized BUSY payload (unused, reserved)
 function GBL:HandleBusy(sender, data) -- luacheck: ignore 212/data
-    local cleanSender = Ambiguate(sender, "none")
+    local cleanSender = self:CanonicalPeerKey(sender)
     self:AddAuditEntry("Received BUSY from " .. cleanSender)
 
     -- Clear receiving state if we're waiting for this peer (even with partial data).
     -- Already-stored records are safe; next sync uses bucket hashes to avoid re-sending.
     if syncState.receiving
-        and self:StripRealm(sender) == self:StripRealm(syncState.receiveSource) then
+        and self:CanonicalPeerKey(sender) == self:CanonicalPeerKey(syncState.receiveSource) then
         if syncState.receiveTimer then
             syncState.receiveTimer:Cancel()
             syncState.receiveTimer = nil
@@ -2548,7 +2567,7 @@ function GBL:HandleBusy(sender, data) -- luacheck: ignore 212/data
     -- Also abort sending if BUSY came from our send target
     -- (partner entered combat or became busy while we were sending to them)
     if syncState.sending
-        and self:StripRealm(sender) == self:StripRealm(syncState.sendTarget) then
+        and self:CanonicalPeerKey(sender) == self:CanonicalPeerKey(syncState.sendTarget) then
         -- v0.28.7: tag outcome on the chunk that was in flight when BUSY arrived
         local busyIdx = syncState.sendChunkIndex
         if busyIdx and syncState.chunkOutcomes and syncState.chunkOutcomes[busyIdx]
