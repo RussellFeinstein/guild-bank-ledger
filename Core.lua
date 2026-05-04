@@ -268,32 +268,29 @@ end
 ------------------------------------------------------------------------
 
 --- Resolve a bare player name to Name-Realm format.
--- Priority: already-qualified → roster cache → local realm fallback.
+-- Priority: already-qualified → explicit playerRealms arg → current guild's
+-- roster cache → local realm fallback. The cross-guild fallback that used
+-- to iterate self.db.global.guilds was removed: bare names from a different
+-- guild's roster could resolve to a wrong realm for users who'd been in
+-- multiple guilds. Migrations pass the per-guild table explicitly via the
+-- playerRealms arg so they remain correct.
 -- @param name string Bare or already-qualified name
--- @param playerRealms table|nil Optional realm lookup table (used by migration
---   when GetGuildData() is unavailable because guild info hasn't loaded yet)
+-- @param playerRealms table|nil Optional per-guild realm lookup (migration path)
 -- @return string Name-Realm format
 function GBL:ResolvePlayerName(name, playerRealms)
     if not name or name == "" then return name end
     -- Already has realm suffix
     if name:find("%-") then return name end
     -- Check provided playerRealms table first (migration path)
-    if playerRealms and playerRealms[name] then
+    if playerRealms and type(playerRealms[name]) == "string" then
         return name .. "-" .. playerRealms[name]
     end
     -- Check persistent roster cache via GetGuildData
     -- (may return nil during early login before guild info loads)
     local guildData = self:GetGuildData()
-    if guildData and guildData.playerRealms and guildData.playerRealms[name] then
+    if guildData and guildData.playerRealms
+       and type(guildData.playerRealms[name]) == "string" then
         return name .. "-" .. guildData.playerRealms[name]
-    end
-    -- Search all guilds' playerRealms as last resort before local realm fallback
-    if self.db and self.db.global and self.db.global.guilds then
-        for _, gd in pairs(self.db.global.guilds) do
-            if gd.playerRealms and gd.playerRealms[name] then
-                return name .. "-" .. gd.playerRealms[name]
-            end
-        end
     end
     -- Fallback: append local realm (always normalized via GetLocalRealm)
     return name .. "-" .. self:GetLocalRealm()
@@ -333,21 +330,13 @@ function GBL:GetLocalRealm()
     return realm or "UnknownRealm"
 end
 
---- Canonicalize a sender / target name for peer identity keying.
--- Uses Ambiguate("guild"): strips realm only when it matches the local
--- realm. Cross-realm names (different connected-realm) keep their realm
--- suffix, preserving identity for connected-realm guilds where two
--- characters can share a first name across realms.
--- For genuine bare-name semantics (recentWhisperTargets chat-suppression)
--- use StripRealm directly, not this helper.
--- @param name string|nil Sender / target name in any qualification
--- @return string|nil Canonical peer key (input unchanged for nil/empty)
 --- True when the given realm string matches the local realm (raw or normalized).
 -- Used by CanonicalPeerKey to decide whether to strip the realm suffix. We
--- can't delegate this to Ambiguate("guild") because retail's Ambiguate strips
--- realm for ALL guildmates of a connected-realm group, collapsing distinct
--- same-name characters across realms; this helper restricts stripping to the
--- local realm only, preserving cross-realm distinguishability.
+-- intentionally do NOT delegate to Ambiguate("guild") because retail's
+-- Ambiguate strips realm for ALL guildmates of a connected-realm group,
+-- which would collapse distinct same-name characters across connected realms
+-- into one peer key. Custom local-realm-only logic preserves cross-realm
+-- distinguishability.
 -- @param realm string|nil Realm portion of a Name-Realm pair
 -- @return boolean true if realm == local realm (raw or normalized)
 function GBL:_isLocalRealm(realm)
@@ -360,6 +349,21 @@ function GBL:_isLocalRealm(realm)
     return self:NormalizeRealm(realm) == self:NormalizeRealm(localRealm)
 end
 
+--- Canonicalize a sender / target name for peer identity keying.
+-- Strip rules (custom; do NOT delegate to Ambiguate):
+--   * Qualified Name-Realm: strip when realm equals the local realm
+--     (raw-or-normalized), preserve as-is otherwise. Cross-realm guildmates
+--     in connected-realm groups keep their realm suffix so two distinct
+--     same-name characters across realms stay distinct.
+--   * Bare name: re-realm via guildData.playerRealms (built by
+--     BuildRosterCache, persisted across sessions) when the bare name maps
+--     to a unique realm. Bare names with no roster entry, or with the `false`
+--     ambiguity sentinel (multiple roster realms share the bare name), pass
+--     through unchanged — guessing the wrong realm would silently misroute.
+-- For genuine bare-name semantics (recentWhisperTargets chat-suppression,
+-- UI filter inputs) use GBL:StripRealm directly, not this helper.
+-- @param name string|nil Sender / target name in any qualification
+-- @return string|nil Canonical peer key (input unchanged for nil / empty / no-mapping)
 function GBL:CanonicalPeerKey(name)
     if not name or name == "" then return name end
     if name:find("-", 1, true) then
@@ -376,11 +380,16 @@ function GBL:CanonicalPeerKey(name)
     -- distinctly from the same character's qualified arrivals.
     local guildData = self:GetGuildData()
     local realm = guildData and guildData.playerRealms and guildData.playerRealms[name]
-    -- Defensive: reject corrupt realms (hyphen-bearing strings from a
-    -- long-since-fixed code path; retail realms never contain hyphens). Falls
-    -- through to bare passthrough, which is the safe default.
-    -- RepairCorruptedPlayerRealms cleans these up at the next BuildRosterCache.
-    if realm and not realm:find("-", 1, true) then
+    -- Three defensive guards in one condition:
+    --   1. type(realm) == "string" — rejects the `false` ambiguity sentinel
+    --      (set by BuildRosterCache when a bare name maps to multiple realms
+    --      in the roster) and skips re-realming, so ambiguous bare arrivals
+    --      stay bare instead of being misrouted to the last-write-wins realm.
+    --   2. realm ~= "" — rejects empty strings (defensive; shouldn't happen).
+    --   3. not realm:find("-") — rejects corrupt hyphen-bearing realm strings
+    --      from a long-fixed code path; retail realms never contain hyphens.
+    --      RepairCorruptedPlayerRealms cleans these up at next BuildRosterCache.
+    if type(realm) == "string" and realm ~= "" and not realm:find("-", 1, true) then
         if self:_isLocalRealm(realm) then return name end
         return name .. "-" .. realm
     end
@@ -420,6 +429,11 @@ end
 --- Build/update the persistent guild roster cache.
 -- Maps bare player names to their realm, persisted in SavedVariables.
 -- Called on GUILD_ROSTER_UPDATE so the mapping survives guild departures.
+-- Two-pass design: collect distinct realms per bare name first, then write.
+-- A bare name appearing at two or more realms in the roster (rare but
+-- possible in connected-realm guilds) is marked with the `false` sentinel
+-- so CanonicalPeerKey skips re-realming and keeps the bare arrival bare —
+-- guessing the wrong realm would silently misroute peer state.
 function GBL:BuildRosterCache()
     if not self.db then return end
     local numMembers = GetNumGuildMembers()
@@ -427,18 +441,45 @@ function GBL:BuildRosterCache()
     if not guildData or not numMembers or numMembers == 0 then return end
     if not guildData.playerRealms then guildData.playerRealms = {} end
     -- Repair any corrupt realm strings before adding fresh roster entries so
-    -- offline/departed peers don't carry corruption forward.
+    -- offline/departed peers don't carry corruption forward. (Also leaves
+    -- the `false` ambiguity sentinel untouched — it's not a string.)
     self:RepairCorruptedPlayerRealms(guildData.playerRealms)
     local localRealm = self:GetLocalRealm()
+
+    -- Pass 1: collect distinct realms per bare name from the current roster
+    local seen = {}  -- base -> { realm1, realm2, ... } (deduped)
     for i = 1, numMembers do
         local fullName = GetGuildRosterInfo(i)
         if fullName then
             local base, realm = fullName:match("^([^%-]+)%-(.+)$")
-            if base and realm then
-                guildData.playerRealms[base] = self:NormalizeRealm(realm)
-            elseif localRealm then
-                guildData.playerRealms[fullName] = localRealm
+            if not (base and realm) then
+                base = fullName
+                realm = localRealm
             end
+            if base and realm and realm ~= "" then
+                local normalized = self:NormalizeRealm(realm)
+                local list = seen[base]
+                if not list then
+                    seen[base] = { normalized }
+                else
+                    local already = false
+                    for _, r in ipairs(list) do
+                        if r == normalized then already = true; break end
+                    end
+                    if not already then
+                        list[#list+1] = normalized
+                    end
+                end
+            end
+        end
+    end
+
+    -- Pass 2: unique → string realm; ambiguous → `false` sentinel
+    for base, realms in pairs(seen) do
+        if #realms == 1 then
+            guildData.playerRealms[base] = realms[1]
+        else
+            guildData.playerRealms[base] = false
         end
     end
 end

@@ -778,8 +778,9 @@ describe("Core", function()
 
         it("collapses a bare name with a same-realm playerRealms entry", function()
             guildData.playerRealms = { ["Bob"] = "TestRealm" }
-            -- Roster says Bob is local-realm; helper re-realms then Ambiguate("guild")
-            -- collapses back to bare. Net: bare in, bare out (canonical for same-realm).
+            -- Roster says Bob is local-realm; the bare-name path checks
+            -- _isLocalRealm("TestRealm") and returns the bare name. Net: bare
+            -- in, bare out (canonical for same-realm).
             assert.equals("Bob", GBL:CanonicalPeerKey("Bob"))
         end)
 
@@ -795,9 +796,9 @@ describe("Core", function()
 
         it("qualified name path is unaffected by playerRealms", function()
             guildData.playerRealms = { ["Katorriwl"] = "Stormrage" }
-            -- Cross-realm qualified arrival: Ambiguate("guild") preserves
+            -- Cross-realm qualified arrival: _isLocalRealm("Stormrage") false → preserve
             assert.equals("Katorriwl-Stormrage", GBL:CanonicalPeerKey("Katorriwl-Stormrage"))
-            -- Same-realm qualified arrival: Ambiguate("guild") strips
+            -- Same-realm qualified arrival: _isLocalRealm("TestRealm") true → strip
             assert.equals("Alice", GBL:CanonicalPeerKey("Alice-TestRealm"))
         end)
 
@@ -891,6 +892,132 @@ describe("Core", function()
             assert.equals("Stormrage", guildData.playerRealms["Katorriwl"])
             -- Fresh entry added from the roster
             assert.equals("Stormrage", guildData.playerRealms["Alice"])
+        end)
+    end)
+
+    describe("ResolvePlayerName cross-guild isolation", function()
+        before_each(function()
+            GBL:OnInitialize()
+            MockWoW.guild.name = "Test Guild"
+            GBL:OnEnable()
+            MockWoW.player.realm = "TestRealm"
+        end)
+
+        it("does NOT resolve a bare name via another guild's playerRealms", function()
+            -- Setup: current guild's playerRealms is empty; a different guild
+            -- key in the DB has Alice mapped to a foreign realm. Old behavior
+            -- iterated all guilds and returned "Alice-OtherRealm". New
+            -- behavior falls through to local-realm only.
+            local current = GBL:GetGuildData()
+            current.playerRealms = {}
+            GBL.db.global.guilds["Other Guild"] = {
+                playerRealms = { ["Alice"] = "OtherRealm" },
+            }
+
+            assert.equals("Alice-TestRealm", GBL:ResolvePlayerName("Alice"))
+        end)
+
+        it("explicit playerRealms argument still wins over current-guild lookup", function()
+            -- Migration path passes its own per-guild table. Regression cover
+            -- so we don't accidentally lose the priority ordering.
+            local current = GBL:GetGuildData()
+            current.playerRealms = { ["Alice"] = "CurrentRealm" }
+            local migrationPr = { ["Alice"] = "MigrationRealm" }
+
+            assert.equals("Alice-MigrationRealm",
+                GBL:ResolvePlayerName("Alice", migrationPr))
+        end)
+
+        it("rejects the false ambiguity sentinel and falls back to local realm", function()
+            -- BuildRosterCache writes `false` for bare names with multiple
+            -- realm matches. ResolvePlayerName must not produce "Alice-false";
+            -- the type check skips the entry and falls through to local.
+            local current = GBL:GetGuildData()
+            current.playerRealms = { ["Alice"] = false }
+
+            assert.equals("Alice-TestRealm", GBL:ResolvePlayerName("Alice"))
+        end)
+    end)
+
+    describe("BuildRosterCache ambiguity tracking", function()
+        before_each(function()
+            GBL:OnInitialize()
+            MockWoW.guild.name = "Test Guild"
+            GBL:OnEnable()
+            MockWoW.player.realm = "Tichondrius"
+        end)
+
+        it("marks a bare name with multiple distinct realms as `false`", function()
+            MockWoW.guildRoster = {
+                { name = "Alice-Stormrage", isOnline = true },
+                { name = "Alice-Area52", isOnline = true },
+            }
+            GBL:BuildRosterCache()
+
+            local guildData = GBL:GetGuildData()
+            assert.equals(false, guildData.playerRealms["Alice"])
+        end)
+
+        it("keeps a unique bare-name mapping as a string realm", function()
+            MockWoW.guildRoster = {
+                { name = "Katorriwl-Stormrage", isOnline = true },
+            }
+            GBL:BuildRosterCache()
+
+            local guildData = GBL:GetGuildData()
+            assert.equals("Stormrage", guildData.playerRealms["Katorriwl"])
+        end)
+
+        it("treats duplicate roster entries on same realm as unique", function()
+            -- Same character listed twice (rare API quirk) shouldn't trigger
+            -- the ambiguity sentinel — only DIFFERENT realms do.
+            MockWoW.guildRoster = {
+                { name = "Bob-Stormrage", isOnline = true },
+                { name = "Bob-Stormrage", isOnline = false },
+            }
+            GBL:BuildRosterCache()
+
+            local guildData = GBL:GetGuildData()
+            assert.equals("Stormrage", guildData.playerRealms["Bob"])
+        end)
+
+        it("is idempotent: re-running on same ambiguous roster preserves false", function()
+            MockWoW.guildRoster = {
+                { name = "Alice-Stormrage", isOnline = true },
+                { name = "Alice-Area52", isOnline = true },
+            }
+            GBL:BuildRosterCache()
+            GBL:BuildRosterCache()
+
+            local guildData = GBL:GetGuildData()
+            assert.equals(false, guildData.playerRealms["Alice"])
+        end)
+    end)
+
+    describe("CanonicalPeerKey under ambiguous bare lookup", function()
+        local guildData
+        before_each(function()
+            GBL:OnInitialize()
+            MockWoW.guild.name = "Test Guild"
+            GBL:OnEnable()
+            guildData = GBL:GetGuildData()
+            MockWoW.player.realm = "Tichondrius"
+        end)
+
+        it("bare arrival with `false` sentinel passes through unchanged", function()
+            guildData.playerRealms = { ["Alice"] = false }
+            -- We can't safely guess which Alice this is, so leave it bare.
+            assert.equals("Alice", GBL:CanonicalPeerKey("Alice"))
+        end)
+
+        it("two qualified same-name peers stay distinct under the sentinel", function()
+            -- The qualified path doesn't consult playerRealms; ambiguity
+            -- only affects the bare-name fallback. Both forms preserved.
+            guildData.playerRealms = { ["Alice"] = false }
+            assert.equals("Alice-Stormrage",
+                GBL:CanonicalPeerKey("Alice-Stormrage"))
+            assert.equals("Alice-Area52",
+                GBL:CanonicalPeerKey("Alice-Area52"))
         end)
     end)
 

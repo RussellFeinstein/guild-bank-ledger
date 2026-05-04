@@ -122,6 +122,27 @@ See **Branch lifecycle: frozen vs long-lived** in `~/.claude/CLAUDE.md` for the 
 - `C_ChatInfo.SendAddonMessage` via `AceComm:SendCommMessage` does not return a useful delivery status — reliability is observed only via ACK/NACK/timeout at the protocol layer. Do not branch on its return value.
 - AceComm's progress callback fires per CTL piece; only `sent == totalBytes` indicates "handed to the wire," and only then should the ACK timer start. This is the v0.23.0 contract codified in `SendNextChunk`.
 
+### Name forms quick reference
+
+GBL handles three distinct name forms. Mixing them is a collision risk; each has a dedicated producer and a fixed set of consumers:
+
+| Form | Example | Where it lives | Producer |
+|---|---|---|---|
+| Qualified `Name-Realm` | `Katorriwl-Stormrage` | `record.player`, `record.scannedBy` (after the `sync:` prefix), all migrations | `GBL:ResolvePlayerName` |
+| Canonical peer key | bare for same-realm, qualified for cross-realm | keys of `syncState.peers`, `guildData.knownPeers`, `syncState.peerManifests`, `syncState.pendingPeers` | `GBL:CanonicalPeerKey` |
+| Bare name | `Bob` | `recentWhisperTargets` keys (chat-system suppression), UI filter inputs | `GBL:StripRealm` |
+| Raw network sender | whatever AceComm passes | runtime only — must never be stored without canonicalization | always wrap in `GBL:CanonicalPeerKey` before keying any peer-state table |
+
+Helpers:
+
+- `GBL:NormalizeRealm(realm)` — strips whitespace from a realm portion (e.g. `"Aerie Peak"` → `"AeriePeak"`). Always normalize before equality comparison or persistence.
+- `GBL:GetLocalRealm()` — normalized local realm, or `"UnknownRealm"` sentinel when realm APIs are cold.
+- `GBL:_isLocalRealm(realm)` — `true` iff realm matches local (raw or normalized). Used by `CanonicalPeerKey` to decide whether to strip.
+- `GBL:BuildRosterCache()` — populates `guildData.playerRealms[bareName] → realm`. Two-pass: detects bare-name ambiguity and writes the `false` sentinel when a bare name maps to multiple distinct realms in the roster (so `CanonicalPeerKey` can refuse to guess and keep ambiguous bare arrivals bare).
+- `GBL:RepairCorruptedPlayerRealms(t)` — trims hyphen-corrupted realm strings carried forward from a long-fixed code path; called from `BuildRosterCache` on each invocation. Leaves `false` sentinels untouched.
+
+`ResolvePlayerName` priority order: **explicit `playerRealms` arg → current guild's playerRealms → local realm fallback**. There is no cross-guild fallback — bare names from the bank log are assumed to belong to the current guild, not a guild the user previously belonged to. Migrations pass the per-guild table explicitly via the `playerRealms` arg.
+
 ### Code invariants to preserve
 
 - All sync diagnostics go through `GBL:AddAuditEntry`. Use `chatOnly=true` for high-frequency per-chunk chat spam and plain calls for the audit trail. The trail is capped at 2000 entries — new per-chunk entries must be additive/terse, not verbose.

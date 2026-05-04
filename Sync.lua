@@ -586,15 +586,12 @@ function GBL:OnSyncMessage(_prefix, message, distribution, sender)
 
     -- Ignore our own messages. AceComm passes sender as "Name-Realm" in retail
     -- when cross-realm, "Name" or "Name-Realm" inconsistently for same-realm.
-    -- CanonicalPeerKey wraps Ambiguate("guild") which strips realm only when
-    -- it matches the local realm, so own broadcasts always reduce to the bare
-    -- name returned by UnitName("player"). For peer-identity keying elsewhere
-    -- in this file always use CanonicalPeerKey, never raw StripRealm: the
-    -- latter would silently collapse cross-realm same-name peers in connected
-    -- realm guilds. Historical note: pre-v0.30.5 this site used Ambiguate(_,
-    -- "none") which is identity in retail (peer-list bloat); v0.30.5 switched
-    -- to StripRealm (cross-realm collision risk); the v0.30.5 follow-up
-    -- landed CanonicalPeerKey.
+    -- CanonicalPeerKey strips realm only when it matches the local realm
+    -- (custom logic, not Ambiguate), so own broadcasts always reduce to the
+    -- bare name returned by UnitName("player"). For peer-identity keying
+    -- elsewhere in this file always use CanonicalPeerKey, never raw
+    -- StripRealm: the latter would silently collapse cross-realm same-name
+    -- peers in connected-realm guilds.
     local myName = UnitName("player")
     if self:CanonicalPeerKey(sender) == myName then return end
 
@@ -846,10 +843,11 @@ end
 -- Payload helpers
 ------------------------------------------------------------------------
 
--- For peer identity, all sites below call GBL:CanonicalPeerKey (Core.lua),
--- which wraps Ambiguate("guild"): bare for same-realm, realm-qualified for
--- cross-realm. GBL:StripRealm is reserved for genuine bare-name use cases
--- (recentWhisperTargets chat-suppression; see comment near its declaration).
+-- For peer identity, all sites below call GBL:CanonicalPeerKey (Core.lua):
+-- bare for same-realm, realm-qualified for cross-realm (custom local-realm-
+-- only strip; deliberately not Ambiguate("guild") which would over-strip in
+-- connected-realm guilds). GBL:StripRealm is reserved for genuine bare-name
+-- use cases (recentWhisperTargets chat-suppression, UI filter inputs).
 
 --- Strip reconstructable fields from a transaction record for sync.
 -- Removes itemLink (large, reconstructable from itemID) to reduce payload.
