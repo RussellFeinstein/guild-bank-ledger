@@ -655,6 +655,77 @@ describe("Core", function()
             assert.equals(0, rewrites)
             assert.equals(10, guildData.schemaVersion)
         end)
+
+        it("refuses to bump from schema 8 (strict prerequisite)", function()
+            -- If MigrateNormalizePeerNames short-circuits on cold realm APIs,
+            -- schemaVersion stays at 8. This migration must NOT advance schema
+            -- past 9 in that case, otherwise schema 8 -> 9 is permanently
+            -- skipped on the next session.
+            guildData.schemaVersion = 8
+            guildData.playerRealms = { ["Alice"] = "Aerie Peak" }
+
+            local rewrites = GBL:MigrateNormalizeStoredRealms(guildData)
+
+            assert.equals(0, rewrites)
+            assert.equals(8, guildData.schemaVersion)
+            -- Spaced realm untouched (will be normalized once schema 9 is reached)
+            assert.equals("Aerie Peak", guildData.playerRealms["Alice"])
+        end)
+
+        it("recomputes record.id after rewriting record.player", function()
+            guildData.schemaVersion = 9
+            local hashOld = GBL:ComputeTxHash({
+                type = "deposit", player = "Alice-Aerie Peak",
+                itemID = 100, count = 5, timestamp = 1000,
+            })
+            local hashNew = GBL:ComputeTxHash({
+                type = "deposit", player = "Alice-AeriePeak",
+                itemID = 100, count = 5, timestamp = 1000,
+            })
+            -- Sanity check: the two hashes really differ (player participates)
+            assert.not_equals(hashOld, hashNew)
+
+            guildData.transactions = {
+                {
+                    type = "deposit", player = "Alice-Aerie Peak",
+                    itemID = 100, count = 5, timestamp = 1000,
+                    _occurrence = 0,
+                    id = hashOld .. ":0",
+                },
+            }
+            guildData.seenTxHashes = { [hashOld .. ":0"] = 1000 }
+
+            GBL:MigrateNormalizeStoredRealms(guildData)
+
+            -- Player normalized
+            assert.equals("Alice-AeriePeak", guildData.transactions[1].player)
+            -- Id recomputed from new player string
+            assert.equals(hashNew .. ":0", guildData.transactions[1].id)
+            -- seenTxHashes reseeded under the new id; old id evicted
+            assert.is_nil(guildData.seenTxHashes[hashOld .. ":0"])
+            assert.is_not_nil(guildData.seenTxHashes[hashNew .. ":0"])
+        end)
+
+        it("does not rebuild seenTxHashes when no record.player changed", function()
+            guildData.schemaVersion = 9
+            -- playerRealms has spaces (will be rewritten) but records do not
+            guildData.playerRealms = { ["Alice"] = "Aerie Peak" }
+            guildData.transactions = {
+                {
+                    type = "deposit", player = "Bob-AeriePeak",
+                    itemID = 100, count = 5, timestamp = 1000,
+                    _occurrence = 0, id = "h1:0",
+                },
+            }
+            local sentinel = 9999
+            guildData.seenTxHashes = { ["h1:0"] = sentinel }
+
+            GBL:MigrateNormalizeStoredRealms(guildData)
+
+            -- Record id untouched, seenTxHashes preserved with original sentinel
+            assert.equals("h1:0", guildData.transactions[1].id)
+            assert.equals(sentinel, guildData.seenTxHashes["h1:0"])
+        end)
     end)
 
     describe("CanonicalPeerKey", function()
@@ -917,6 +988,38 @@ describe("Core", function()
 
             assert.is_nil(guildData.syncState.peers["Alice"])
             assert.is_not_nil(guildData.syncState.peers["Alice-OtherRealm"])
+        end)
+
+        it("refuses to bump from schema 8 (strict prerequisite)", function()
+            -- Skip-chain prevention: if earlier migrations (8 -> 9, 9 -> 10)
+            -- short-circuited, this one must not jump straight to 11.
+            guildData.schemaVersion = 8
+            guildData.knownPeers = { ["Alice"] = { lastSeen = 1000 } }
+            MockWoW.guildRoster = {
+                { name = "Alice-OtherRealm", isOnline = true },
+            }
+
+            local rewrites = GBL:MigrateRecoverPeerRealms(guildData)
+
+            assert.equals(0, rewrites)
+            assert.equals(8, guildData.schemaVersion)
+            -- Bare key untouched (will be recovered once schema 10 is reached)
+            assert.is_not_nil(guildData.knownPeers["Alice"])
+            assert.is_nil(guildData.knownPeers["Alice-OtherRealm"])
+        end)
+
+        it("refuses to bump from schema 9 (strict prerequisite)", function()
+            guildData.schemaVersion = 9
+            guildData.knownPeers = { ["Alice"] = { lastSeen = 1000 } }
+            MockWoW.guildRoster = {
+                { name = "Alice-OtherRealm", isOnline = true },
+            }
+
+            local rewrites = GBL:MigrateRecoverPeerRealms(guildData)
+
+            assert.equals(0, rewrites)
+            assert.equals(9, guildData.schemaVersion)
+            assert.is_not_nil(guildData.knownPeers["Alice"])
         end)
     end)
 end)

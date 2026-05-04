@@ -1193,9 +1193,15 @@ end
 -- Idempotent: realm strings without spaces pass through untouched.
 -- @return number Number of strings rewritten across playerRealms + records
 function GBL:MigrateNormalizeStoredRealms(guildData)
-    if not guildData or (guildData.schemaVersion or 0) >= 10 then return 0 end
+    -- Strict prerequisite: only run after schema 9 has been reached. The
+    -- prior MigrateNormalizePeerNames short-circuits on cold realm APIs
+    -- (schemaVersion stays at 8); a loose `>= 10` gate here would let this
+    -- migration bump straight to 10 from 8, permanently skipping the 8 -> 9
+    -- work on the next session. Strict equality keeps the chain in order.
+    if not guildData or (guildData.schemaVersion or 0) ~= 9 then return 0 end
 
     local rewrites = 0
+    local recordsRewritten = false
 
     if type(guildData.playerRealms) == "table" then
         local keys = {}
@@ -1209,14 +1215,19 @@ function GBL:MigrateNormalizeStoredRealms(guildData)
         end
     end
 
+    -- Rewrites that mutate record.player invalidate record.id (ComputeTxHash
+    -- includes player) and seenTxHashes; the per-record loop recomputes id
+    -- inline and we rebuild seenTxHashes once at the end.
     local function rewriteRecordRealms(records)
         if type(records) ~= "table" then return end
         for _, record in ipairs(records) do
+            local playerChanged = false
             if type(record.player) == "string" then
                 local base, realm = record.player:match("^([^%-]+)%-(.+)$")
                 if base and realm and realm:find("%s") then
                     record.player = base .. "-" .. self:NormalizeRealm(realm)
                     rewrites = rewrites + 1
+                    playerChanged = true
                 end
             end
             if type(record.scannedBy) == "string" then
@@ -1229,11 +1240,43 @@ function GBL:MigrateNormalizeStoredRealms(guildData)
                     end
                 end
             end
+            -- ComputeTxHash hashes the player field; if we changed it, the
+            -- record's id is now stale and must be rebuilt before sync sees
+            -- it (or sync would re-import this record under its new id).
+            if playerChanged and record.id then
+                local baseHash = self:ComputeTxHash(record)
+                local occ = record._occurrence or 0
+                record.id = baseHash .. ":" .. occ
+                recordsRewritten = true
+            end
         end
     end
 
     rewriteRecordRealms(guildData.transactions)
     rewriteRecordRealms(guildData.moneyTransactions)
+
+    -- Rebuild seenTxHashes if any record ids changed. Walks both transaction
+    -- tables and reseeds the dedup index from the new ids. Mirrors the same
+    -- pattern as MigrateRepairEpochTimestamps.
+    if recordsRewritten and type(guildData.seenTxHashes) == "table" then
+        local newHashes = {}
+        for _, record in ipairs(guildData.transactions or {}) do
+            if record.id then
+                newHashes[record.id] = self:SafeRecordTimestamp(record)
+            end
+        end
+        for _, record in ipairs(guildData.moneyTransactions or {}) do
+            if record.id then
+                newHashes[record.id] = self:SafeRecordTimestamp(record)
+            end
+        end
+        for k in pairs(guildData.seenTxHashes) do
+            guildData.seenTxHashes[k] = nil
+        end
+        for k, v in pairs(newHashes) do
+            guildData.seenTxHashes[k] = v
+        end
+    end
 
     guildData.schemaVersion = 10
     return rewrites
@@ -1256,7 +1299,11 @@ end
 -- peers and ambiguous for multi-realm name collisions.
 -- @return number Number of keys rewritten across knownPeers + syncState.peers
 function GBL:MigrateRecoverPeerRealms(guildData)
-    if not guildData or (guildData.schemaVersion or 0) >= 11 then return 0 end
+    -- Strict prerequisite: only run after schema 10 has been reached. Same
+    -- skip-chain concern as MigrateNormalizeStoredRealms: a loose `>= 11`
+    -- gate would let this migration bump straight from 8 to 11 if earlier
+    -- migrations short-circuited on cold realm APIs.
+    if not guildData or (guildData.schemaVersion or 0) ~= 10 then return 0 end
 
     local localRealm = self:GetLocalRealm()
     if localRealm == "UnknownRealm" then return 0 end
