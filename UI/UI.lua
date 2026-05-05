@@ -197,6 +197,9 @@ function GBL:SelectTab(tabName)
         self:AddSettingsRow(self.tabGroup)
     end
 
+    -- Personal-preference row (visible to all access levels)
+    self:AddPersonalSettingsRow(self.tabGroup)
+
     -- Restricted mode banner
     if accessLevel == "own_transactions" then
         self:AddRestrictedBanner(self.tabGroup, "Showing your transactions only.")
@@ -326,6 +329,32 @@ function GBL:AddSettingsRow(container)
         end
     end)
     row:AddChild(minimapCB)
+end
+
+------------------------------------------------------------------------
+-- Personal preferences row (all access levels)
+------------------------------------------------------------------------
+
+--- Add per-user preference checkboxes to a container.
+-- These are personal client-side toggles, not officer settings, so they
+-- are rendered for every access level.
+-- @param container AceGUI container
+function GBL:AddPersonalSettingsRow(container)
+    local AceGUI = LibStub("AceGUI-3.0")
+
+    local row = AceGUI:Create("SimpleGroup")
+    row:SetFullWidth(true)
+    row:SetLayout("Flow")
+    container:AddChild(row)
+
+    local muteCB = AceGUI:Create("CheckBox")
+    muteCB:SetLabel("Mute Silvermoon Citizen ambient chatter")
+    muteCB:SetWidth(320)
+    muteCB:SetValue(self.db.profile.chatFilters.muteAmbientNPCs)
+    muteCB:SetCallback("OnValueChanged", function(_widget, _event, value)
+        self.db.profile.chatFilters.muteAmbientNPCs = value
+    end)
+    row:AddChild(muteCB)
 end
 
 ------------------------------------------------------------------------

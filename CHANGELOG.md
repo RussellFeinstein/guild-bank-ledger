@@ -5,6 +5,12 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.0] - 2026-05-05
+
+### Added
+- Optional filter to mute `Silvermoon Citizen` ambient chatter (off by default; checkbox lives on a new personal-preferences row visible to all access levels). Hides both the chat-frame line and the world speech bubble. Chat-frame side suppresses `CHAT_MSG_MONSTER_SAY` / `_YELL` / `_EMOTE`; bubble side listens for SAY/YELL via AceEvent, queues the stripped message text, and polls `C_ChatBubbles.GetAllChatBubbles()` every 50ms to hide bubbles whose text matches (exact, with substring fallback for engine-side wrapping). Bubbles are hidden via `SetAlpha(0)` + `Hide` on both the bubble frame and its visible regions, plus reparenting to a hidden frame, so retail's bubble-show cycle does not re-expose them. Muted-name set is data-driven (`ChatFilters.lua`), so adding a future NPC is a one-line code change. enUS-only by virtue of the localized sender name.
+- `/gbl bubbletest` slash command: dumps whether `C_ChatBubbles` is available, the current toggle state, the queued suppression set, and every active bubble's FontString text with a `[MATCH]` annotation when the queue would suppress it. Useful for diagnosing cases where chat is muted but the bubble survives.
+
 ## [0.30.6] - 2026-05-05
 
 ### Added

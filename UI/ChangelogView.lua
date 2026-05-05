@@ -29,6 +29,14 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.31.0
+    {"0.31.0", "2026-05-05", {
+        Added = {
+            "Optional filter to mute Silvermoon Citizen ambient chatter near the guild bank. Off by default. Toggle lives on a new personal-preferences row at the top of the ledger window, visible to all access levels. Hides both the chat-frame line and the world speech bubble. Chat-frame side suppresses CHAT_MSG_MONSTER_SAY/_YELL/_EMOTE; bubble side listens for SAY/YELL via AceEvent, queues the stripped message text, and a 50ms ticker walks C_ChatBubbles.GetAllChatBubbles() to hide bubbles whose FontString text matches (exact, with substring fallback for engine-side wrapping). Bubbles are hidden via SetAlpha(0) plus Hide on the bubble frame and its visible regions, plus reparenting to a hidden frame, since plain Hide is sometimes re-shown by the engine. Muted-name set is data-driven so a future addition is a one-line code change. enUS-only by virtue of the localized sender name.",
+            "/gbl bubbletest slash command dumps whether C_ChatBubbles is available, the current toggle state, the queued suppression set, and every active bubble's FontString text with a [MATCH] annotation when it would be suppressed. Useful for diagnosing cases where chat is muted but a bubble survives.",
+        },
+    }},
+
     -- v0.30.6
     {"0.30.6", "2026-05-05", {
         Added = {

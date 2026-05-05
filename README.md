@@ -25,6 +25,7 @@ Persistent guild bank transaction logging for World of Warcraft. WoW's built-in 
 - **Version label** — Addon version displayed in the top-right corner; turns orange with "update available" when a peer has a newer version
 - **Auto re-scan** — While the bank is open, re-queries all transaction logs every 5 seconds to capture item movements and gold transactions before they roll off the 25-entry-per-tab limit
 - **Minimap button** — Left-click to toggle the ledger window
+- **Mute ambient NPC chatter**: Optional client-side filter that suppresses `Silvermoon Citizen` say/yell/emote in chat and hides the matching world speech bubbles. Off by default. Toggle on the personal-preferences row at the top of the ledger window.
 - **Access control** — GM configures a rank threshold for full addon access. Players below the threshold are restricted to Sync Only or Own Transactions Only mode (GM's choice). Settings sync to all guild members via the HELLO protocol
 - **Accessibility** — Colorblind-safe palettes (4 modes, auto-detected from WoW settings), high contrast mode, triple encoding (shape + color + text), keyboard navigation (Tab/Shift+Tab), font scaling (8-24pt)
 

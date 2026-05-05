@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.30.6"
+local VERSION = "0.31.0"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -140,6 +140,7 @@ local defaults = {
         export = { delimiter = ",", includeHeaders = true, dateFormat = "%Y-%m-%d %H:%M" },
         sync = { enabled = true, autoSync = true, chatLog = false },
         filters = { defaultDays = 7, defaultCategory = "ALL" },
+        chatFilters = { muteAmbientNPCs = false },
     },
 }
 
@@ -2251,6 +2252,12 @@ function GBL:HandleSlashCommand(input)
         self:Print("Sort cancellation requested.")
     elseif command == "deviations" or command == "devs" then
         self:PrintDeviations()
+    elseif command == "bubbletest" then
+        if self.DumpBubbleDiagnostics then
+            self:DumpBubbleDiagnostics()
+        else
+            self:Print("ChatFilters module not loaded.")
+        end
     else
         self:Print("Unknown command: " .. command .. ". Type /gbl help for usage.")
     end
