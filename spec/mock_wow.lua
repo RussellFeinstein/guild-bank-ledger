@@ -480,10 +480,29 @@ function MockWoW.install()
         end,
     }
 
-    -- Name disambiguation (retail: sender includes realm suffix)
+    -- Name disambiguation. Mirrors retail WoW: "none" returns the name as-is
+    -- (does NOT strip realm); "all" and "short" always strip; "guild" strips
+    -- only when the realm matches the local realm. The "guild" branch compares
+    -- both the raw form and the whitespace-stripped form so a sender like
+    -- "Alice-AeriePeak" (normalized) matches a local realm of "Aerie Peak"
+    -- (raw) the way retail WoW does. For genuine bare-name semantics use
+    -- GBL:StripRealm directly; for peer identity use GBL:CanonicalPeerKey.
     _G.Ambiguate = function(name, context)
-        if context == "none" then
+        if not name then return name end
+        if context == "all" or context == "short" then
             return name:match("^([^%-]+)") or name
+        end
+        if context == "guild" then
+            local base, realm = name:match("^([^%-]+)%-(.+)$")
+            if base and realm and MockWoW.player and MockWoW.player.realm then
+                local localRealm = MockWoW.player.realm
+                local localNormalized = (localRealm:gsub("%s", ""))
+                local realmNormalized = (realm:gsub("%s", ""))
+                if realm == localRealm or realmNormalized == localNormalized then
+                    return base
+                end
+            end
+            return name
         end
         return name
     end
@@ -507,13 +526,24 @@ function MockWoW.install()
         return nil
     end
 
-    -- Realm info
-    _G.GetNormalizedRealmName = function()
+    -- Realm info. Mirrors retail WoW:
+    -- GetRealmName returns the raw display form (may contain whitespace,
+    -- e.g. "Aerie Peak"). GetNormalizedRealmName returns the same realm
+    -- with whitespace stripped (e.g. "AeriePeak"). When MockWoW.player.realm
+    -- has no whitespace the two return the same string, matching realms like
+    -- "Tichondrius" or "TestRealm".
+    _G.GetRealmName = function()
         return MockWoW.player.realm
     end
 
-    _G.GetRealmName = function()
-        return MockWoW.player.realm
+    _G.GetNormalizedRealmName = function()
+        if MockWoW.player.normalizedRealm then
+            return MockWoW.player.normalizedRealm
+        end
+        if MockWoW.player.realm then
+            return (MockWoW.player.realm:gsub("%s", ""))
+        end
+        return nil
     end
 
     -- Guild roster
@@ -521,6 +551,9 @@ function MockWoW.install()
         return #MockWoW.guildRoster
     end
 
+    -- Returns the same 14 values as retail WoW. The 14th (lastLogoff) is a
+    -- relative time offset in seconds; for online members real WoW returns 0.
+    -- Tests that don't care can leave m.lastLogoff unset.
     _G.GetGuildRosterInfo = function(index)
         local m = MockWoW.guildRoster[index]
         if not m then return nil end
@@ -528,7 +561,8 @@ function MockWoW.install()
                m.level or 70, m.classDisplayName or "Warrior",
                m.zone or "", m.publicNote or "", m.officerNote or "",
                m.isOnline ~= false, m.status or 0, m.classFileName or "WARRIOR",
-               m.achievementPoints or 0, m.achievementRank or 0
+               m.achievementPoints or 0, m.achievementRank or 0,
+               m.lastLogoff or 0
     end
 
     -- Item info (name/link/stackCount lookup for ItemCache).

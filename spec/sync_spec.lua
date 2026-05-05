@@ -2607,31 +2607,52 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
 
     describe("self-message filtering", function()
-        it("filters realm-qualified self-messages", function()
+        it("filters realm-qualified self-messages (same realm)", function()
             MockWoW.player.name = "OfficerA"
+            MockWoW.player.realm = "TestRealm"
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
             local msg = GBL:Serialize({
                 type = "HELLO", version = GBL.version,
                 txCount = 999, protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
             })
-            -- Sender includes realm suffix (retail WoW behavior)
-            GBL:OnSyncMessage("GBLSync", msg, "GUILD", "OfficerA-Stormrage")
+            -- Sender includes realm suffix matching local (retail WoW behavior).
+            -- CanonicalPeerKey strips same-realm suffix, so own-message filter triggers.
+            GBL:OnSyncMessage("GBLSync", msg, "GUILD", "OfficerA-TestRealm")
 
-            -- Should have been filtered as self-message
             local peers = GBL:GetSyncPeers()
-            assert.is_nil(peers["OfficerA-Stormrage"])
+            assert.is_nil(peers["OfficerA"])
+            assert.is_nil(peers["OfficerA-TestRealm"])
         end)
 
-        it("does not filter messages from different players", function()
+        it("does not filter same-name messages from cross-realm players", function()
             MockWoW.player.name = "OfficerA"
+            MockWoW.player.realm = "TestRealm"
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
             local msg = GBL:Serialize({
                 type = "HELLO", version = GBL.version,
                 txCount = 5, protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
             })
-            GBL:OnSyncMessage("GBLSync", msg, "GUILD", "OfficerB-Stormrage")
+            -- Same first name as local player but different realm: should NOT
+            -- be filtered (it's a distinct connected-realm peer).
+            GBL:OnSyncMessage("GBLSync", msg, "GUILD", "OfficerA-OtherRealm")
+
+            local peers = GBL:GetSyncPeers()
+            assert.is_nil(peers["OfficerA"])
+            assert.is_not_nil(peers["OfficerA-OtherRealm"])
+        end)
+
+        it("does not filter messages from different players", function()
+            MockWoW.player.name = "OfficerA"
+            MockWoW.player.realm = "TestRealm"
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local msg = GBL:Serialize({
+                type = "HELLO", version = GBL.version,
+                txCount = 5, protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+            })
+            GBL:OnSyncMessage("GBLSync", msg, "GUILD", "OfficerB-TestRealm")
 
             local peers = GBL:GetSyncPeers()
             assert.is_not_nil(peers["OfficerB"])
@@ -2781,7 +2802,16 @@ describe("Sync", function()
     -- Cross-realm name matching
     ---------------------------------------------------------------------------
 
-    describe("cross-realm name matching", function()
+    describe("same-realm mixed-qualification matching", function()
+        -- AceComm inconsistently qualifies same-realm sender names ("OfficerB"
+        -- on one message, "OfficerB-TestRealm" on the next). CanonicalPeerKey
+        -- collapses both to "OfficerB" so HandleAck / HandleSyncData see the
+        -- same peer regardless of which form arrived. Cross-realm peers stay
+        -- distinct (covered in connected-realm peer disambiguation tests).
+        before_each(function()
+            MockWoW.player.realm = "TestRealm"
+        end)
+
         it("HandleAck accepts ACK when sender has realm but target does not", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
@@ -2792,19 +2822,18 @@ describe("Sync", function()
             GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
-            -- ACK comes from realm-qualified name (cross-realm WHISPER)
-            GBL:HandleAck("OfficerB-Stormrage", { chunk = 1 })
+            -- ACK comes from same-realm-qualified name; canonicalizes to "OfficerB"
+            GBL:HandleAck("OfficerB-TestRealm", { chunk = 1 })
 
-            -- Should have accepted the ACK (baseName match)
             local trail = GBL:GetAuditTrail()
             local foundAck = false
             for _, entry in ipairs(trail) do
-                if entry.message:find("ACK from OfficerB%-Stormrage for chunk 1") then
+                if entry.message:find("ACK from OfficerB%-TestRealm for chunk 1") then
                     foundAck = true
                 end
             end
             assert.is_true(foundAck,
-                "ACK should be accepted despite realm suffix mismatch")
+                "ACK should be accepted despite realm suffix mismatch (same realm)")
         end)
 
         it("HandleAck accepts ACK when target has realm but sender does not", function()
@@ -2814,11 +2843,11 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "h1",
             })
-            -- SYNC_REQUEST came from realm-qualified name (GUILD channel)
-            GBL:HandleSyncRequest("OfficerB-ArgentDawn", { sinceTimestamp = 0 })
+            -- SYNC_REQUEST came from realm-qualified name on local realm
+            GBL:HandleSyncRequest("OfficerB-TestRealm", { sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
-            -- ACK comes without realm (WHISPER channel)
+            -- ACK comes without realm
             GBL:HandleAck("OfficerB", { chunk = 1 })
 
             local trail = GBL:GetAuditTrail()
@@ -2829,14 +2858,14 @@ describe("Sync", function()
                 end
             end
             assert.is_true(foundAck,
-                "ACK should be accepted despite missing realm suffix")
+                "ACK should be accepted despite missing realm suffix (same realm)")
         end)
 
         it("HandleSyncData accepts data from differently-qualified sender", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Start receiving — receiveSource set with realm suffix
-            GBL:RequestSync("OfficerB-Stormrage", 0)
+            -- Start receiving — receiveSource set with same-realm suffix
+            GBL:RequestSync("OfficerB-TestRealm", 0)
 
             -- SYNC_DATA arrives without realm suffix (different channel format)
             GBL:HandleSyncData("OfficerB", {
@@ -4428,6 +4457,382 @@ describe("Sync", function()
 
             GBL:ResetSyncState()
             assert.is_true(heartbeat.cancelled)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Realm-qualified peer name handling (v0.30.5 hardening)
+    ---------------------------------------------------------------------------
+
+    describe("realm-qualified peer names", function()
+        local function buildHelloPayload()
+            return GBL:Serialize({
+                type = "HELLO",
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                version = GBL.version,
+                txCount = 7,
+                dataHash = "abc123",
+                lastScanTime = 99999,
+            })
+        end
+
+        it("Ambiguate('Name-Realm', 'none') is identity in the mock (matches retail)", function()
+            assert.equals("Rexxybear-Tichondrius",
+                Ambiguate("Rexxybear-Tichondrius", "none"))
+        end)
+
+        it("Ambiguate('Name-Realm', 'short') strips realm in the mock", function()
+            assert.equals("Rexxybear", Ambiguate("Rexxybear-Tichondrius", "short"))
+            assert.equals("Rexxybear", Ambiguate("Rexxybear-Tichondrius", "all"))
+        end)
+
+        it("same-realm-qualified HELLO sender keys peer by bare name", function()
+            MockWoW.serverTime = 100000
+            MockWoW.player.realm = "TestRealm"
+            local payload = buildHelloPayload()
+            local compressed = GBL._compressMessage(payload)
+            GBL:OnSyncMessage("GBL", compressed, "GUILD", "Rexxybear-TestRealm")
+
+            local peers = GBL:GetAllPeers()
+            assert.is_not_nil(peers["Rexxybear"])
+            assert.is_nil(peers["Rexxybear-TestRealm"])
+        end)
+
+        it("mixed-qualification same-realm HELLO arrivals collapse to one entry", function()
+            MockWoW.serverTime = 100000
+            MockWoW.player.realm = "TestRealm"
+            local payload = buildHelloPayload()
+            local compressed = GBL._compressMessage(payload)
+            GBL:OnSyncMessage("GBL", compressed, "GUILD", "Rexxybear-TestRealm")
+            MockWoW.serverTime = 100050
+            GBL:OnSyncMessage("GBL", compressed, "GUILD", "Rexxybear")
+
+            local peers = GBL:GetAllPeers()
+            local count = 0
+            for _ in pairs(peers) do count = count + 1 end
+            assert.equals(1, count)
+            assert.is_not_nil(peers["Rexxybear"])
+        end)
+
+        it("OnSyncMessage ignores own message arriving as Name-Realm", function()
+            MockWoW.player.name = "OfficerA"
+            MockWoW.player.realm = "Tichondrius"
+            local payload = buildHelloPayload()
+            local compressed = GBL._compressMessage(payload)
+
+            GBL:OnSyncMessage("GBL", compressed, "GUILD", "OfficerA-Tichondrius")
+
+            local peers = GBL:GetAllPeers()
+            assert.is_nil(peers["OfficerA"])
+            assert.is_nil(peers["OfficerA-Tichondrius"])
+        end)
+
+        it("UpdatePeer keys knownPeers by bare name when called with same-realm Name-Realm", function()
+            MockWoW.serverTime = 100000
+            MockWoW.player.realm = "TestRealm"
+            GBL:UpdatePeer("Rexxybear-TestRealm", {
+                version = "0.30.5", txCount = 12, lastScanTime = 99999,
+            })
+
+            assert.is_not_nil(guildData.knownPeers["Rexxybear"])
+            assert.is_nil(guildData.knownPeers["Rexxybear-TestRealm"])
+        end)
+
+        -- Migration tests for MigrateNormalizePeerNames + MigrateRecoverPeerRealms
+        -- now live in spec/core_spec.lua under their own describe blocks.
+
+        it("MigrateNormalizePeerNames skips already-migrated guilds", function()
+            guildData.schemaVersion = 9
+            guildData.knownPeers = {
+                ["Stale-Realm"] = { version = "0.20.0", txCount = 1, lastSeen = 1 },
+            }
+
+            GBL:MigrateNormalizePeerNames(guildData)
+
+            -- Already at schema 9 so the function returns without touching the table
+            assert.is_not_nil(guildData.knownPeers["Stale-Realm"])
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Connected-realm peer disambiguation
+    ---------------------------------------------------------------------------
+
+    describe("connected-realm peer disambiguation", function()
+        local function buildHelloPayload()
+            return GBL:Serialize({
+                type = "HELLO",
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                version = GBL.version,
+                txCount = 7,
+                dataHash = "abc123",
+                lastScanTime = 99999,
+            })
+        end
+
+        before_each(function()
+            MockWoW.player.realm = "TestRealm"
+        end)
+
+        it("cross-realm HELLO sender keys peer with realm suffix", function()
+            MockWoW.serverTime = 100000
+            local compressed = GBL._compressMessage(buildHelloPayload())
+            GBL:OnSyncMessage("GBL", compressed, "GUILD", "Alice-OtherRealm")
+
+            local peers = GBL:GetAllPeers()
+            assert.is_not_nil(peers["Alice-OtherRealm"])
+            assert.is_nil(peers["Alice"])
+        end)
+
+        it("two same-name peers on different realms stay distinct", function()
+            MockWoW.serverTime = 100000
+            local compressed = GBL._compressMessage(buildHelloPayload())
+            GBL:OnSyncMessage("GBL", compressed, "GUILD", "Alice-TestRealm")
+            MockWoW.serverTime = 100050
+            GBL:OnSyncMessage("GBL", compressed, "GUILD", "Alice-OtherRealm")
+
+            local peers = GBL:GetAllPeers()
+            assert.is_not_nil(peers["Alice"])             -- local realm peer
+            assert.is_not_nil(peers["Alice-OtherRealm"])  -- cross-realm peer
+
+            local count = 0
+            for _ in pairs(peers) do count = count + 1 end
+            assert.equals(2, count)
+        end)
+
+        it("IsGuildMemberOnline disambiguates same-name members across realms", function()
+            MockWoW.guildRoster = {
+                { name = "Alice", isOnline = true },             -- local realm Alice
+                { name = "Alice-OtherRealm", isOnline = false }, -- cross-realm Alice
+            }
+
+            assert.is_true(GBL:IsGuildMemberOnline("Alice"))
+            assert.is_true(GBL:IsGuildMemberOnline("Alice-TestRealm"))
+            assert.is_false(GBL:IsGuildMemberOnline("Alice-OtherRealm"))
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- InitSync knownPeers seed consolidation (connected-realm follow-up)
+    ---------------------------------------------------------------------------
+    --
+    -- Self-heals stuck-at-11 users: stale bare keys in knownPeers (left over
+    -- from pre-v0.30.5 saved variables, or from the v0.30.5 schema-11
+    -- premature-bump cold-roster bug) get re-canonicalized via playerRealms at
+    -- session start, persistent state consolidates, runtime view is correct.
+
+    describe("InitSync knownPeers seed consolidation", function()
+        before_each(function()
+            MockWoW.player.realm = "TestRealm"
+            MockWoW.serverTime = 100000
+            guildData.knownPeers = {}
+            guildData.playerRealms = {}
+            GBL:ResetSyncState()
+        end)
+
+        it("re-realms a stale bare cross-realm key via playerRealms", function()
+            -- Setup: bare Katorriwl in knownPeers (from buggy schema-11),
+            -- playerRealms knows the real realm.
+            guildData.knownPeers["Katorriwl"] = {
+                version = "0.30.4", txCount = 5, lastSeen = 99500,
+            }
+            guildData.playerRealms["Katorriwl"] = "Stormrage"
+
+            GBL:InitSync()
+
+            -- knownPeers consolidated: bare gone, qualified present
+            assert.is_nil(guildData.knownPeers["Katorriwl"])
+            assert.is_not_nil(guildData.knownPeers["Katorriwl-Stormrage"])
+            assert.equals(5, guildData.knownPeers["Katorriwl-Stormrage"].txCount)
+
+            -- syncState.peers seeded with the canonical key only
+            local peers = GBL:GetAllPeers()
+            assert.is_not_nil(peers["Katorriwl-Stormrage"])
+            assert.is_nil(peers["Katorriwl"])
+        end)
+
+        it("collapses a bare same-realm key to bare (idempotent)", function()
+            -- Bare entry that's actually a local-realm member: roster says local,
+            -- helper re-realms then Ambiguate('guild') strips back to bare.
+            guildData.knownPeers["Bob"] = {
+                version = "0.30.5", txCount = 3, lastSeen = 99500,
+            }
+            guildData.playerRealms["Bob"] = "TestRealm"
+
+            GBL:InitSync()
+
+            -- Stays bare, no rewrite needed
+            assert.is_not_nil(guildData.knownPeers["Bob"])
+            assert.is_nil(guildData.knownPeers["Bob-TestRealm"])
+            assert.is_not_nil(GBL:GetAllPeers()["Bob"])
+        end)
+
+        it("merges bare + qualified collision by recency", function()
+            -- Both forms of the same character coexist in knownPeers (the bug).
+            -- Bare form is older, qualified is newer; result should keep newer.
+            guildData.knownPeers["Katorriwl"] = {
+                version = "0.30.4", txCount = 5, lastSeen = 99000,
+            }
+            guildData.knownPeers["Katorriwl-Stormrage"] = {
+                version = "0.30.5", txCount = 8, lastSeen = 99800,
+            }
+            guildData.playerRealms["Katorriwl"] = "Stormrage"
+
+            GBL:InitSync()
+
+            -- Only the qualified key survives, holding the newer record
+            assert.is_nil(guildData.knownPeers["Katorriwl"])
+            local kp = guildData.knownPeers["Katorriwl-Stormrage"]
+            assert.is_not_nil(kp)
+            assert.equals(8, kp.txCount)
+            assert.equals("0.30.5", kp.version)
+        end)
+
+        it("keeps bare key when playerRealms has no entry for it", function()
+            -- Departed peer or non-guildmate: no roster mapping, stays bare.
+            guildData.knownPeers["Ghost"] = {
+                version = "0.30.4", txCount = 1, lastSeen = 99000,
+            }
+            -- No playerRealms entry for Ghost
+
+            GBL:InitSync()
+
+            assert.is_not_nil(guildData.knownPeers["Ghost"])
+            assert.is_not_nil(GBL:GetAllPeers()["Ghost"])
+        end)
+
+        it("syncState.peers seeding preserves recency on canonical-key collisions", function()
+            -- When both legacy bare and canonical qualified forms exist in
+            -- knownPeers (the upgrade scenario this PR addresses), both raw
+            -- keys canonicalize to the same clean key. pairs() iteration order
+            -- is undefined, so an unconditional write to syncState.peers[clean]
+            -- could let an older snapshot overwrite a newer one in the runtime
+            -- cache. The seed loop must recency-merge syncState.peers the same
+            -- way it recency-merges knownPeers.
+            --
+            -- Direction A: bare is older, qualified is newer. Newer wins.
+            guildData.knownPeers["Katorriwl"] = {
+                version = "0.30.4", txCount = 5, lastSeen = 99000,
+            }
+            guildData.knownPeers["Katorriwl-Stormrage"] = {
+                version = "0.30.5", txCount = 8, lastSeen = 99800,
+            }
+            guildData.playerRealms["Katorriwl"] = "Stormrage"
+
+            GBL:InitSync()
+
+            local peers = GBL:GetAllPeers()
+            local newer = peers["Katorriwl-Stormrage"]
+            assert.is_not_nil(newer)
+            assert.equals(8, newer.txCount)
+            assert.equals("0.30.5", newer.version)
+            assert.equals(99800, newer.lastSeen)
+            assert.is_nil(peers["Katorriwl"])
+        end)
+
+        it("syncState.peers seeding wins for the bare entry when bare is newer", function()
+            -- Direction B: bare is newer, qualified is older. The recency
+            -- check must pick bare's data even though both canonicalize to
+            -- the qualified key. Without the check, pairs() ordering decides.
+            guildData.knownPeers["Katorriwl"] = {
+                version = "0.30.5", txCount = 12, lastSeen = 99900,
+            }
+            guildData.knownPeers["Katorriwl-Stormrage"] = {
+                version = "0.30.4", txCount = 4, lastSeen = 99100,
+            }
+            guildData.playerRealms["Katorriwl"] = "Stormrage"
+
+            GBL:InitSync()
+
+            local peers = GBL:GetAllPeers()
+            local newer = peers["Katorriwl-Stormrage"]
+            assert.is_not_nil(newer)
+            assert.equals(12, newer.txCount)  -- bare's newer txCount won
+            assert.equals("0.30.5", newer.version)
+            assert.equals(99900, newer.lastSeen)
+            assert.is_nil(peers["Katorriwl"])
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- ConsolidatePeerKeys (runtime re-canonicalization)
+    ---------------------------------------------------------------------------
+    --
+    -- Recovers from cold-startup states where stale bare entries got written
+    -- to syncState.peers / knownPeers before playerRealms was populated or
+    -- repaired. Called from GUILD_ROSTER_UPDATE in Core.lua.
+
+    describe("ConsolidatePeerKeys", function()
+        before_each(function()
+            MockWoW.player.realm = "Tichondrius"
+            MockWoW.serverTime = 100000
+            guildData.knownPeers = {}
+            guildData.playerRealms = {}
+            GBL:ResetSyncState()
+        end)
+
+        it("rewrites stale bare entries in syncState.peers to qualified", function()
+            -- Simulate the cold-startup outcome: bare Katorriwl wrote to
+            -- syncState.peers because playerRealms was corrupt at the time.
+            local syncPeers = GBL:GetAllPeers()
+            syncPeers["Katorriwl"] = { version = "0.30.4", txCount = 5, lastSeen = 99500 }
+            -- playerRealms is now clean (BuildRosterCache + repair has run)
+            guildData.playerRealms["Katorriwl"] = "Stormrage"
+
+            GBL:ConsolidatePeerKeys()
+
+            assert.is_nil(syncPeers["Katorriwl"])
+            assert.is_not_nil(syncPeers["Katorriwl-Stormrage"])
+            assert.equals(5, syncPeers["Katorriwl-Stormrage"].txCount)
+        end)
+
+        it("rewrites stale bare entries in knownPeers too", function()
+            guildData.knownPeers["Katorriwl"] = {
+                version = "0.30.4", txCount = 5, lastSeen = 99500,
+            }
+            guildData.playerRealms["Katorriwl"] = "Stormrage"
+
+            GBL:ConsolidatePeerKeys()
+
+            assert.is_nil(guildData.knownPeers["Katorriwl"])
+            assert.is_not_nil(guildData.knownPeers["Katorriwl-Stormrage"])
+        end)
+
+        it("merges bare + qualified collisions by recency", function()
+            local syncPeers = GBL:GetAllPeers()
+            syncPeers["Katorriwl"] = { version = "0.30.4", txCount = 5, lastSeen = 99000 }
+            syncPeers["Katorriwl-Stormrage"] = { version = "0.30.5", txCount = 8, lastSeen = 99800 }
+            guildData.playerRealms["Katorriwl"] = "Stormrage"
+
+            GBL:ConsolidatePeerKeys()
+
+            assert.is_nil(syncPeers["Katorriwl"])
+            local kp = syncPeers["Katorriwl-Stormrage"]
+            assert.is_not_nil(kp)
+            assert.equals(8, kp.txCount)  -- newer entry wins
+        end)
+
+        it("leaves bare same-realm entries bare (no-op)", function()
+            local syncPeers = GBL:GetAllPeers()
+            syncPeers["Bob"] = { version = "0.30.5", txCount = 3, lastSeen = 99500 }
+            guildData.playerRealms["Bob"] = "Tichondrius"  -- local realm
+
+            GBL:ConsolidatePeerKeys()
+
+            assert.is_not_nil(syncPeers["Bob"])
+            assert.is_nil(syncPeers["Bob-Tichondrius"])
+        end)
+
+        it("is idempotent (second run produces no further rewrites)", function()
+            local syncPeers = GBL:GetAllPeers()
+            syncPeers["Katorriwl"] = { version = "0.30.4", txCount = 5, lastSeen = 99500 }
+            guildData.playerRealms["Katorriwl"] = "Stormrage"
+
+            GBL:ConsolidatePeerKeys()
+            GBL:ConsolidatePeerKeys()
+
+            assert.is_nil(syncPeers["Katorriwl"])
+            assert.is_not_nil(syncPeers["Katorriwl-Stormrage"])
         end)
     end)
 
