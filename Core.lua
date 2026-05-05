@@ -5,6 +5,7 @@
 
 local ADDON_NAME = "GuildBankLedger"
 local VERSION = "0.30.5"
+local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -25,8 +26,13 @@ function GBL:CompareSemver(a, b)
     if a == b then return 0 end
     if not a then return -1 end
     if not b then return 1 end
-    local aMajor, aMinor, aPatch = a:match("^(%d+)%.(%d+)%.(%d+)$")
-    local bMajor, bMinor, bPatch = b:match("^(%d+)%.(%d+)%.(%d+)$")
+    -- Strip an optional pre-release suffix (e.g. "-dev.<id>") so a dev build
+    -- compares as the same release line as its base. The wire-side equality
+    -- check at Sync.lua HandleHello is unaffected because it uses ~= directly.
+    local aBase = a:match("^([^-]+)") or a
+    local bBase = b:match("^([^-]+)") or b
+    local aMajor, aMinor, aPatch = aBase:match("^(%d+)%.(%d+)%.(%d+)$")
+    local bMajor, bMinor, bPatch = bBase:match("^(%d+)%.(%d+)%.(%d+)$")
     if not aMajor then return -1 end
     if not bMajor then return 1 end
     aMajor, aMinor, aPatch = tonumber(aMajor), tonumber(aMinor), tonumber(aPatch)
@@ -35,6 +41,30 @@ function GBL:CompareSemver(a, b)
     if aMinor ~= bMinor then return aMinor < bMinor and -1 or 1 end
     if aPatch ~= bPatch then return aPatch < bPatch and -1 or 1 end
     return 0
+end
+
+------------------------------------------------------------------------
+-- Dev-build identity
+------------------------------------------------------------------------
+
+-- Internal: tests set self._testDevBuild on the GBL instance to override
+-- DEV_BUILD without touching the file. Production code never sets it.
+function GBL:_GetDevBuildId()
+    return self._testDevBuild or DEV_BUILD
+end
+
+--- Returns the version string used on the wire and in user-visible labels.
+-- When DEV_BUILD is set, appends "-dev.<id>" so the existing exact-match
+-- rejection at Sync.lua's HandleHello refuses to sync with production peers.
+function GBL:GetSyncVersion()
+    local dev = self:_GetDevBuildId()
+    if dev then return VERSION .. "-dev." .. dev end
+    return VERSION
+end
+
+--- Returns true when the addon is built as an isolated dev build.
+function GBL:IsDevBuild()
+    return self:_GetDevBuildId() ~= nil
 end
 
 -- AceDB defaults
@@ -122,7 +152,7 @@ function GBL:OnInitialize()
     self.bankOpen = false
     self.scanInProgress = false
     self.lastScanTime = 0
-    self.version = VERSION
+    self.version = self:GetSyncVersion()
 
     self:RegisterChatCommand("gbl", "HandleSlashCommand")
     self:RegisterChatCommand("guildbankledger", "HandleSlashCommand")
@@ -159,6 +189,10 @@ function GBL:OnEnable()
 
     -- Initialize sync system (M5)
     self:InitSync()
+
+    if self:IsDevBuild() then
+        self:Print("|cffffcc00v" .. self.version .. "|r |cffff8800-- sync isolated from production peers|r")
+    end
 end
 
 function GBL:OnAccessControlChanged()

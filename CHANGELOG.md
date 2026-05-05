@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Dev-build sync isolation: a `DEV_BUILD` constant in `Core.lua` flips the wire version to `X.Y.Z-dev.<id>` so isolated dev installs cannot exchange records with production peers. The existing exact-match rejection at `Sync.lua` HandleHello refuses both directions; the audit entry distinguishes "sync isolated" from a real version mismatch. UI surfaces the dev state via a `[DEV]` title-bar suffix and a one-line login chat notification. CI guard rejects any PR where the constant is non-nil. The local `run_tests.sh` is intentionally unguarded so dev iteration on the dev branch keeps working.
+
 ## [0.30.5] - 2026-05-05
 
 ### Added

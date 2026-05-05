@@ -17,7 +17,7 @@ function GBL:CreateMainFrame()
     local AceGUI = LibStub("AceGUI-3.0")
 
     local frame = AceGUI:Create("Frame")
-    frame:SetTitle("GuildBankLedger")
+    frame:SetTitle("GuildBankLedger" .. (self:IsDevBuild() and " [DEV]" or ""))
     frame:SetWidth(self.db.profile.ui.width or 1000)
     frame:SetHeight(self.db.profile.ui.height or 600)
     frame:SetLayout("Fill")

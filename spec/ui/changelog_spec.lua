@@ -35,7 +35,10 @@ describe("ChangelogView", function()
 
         it("first entry version matches addon version", function()
             local first = GBL.CHANGELOG_DATA[1]
-            assert.equals(GBL.version, first[1])
+            -- Strip an optional "-dev.<id>" suffix so the dev-build dogfood
+            -- mode (DEV_BUILD set in Core.lua) does not break this test.
+            local addonVersion = GBL.version:match("^([^-]+)") or GBL.version
+            assert.equals(addonVersion, first[1])
         end)
 
         it("every entry has version, date, and sections", function()

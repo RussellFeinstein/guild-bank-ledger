@@ -124,6 +124,9 @@ function Helpers.loadAddon()
     safeDofile("UI/LayoutEditor.lua")
     safeDofile("UI/SortView.lua")
     safeDofile("UI/UI.lua")
+    -- Defensive: ensure no test bleed of the dev-build override.
+    -- Tests that exercise dev-build behavior set this on the returned instance.
+    if MockAce.addon then MockAce.addon._testDevBuild = nil end
     return MockAce.addon
 end
 

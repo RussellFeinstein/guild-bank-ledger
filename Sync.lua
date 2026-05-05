@@ -753,8 +753,14 @@ function GBL:HandleHello(sender, data)
             syncState.peers[cleanSender].versionRelation =
                 (cmp < 0) and "local_behind" or "peer_behind"
         end
-        self:AddAuditEntry("WARNING: " .. sender .. " on v"
-            .. tostring(data.version) .. " (version mismatch, need v" .. self.version .. ")")
+        local peerIsDev = data.version and data.version:find("-dev.", 1, true)
+        if self:IsDevBuild() or peerIsDev then
+            self:AddAuditEntry("WARNING: " .. sender .. " on v"
+                .. tostring(data.version) .. " (sync isolated: this build is v" .. self.version .. ")")
+        else
+            self:AddAuditEntry("WARNING: " .. sender .. " on v"
+                .. tostring(data.version) .. " (version mismatch, need v" .. self.version .. ")")
+        end
         return
     end
 

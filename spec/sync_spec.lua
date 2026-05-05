@@ -429,10 +429,13 @@ describe("Sync", function()
                     assert.not_equals("SYNC_REQUEST", data.type)
                 end
             end
-            -- Should have an audit entry about the mismatch
+            -- Should have an audit entry about the mismatch (either wording).
+            -- "version mismatch" is the production wording; "sync isolated" is
+            -- the dev-build wording (when this branch dogfoods DEV_BUILD).
             local trail = GBL:GetAuditTrail()
             assert.is_true(#trail > 0)
-            assert.truthy(trail[1].message:find("version mismatch"))
+            assert.truthy(trail[1].message:find("version mismatch", 1, true)
+                or trail[1].message:find("sync isolated", 1, true))
         end)
 
         it("refuses sync even on same major but different minor version", function()
@@ -453,7 +456,72 @@ describe("Sync", function()
             end
             local trail = GBL:GetAuditTrail()
             assert.is_true(#trail > 0)
-            assert.truthy(trail[1].message:find("version mismatch"))
+            assert.truthy(trail[1].message:find("version mismatch", 1, true)
+                or trail[1].message:find("sync isolated", 1, true))
+        end)
+
+        it("dev build refuses HELLO from production peer with 'sync isolated' audit", function()
+            -- Re-init so self.version captures the dev suffix.
+            GBL._testDevBuild = "sync"
+            GBL:OnInitialize()
+            assert.equals("0.30.5-dev.sync", GBL.version)
+
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:HandleHello("OfficerB", {
+                version = "0.30.5",
+                txCount = 999,
+                lastScanTime = 1000,
+            })
+
+            -- No SYNC_REQUEST sent.
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok then
+                    assert.not_equals("SYNC_REQUEST", data.type)
+                end
+            end
+
+            local trail = GBL:GetAuditTrail()
+            local found = false
+            for _, e in ipairs(trail) do
+                if e.message:find("sync isolated", 1, true) then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found, "expected 'sync isolated' audit entry")
+        end)
+
+        it("HELLO carrying a -dev.<id> version triggers 'sync isolated' audit", function()
+            -- Use a sentinel id distinct from any plausible real DEV_BUILD
+            -- value so the test is robust whether the source file currently
+            -- has DEV_BUILD set (dogfooding) or nil (production state).
+            local foreignDevVersion = "0.30.5-dev.production-test-sentinel-xyz"
+            assert.not_equals(GBL.version, foreignDevVersion)
+
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:HandleHello("OfficerB", {
+                version = foreignDevVersion,
+                txCount = 999,
+                lastScanTime = 1000,
+            })
+
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok then
+                    assert.not_equals("SYNC_REQUEST", data.type)
+                end
+            end
+
+            local trail = GBL:GetAuditTrail()
+            local found = false
+            for _, e in ipairs(trail) do
+                if e.message:find("sync isolated", 1, true) then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found, "expected 'sync isolated' audit entry")
         end)
 
         it("triggers sync when hash differs and counts are equal", function()
