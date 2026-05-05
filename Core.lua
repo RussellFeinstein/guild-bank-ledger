@@ -140,6 +140,7 @@ local defaults = {
         export = { delimiter = ",", includeHeaders = true, dateFormat = "%Y-%m-%d %H:%M" },
         sync = { enabled = true, autoSync = true, chatLog = false },
         filters = { defaultDays = 7, defaultCategory = "ALL" },
+        chatFilters = { muteAmbientNPCs = false },
     },
 }
 
@@ -2251,6 +2252,12 @@ function GBL:HandleSlashCommand(input)
         self:Print("Sort cancellation requested.")
     elseif command == "deviations" or command == "devs" then
         self:PrintDeviations()
+    elseif command == "bubbletest" then
+        if self.DumpBubbleDiagnostics then
+            self:DumpBubbleDiagnostics()
+        else
+            self:Print("ChatFilters module not loaded.")
+        end
     else
         self:Print("Unknown command: " .. command .. ". Type /gbl help for usage.")
     end

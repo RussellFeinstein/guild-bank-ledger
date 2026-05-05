@@ -57,6 +57,7 @@ read_globals = {
     "SetCVar",
 
     -- WoW utilities
+    "C_ChatBubbles",
     "C_Item",
     "C_Timer",
     "GetAddOnMetadata",
