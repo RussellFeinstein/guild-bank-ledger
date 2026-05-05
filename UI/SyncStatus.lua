@@ -284,6 +284,7 @@ function GBL:RenderPeerList(container)
 
     local peers = self:GetSyncPeers()
     local hasPeers = false
+    local localIsDev = self:IsDevBuild()
 
     for name, info in pairs(peers) do
         hasPeers = true
@@ -300,44 +301,46 @@ function GBL:RenderPeerList(container)
             agoStr = math.floor(ago / 3600) .. "h ago"
         end
 
-        -- Version status indicator (directional: who needs to update?)
         local peerVersion = info.version or "?"
-        local versionTag = ""
-        local peerIsDev = peerVersion ~= "?"
-            and peerVersion:find("-dev.", 1, true) ~= nil
-        local localIsDev = self:IsDevBuild()
-        local devMismatch = (localIsDev or peerIsDev)
-            and peerVersion ~= "?" and peerVersion ~= self.version
-        if devMismatch then
-            -- One side is a dev build; sync is intentionally refused. The
-            -- peer is not behind or ahead of us on the release line, just
-            -- on a different build.
-            local cause = localIsDev and "this is a dev build"
-                or "peer is a dev build"
-            versionTag = " |cffff8800(sync isolated: " .. cause .. ")|r"
-        elseif info.outdated then
-            if info.versionRelation == "local_behind" then
-                versionTag = " |cff44aaff(newer — update available)|r"
-            else
-                versionTag = " |cffff4400(outdated — no sync)|r"
+
+        if localIsDev then
+            -- Local is a dev build; the banner above already explains why
+            -- nothing in this list is reachable. Render greyed out and
+            -- skip per-row tags / nested color codes.
+            local seenStr = info.rosterOnly
+                and "online (no HELLO)"
+                or ("seen " .. agoStr)
+            lbl:SetText("|cff666666  " .. name
+                .. "  v" .. peerVersion
+                .. ", " .. (info.txCount or 0) .. " tx"
+                .. ", " .. seenStr .. "|r")
+        else
+            -- Production-mode rendering: tag each peer individually.
+            local versionTag = ""
+            if info.outdated then
+                if info.versionRelation == "local_behind" then
+                    versionTag = " |cff44aaff(newer — update available)|r"
+                else
+                    versionTag = " |cffff4400(outdated — no sync)|r"
+                end
+            elseif peerVersion ~= self.version then
+                local cmp = self:CompareSemver(self.version, peerVersion)
+                if cmp < 0 then
+                    versionTag = " |cff44aaff(newer — update available)|r"
+                else
+                    versionTag = " |cffff6600(outdated)|r"
+                end
             end
-        elseif peerVersion ~= self.version then
-            local cmp = self:CompareSemver(self.version, peerVersion)
-            if cmp < 0 then
-                versionTag = " |cff44aaff(newer — update available)|r"
-            else
-                versionTag = " |cffff6600(outdated)|r"
-            end
+
+            local seenStr = info.rosterOnly
+                and "|cffa0a0a0online (no HELLO)|r"
+                or ("seen " .. agoStr)
+
+            lbl:SetText("  " .. name
+                .. " — v" .. peerVersion .. versionTag
+                .. ", " .. (info.txCount or 0) .. " tx"
+                .. ", " .. seenStr)
         end
-
-        local seenStr = info.rosterOnly
-            and "|cffa0a0a0online (no HELLO)|r"
-            or ("seen " .. agoStr)
-
-        lbl:SetText("  " .. name
-            .. " — v" .. peerVersion .. versionTag
-            .. ", " .. (info.txCount or 0) .. " tx"
-            .. ", " .. seenStr)
         container:AddChild(lbl)
     end
 

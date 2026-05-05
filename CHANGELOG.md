@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Trim dev-build sync isolation diagnostics. The `-dev.<id>` suffix in the wire version string is already self-evident, so the audit-log now uses a single `(version mismatch; this build is v...)` line in both the dev-isolation and real-skew cases. The Online Peers list drops the `(sync isolated: peer is a dev build)` per-row tag in production-mode rendering; production users see normal "outdated" tagging when a dev peer is online. The dev-side banner, `[DEV]` title suffix, login chat ping, greyed-out peer list, CI guard, and `CompareSemver` pre-release stripping all stay.
+
 ## [0.30.6] - 2026-05-05
 
 ### Added

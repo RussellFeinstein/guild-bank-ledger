@@ -434,8 +434,7 @@ describe("Sync", function()
             -- the dev-build wording (when this branch dogfoods DEV_BUILD).
             local trail = GBL:GetAuditTrail()
             assert.is_true(#trail > 0)
-            assert.truthy(trail[1].message:find("version mismatch", 1, true)
-                or trail[1].message:find("sync isolated", 1, true))
+            assert.truthy(trail[1].message:find("version mismatch", 1, true))
         end)
 
         it("refuses sync even on same major but different minor version", function()
@@ -456,11 +455,10 @@ describe("Sync", function()
             end
             local trail = GBL:GetAuditTrail()
             assert.is_true(#trail > 0)
-            assert.truthy(trail[1].message:find("version mismatch", 1, true)
-                or trail[1].message:find("sync isolated", 1, true))
+            assert.truthy(trail[1].message:find("version mismatch", 1, true))
         end)
 
-        it("dev build refuses HELLO from production peer with 'sync isolated' audit", function()
+        it("dev build refuses HELLO from production peer", function()
             -- Capture the production version BEFORE setting the override so
             -- the test is independent of the source file's VERSION literal.
             local productionVersion = GBL:GetSyncVersion():match("^([^-]+)")
@@ -488,15 +486,16 @@ describe("Sync", function()
             local trail = GBL:GetAuditTrail()
             local found = false
             for _, e in ipairs(trail) do
-                if e.message:find("sync isolated", 1, true) then
+                if e.message:find("version mismatch", 1, true)
+                    and e.message:find("-dev.sync", 1, true) then
                     found = true
                     break
                 end
             end
-            assert.is_true(found, "expected 'sync isolated' audit entry")
+            assert.is_true(found, "expected version-mismatch audit entry naming the dev suffix")
         end)
 
-        it("HELLO carrying a -dev.<id> version triggers 'sync isolated' audit", function()
+        it("HELLO carrying a -dev.<id> version is rejected", function()
             -- Use a sentinel id distinct from any plausible real DEV_BUILD
             -- value so the test is robust whether the source file currently
             -- has DEV_BUILD set (dogfooding) or nil (production state).
@@ -521,12 +520,13 @@ describe("Sync", function()
             local trail = GBL:GetAuditTrail()
             local found = false
             for _, e in ipairs(trail) do
-                if e.message:find("sync isolated", 1, true) then
+                if e.message:find("version mismatch", 1, true)
+                    and e.message:find("-dev.production-test-sentinel-xyz", 1, true) then
                     found = true
                     break
                 end
             end
-            assert.is_true(found, "expected 'sync isolated' audit entry")
+            assert.is_true(found, "expected version-mismatch audit entry naming the foreign dev suffix")
         end)
 
         it("triggers sync when hash differs and counts are equal", function()
