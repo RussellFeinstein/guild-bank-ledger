@@ -849,6 +849,44 @@ end
 -- connected-realm guilds). GBL:StripRealm is reserved for genuine bare-name
 -- use cases (recentWhisperTargets chat-suppression, UI filter inputs).
 
+--- Re-canonicalize peer-state keys in place across syncState.peers and
+-- guildData.knownPeers. Idempotent. Used to clean up stale entries written
+-- by an earlier code path (or by InitSync's seed loop running before the
+-- roster cache was warm), so that current-canonical state reflects the
+-- current CanonicalPeerKey output. Called by Core.lua's GUILD_ROSTER_UPDATE
+-- handler after BuildRosterCache, and from InitSync's seed loop via the
+-- inline rewrite there.
+function GBL:ConsolidatePeerKeys()
+    local guildData = self:GetGuildData()
+    if not guildData then return end
+
+    local function reKey(t)
+        if type(t) ~= "table" then return end
+        local rawKeys = {}
+        for k in pairs(t) do rawKeys[#rawKeys+1] = k end
+        for _, name in ipairs(rawKeys) do
+            local info = t[name]
+            if info then
+                local clean = self:CanonicalPeerKey(name)
+                if clean ~= name then
+                    local existing = t[clean]
+                    if existing then
+                        if (info.lastSeen or 0) > (existing.lastSeen or 0) then
+                            t[clean] = info
+                        end
+                    else
+                        t[clean] = info
+                    end
+                    t[name] = nil
+                end
+            end
+        end
+    end
+
+    reKey(syncState.peers)
+    reKey(guildData.knownPeers)
+end
+
 --- Strip reconstructable fields from a transaction record for sync.
 -- Removes itemLink (large, reconstructable from itemID) to reduce payload.
 -- Returns a shallow copy — does not mutate the original record.

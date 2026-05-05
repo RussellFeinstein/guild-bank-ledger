@@ -4703,6 +4703,88 @@ describe("Sync", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- ConsolidatePeerKeys (runtime re-canonicalization)
+    ---------------------------------------------------------------------------
+    --
+    -- Recovers from cold-startup states where stale bare entries got written
+    -- to syncState.peers / knownPeers before playerRealms was populated or
+    -- repaired. Called from GUILD_ROSTER_UPDATE in Core.lua.
+
+    describe("ConsolidatePeerKeys", function()
+        before_each(function()
+            MockWoW.player.realm = "Tichondrius"
+            MockWoW.serverTime = 100000
+            guildData.knownPeers = {}
+            guildData.playerRealms = {}
+            GBL:ResetSyncState()
+        end)
+
+        it("rewrites stale bare entries in syncState.peers to qualified", function()
+            -- Simulate the cold-startup outcome: bare Katorriwl wrote to
+            -- syncState.peers because playerRealms was corrupt at the time.
+            local syncPeers = GBL:GetAllPeers()
+            syncPeers["Katorriwl"] = { version = "0.30.4", txCount = 5, lastSeen = 99500 }
+            -- playerRealms is now clean (BuildRosterCache + repair has run)
+            guildData.playerRealms["Katorriwl"] = "Stormrage"
+
+            GBL:ConsolidatePeerKeys()
+
+            assert.is_nil(syncPeers["Katorriwl"])
+            assert.is_not_nil(syncPeers["Katorriwl-Stormrage"])
+            assert.equals(5, syncPeers["Katorriwl-Stormrage"].txCount)
+        end)
+
+        it("rewrites stale bare entries in knownPeers too", function()
+            guildData.knownPeers["Katorriwl"] = {
+                version = "0.30.4", txCount = 5, lastSeen = 99500,
+            }
+            guildData.playerRealms["Katorriwl"] = "Stormrage"
+
+            GBL:ConsolidatePeerKeys()
+
+            assert.is_nil(guildData.knownPeers["Katorriwl"])
+            assert.is_not_nil(guildData.knownPeers["Katorriwl-Stormrage"])
+        end)
+
+        it("merges bare + qualified collisions by recency", function()
+            local syncPeers = GBL:GetAllPeers()
+            syncPeers["Katorriwl"] = { version = "0.30.4", txCount = 5, lastSeen = 99000 }
+            syncPeers["Katorriwl-Stormrage"] = { version = "0.30.5", txCount = 8, lastSeen = 99800 }
+            guildData.playerRealms["Katorriwl"] = "Stormrage"
+
+            GBL:ConsolidatePeerKeys()
+
+            assert.is_nil(syncPeers["Katorriwl"])
+            local kp = syncPeers["Katorriwl-Stormrage"]
+            assert.is_not_nil(kp)
+            assert.equals(8, kp.txCount)  -- newer entry wins
+        end)
+
+        it("leaves bare same-realm entries bare (no-op)", function()
+            local syncPeers = GBL:GetAllPeers()
+            syncPeers["Bob"] = { version = "0.30.5", txCount = 3, lastSeen = 99500 }
+            guildData.playerRealms["Bob"] = "Tichondrius"  -- local realm
+
+            GBL:ConsolidatePeerKeys()
+
+            assert.is_not_nil(syncPeers["Bob"])
+            assert.is_nil(syncPeers["Bob-Tichondrius"])
+        end)
+
+        it("is idempotent (second run produces no further rewrites)", function()
+            local syncPeers = GBL:GetAllPeers()
+            syncPeers["Katorriwl"] = { version = "0.30.4", txCount = 5, lastSeen = 99500 }
+            guildData.playerRealms["Katorriwl"] = "Stormrage"
+
+            GBL:ConsolidatePeerKeys()
+            GBL:ConsolidatePeerKeys()
+
+            assert.is_nil(syncPeers["Katorriwl"])
+            assert.is_not_nil(syncPeers["Katorriwl-Stormrage"])
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Compression
     ---------------------------------------------------------------------------
 

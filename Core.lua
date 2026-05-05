@@ -1492,6 +1492,15 @@ end
 function GBL:MigrateAllGuilds()
     if not self.db or not self.db.global or not self.db.global.guilds then return end
     for _, guildData in pairs(self.db.global.guilds) do
+        -- Repair playerRealms corruption FIRST so any migration that consults
+        -- the cache (and InitSync's seed loop downstream) sees clean data.
+        -- BuildRosterCache also calls this on every GUILD_ROSTER_UPDATE, but
+        -- that fires AFTER OnEnable -> InitSync, leaving a cold-startup window
+        -- where the seed loop would canonicalize bare names to bare via the
+        -- corruption-rejecting fallback in CanonicalPeerKey.
+        if guildData.playerRealms then
+            self:RepairCorruptedPlayerRealms(guildData.playerRealms)
+        end
         self:MigrateOccurrenceScheme(guildData)
         self:MigrateSchemaV2ToV3(guildData)
         self:MigrateOccurrenceToPerSlot(guildData)
@@ -1694,6 +1703,15 @@ function GBL:GUILD_ROSTER_UPDATE()
             self._migrationsRetried = true
             self:MigrateAllGuilds()
         end
+    end
+
+    -- Re-canonicalize peer-state tables. CanonicalPeerKey output can change
+    -- between OnEnable (cold roster, possibly corrupt playerRealms) and now
+    -- (warm roster, repaired playerRealms). Stale bare entries written by
+    -- the InitSync seed loop or by HELLO arrivals during the cold window get
+    -- swept into their qualified canonical form here. Idempotent.
+    if self.ConsolidatePeerKeys then
+        self:ConsolidatePeerKeys()
     end
 
     -- One-time repair: fix player names that got wrong realm during early migration

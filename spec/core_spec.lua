@@ -1342,7 +1342,7 @@ describe("Core", function()
             assert.is_not_nil(guildData.knownPeers["Katorriwl-Stormrage"])
         end)
 
-        it("does not retrigger again after the first warm GUILD_ROSTER_UPDATE", function()
+        it("does not retrigger migrations again after the first warm GUILD_ROSTER_UPDATE", function()
             guildData.schemaVersion = 10
             MockWoW.guildRoster = {
                 { name = "Katorriwl-Stormrage", isOnline = true },
@@ -1352,18 +1352,23 @@ describe("Core", function()
             assert.is_true(GBL._migrationsRetried)
             assert.equals(11, guildData.schemaVersion)
 
-            -- Mutate guildData to detect a second migration run if it happens
+            -- Reset schema to detect a second migration run via the strict gate.
+            -- knownPeers entry uses a name with NO playerRealms mapping so
+            -- ConsolidatePeerKeys (which always runs on GUILD_ROSTER_UPDATE)
+            -- doesn't move it. The check we want is just "did the migration
+            -- ladder fire again" — answered by schemaVersion staying at 10.
             guildData.schemaVersion = 10
-            guildData.knownPeers = { ["Loner"] = { lastSeen = 1000 } }
+            guildData.knownPeers = { ["Ghost"] = { lastSeen = 1000 } }
             MockWoW.guildRoster = {
-                { name = "Loner-OtherRealm", isOnline = true },
+                { name = "Katorriwl-Stormrage", isOnline = true },  -- Ghost not in roster
             }
 
-            GBL:GUILD_ROSTER_UPDATE()  -- second fire: should NOT re-run
+            GBL:GUILD_ROSTER_UPDATE()  -- second fire: should NOT re-run migrations
 
             -- Schema stays at 10 because the retrigger is one-shot
             assert.equals(10, guildData.schemaVersion)
-            assert.is_not_nil(guildData.knownPeers["Loner"])
+            -- Ghost stays bare because no playerRealms mapping exists for it
+            assert.is_not_nil(guildData.knownPeers["Ghost"])
         end)
     end)
 end)
