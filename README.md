@@ -85,6 +85,16 @@ busted --verbose
 luacheck .
 ```
 
+### Git hooks
+
+A `pre-push` hook in `scripts/hooks/` mirrors the CI `Verify DEV_BUILD is nil` step so a forgotten dev flip fails locally in under a second instead of after a CI round-trip. Activate it once per clone:
+
+```bash
+git config core.hooksPath scripts/hooks
+```
+
+Override for an intentional WIP push: `git push --no-verify`.
+
 ## Contributing
 
 Bug reports, feature requests, and pull requests are all welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide: quick-start setup, commit / versioning conventions, test expectations, and the PR review process.
