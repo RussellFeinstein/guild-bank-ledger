@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Layout editor's Add-item input is reachable again on captured display tabs. The row was sitting at the bottom of the per-tab scroll content (below the item rows and slot map) where AceGUI's trailing-widget scroll bug clipped it from the wheel-scrollable area, so users couldn't add new items by hand once a tab had been captured. Moved the row up to sit just below Capture / Unpin All, alongside the other write controls. Same widgets, same callback, same `HasLayoutWrite()` gate. This is the second instance of the v0.30.4 save-bar workaround pattern; the underlying AceGUI content-height bookkeeping bug is unchanged.
+- Sort tab scroll now reaches the bottom of the window on tall plans. The ScrollFrame was missing the bottom-right anchor that Transactions / Gold Log / Consumption already use, so AceGUI's default Flow-layout height stopped the scroll short of the window edge and hid the tail of long move lists. Added the same `scroll.frame:SetPoint("BOTTOMRIGHT", container.content, ...)` fill-remainder anchor.
 
 ## [0.31.0] - 2026-05-05
 

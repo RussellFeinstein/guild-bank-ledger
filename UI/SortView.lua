@@ -81,12 +81,18 @@ function GBL:BuildSortTab(container)
     controls:SetLayout("Flow")
     container:AddChild(controls)
 
-    -- Content area (scrollable)
+    -- Content area (scrollable). Anchored bottom-right to the container's
+    -- content frame so the scroll fills the remaining space under the
+    -- status banner + controls row instead of stopping at AceGUI's
+    -- default Flow-layout height. Without this anchor the scroll cannot
+    -- reach the bottom of the move list on tall plans. Same pattern used
+    -- in BuildTransactionsTab / BuildGoldLogTab / BuildConsumptionTab.
     local content = AceGUI:Create("ScrollFrame")
     content:SetFullWidth(true)
     content:SetFullHeight(true)
     content:SetLayout("List")
     container:AddChild(content)
+    content.frame:SetPoint("BOTTOMRIGHT", container.content, "BOTTOMRIGHT", 0, 0)
     self._sortContent = content
 
     local previewBtn = AceGUI:Create("Button")
