@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.31.1] - 2026-05-05
 
 ### Fixed
 - Layout editor's Add-item input is reachable again on captured display tabs. The row was sitting at the bottom of the per-tab scroll content (below the item rows and slot map) where AceGUI's trailing-widget scroll bug clipped it from the wheel-scrollable area, so users couldn't add new items by hand once a tab had been captured. Moved the row up to sit just below Capture / Unpin All, alongside the other write controls. Same widgets, same callback, same `HasLayoutWrite()` gate. This is the second instance of the v0.30.4 save-bar workaround pattern; the underlying AceGUI content-height bookkeeping bug is unchanged.
