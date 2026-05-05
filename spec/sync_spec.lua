@@ -461,14 +461,18 @@ describe("Sync", function()
         end)
 
         it("dev build refuses HELLO from production peer with 'sync isolated' audit", function()
+            -- Capture the production version BEFORE setting the override so
+            -- the test is independent of the source file's VERSION literal.
+            local productionVersion = GBL:GetSyncVersion():match("^([^-]+)")
+
             -- Re-init so self.version captures the dev suffix.
             GBL._testDevBuild = "sync"
             GBL:OnInitialize()
-            assert.equals("0.30.5-dev.sync", GBL.version)
+            assert.equals(productionVersion .. "-dev.sync", GBL.version)
 
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
             GBL:HandleHello("OfficerB", {
-                version = "0.30.5",
+                version = productionVersion,
                 txCount = 999,
                 lastScanTime = 1000,
             })
@@ -496,7 +500,8 @@ describe("Sync", function()
             -- Use a sentinel id distinct from any plausible real DEV_BUILD
             -- value so the test is robust whether the source file currently
             -- has DEV_BUILD set (dogfooding) or nil (production state).
-            local foreignDevVersion = "0.30.5-dev.production-test-sentinel-xyz"
+            local productionVersion = GBL:GetSyncVersion():match("^([^-]+)")
+            local foreignDevVersion = productionVersion .. "-dev.production-test-sentinel-xyz"
             assert.not_equals(GBL.version, foreignDevVersion)
 
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")

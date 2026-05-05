@@ -29,6 +29,16 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.30.6
+    {"0.30.6", "2026-05-05", {
+        Added = {
+            "Dev-build sync isolation. A new DEV_BUILD constant in Core.lua, when set to a string on a dev branch, flips the wire version to X.Y.Z-dev.<id> so an isolated dev install cannot exchange records with production peers. The existing exact-match rejection at Sync.lua HandleHello refuses sync in both directions. The audit entry uses 'sync isolated' wording for dev-vs-release mismatches and the existing 'version mismatch' wording for real version skew. The UI surfaces the dev state via a [DEV] suffix in the main window title and a one-line login chat notification. A CI workflow step rejects any PR where DEV_BUILD is non-nil; the local test runner is intentionally unguarded so dev iteration keeps working.",
+        },
+        Changed = {
+            "GBL:CompareSemver strips an optional pre-release suffix (e.g. -dev.<id>) before parsing so dev builds compare as the same release line as their base for the ahead/behind UI labeling. The wire-side equality check at Sync.lua HandleHello is unaffected.",
+        },
+    }},
+
     -- v0.30.5
     {"0.30.5", "2026-05-05", {
         Fixed = {
