@@ -245,6 +245,16 @@ function GBL:RenderSyncContent(container)
     statusLabel:SetText("|cffffcc00Status:|r " .. statusText)
     container:AddChild(statusLabel)
 
+    -- Dev-build banner: makes it obvious that sync is intentionally
+    -- refused from production peers when this install is a dev build.
+    if self:IsDevBuild() then
+        local devLabel = AceGUI:Create("Label")
+        devLabel:SetFullWidth(true)
+        devLabel:SetText("|cffff8800Dev build (v" .. self.version
+            .. ") -- sync isolated from production peers.|r")
+        container:AddChild(devLabel)
+    end
+
     -- Local transaction count
     local countLabel = AceGUI:Create("Label")
     countLabel:SetFullWidth(true)
@@ -274,6 +284,7 @@ function GBL:RenderPeerList(container)
 
     local peers = self:GetSyncPeers()
     local hasPeers = false
+    local localIsDev = self:IsDevBuild()
 
     for name, info in pairs(peers) do
         hasPeers = true
@@ -290,32 +301,46 @@ function GBL:RenderPeerList(container)
             agoStr = math.floor(ago / 3600) .. "h ago"
         end
 
-        -- Version status indicator (directional: who needs to update?)
         local peerVersion = info.version or "?"
-        local versionTag = ""
-        if info.outdated then
-            if info.versionRelation == "local_behind" then
-                versionTag = " |cff44aaff(newer — update available)|r"
-            else
-                versionTag = " |cffff4400(outdated — no sync)|r"
+
+        if localIsDev then
+            -- Local is a dev build; the banner above already explains why
+            -- nothing in this list is reachable. Render greyed out and
+            -- skip per-row tags / nested color codes.
+            local seenStr = info.rosterOnly
+                and "online (no HELLO)"
+                or ("seen " .. agoStr)
+            lbl:SetText("|cff666666  " .. name
+                .. "  v" .. peerVersion
+                .. ", " .. (info.txCount or 0) .. " tx"
+                .. ", " .. seenStr .. "|r")
+        else
+            -- Production-mode rendering: tag each peer individually.
+            local versionTag = ""
+            if info.outdated then
+                if info.versionRelation == "local_behind" then
+                    versionTag = " |cff44aaff(newer — update available)|r"
+                else
+                    versionTag = " |cffff4400(outdated — no sync)|r"
+                end
+            elseif peerVersion ~= self.version then
+                local cmp = self:CompareSemver(self.version, peerVersion)
+                if cmp < 0 then
+                    versionTag = " |cff44aaff(newer — update available)|r"
+                else
+                    versionTag = " |cffff6600(outdated)|r"
+                end
             end
-        elseif peerVersion ~= self.version then
-            local cmp = self:CompareSemver(self.version, peerVersion)
-            if cmp < 0 then
-                versionTag = " |cff44aaff(newer — update available)|r"
-            else
-                versionTag = " |cffff6600(outdated)|r"
-            end
+
+            local seenStr = info.rosterOnly
+                and "|cffa0a0a0online (no HELLO)|r"
+                or ("seen " .. agoStr)
+
+            lbl:SetText("  " .. name
+                .. " — v" .. peerVersion .. versionTag
+                .. ", " .. (info.txCount or 0) .. " tx"
+                .. ", " .. seenStr)
         end
-
-        local seenStr = info.rosterOnly
-            and "|cffa0a0a0online (no HELLO)|r"
-            or ("seen " .. agoStr)
-
-        lbl:SetText("  " .. name
-            .. " — v" .. peerVersion .. versionTag
-            .. ", " .. (info.txCount or 0) .. " tx"
-            .. ", " .. seenStr)
         container:AddChild(lbl)
     end
 

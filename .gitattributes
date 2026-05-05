@@ -1,0 +1,5 @@
+# Shell scripts and git hooks must stay LF on every platform — CRLF in
+# the shebang line breaks bash on Linux/macOS, and the hook is invoked
+# by Git for Windows' bundled bash which also handles LF correctly.
+*.sh        text eol=lf
+scripts/hooks/*  text eol=lf

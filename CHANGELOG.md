@@ -5,7 +5,13 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.30.6] - 2026-05-05
+
+### Added
+- Dev-build sync isolation: a `DEV_BUILD` constant in `Core.lua` flips the wire version to `X.Y.Z-dev.<id>` so isolated dev installs cannot exchange records with production peers. The existing exact-match rejection at `Sync.lua` HandleHello refuses both directions and writes a single `(version mismatch; this build is v...)` audit line; the `-dev.<id>` substring in the printed version is the disambiguator between dev-isolation and real version skew. UI surfaces the dev state via a `[DEV]` title-bar suffix, a one-line login chat notification, an orange "Dev build (vX.Y.Z) -- sync isolated" banner at the top of the Sync tab when local is dev, and a greyed-out Online Peers list when local is dev (the banner above explains why none are reachable). CI guard rejects any PR where the constant is non-nil. The local `run_tests.sh` is intentionally unguarded so dev iteration on the dev branch keeps working.
+
+### Changed
+- `GBL:CompareSemver` strips an optional pre-release suffix (e.g. `-dev.<id>`) before parsing so dev builds compare as the same release line as their base for the ahead/behind UI labeling. The wire-side equality check at `Sync.lua` HandleHello is unaffected (uses string `~=` directly).
 
 ## [0.30.5] - 2026-05-05
 

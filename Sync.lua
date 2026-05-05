@@ -754,7 +754,7 @@ function GBL:HandleHello(sender, data)
                 (cmp < 0) and "local_behind" or "peer_behind"
         end
         self:AddAuditEntry("WARNING: " .. sender .. " on v"
-            .. tostring(data.version) .. " (version mismatch, need v" .. self.version .. ")")
+            .. tostring(data.version) .. " (version mismatch; this build is v" .. self.version .. ")")
         return
     end
 

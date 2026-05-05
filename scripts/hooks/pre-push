@@ -1,0 +1,39 @@
+#!/bin/bash
+# pre-push: refuse to push when the tip commit's Core.lua has DEV_BUILD set
+# to anything other than nil. Mirrors the "Verify DEV_BUILD is nil" step in
+# .github/workflows/ci.yml so a forgotten dev flip fails locally in under a
+# second instead of after a CI round-trip.
+#
+# Activate this hook (one-time per clone):
+#   git config core.hooksPath scripts/hooks
+#
+# Override for an intentional WIP push:
+#   git push --no-verify
+
+zero='0000000000000000000000000000000000000000'
+exit_code=0
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    # Branch deletion push, nothing to check.
+    if [ "$local_sha" = "$zero" ]; then
+        continue
+    fi
+
+    # Skip if Core.lua does not exist at this sha (e.g. very early history).
+    if ! git cat-file -e "$local_sha:Core.lua" 2>/dev/null; then
+        continue
+    fi
+
+    if ! git show "$local_sha:Core.lua" | grep -qE '^local DEV_BUILD = nil[[:space:]]'; then
+        echo "ERROR: $local_ref tip ($local_sha) has DEV_BUILD non-nil in Core.lua." >&2
+        echo "       CI will reject this push." >&2
+        echo "" >&2
+        git show "$local_sha:Core.lua" | grep -nE '^local DEV_BUILD' >&2 || true
+        echo "" >&2
+        echo "       Reset 'local DEV_BUILD = nil' in Core.lua and amend or add" >&2
+        echo "       a follow-up commit. Override with: git push --no-verify" >&2
+        exit_code=1
+    fi
+done
+
+exit $exit_code

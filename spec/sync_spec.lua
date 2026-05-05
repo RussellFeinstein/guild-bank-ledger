@@ -429,10 +429,12 @@ describe("Sync", function()
                     assert.not_equals("SYNC_REQUEST", data.type)
                 end
             end
-            -- Should have an audit entry about the mismatch
+            -- Should have an audit entry about the mismatch (either wording).
+            -- "version mismatch" is the production wording; "sync isolated" is
+            -- the dev-build wording (when this branch dogfoods DEV_BUILD).
             local trail = GBL:GetAuditTrail()
             assert.is_true(#trail > 0)
-            assert.truthy(trail[1].message:find("version mismatch"))
+            assert.truthy(trail[1].message:find("version mismatch", 1, true))
         end)
 
         it("refuses sync even on same major but different minor version", function()
@@ -453,7 +455,78 @@ describe("Sync", function()
             end
             local trail = GBL:GetAuditTrail()
             assert.is_true(#trail > 0)
-            assert.truthy(trail[1].message:find("version mismatch"))
+            assert.truthy(trail[1].message:find("version mismatch", 1, true))
+        end)
+
+        it("dev build refuses HELLO from production peer", function()
+            -- Capture the production version BEFORE setting the override so
+            -- the test is independent of the source file's VERSION literal.
+            local productionVersion = GBL:GetSyncVersion():match("^([^-]+)")
+
+            -- Re-init so self.version captures the dev suffix.
+            GBL._testDevBuild = "sync"
+            GBL:OnInitialize()
+            assert.equals(productionVersion .. "-dev.sync", GBL.version)
+
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:HandleHello("OfficerB", {
+                version = productionVersion,
+                txCount = 999,
+                lastScanTime = 1000,
+            })
+
+            -- No SYNC_REQUEST sent.
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok then
+                    assert.not_equals("SYNC_REQUEST", data.type)
+                end
+            end
+
+            local trail = GBL:GetAuditTrail()
+            local found = false
+            for _, e in ipairs(trail) do
+                if e.message:find("version mismatch", 1, true)
+                    and e.message:find("-dev.sync", 1, true) then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found, "expected version-mismatch audit entry naming the dev suffix")
+        end)
+
+        it("HELLO carrying a -dev.<id> version is rejected", function()
+            -- Use a sentinel id distinct from any plausible real DEV_BUILD
+            -- value so the test is robust whether the source file currently
+            -- has DEV_BUILD set (dogfooding) or nil (production state).
+            local productionVersion = GBL:GetSyncVersion():match("^([^-]+)")
+            local foreignDevVersion = productionVersion .. "-dev.production-test-sentinel-xyz"
+            assert.not_equals(GBL.version, foreignDevVersion)
+
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:HandleHello("OfficerB", {
+                version = foreignDevVersion,
+                txCount = 999,
+                lastScanTime = 1000,
+            })
+
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok then
+                    assert.not_equals("SYNC_REQUEST", data.type)
+                end
+            end
+
+            local trail = GBL:GetAuditTrail()
+            local found = false
+            for _, e in ipairs(trail) do
+                if e.message:find("version mismatch", 1, true)
+                    and e.message:find("-dev.production-test-sentinel-xyz", 1, true) then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found, "expected version-mismatch audit entry naming the foreign dev suffix")
         end)
 
         it("triggers sync when hash differs and counts are equal", function()

@@ -11,6 +11,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify DEV_BUILD is nil
+        run: |
+          if ! grep -qE '^local DEV_BUILD = nil[[:space:]]' Core.lua; then
+            echo "ERROR: DEV_BUILD must be nil before merging to main"
+            grep -n 'DEV_BUILD' Core.lua
+            exit 1
+          fi
+
       - name: Set up Lua 5.1
         uses: leafo/gh-actions-lua@v10
         with:
