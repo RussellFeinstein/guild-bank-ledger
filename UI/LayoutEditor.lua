@@ -603,6 +603,69 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
     unpinHint:SetFontObject(GameFontNormalSmall)
     unpinRow:AddChild(unpinHint)
 
+    -- Add-item row.
+    --
+    -- Sits above the item-rows table and slot map so it stays reachable on
+    -- captured display tabs. AceGUI's ScrollFrame content-height bookkeeping
+    -- on a deeply-nested Flow layout (item rows + slot map) clips trailing
+    -- widgets from the wheel-scrollable area; the save bar hit the same bug
+    -- in v0.30.4 and was moved up the same way (see the design notes on
+    -- _LayoutEditor_BuildInnerTabContent above).
+    if writable then
+        local addRow = AceGUI:Create("SimpleGroup")
+        addRow:SetFullWidth(true)
+        addRow:SetLayout("Flow")
+        parent:AddChild(addRow)
+
+        local input = AceGUI:Create("EditBox")
+        input:SetLabel("Add item (itemID or paste item link)")
+        input:SetWidth(260)
+        input:DisableButton(true)
+        addRow:AddChild(input)
+
+        local slotsInput = AceGUI:Create("EditBox")
+        slotsInput:SetLabel("Slots")
+        slotsInput:SetWidth(80)
+        slotsInput:SetText("1")
+        slotsInput:DisableButton(true)
+        addRow:AddChild(slotsInput)
+
+        local perSlotInput = AceGUI:Create("EditBox")
+        perSlotInput:SetLabel("Per slot")
+        perSlotInput:SetWidth(80)
+        perSlotInput:SetText("20")
+        perSlotInput:DisableButton(true)
+        addRow:AddChild(perSlotInput)
+
+        local addBtn = AceGUI:Create("Button")
+        addBtn:SetText("Add")
+        addBtn:SetWidth(80)
+        addBtn:SetCallback("OnClick", function()
+            local raw = input:GetText() or ""
+            local id = extractItemID(raw) or tonumber(raw)
+            if not id then
+                self:Print("Enter a numeric itemID or paste an item link.")
+                return
+            end
+            local slots = tonumber(slotsInput:GetText()) or 1
+            local perSlot = tonumber(perSlotInput:GetText()) or 1
+            if slots < 1 or perSlot < 1 then
+                self:Print("Slots and Per slot must be >= 1.")
+                return
+            end
+            tab.items[id] = { slots = slots, perSlot = perSlot }
+            -- slotOrder is intentionally NOT populated here. Only Capture
+            -- writes pinned slot positions; SortPlanner Pass 2 places
+            -- Add-Item entries at plan time using the same right/left/
+            -- first-empty adjacency the UI used to do, so the planned
+            -- layout is identical without the semantic ambiguity of
+            -- heuristically-pinned positions the user never chose.
+            self._layoutDirty = true
+            self:RefreshLayoutTab()
+        end)
+        addRow:AddChild(addBtn)
+    end
+
     -- Item rows table
     local totalSlots = 0
     for _, row in pairs(tab.items) do totalSlots = totalSlots + row.slots end
@@ -705,62 +768,6 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
     -- having S24 and S50 swapped.
     if #itemIDs > 0 then
         self:_LayoutEditor_RenderSlotMap(parent, tabIndex)
-    end
-
-    -- Add-item row
-    if writable then
-        local addRow = AceGUI:Create("SimpleGroup")
-        addRow:SetFullWidth(true)
-        addRow:SetLayout("Flow")
-        parent:AddChild(addRow)
-
-        local input = AceGUI:Create("EditBox")
-        input:SetLabel("Add item (itemID or paste item link)")
-        input:SetWidth(260)
-        input:DisableButton(true)
-        addRow:AddChild(input)
-
-        local slotsInput = AceGUI:Create("EditBox")
-        slotsInput:SetLabel("Slots")
-        slotsInput:SetWidth(80)
-        slotsInput:SetText("1")
-        slotsInput:DisableButton(true)
-        addRow:AddChild(slotsInput)
-
-        local perSlotInput = AceGUI:Create("EditBox")
-        perSlotInput:SetLabel("Per slot")
-        perSlotInput:SetWidth(80)
-        perSlotInput:SetText("20")
-        perSlotInput:DisableButton(true)
-        addRow:AddChild(perSlotInput)
-
-        local addBtn = AceGUI:Create("Button")
-        addBtn:SetText("Add")
-        addBtn:SetWidth(80)
-        addBtn:SetCallback("OnClick", function()
-            local raw = input:GetText() or ""
-            local id = extractItemID(raw) or tonumber(raw)
-            if not id then
-                self:Print("Enter a numeric itemID or paste an item link.")
-                return
-            end
-            local slots = tonumber(slotsInput:GetText()) or 1
-            local perSlot = tonumber(perSlotInput:GetText()) or 1
-            if slots < 1 or perSlot < 1 then
-                self:Print("Slots and Per slot must be >= 1.")
-                return
-            end
-            tab.items[id] = { slots = slots, perSlot = perSlot }
-            -- slotOrder is intentionally NOT populated here. Only Capture
-            -- writes pinned slot positions; SortPlanner Pass 2 places
-            -- Add-Item entries at plan time using the same right/left/
-            -- first-empty adjacency the UI used to do, so the planned
-            -- layout is identical without the semantic ambiguity of
-            -- heuristically-pinned positions the user never chose.
-            self._layoutDirty = true
-            self:RefreshLayoutTab()
-        end)
-        addRow:AddChild(addBtn)
     end
 end
 

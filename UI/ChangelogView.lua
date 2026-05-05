@@ -29,6 +29,17 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.31.1
+    {"0.31.1", "2026-05-05", {
+        Fixed = {
+            "Layout editor's Add item input is reachable again on captured display tabs. The row was sitting at the bottom of the per-tab scroll content (below the item rows and slot map) where AceGUI's trailing-widget scroll bug clipped it from the wheel-scrollable area, so users couldn't add new items by hand once a tab had been captured. Moved the row up to sit just below Capture / Unpin All, alongside the other write controls. Same widgets, same callback, same layout-write gate. Second instance of the v0.30.4 save-bar workaround pattern; the underlying AceGUI bug is unchanged.",
+            "Sort tab scroll now reaches the bottom of the window on tall plans. The ScrollFrame was missing the bottom-right anchor that Transactions / Gold Log / Consumption already use, so AceGUI's default Flow-layout height stopped the scroll short of the window edge and hid the tail of long move lists.",
+        },
+        Changed = {
+            "Sort tab Plan summary, live progress label, and Moves heading are now pinned above the scroll instead of scrolling away with the move list. The op rows, Deficits, and Unplaced sections continue to scroll. The running 'op N / M' counter stays visible during long sorts.",
+        },
+    }},
+
     -- v0.31.0
     {"0.31.0", "2026-05-05", {
         Added = {

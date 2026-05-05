@@ -81,12 +81,31 @@ function GBL:BuildSortTab(container)
     controls:SetLayout("Flow")
     container:AddChild(controls)
 
-    -- Content area (scrollable)
+    -- Pinned header area for the Plan summary, progress label, and Moves
+    -- heading. These three widgets stay visible while the move list +
+    -- deficits + unplaced scroll under them, so the user can watch the
+    -- progress counter ("op N / M") without having to scroll back up
+    -- mid-sort. _SortView_Preview clears and repopulates this group on
+    -- every render alongside the scroll content.
+    local header = AceGUI:Create("SimpleGroup")
+    header:SetFullWidth(true)
+    header:SetLayout("List")
+    container:AddChild(header)
+    self._sortHeader = header
+
+    -- Content area (scrollable). Anchored bottom-right to the container's
+    -- content frame so the scroll fills the remaining space under the
+    -- status banner + controls row + header instead of stopping at
+    -- AceGUI's default Flow-layout height. Without this anchor the scroll
+    -- cannot reach the bottom of the move list on tall plans. Same
+    -- pattern used in BuildTransactionsTab / BuildGoldLogTab /
+    -- BuildConsumptionTab.
     local content = AceGUI:Create("ScrollFrame")
     content:SetFullWidth(true)
     content:SetFullHeight(true)
     content:SetLayout("List")
     container:AddChild(content)
+    content.frame:SetPoint("BOTTOMRIGHT", container.content, "BOTTOMRIGHT", 0, 0)
     self._sortContent = content
 
     local previewBtn = AceGUI:Create("Button")
@@ -145,8 +164,10 @@ end
 function GBL:_SortView_Preview()
     local AceGUI = LibStub("AceGUI-3.0")
     local content = self._sortContent
+    local header = self._sortHeader
     if not content then return end
     content:ReleaseChildren()
+    if header then header:ReleaseChildren() end
 
     -- A fresh Preview generates a fresh plan; stale per-op status from a
     -- previous run would paint onto the wrong op indices. Clear both
@@ -201,22 +222,26 @@ function GBL:_SortView_Preview()
         self._sortLastPlan = plan
     end
 
-    -- Summary line
+    -- Summary line. Pinned in the header group (above the scroll) so it
+    -- stays visible while the user scrolls the move list.
     local opsN = #(plan.ops or {})
     local defN = 0; for _ in pairs(plan.deficits or {}) do defN = defN + 1 end
     local unpN = #(plan.unplaced or {})
 
+    local headerParent = header or content
     local summary = AceGUI:Create("Label")
     summary:SetFullWidth(true)
     summary:SetText(format(
         "|cff00ff88Plan:|r %d moves · |cffffaa55%d deficits|r · |cffff5555%d unplaced|r",
         opsN, defN, unpN))
-    content:AddChild(summary)
+    headerParent:AddChild(summary)
 
     -- Live progress label, updated by _SortView_OnProgress via direct
     -- SetText on this widget — no rebuild needed. Repopulated from the
     -- persistent _sortProgressText cache so a rebuild mid-sort doesn't
-    -- leave the label blank until the next event fires.
+    -- leave the label blank until the next event fires. Also pinned in
+    -- the header so the running counter stays visible while the move
+    -- list scrolls underneath.
     local progress = AceGUI:Create("Label")
     progress:SetFullWidth(true)
     progress:SetFontObject(GameFontNormalSmall)
@@ -225,7 +250,7 @@ function GBL:_SortView_Preview()
     else
         progress:SetText(" ")
     end
-    content:AddChild(progress)
+    headerParent:AddChild(progress)
     self._sortProgressLabel = progress
 
     if opsN == 0 and defN == 0 and unpN == 0 then
@@ -236,12 +261,14 @@ function GBL:_SortView_Preview()
         return
     end
 
-    -- Ops list
+    -- Ops list. The "Moves (N)" heading is pinned in the header group
+    -- (above the scroll) so it stays visible while the user scrolls the
+    -- move list. The op rows themselves go in the scroll content.
     if opsN > 0 then
         local h = AceGUI:Create("Heading")
         h:SetFullWidth(true)
         h:SetText(format("Moves (%d)", opsN))
-        content:AddChild(h)
+        headerParent:AddChild(h)
         for idx, op in ipairs(plan.ops) do
             local lbl = AceGUI:Create("Label")
             lbl:SetFullWidth(true)
