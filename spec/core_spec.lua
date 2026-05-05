@@ -1298,6 +1298,31 @@ describe("Core", function()
             assert.equals(10, guildData.schemaVersion)  -- NOT bumped
             assert.is_not_nil(guildData.knownPeers["Alice"])
         end)
+
+        it("normalizes raw spaced realms from roster into recovered keys", function()
+            -- GetGuildRosterInfo can return raw spaced realm names ("Aerie Peak")
+            -- for cross-realm guildmates. Without normalization the recovered
+            -- key would be "Alice-Aerie Peak" while every other call site of
+            -- CanonicalPeerKey produces "Alice-AeriePeak", silently splitting
+            -- the same peer across two keys. The migration must store the
+            -- normalized realm in the lookup so the rewrite agrees with the
+            -- form used elsewhere.
+            guildData.schemaVersion = 10
+            guildData.knownPeers = { ["Alice"] = { lastSeen = 1000, txCount = 7 } }
+            MockWoW.guildRoster = {
+                { name = "Alice-Aerie Peak", isOnline = true },  -- raw spaced realm
+            }
+
+            local rewrites = GBL:MigrateRecoverPeerRealms(guildData)
+
+            assert.equals(1, rewrites)
+            assert.equals(11, guildData.schemaVersion)
+            assert.is_nil(guildData.knownPeers["Alice"])
+            assert.is_nil(guildData.knownPeers["Alice-Aerie Peak"])  -- raw form must NOT survive
+            local recovered = guildData.knownPeers["Alice-AeriePeak"]
+            assert.is_not_nil(recovered)
+            assert.equals(7, recovered.txCount)
+        end)
     end)
 
     describe("GUILD_ROSTER_UPDATE migration retrigger", function()

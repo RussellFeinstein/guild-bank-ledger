@@ -1444,6 +1444,14 @@ function GBL:MigrateRecoverPeerRealms(guildData)
                 base = fullName
                 realm = localRealm
             end
+            -- Normalize before storing so the lookup agrees with the
+            -- normalized form used everywhere else (record.player after the
+            -- 9 -> 10 migration, HELLO sender canonicalization, etc.).
+            -- GetGuildRosterInfo can return raw spaced realm names ("Aerie
+            -- Peak") for cross-realm guildmates depending on the realm
+            -- topology; without this normalize the recovered key would split
+            -- across "Name-Aerie Peak" and "Name-AeriePeak".
+            realm = self:NormalizeRealm(realm)
             if not ambiguous[base] then
                 if lookup[base] and lookup[base] ~= realm then
                     lookup[base] = nil

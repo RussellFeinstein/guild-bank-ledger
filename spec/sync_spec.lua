@@ -4700,6 +4700,58 @@ describe("Sync", function()
             assert.is_not_nil(guildData.knownPeers["Ghost"])
             assert.is_not_nil(GBL:GetAllPeers()["Ghost"])
         end)
+
+        it("syncState.peers seeding preserves recency on canonical-key collisions", function()
+            -- When both legacy bare and canonical qualified forms exist in
+            -- knownPeers (the upgrade scenario this PR addresses), both raw
+            -- keys canonicalize to the same clean key. pairs() iteration order
+            -- is undefined, so an unconditional write to syncState.peers[clean]
+            -- could let an older snapshot overwrite a newer one in the runtime
+            -- cache. The seed loop must recency-merge syncState.peers the same
+            -- way it recency-merges knownPeers.
+            --
+            -- Direction A: bare is older, qualified is newer. Newer wins.
+            guildData.knownPeers["Katorriwl"] = {
+                version = "0.30.4", txCount = 5, lastSeen = 99000,
+            }
+            guildData.knownPeers["Katorriwl-Stormrage"] = {
+                version = "0.30.5", txCount = 8, lastSeen = 99800,
+            }
+            guildData.playerRealms["Katorriwl"] = "Stormrage"
+
+            GBL:InitSync()
+
+            local peers = GBL:GetAllPeers()
+            local newer = peers["Katorriwl-Stormrage"]
+            assert.is_not_nil(newer)
+            assert.equals(8, newer.txCount)
+            assert.equals("0.30.5", newer.version)
+            assert.equals(99800, newer.lastSeen)
+            assert.is_nil(peers["Katorriwl"])
+        end)
+
+        it("syncState.peers seeding wins for the bare entry when bare is newer", function()
+            -- Direction B: bare is newer, qualified is older. The recency
+            -- check must pick bare's data even though both canonicalize to
+            -- the qualified key. Without the check, pairs() ordering decides.
+            guildData.knownPeers["Katorriwl"] = {
+                version = "0.30.5", txCount = 12, lastSeen = 99900,
+            }
+            guildData.knownPeers["Katorriwl-Stormrage"] = {
+                version = "0.30.4", txCount = 4, lastSeen = 99100,
+            }
+            guildData.playerRealms["Katorriwl"] = "Stormrage"
+
+            GBL:InitSync()
+
+            local peers = GBL:GetAllPeers()
+            local newer = peers["Katorriwl-Stormrage"]
+            assert.is_not_nil(newer)
+            assert.equals(12, newer.txCount)  -- bare's newer txCount won
+            assert.equals("0.30.5", newer.version)
+            assert.equals(99900, newer.lastSeen)
+            assert.is_nil(peers["Katorriwl"])
+        end)
     end)
 
     ---------------------------------------------------------------------------

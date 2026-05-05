@@ -296,11 +296,20 @@ function GBL:InitSync()
             local info = guildData.knownPeers[name]
             if info and now - (info.lastSeen or 0) < KNOWN_PEER_EXPIRE_SECONDS then
                 local clean = self:CanonicalPeerKey(name)
-                syncState.peers[clean] = {
-                    version = info.version,
-                    txCount = info.txCount or 0,
-                    lastSeen = info.lastSeen or 0,
-                }
+                -- Recency-merge syncState.peers: when both legacy bare and
+                -- canonical qualified forms canonicalize to the same clean key
+                -- (the upgrade scenario the v0.30.5 bundle addresses), pairs()
+                -- iteration order is undefined so an unconditional write would
+                -- nondeterministically let an older snapshot overwrite a newer
+                -- one. Mirrors the recency check used for knownPeers below.
+                local existingPeer = syncState.peers[clean]
+                if not existingPeer or (info.lastSeen or 0) > (existingPeer.lastSeen or 0) then
+                    syncState.peers[clean] = {
+                        version = info.version,
+                        txCount = info.txCount or 0,
+                        lastSeen = info.lastSeen or 0,
+                    }
+                end
                 if clean ~= name then
                     local existing = guildData.knownPeers[clean]
                     if existing then
