@@ -245,6 +245,16 @@ function GBL:RenderSyncContent(container)
     statusLabel:SetText("|cffffcc00Status:|r " .. statusText)
     container:AddChild(statusLabel)
 
+    -- Dev-build banner: makes it obvious that sync is intentionally
+    -- refused from production peers when this install is a dev build.
+    if self:IsDevBuild() then
+        local devLabel = AceGUI:Create("Label")
+        devLabel:SetFullWidth(true)
+        devLabel:SetText("|cffff8800Dev build (v" .. self.version
+            .. ") -- sync isolated from production peers.|r")
+        container:AddChild(devLabel)
+    end
+
     -- Local transaction count
     local countLabel = AceGUI:Create("Label")
     countLabel:SetFullWidth(true)
@@ -293,7 +303,19 @@ function GBL:RenderPeerList(container)
         -- Version status indicator (directional: who needs to update?)
         local peerVersion = info.version or "?"
         local versionTag = ""
-        if info.outdated then
+        local peerIsDev = peerVersion ~= "?"
+            and peerVersion:find("-dev.", 1, true) ~= nil
+        local localIsDev = self:IsDevBuild()
+        local devMismatch = (localIsDev or peerIsDev)
+            and peerVersion ~= "?" and peerVersion ~= self.version
+        if devMismatch then
+            -- One side is a dev build; sync is intentionally refused. The
+            -- peer is not behind or ahead of us on the release line, just
+            -- on a different build.
+            local cause = localIsDev and "this is a dev build"
+                or "peer is a dev build"
+            versionTag = " |cffff8800(sync isolated: " .. cause .. ")|r"
+        elseif info.outdated then
             if info.versionRelation == "local_behind" then
                 versionTag = " |cff44aaff(newer — update available)|r"
             else
