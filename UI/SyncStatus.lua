@@ -106,6 +106,15 @@ function GBL:BuildSyncTab(container)
     end)
     controlRow:AddChild(logBtn)
 
+    -- Open Master Log button (sync + sort + system, interleaved by timestamp)
+    local masterLogBtn = AceGUI:Create("Button")
+    masterLogBtn:SetText("Open Master Log")
+    masterLogBtn:SetWidth(140)
+    masterLogBtn:SetCallback("OnClick", function()
+        self:ShowMasterLog()
+    end)
+    controlRow:AddChild(masterLogBtn)
+
     -- GM-only access control section
     if self:IsGuildMaster() then
         self:BuildAccessControlRow(container)
