@@ -145,6 +145,14 @@ function GBL:BuildSortTab(container)
     end)
     controls:AddChild(scanBtn)
 
+    local sortLogBtn = AceGUI:Create("Button")
+    sortLogBtn:SetText("Open Sort Log")
+    sortLogBtn:SetWidth(140)
+    sortLogBtn:SetCallback("OnClick", function()
+        self:ShowSortLog()
+    end)
+    controls:AddChild(sortLogBtn)
+
     -- Initial content
     self:_SortView_Preview()
 end

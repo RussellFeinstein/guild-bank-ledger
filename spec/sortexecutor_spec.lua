@@ -367,8 +367,8 @@ describe("SortExecutor", function()
                 },
             })
             MockAce.fireEvent("GUILDBANKBAGSLOTS_CHANGED")
-            -- Look for the reversion-suspected audit line.
-            local trail = GBL:GetAuditTrail()
+            -- Look for the reversion-suspected audit line in the sort channel.
+            local trail = GBL:GetLog("sort")
             local found = false
             for _, entry in ipairs(trail) do
                 if entry.message:find("server reversion suspected", 1, true) then
@@ -377,7 +377,7 @@ describe("SortExecutor", function()
                 end
             end
             assert.is_true(found,
-                "expected 'server reversion suspected' audit line; got " ..
+                "expected 'server reversion suspected' sort-log line; got " ..
                 tostring(#trail) .. " entries")
         end)
 
@@ -399,7 +399,7 @@ describe("SortExecutor", function()
             -- live bank already matches projected post-state. No further
             -- mutation. Fire a stray event.
             MockAce.fireEvent("GUILDBANKBAGSLOTS_CHANGED")
-            local trail = GBL:GetAuditTrail()
+            local trail = GBL:GetLog("sort")
             for _, entry in ipairs(trail) do
                 assert.is_nil(entry.message:find("server reversion suspected", 1, true),
                     "did not expect reversion audit but got: " .. entry.message)
@@ -477,8 +477,8 @@ describe("SortExecutor", function()
                 "no-op should not be counted as done")
             assert.is_true(result.failed > 0 or not result.ok,
                 "no-op should be classified as failure or abort")
-            -- Audit log should contain a "no-op suspected" line.
-            local trail = GBL:GetAuditTrail()
+            -- Sort log should contain a "no-op suspected" line.
+            local trail = GBL:GetLog("sort")
             local found = false
             for _, entry in ipairs(trail) do
                 if entry.message:find("no-op suspected", 1, true) then
@@ -487,7 +487,7 @@ describe("SortExecutor", function()
                 end
             end
             assert.is_true(found,
-                "expected 'no-op suspected' audit entry")
+                "expected 'no-op suspected' sort-log entry")
         end)
 
         it("[sync] still advances on a clean move (regression check)", function()

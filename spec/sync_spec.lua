@@ -8540,23 +8540,44 @@ describe("Sync", function()
             assert.equals("test message", trail[1].message)
         end)
 
-        it("AddAuditEntry with chatOnly prints to chat but not audit trail", function()
+        it("AddAuditEntry chatOnly drops entry when debugChat is off", function()
+            -- Post-channel-split: chatOnly=true is now an alias for DEBUG
+            -- severity, which drops entirely unless debugChat is enabled.
+            -- Preserves the prior "don't pollute the buffer with per-chunk
+            -- spam" property without needing the chatOnly side channel.
             GBL.db.profile.sync.chatLog = true
+            GBL.db.profile.sync.debugChat = false
 
             local printed = {}
             GBL.Print = function(_, msg)
                 table.insert(printed, msg)
             end
 
-            GBL:AddAuditEntry("chat only msg", true)
+            GBL:AddAuditEntry("noisy chunk msg", true)
 
-            assert.equals(1, #printed)
-            assert.equals("Sync: chat only msg", printed[1])
-            -- NOT in audit trail
+            assert.equals(0, #printed, "DEBUG should not chat without debugChat")
             local trail = GBL:GetAuditTrail()
             for _, entry in ipairs(trail) do
-                assert.falsy(entry.message:find("chat only msg"))
+                assert.falsy(entry.message:find("noisy chunk msg"))
             end
+        end)
+
+        it("AddAuditEntry chatOnly records as DEBUG when debugChat is on", function()
+            GBL.db.profile.sync.chatLog = false  -- only debugChat gates DEBUG
+            GBL.db.profile.sync.debugChat = true
+
+            local printed = {}
+            GBL.Print = function(_, msg)
+                table.insert(printed, msg)
+            end
+
+            GBL:AddAuditEntry("noisy chunk msg", true)
+
+            assert.equals(1, #printed)
+            assert.is_truthy(printed[1]:find("[DEBUG]", 1, true))
+            local trail = GBL:GetAuditTrail()
+            assert.equal("noisy chunk msg", trail[1].message)
+            assert.equal("DEBUG", trail[1].level)
         end)
 
         it("SyncLog function no longer exists", function()

@@ -2,7 +2,7 @@
 ## Title: GuildBankLedger
 ## Notes: Persistent guild bank transaction logging with guild-wide sync and consumption tracking
 ## Author: RussellFeinstein
-## Version: 0.31.1
+## Version: 0.32.0
 ## SavedVariables: GuildBankLedgerDB
 ## OptionalDeps: Ace3, LibDBIcon-1.0, LibDataBroker-1.1, LibDeflate
 ## X-Category: Guild
@@ -28,6 +28,7 @@ Libs\LibDBIcon-1.0\LibDBIcon-1.0.lua
 
 # Core
 Core.lua
+Logger.lua
 Scanner.lua
 Categories.lua
 ChatFilters.lua

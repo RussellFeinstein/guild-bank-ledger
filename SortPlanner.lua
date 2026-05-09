@@ -1018,13 +1018,13 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- Planner diagnostics. The first line is always emitted (baseline
     -- timing + replan hitch investigation). The phase / demand breakdown
     -- lines fire only when there's plan or demand activity, so quiet
-    -- replan-no-op cycles don't spam the audit trail. AddAuditEntry is
-    -- provided by Sync.lua; guard for partial test setups.
-    if self.AddAuditEntry then
+    -- replan-no-op cycles don't spam the sort log. SortInfo is provided
+    -- by Logger.lua; guard for partial test setups.
+    if self.SortInfo then
         local elapsed = profileStart and (debugprofilestop() - profileStart) or 0
         local deficitCount = 0
         for _ in pairs(plan.deficits) do deficitCount = deficitCount + 1 end
-        self:AddAuditEntry(string.format(
+        self:SortInfo(string.format(
             "Sort plan: %.1fms, %d ops, %d deficits, %d unplaced (input: %d slots / %d tabs)",
             elapsed, #plan.ops, deficitCount, #plan.unplaced,
             inputSlots, inputTabs))
@@ -1032,7 +1032,7 @@ function GBL:PlanSort(snapshot, layout, opts)
         local totalDemands = diag.demandPinned + diag.demandExtendRight
             + diag.demandExtendLeft + diag.demandFirstEmpty
         if #plan.ops > 0 or totalDemands > 0 then
-            self:AddAuditEntry(string.format(
+            self:SortInfo(string.format(
                 "  phases: P0 merge=%d(free=%d) P1a assign=%d "
                 .. "P1b spill=%d(top=%d,r=%d,l=%d,fe=%d,unp=%d) "
                 .. "P2 pivot=%d(abort=%d) P3 sweep=%d P4 pack=%d",
@@ -1045,7 +1045,7 @@ function GBL:PlanSort(snapshot, layout, opts)
                 diag.phase1bUnplaced,
                 diag.phase2Pivots, diag.phase2CycleAborts,
                 diag.phase3Sweeps, diag.phase4PositionShifts))
-            self:AddAuditEntry(string.format(
+            self:SortInfo(string.format(
                 "  demands: %d total (pinned=%d, ext-R=%d, ext-L=%d, first-empty=%d)",
                 totalDemands, diag.demandPinned, diag.demandExtendRight,
                 diag.demandExtendLeft, diag.demandFirstEmpty))

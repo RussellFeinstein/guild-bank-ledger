@@ -7,6 +7,7 @@ WoW addon that persistently logs guild bank transactions. Lua 5.1 + Ace3 stack. 
 ## Architecture
 
 - **Core.lua** — AceAddon bootstrap, lifecycle, slash commands, bank open/close detection
+- **Logger.lua**: Per-channel session log. Sync cap 2000, sort cap 1000, system cap 500. Severity levels DEBUG/INFO/WARN/ERROR; printf format with `pcall(string.format)` fallback so a bad format string never crashes. INFO/WARN/ERROR always record; DEBUG drops unless `db.profile.<channel>.debugChat` is on. Public API: `GBL:LogSync/LogSort/LogSystem(level, fmt, ...)` plus convenience wrappers (`SyncInfo`, `SortWarn`, etc.), `GetLog(channel)`, `GetMasterLog(opts)`, `ClearLog(channel)`. Surfaced on demand via `/gbl synclog`, `/gbl sortlog`, `/gbl logs` (master, interleaved by timestamp).
 - **Scanner.lua** — Guild bank slot scanning (inventory snapshots)
 - **Categories.lua** — Item classification via WoW classID/subclassID
 - **Dedup.lua** — Deduplication engine (occurrence-based hashing, fuzzy matching, event count metadata, count-based cleanup)
@@ -22,7 +23,7 @@ WoW addon that persistently logs guild bank transactions. Lua 5.1 + Ace3 stack. 
 - **UI/FilterBar.lua** — Transaction filter logic and AceGUI filter widgets
 - **UI/ConsumptionView.lua** — Consumption aggregation: guild totals, per-player summaries, guild-wide item usage with time buckets
 - **UI/LedgerView.lua** — Virtual-scrolling transaction list with sortable columns
-- **UI/SyncStatus.lua** — Sync tab: enable toggle, peer list, audit trail
+- **UI/SyncStatus.lua**: Sync tab. Enable toggle, peer list. (Audit panel removed: log surfaces only via `/gbl synclog` or `/gbl logs`.)
 - **UI/ChangelogView.lua** — Changelog tab: embedded version history and in-game renderer
 - **UI/AboutView.lua** — About tab: addon info, Ko-fi donation link, CurseForge link, credits
 - **UI/LayoutEditor.lua** — Layout tab: per-tab mode picker (display/overflow/ignore), item-template rows with slots/perSlot, Capture-from-current-tab button, Add-item input, Sort Access sub-section (two tiers: Layout Write and Sort-only, each with rank threshold + delegate list). Writes gated by `HasLayoutWrite()`; Sort Access writes gated by `IsGuildMaster()`. Write tier implies sort tier.
@@ -147,7 +148,7 @@ Helpers:
 
 ### Code invariants to preserve
 
-- All sync diagnostics go through `GBL:AddAuditEntry`. Use `chatOnly=true` for high-frequency per-chunk chat spam and plain calls for the audit trail. The trail is capped at 2000 entries — new per-chunk entries must be additive/terse, not verbose.
+- Logging is split across three channels owned by `Logger.lua`. Sync code calls `GBL:SyncInfo / SyncWarn / SyncError / SyncDebug`; sort code calls `GBL:Sort*`; system events call `GBL:System*`. The lower-level form `GBL:LogSync(level, fmt, ...)` exists for runtime-computed levels. Each channel is a session-only ring buffer (sync 2000 / sort 1000 / system 500, FIFO from tail). DEBUG entries are dropped entirely unless `db.profile.<channel>.debugChat` is on, which preserves the prior `chatOnly=true` "do not pollute the buffer with per-chunk noise" property without a separate side channel. Chat mirroring is gated by `chatLog` (INFO/WARN/ERROR) and `debugChat` (DEBUG). `GBL:AddAuditEntry(msg, chatOnly?)` is a deprecated shim that routes plain calls to `SyncInfo` and `chatOnly=true` calls to `SyncDebug`. `GBL:GetAuditTrail()` is a permanent alias for `GetLog("sync")` that also exposes a legacy `entry.timestamp` field; new readers should use `GetLog(channel)` or `GetMasterLog(opts)` directly. Slash commands: `/gbl synclog`, `/gbl sortlog`, `/gbl logs` (master pop-up), `/gbl logs dump [N]`, `/gbl logs clear sync|sort|system|all`, `/gbl logs debug sync|sort|system on|off`. The Sync tab no longer carries an always-visible audit panel; logs surface only on demand via slash command.
 - `syncState.lastChunkBytes` is the canonical compressed chunk size. Reuse it for fragment-count estimates (`ceil(lastChunkBytes/255)`) rather than re-measuring.
 - `HasSyncBandwidth()` uses a **dynamic** threshold `max(CTL_BANDWIDTH_MIN, lastChunkBytes)` — this is the v0.28.2 fix for the burst-stall regression from v0.28.0. Do not regress to a fixed threshold.
 - The superset skip in `HandleHello` and again in the bidirectional check after `FinishSending` is load-bearing for convergence but lacks a "tried and failed, back off" state — when sends fail, both sides' bidirectional checks short-circuit on "likely superset" and the protocol re-enters the same failing pattern. Flagged as a candidate amplifier, not fixed in v0.28.4.
@@ -181,4 +182,4 @@ Helpers:
 
 ## Version
 
-Current: 0.31.1 (see `VERSION` file)
+Current: 0.32.0 (see `VERSION` file)
