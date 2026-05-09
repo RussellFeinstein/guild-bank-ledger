@@ -34,11 +34,11 @@ The agent should ground every verdict in specific file paths or commit reference
 
 ### 3. Mutation testing
 
-**The idea.** Run `mutate.lua` (or equivalent) against the most logic-heavy modules (`Sync.lua`, `Planner.lua`, audit-log filtering). The test suite should kill 80%+ of generated mutants.
+**The idea.** Run `mutate.lua` (or equivalent) against the most logic-heavy modules (`src/Sync.lua`, `Planner.lua`, audit-log filtering). The test suite should kill 80%+ of generated mutants.
 
 **Why it might matter here.** The sync protocol has invariants that are hard to test exhaustively (chunk ordering, ACK timing, dedup correctness, replan-cap behaviour). Mutation testing surfaces weak assertions: places where a test passes regardless of whether the code does the right thing. The lessons.md 2026-04-07 entry ("mocks that encode wrong assumptions give false confidence") is the canonical case mutation testing catches.
 
-**What to investigate.** Pick the single highest-impact module. If `Sync.lua` mutation surfaces three tests that pass under inversion of an `if`-condition, those tests need real assertions. Decide whether running mutation testing in CI is worth the time cost (it is usually 20-50x slower than the base suite).
+**What to investigate.** Pick the single highest-impact module. If `src/Sync.lua` mutation surfaces three tests that pass under inversion of an `if`-condition, those tests need real assertions. Decide whether running mutation testing in CI is worth the time cost (it is usually 20-50x slower than the base suite).
 
 **Acceptance criteria if KEEP.** Mutation score reported per module. Tests strengthened until score is 80%+ on the chosen modules. CI runs mutation testing as a non-blocking nightly job, not on every PR.
 

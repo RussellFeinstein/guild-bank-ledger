@@ -22,7 +22,7 @@ bucket_key = floor(timeSlot / BUCKET_HOURS)
 
 All record IDs in a bucket are hashed (djb2) and XOR'd together to produce a 32-bit bucket fingerprint. XOR is order-independent, so peers with the same records produce identical bucket hashes regardless of insertion order.
 
-**Current constants** (`Fingerprint.lua`):
+**Current constants** (`src/Fingerprint.lua`):
 - `BUCKET_SECONDS = 21600` (6 hours)
 - `BUCKET_HOURS = 6`
 
@@ -238,7 +238,7 @@ With 70 peers and 10-peer pending queue (`MAX_PENDING_PEERS = 10`), peer-selecti
 
 ## Cross-Version Rollout
 
-Bucket granularity is computed locally per `Fingerprint.lua`. If peers run different bucket sizes:
+Bucket granularity is computed locally per `src/Fingerprint.lua`. If peers run different bucket sizes:
 
 - Bucket keys won't align (`floor(slot/6)` vs `floor(slot/3)`)
 - Every bucket appears "different" to the responder

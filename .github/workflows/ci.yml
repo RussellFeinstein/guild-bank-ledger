@@ -13,9 +13,9 @@ jobs:
 
       - name: Verify DEV_BUILD is nil
         run: |
-          if ! grep -qE '^local DEV_BUILD = nil[[:space:]]' Core.lua; then
+          if ! grep -qE '^local DEV_BUILD = nil[[:space:]]' src/Core.lua; then
             echo "ERROR: DEV_BUILD must be nil before merging to main"
-            grep -n 'DEV_BUILD' Core.lua
+            grep -n 'DEV_BUILD' src/Core.lua
             exit 1
           fi
 

@@ -19,15 +19,15 @@ After a sort completes, every same-item run on the overflow tab should be a sequ
 
 ### 1. Plumb max stack size into the planner
 
-ItemCache.lua currently caches only `(name, link)` from `GetItemInfo`. `GetItemInfo`'s 8th return value is `itemStackCount` — extend the cache tuple to include it.
+src/ItemCache.lua currently caches only `(name, link)` from `GetItemInfo`. `GetItemInfo`'s 8th return value is `itemStackCount` — extend the cache tuple to include it.
 
-- **`ItemCache.lua`** — add `stackCount` to the cached fields; expose `GBL.ItemCache:GetMaxStack(itemID)` returning the cached value or `nil` when not yet known.
+- **`src/ItemCache.lua`** — add `stackCount` to the cached fields; expose `GBL.ItemCache:GetMaxStack(itemID)` returning the cached value or `nil` when not yet known.
 - **Snapshot path** — when Scanner builds the snapshot, opportunistically populate stack count for each observed itemID via the cache (already happens for name/link).
-- **`SortPlanner.lua`** — accept an optional `maxStackByItem` map in the planner input (or look it up from ItemCache directly). When `nil` for a given itemID, fall back to current behavior (no merging) so a cold cache never blocks a sort.
+- **`src/SortPlanner.lua`** — accept an optional `maxStackByItem` map in the planner input (or look it up from ItemCache directly). When `nil` for a given itemID, fall back to current behavior (no merging) so a cold cache never blocks a sort.
 
 ### 2. Merge step in Phase 4
 
-In `SortPlanner.lua` lines 682–730, after the existing `ovStacks` sort by `(itemID, -count, origSlot)`:
+In `src/SortPlanner.lua` lines 682–730, after the existing `ovStacks` sort by `(itemID, -count, origSlot)`:
 
 1. Walk each same-item run.
 2. Two-pointer merge: pour from the smallest stack into the largest until the largest reaches `maxStack`, then advance.
@@ -45,9 +45,9 @@ Idempotence requirement: if the run is already in canonical merged form, the pla
 
 ## Critical files
 
-- `SortPlanner.lua` — Phase 4 block (lines 682–730); add merge sub-phase before contiguous-run emission
-- `ItemCache.lua` — extend cached tuple with `stackCount`
-- `Scanner.lua` — ensure snapshot population path warms `stackCount` (likely already covered if it goes through ItemCache)
+- `src/SortPlanner.lua` — Phase 4 block (lines 682–730); add merge sub-phase before contiguous-run emission
+- `src/ItemCache.lua` — extend cached tuple with `stackCount`
+- `src/Scanner.lua` — ensure snapshot population path warms `stackCount` (likely already covered if it goes through ItemCache)
 - `spec/sortplanner_spec.lua` — extend the Phase 4 suite (lines 1039–1189)
 
 ## Testing
