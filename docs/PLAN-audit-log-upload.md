@@ -11,7 +11,7 @@ Goal: opt-in auto-upload of sync audit logs from each consenting guildie to a ma
 ## Hard constraints
 
 - **Opt-in only, off by default.** A privacy-first toggle in the addon's About/Sync settings, with a clear one-line description of what gets uploaded and where it goes. Toggling off must immediately stop new uploads.
-- **Every log entry tags its source version.** Both addon `VERSION` and sync protocol version (`PROTOCOL_VERSION` at Sync.lua:11, exposed as `GBL.SYNC_PROTOCOL_VERSION`) on every record so cross-version corpora are partitionable. Without this tag, mixed-version corpora are unanalyzable.
+- **Every log entry tags its source version.** Both addon `VERSION` and sync protocol version (`PROTOCOL_VERSION` at src/Sync.lua:11, exposed as `GBL.SYNC_PROTOCOL_VERSION`) on every record so cross-version corpora are partitionable. Without this tag, mixed-version corpora are unanalyzable.
 - **No PII beyond character/realm names** (already in audit lines today). Do not start uploading bank contents or item lists. Scope is the audit trail, not the ledger.
 - **Bounded volume.** Cap per-day upload size and rotate. A guildie should never see the addon balloon their disk usage or upload bandwidth.
 
@@ -52,10 +52,10 @@ Recommended starting point: simple HTTP endpoint with a maintainer-issued opt-in
 
 ## Critical files (phase 1 only)
 
-- `Sync.lua` — every `GBL:AddAuditEntry` call site (defined at line 2184) is the source of records; entries already have `peer`, `outcome`, etc. Stamp `addonVersion` + `protocolVersion` at write time.
-- `Core.lua` — register `GuildBankLedgerAuditDB` AceDB, wire the opt-in toggle, register the slash command.
+- `src/Sync.lua` — every `GBL:AddAuditEntry` call site (defined at line 2184) is the source of records; entries already have `peer`, `outcome`, etc. Stamp `addonVersion` + `protocolVersion` at write time.
+- `src/Core.lua` — register `GuildBankLedgerAuditDB` AceDB, wire the opt-in toggle, register the slash command.
 - `UI/SyncStatus.lua` or `UI/AboutView.lua` — add the opt-in checkbox with the one-line disclosure.
-- `VERSION` / `Sync.lua` `PROTOCOL_VERSION` constant — read at runtime for stamping.
+- `VERSION` / `src/Sync.lua` `PROTOCOL_VERSION` constant — read at runtime for stamping.
 
 ## Testing (phase 1)
 

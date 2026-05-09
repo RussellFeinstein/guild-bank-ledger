@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.32.1] - 2026-05-09
+
+### Changed
+- Reorganized addon source files into the `src/` subfolder. Internal-only change with no user-visible behavior. Updates the `.toc` load paths, the test harness `dofile` paths, the `.busted` `lpath`, the CI `Verify DEV_BUILD is nil` step, the `pre-push` hook, and path references across `CLAUDE.md`, `CONTRIBUTING.md`, the GitHub PR template, and `docs/`. Historical CHANGELOG entries and in-source comments retain the old root-level filenames since they describe the codebase as it stood at the time.
+
 ## [0.32.0] - 2026-05-08
 
 ### Added

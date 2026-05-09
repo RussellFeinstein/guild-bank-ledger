@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.32.1
+    {"0.32.1", "2026-05-09", {
+        Changed = {
+            "Reorganized addon source files into the src/ subfolder. Internal-only change with no user-visible behavior. The 14 production .lua modules (Core, Logger, Scanner, Categories, ChatFilters, Dedup, Ledger, Storage, Fingerprint, ItemCache, Sync, BankLayout, SortPlanner, SortExecutor) now live under src/; UI/, Libs/, spec/, scripts/, and docs/ are unchanged. Build, test, and CI surfaces (.toc, spec/helpers.lua, .busted, ci.yml, pre-push hook) updated to match.",
+        },
+    }},
+
     -- v0.32.0
     {"0.32.0", "2026-05-08", {
         Added = {

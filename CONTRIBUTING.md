@@ -69,7 +69,7 @@ Follows [Semantic Versioning 2.0](https://semver.org/). Rules of thumb:
 - **Minor (x.Y.0)**: new features a user or contributor needs to know about. New slash commands, new config keys, new modules, new output/schema types.
 - **Major (X.0.0)**: breaking changes. Removed commands, renamed keys, incompatible schema migrations.
 
-The authoritative version is in `VERSION`. Files that must agree: `VERSION`, `GuildBankLedger.toc` (`## Version:` line), `Core.lua` (local `VERSION` string), `CLAUDE.md` (`Current:` line). Every commit that bumps the version must update all four in lockstep, plus add a `CHANGELOG.md` entry and a matching `CHANGELOG_DATA` entry in `UI/ChangelogView.lua`.
+The authoritative version is in `VERSION`. Files that must agree: `VERSION`, `GuildBankLedger.toc` (`## Version:` line), `src/Core.lua` (local `VERSION` string), `CLAUDE.md` (`Current:` line). Every commit that bumps the version must update all four in lockstep, plus add a `CHANGELOG.md` entry and a matching `CHANGELOG_DATA` entry in `UI/ChangelogView.lua`.
 
 **External contributors: leave all version strings alone.** The maintainer handles the version bump and CHANGELOG promotion in a bookkeeping commit after merging your PR. This keeps the repo's version policy entirely on maintainer side so contributors don't have to guess at internal release planning.
 
