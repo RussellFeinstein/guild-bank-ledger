@@ -753,8 +753,8 @@ function GBL:HandleHello(sender, data)
             syncState.peers[cleanSender].versionRelation =
                 (cmp < 0) and "local_behind" or "peer_behind"
         end
-        self:AddAuditEntry("WARNING: " .. sender .. " on v"
-            .. tostring(data.version) .. " (version mismatch; this build is v" .. self.version .. ")")
+        self:SyncWarn(sender .. " on v" .. tostring(data.version)
+            .. " (version mismatch; this build is v" .. self.version .. ")")
         return
     end
 
@@ -1031,7 +1031,7 @@ function GBL:RequestSync(target, sinceTimestamp)
 
     local msgBytes = #msg
     if not self:SendSyncWhisper(PREFIX, msg, target) then
-        self:AddAuditEntry("Target offline — aborting sync request to " .. target)
+        self:SyncError("Target offline, aborting sync request to " .. target)
         self:FinishReceiving(target)
         return
     end
@@ -1415,10 +1415,10 @@ function GBL:SendNextChunk()
 
     if msgLen > WHISPER_SAFE_BYTES then
         self:Print("|cffff0000Sync WARNING:|r chunk " .. idx .. " is " .. msgLen
-            .. "b (>" .. WHISPER_SAFE_BYTES .. ") — may be dropped!")
-        self:AddAuditEntry("WARNING: chunk " .. idx .. " is " .. msgLen
+            .. "b (>" .. WHISPER_SAFE_BYTES .. "), may be dropped!")
+        self:SyncWarn("chunk " .. idx .. " is " .. msgLen
             .. " bytes (>" .. WHISPER_SAFE_BYTES
-            .. ") — may be silently dropped by AceComm WHISPER")
+            .. "), may be silently dropped by AceComm WHISPER")
     end
 
     -- Hard timeout safety net — fires if AceComm callback never completes.
@@ -1429,7 +1429,7 @@ function GBL:SendNextChunk()
     end
     syncState.sendHardTimer = C_Timer.NewTicker(120, function()
         if syncState.sending then
-            self:AddAuditEntry("Send hard timeout (120s) — AceComm never finished, aborting")
+            self:SyncError("Send hard timeout (120s), AceComm never finished, aborting")
             self:FinishSending()
         end
     end, 1)
@@ -1469,7 +1469,7 @@ function GBL:SendNextChunk()
                     local liveness = self:IsGuildMemberOnline(syncState.sendTarget)
                     local livenessStr = (liveness == true) and "online"
                         or (liveness == false) and "offline" or "unknown"
-                    self:AddAuditEntry("ACK timeout — retrying chunk " .. retryChunk
+                    self:SyncWarn("ACK timeout, retrying chunk " .. retryChunk
                         .. " (attempt " .. (syncState.sendRetryCount + 1) .. "/"
                         .. (MAX_RETRIES + 1) .. ")"
                         .. ", fragments~=" .. fragments
@@ -1486,15 +1486,15 @@ function GBL:SendNextChunk()
                     if syncState.chunkOutcomes and syncState.chunkOutcomes[idx] then
                         syncState.chunkOutcomes[idx].outcome = "aborted"
                     end
-                    self:AddAuditEntry("ACK timeout from "
+                    self:SyncError("ACK timeout from "
                         .. (syncState.sendTarget or "unknown")
-                        .. " after " .. (MAX_RETRIES + 1) .. " attempts — aborting")
+                        .. " after " .. (MAX_RETRIES + 1) .. " attempts, aborting")
                     self:FinishSending()
                 end
             end, 1)
         end) then
-        self:AddAuditEntry("Target " .. (syncState.sendTarget or "?")
-            .. " went offline — aborting send")
+        self:SyncError("Target " .. (syncState.sendTarget or "?")
+            .. " went offline, aborting send")
         -- v0.28.7: tag outcome for histogram attribution
         if syncState.chunkOutcomes and syncState.chunkOutcomes[idx]
             and syncState.chunkOutcomes[idx].outcome == "pending" then
@@ -2263,19 +2263,17 @@ end
 -- Helpers
 ------------------------------------------------------------------------
 
---- Append an entry to the session audit trail (capped at 200).
+--- Deprecated: route to Logger.lua. Preserved as a thin shim so test
+-- fixtures and any external callers keep working through the transition.
+-- New code calls GBL:SyncInfo / SyncWarn / SyncError / SyncDebug directly
+-- (or the lower-level GBL:LogSync).
 -- @param message string Human-readable log entry
+-- @param chatOnly boolean|nil If true, treat as DEBUG-level (chat-only-by-default).
 function GBL:AddAuditEntry(message, chatOnly)
-    if self.db and self.db.profile.sync.chatLog then
-        self:Print("Sync: " .. message)
-    end
-    if chatOnly then return end
-    table.insert(syncState.auditTrail, 1, {
-        timestamp = GetServerTime(),
-        message = message,
-    })
-    while #syncState.auditTrail > 2000 do
-        table.remove(syncState.auditTrail)
+    if chatOnly then
+        self:SyncDebug(message)
+    else
+        self:SyncInfo(message)
     end
 end
 
@@ -2371,10 +2369,24 @@ function GBL:GetAllPeers()
     return syncState.peers
 end
 
---- Return the session audit trail.
--- @return table Array of { timestamp, message }, newest first
+--- Return the sync-channel session log (compat alias for GBL:GetLog("sync")).
+-- Kept permanently because ~40 spec sites read this; retire only if those
+-- assertions are rewritten. Note: entry shape changed from
+-- { timestamp, message } to { ts, level, channel, message }; the legacy
+-- `timestamp` and `message` keys are added inline so downstream string-search
+-- assertions on entry.message keep working unchanged.
+-- @return table Array of entries, newest first
 function GBL:GetAuditTrail()
-    return syncState.auditTrail
+    local snap = self:GetLog("sync")
+    -- Expose `timestamp` alongside `ts` for legacy callers (e.g. UI/SyncStatus
+    -- previously rendered entry.timestamp; tests assert on entry.message).
+    -- Mutating in-place is safe because every entry has a stable shape.
+    for i = 1, #snap do
+        if snap[i].timestamp == nil then
+            snap[i].timestamp = snap[i].ts
+        end
+    end
+    return snap
 end
 
 --- Return total transaction count for the current guild.
@@ -2420,7 +2432,8 @@ function GBL:ResetSyncState()
     syncState.receiveStartTime = 0
     syncState.receiveNackCount = 0
     syncState.peers = {}
-    syncState.auditTrail = {}
+    syncState.auditTrail = {}    -- legacy field, unused; kept zero for any direct readers
+    self:ClearLog("sync")        -- clear the real sync buffer in Logger.lua
     syncState.lastHelloTime = 0
     if syncState.helloHeartbeat then
         syncState.helloHeartbeat:Cancel()
@@ -2501,8 +2514,8 @@ function GBL:ScheduleReceiveTimeout()
         -- Safety net: abort if receiving has been stuck for too long
         if syncState.receiveStartTime > 0
             and (GetServerTime() - syncState.receiveStartTime) > MAX_RECEIVE_DURATION then
-            self:AddAuditEntry("Receive timeout: stuck for >"
-                .. MAX_RECEIVE_DURATION .. "s — aborting")
+            self:SyncError("Receive timeout: stuck for >"
+                .. MAX_RECEIVE_DURATION .. "s, aborting")
             self:FinishReceiving(syncState.receiveSource)
             return
         end
@@ -2510,16 +2523,16 @@ function GBL:ScheduleReceiveTimeout()
         -- Check if sender went offline (abort early instead of wasting NACKs)
         local online = self:IsGuildMemberOnline(syncState.receiveSource)
         if online == false then
-            self:AddAuditEntry("Sender " .. (syncState.receiveSource or "?")
-                .. " offline — aborting receive")
+            self:SyncError("Sender " .. (syncState.receiveSource or "?")
+                .. " offline, aborting receive")
             self:FinishReceiving(syncState.receiveSource)
             return
         end
 
         if syncState.receiveNackCount >= MAX_NACK_RETRIES then
-            self:AddAuditEntry("NACK limit reached for chunk "
+            self:SyncError("NACK limit reached for chunk "
                 .. (syncState.receiveGot + 1) .. " from "
-                .. (syncState.receiveSource or "unknown") .. " — aborting")
+                .. (syncState.receiveSource or "unknown") .. ", aborting")
             self:FinishReceiving(syncState.receiveSource)
         else
             self:SendNack(syncState.receiveSource, syncState.receiveGot + 1)

@@ -138,7 +138,9 @@ local defaults = {
         },
         alerts = { enabled = true, chatNotify = true, soundNotify = true },
         export = { delimiter = ",", includeHeaders = true, dateFormat = "%Y-%m-%d %H:%M" },
-        sync = { enabled = true, autoSync = true, chatLog = false },
+        sync = { enabled = true, autoSync = true, chatLog = false, debugChat = false },
+        sort = { chatLog = false, debugChat = false },
+        system = { chatLog = false, debugChat = false },
         filters = { defaultDays = 7, defaultCategory = "ALL" },
         chatFilters = { muteAmbientNPCs = false },
     },
@@ -1704,7 +1706,7 @@ function GBL:RepairPlayerNames()
     end
 
     self:ResetHashCache()
-    self:AddAuditEntry("Repaired " .. fixed .. " player names after roster load")
+    self:SystemInfo("Repaired " .. fixed .. " player names after roster load")
 end
 
 function GBL:OnDisable()
@@ -1824,7 +1826,7 @@ function GBL:OnBankOpened()
                         -- truth to detect duplicates from prior sync.
                         local removed = self:DeduplicateRecords(guildData)
                         if removed > 0 then
-                            self:AddAuditEntry("Post-scan cleanup: removed "
+                            self:SystemInfo("Post-scan cleanup: removed "
                                 .. removed .. " duplicate record(s)")
                             self:RefreshUI()
                         end
@@ -2227,7 +2229,8 @@ end
 
 function GBL:HandleSlashCommand(input)
     input = input and strtrim(input) or ""
-    local command = input:lower()
+    local head, rest = input:match("^(%S*)%s*(.*)$")
+    local command = (head or ""):lower()
 
     if command == "" or command == "show" then
         self:ToggleMainFrame()
@@ -2241,6 +2244,10 @@ function GBL:HandleSlashCommand(input)
         self:PrintSyncDiag()
     elseif command == "synclog" then
         self:ShowSyncLog()
+    elseif command == "sortlog" then
+        self:ShowSortLog()
+    elseif command == "logs" then
+        self:HandleLogsCommand(rest)
     elseif command == "cleanup" then
         self:RunCleanup()
     elseif command == "sortpreview" then
@@ -2589,16 +2596,22 @@ function GBL:PrintStatus()
 end
 
 function GBL:PrintHelp()
-    self:Print("|cffffcc00GuildBankLedger v" .. self.version .. " — Commands:|r")
-    self:Print("  /gbl         — Toggle the ledger window")
-    self:Print("  /gbl show    — Toggle the ledger window")
-    self:Print("  /gbl status  — Show addon status")
-    self:Print("  /gbl scan    — Manually scan the guild bank")
-    self:Print("  /gbl cleanup — Remove duplicate records from the database")
-    self:Print("  /gbl sortpreview — Preview the current sort plan (debug)")
-    self:Print("  /gbl sortexec    — Execute the current sort plan (GM/delegated only)")
-    self:Print("  /gbl sortcancel  — Cancel a running sort")
-    self:Print("  /gbl help    — Show this help message")
+    self:Print("|cffffcc00GuildBankLedger v" .. self.version .. " - Commands:|r")
+    self:Print("  /gbl         - Toggle the ledger window")
+    self:Print("  /gbl show    - Toggle the ledger window")
+    self:Print("  /gbl status  - Show addon status")
+    self:Print("  /gbl scan    - Manually scan the guild bank")
+    self:Print("  /gbl cleanup - Remove duplicate records from the database")
+    self:Print("  /gbl sortpreview - Preview the current sort plan (debug)")
+    self:Print("  /gbl sortexec    - Execute the current sort plan (GM/delegated only)")
+    self:Print("  /gbl sortcancel  - Cancel a running sort")
+    self:Print("  /gbl synclog     - Show the sync-channel session log")
+    self:Print("  /gbl sortlog     - Show the sort-channel session log")
+    self:Print("  /gbl logs        - Show the master log (sync + sort + system)")
+    self:Print("  /gbl logs dump [N]                       - Dump last N master entries to chat")
+    self:Print("  /gbl logs clear sync|sort|system|all     - Truncate channel(s)")
+    self:Print("  /gbl logs debug sync|sort|system on|off  - Toggle DEBUG-to-chat for a channel")
+    self:Print("  /gbl help    - Show this help message")
 end
 
 --- Run both dedup passes (same-slot + cross-slot) without schema guards.
@@ -2832,25 +2845,62 @@ function GBL:PrintSyncDiag()
     end
 end
 
---- Show the sync audit trail in a copy-pastable editbox.
-function GBL:ShowSyncLog()
-    local trail = self:GetAuditTrail()
-    if #trail == 0 then
-        self:Print("No sync log entries yet.")
+------------------------------------------------------------------------
+-- Log viewers (sync / sort / master) -- copy-pastable AceGUI pop-ups
+--
+-- One-shot snapshot windows, no live-refresh. Callers reach this through
+-- /gbl synclog, /gbl sortlog, and /gbl logs (see HandleSlashCommand).
+------------------------------------------------------------------------
+
+local LOG_TITLES = {
+    sync   = "GBL Sync Log",
+    sort   = "GBL Sort Log",
+    system = "GBL System Log",
+}
+
+--- Format an entry for the master view (channel + level prefix).
+local function masterLine(entry)
+    local ts = date("%H:%M:%S", entry.ts or 0)
+    return string.format("[%s] [%s] [%s] %s",
+        ts, (entry.channel or "?"):upper(),
+        entry.level or "INFO", entry.message or "")
+end
+
+--- Format an entry for a single-channel view (no channel prefix needed).
+local function channelLine(entry)
+    local ts = date("%H:%M:%S", entry.ts or 0)
+    if entry.level and entry.level ~= "INFO" then
+        return string.format("[%s] [%s] %s", ts, entry.level, entry.message or "")
+    end
+    return "[" .. ts .. "] " .. (entry.message or "")
+end
+
+--- Internal: render a snapshot in an AceGUI MultiLineEditBox pop-up.
+-- Falls back to chat dump when AceGUI is unavailable.
+function GBL:_ShowLogFrame(title, entries, formatter)
+    if #entries == 0 then
+        self:Print(title .. ": no entries yet.")
+        return
+    end
+
+    local AceGUI = LibStub and LibStub("AceGUI-3.0", true)
+    if not AceGUI then
+        -- Chat fallback (RCPL_Log.DumpToChat pattern).
+        self:Print(title .. " (" .. #entries .. " entries):")
+        for i = 1, #entries do
+            self:Print(formatter(entries[i]))
+        end
         return
     end
 
     local lines = {}
-    for i = 1, #trail do
-        local entry = trail[i]
-        local ts = date("%H:%M:%S", entry.timestamp)
-        lines[#lines + 1] = "[" .. ts .. "] " .. entry.message
+    for i = 1, #entries do
+        lines[i] = formatter(entries[i])
     end
     local text = table.concat(lines, "\n")
 
-    local AceGUI = LibStub("AceGUI-3.0")
     local frame = AceGUI:Create("Frame")
-    frame:SetTitle("GBL Sync Log")
+    frame:SetTitle(title .. " (" .. #entries .. " entries)")
     frame:SetWidth(600)
     frame:SetHeight(400)
     frame:SetLayout("Fill")
@@ -2862,6 +2912,108 @@ function GBL:ShowSyncLog()
     editBox:SetFullHeight(true)
     editBox:SetText(text)
     frame:AddChild(editBox)
+end
+
+--- Pop up the sync-channel log (also reached via /gbl synclog).
+function GBL:ShowSyncLog()
+    self:_ShowLogFrame(LOG_TITLES.sync, self:GetLog("sync"), channelLine)
+end
+
+--- Pop up the sort-channel log (also reached via /gbl sortlog).
+function GBL:ShowSortLog()
+    self:_ShowLogFrame(LOG_TITLES.sort, self:GetLog("sort"), channelLine)
+end
+
+--- Pop up the system-channel log.
+function GBL:ShowSystemLog()
+    self:_ShowLogFrame(LOG_TITLES.system, self:GetLog("system"), channelLine)
+end
+
+--- Pop up the master log (sync + sort + system, interleaved by timestamp).
+function GBL:ShowMasterLog()
+    local merged = self:GetMasterLog()
+    self:_ShowLogFrame("GBL Master Log", merged, masterLine)
+end
+
+--- Dump the master log to chat (default 50 entries).
+-- @param limit number Max entries to print
+function GBL:DumpMasterLog(limit)
+    limit = tonumber(limit) or 50
+    local merged = self:GetMasterLog({ limit = limit })
+    if #merged == 0 then
+        self:Print("Master log: no entries.")
+        return
+    end
+    self:Print(string.format("Master log dump (%d of available):", #merged))
+    for i = 1, #merged do
+        self:Print(masterLine(merged[i]))
+    end
+end
+
+------------------------------------------------------------------------
+-- Slash command helper: /gbl logs ...
+------------------------------------------------------------------------
+
+local LOG_CHANNEL_KEYS = { sync = true, sort = true, system = true, all = true }
+
+--- Dispatch /gbl logs subcommands. Format:
+--   /gbl logs                          → master pop-up
+--   /gbl logs dump [N]                 → chat dump of master log
+--   /gbl logs clear sync|sort|system|all
+--   /gbl logs debug sync|sort|system on|off
+function GBL:HandleLogsCommand(rest)
+    rest = rest and strtrim(rest) or ""
+
+    if rest == "" then
+        self:ShowMasterLog()
+        return
+    end
+
+    local sub, tail = rest:match("^(%S+)%s*(.*)$")
+    sub = (sub or ""):lower()
+
+    if sub == "dump" then
+        local n = tonumber(tail)
+        self:DumpMasterLog(n)
+        return
+    end
+
+    if sub == "clear" then
+        local target = (tail or ""):lower()
+        if not LOG_CHANNEL_KEYS[target] then
+            self:Print("Usage: /gbl logs clear sync|sort|system|all")
+            return
+        end
+        if target == "all" then
+            self:ClearLog(nil)
+            self:Print("Cleared sync, sort, and system logs.")
+        else
+            self:ClearLog(target)
+            self:Print("Cleared " .. target .. " log.")
+        end
+        return
+    end
+
+    if sub == "debug" then
+        local channel, state = tail:match("^(%S+)%s+(%S+)$")
+        channel = channel and channel:lower() or nil
+        state = state and state:lower() or nil
+        if not channel or not LOG_CHANNEL_KEYS[channel] or channel == "all"
+           or (state ~= "on" and state ~= "off") then
+            self:Print("Usage: /gbl logs debug sync|sort|system on|off")
+            return
+        end
+        local enable = state == "on"
+        if not (self.db and self.db.profile and self.db.profile[channel]) then
+            self:Print("Channel " .. channel .. " has no profile config.")
+            return
+        end
+        self.db.profile[channel].debugChat = enable
+        self:Print(channel .. " debug-to-chat " .. (enable and "enabled" or "disabled") .. ".")
+        return
+    end
+
+    self:Print("Usage: /gbl logs [dump N | clear sync|sort|system|all | debug sync|sort|system on|off]")
 end
 
 function GBL:ManualScan()

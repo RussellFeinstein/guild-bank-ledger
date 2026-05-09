@@ -60,6 +60,7 @@ function Helpers.resetAll()
 
     -- Clear any previously loaded addon modules
     package.loaded["Core"] = nil
+    package.loaded["Logger"] = nil
     package.loaded["Scanner"] = nil
     package.loaded["Categories"] = nil
     package.loaded["Dedup"] = nil
@@ -95,6 +96,7 @@ end
 -- @return table The addon object
 function Helpers.loadAddon()
     package.loaded["Core"] = nil
+    package.loaded["Logger"] = nil
     package.loaded["Scanner"] = nil
     package.loaded["Categories"] = nil
     package.loaded["Dedup"] = nil
@@ -102,6 +104,7 @@ function Helpers.loadAddon()
     package.loaded["Storage"] = nil
     package.loaded["Sync"] = nil
     dofile("Core.lua")
+    dofile("Logger.lua")
     dofile("Scanner.lua")
     safeDofile("Categories.lua")
     safeDofile("ChatFilters.lua")

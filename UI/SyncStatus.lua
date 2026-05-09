@@ -264,8 +264,8 @@ function GBL:RenderSyncContent(container)
     -- Peer list
     self:RenderPeerList(container)
 
-    -- Audit trail
-    self:RenderAuditTrail(container)
+    -- Sync log surfaces only on demand via /gbl synclog (or /gbl logs for the
+    -- master view); the previous always-visible audit panel is gone.
 end
 
 ------------------------------------------------------------------------
@@ -353,37 +353,6 @@ function GBL:RenderPeerList(container)
     end
 end
 
-------------------------------------------------------------------------
--- Audit trail
-------------------------------------------------------------------------
-
---- Render the recent sync log entries.
--- @param container AceGUI container
-function GBL:RenderAuditTrail(container)
-    local AceGUI = LibStub("AceGUI-3.0")
-
-    local header = AceGUI:Create("Label")
-    header:SetFullWidth(true)
-    header:SetText("|cffffcc00Sync log:|r")
-    container:AddChild(header)
-
-    local trail = self:GetAuditTrail()
-
-    if #trail == 0 then
-        local none = AceGUI:Create("Label")
-        none:SetFullWidth(true)
-        none:SetText("  No sync events yet.")
-        container:AddChild(none)
-        return
-    end
-
-    local maxDisplay = 20
-    for i = 1, math.min(#trail, maxDisplay) do
-        local entry = trail[i]
-        local lbl = AceGUI:Create("Label")
-        lbl:SetFullWidth(true)
-        local ts = date("%H:%M:%S", entry.timestamp)
-        lbl:SetText("  [" .. ts .. "] " .. entry.message)
-        container:AddChild(lbl)
-    end
-end
+-- Sync log panel removed: log surfaces only on demand via /gbl synclog
+-- (per-channel) and /gbl logs (master view). Eliminates the always-visible
+-- panel that re-rendered on every tab switch and audit write.

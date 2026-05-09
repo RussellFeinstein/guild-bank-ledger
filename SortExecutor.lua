@@ -137,7 +137,7 @@ local function auditOpNoop(w, branch)
     if not w then return end
     local itemDesc = (w.itemID and GBL.DescribeItem)
         and GBL:DescribeItem(w.itemID) or ("it:" .. tostring(w.itemID))
-    GBL:AddAuditEntry(string.format(
+    GBL:SortWarn(string.format(
         "Sort op %d no-op suspected [%s]: %s T%d/S%d->T%d/S%d %s x%d "
         .. "(dst already held expected item; src unchanged)",
         w.opIndex, branch, w.opLabel or "move",
@@ -260,7 +260,7 @@ local function auditOpSuccess(w, suffix)
         and GBL:DescribeItem(w.itemID) or ("it:" .. tostring(w.itemID))
     local srcPost = snapshotLiveSlot(w.srcTab or 0, w.srcSlot or 0)
     local dstPost = snapshotLiveSlot(w.tabIndex, w.slotIndex)
-    GBL:AddAuditEntry(string.format(
+    GBL:SortInfo(string.format(
         "Sort op %d done: %s T%d/S%d->T%d/S%d %s x%d (%.1fs)%s src=%s dst=%s",
         w.opIndex, w.opLabel or "move",
         w.srcTab or 0, w.srcSlot or 0,
@@ -336,7 +336,7 @@ function finish(ok, reason)
     local attempted = state.done + state.failed
     local avg = attempted > 0 and (elapsed / attempted) or 0
     local tbc = state.timeoutByClass
-    GBL:AddAuditEntry(string.format(
+    GBL:SortInfo(string.format(
         "Sort: %s in %.1fs - %d ops (%d done, %d failed, %d replans, %d reclass)"
         .. " preCheck=%d cursor=%d timeout[n=%d,p=%d,c=%d,o=%d] avg %.2fs/op",
         ok and "complete" or ("aborted (" .. (reason or "?") .. ")"),
@@ -374,7 +374,7 @@ local function doReplan(reason)
     ClearCursor()
     state.waiting = nil
 
-    GBL:AddAuditEntry(
+    GBL:SortInfo(
         string.format("Sort: replan %d/%d (%s)", state.replans, MAX_REPLANS, reason))
     emitProgress("replan", { replanReason = reason })
 
@@ -449,7 +449,7 @@ step = function()
     local _, srcCount = GetGuildBankItemInfo(op.srcTab, op.srcSlot)
     srcCount = srcCount or 0
     if srcID ~= op.itemID or srcCount < op.count then
-        GBL:AddAuditEntry(string.format(
+        GBL:SortWarn(string.format(
             "Sort op %d/%d pre-check fail src T%d/S%d: expected %s x>=%d, got %s",
             myOpIndex, #state.plan.ops,
             op.srcTab, op.srcSlot,
@@ -457,7 +457,7 @@ step = function()
             op.count,
             describeSlot(op.srcTab, op.srcSlot)))
         if op.plannerSrcAt then
-            GBL:AddAuditEntry(string.format(
+            GBL:SortWarn(string.format(
                 "  planner expected src at emit: %s",
                 describePlannerSlot(op.plannerSrcAt)))
         end
@@ -471,7 +471,7 @@ step = function()
     if dstLink then
         local dstID = extractItemID(dstLink)
         if dstID ~= op.itemID then
-            GBL:AddAuditEntry(string.format(
+            GBL:SortWarn(string.format(
                 "Sort op %d/%d pre-check fail dst T%d/S%d: expected empty or %s, got %s",
                 myOpIndex, #state.plan.ops,
                 op.dstTab, op.dstSlot,
@@ -483,10 +483,10 @@ step = function()
             -- the dst slot but in practice didn't. plannerDstAt is set
             -- on every emitted op (nil means the planner expected the
             -- slot to be empty at emit time).
-            GBL:AddAuditEntry(string.format(
+            GBL:SortWarn(string.format(
                 "  planner expected dst at emit: %s",
                 describePlannerSlot(op.plannerDstAt)))
-            GBL:AddAuditEntry(string.format(
+            GBL:SortWarn(string.format(
                 "  op %d was: %s T%d/S%d -> T%d/S%d %s x%d",
                 myOpIndex, op.op or "move",
                 op.srcTab, op.srcSlot, op.dstTab, op.dstSlot,
@@ -573,7 +573,7 @@ step = function()
         state.failed = state.failed + 1
         state.cursorStuck = state.cursorStuck + 1
         state.waiting = nil
-        GBL:AddAuditEntry(
+        GBL:SortWarn(
             string.format("Sort: op %d failed (cursor stuck after placement)", myOpIndex))
         state.opIndex = myOpIndex + 1
         state.gapUntil = GetTime() + INTER_MOVE_GAP
@@ -626,22 +626,22 @@ step = function()
             else
                 state.timeoutByClass.other = state.timeoutByClass.other + 1
             end
-            GBL:AddAuditEntry(string.format(
+            GBL:SortWarn(string.format(
                 "Sort: op %d timed out (no confirm within %ds) [%s]",
                 myOpIndex, MOVE_CONFIRM_TIMEOUT, class))
-            GBL:AddAuditEntry(string.format(
+            GBL:SortWarn(string.format(
                 "  op %d was: %s T%d/S%d -> T%d/S%d %s x%d",
                 myOpIndex, op.op or "move",
                 op.srcTab, op.srcSlot, op.dstTab, op.dstSlot,
                 GBL.DescribeItem and GBL:DescribeItem(op.itemID) or ("it:" .. op.itemID),
                 op.count))
-            GBL:AddAuditEntry(string.format(
+            GBL:SortWarn(string.format(
                 "  observed: src %s, dst %s, cursor %s",
                 srcDesc, dstDesc, cursorHas and "held" or "empty"))
             -- Planner-expected pre-state at emit time. Pairs with the
             -- "observed" line above to show whether the planner's view
             -- and the live bank diverge for THIS op specifically.
-            GBL:AddAuditEntry(string.format(
+            GBL:SortWarn(string.format(
                 "  planner expected: src %s, dst %s",
                 describePlannerSlot(op.plannerSrcAt),
                 describePlannerSlot(op.plannerDstAt)))
@@ -679,7 +679,7 @@ function GBL:_SortExecutor_OnSlotsChanged()
         state.done = state.done + 1
         state.failed = state.failed - 1
         state.reclassified = state.reclassified + 1
-        GBL:AddAuditEntry(string.format(
+        GBL:SortInfo(string.format(
             "Sort: op %d confirmed by late event after timeout - reclassified as success",
             lto.opIndex))
         emitProgress("reclassify", { reclassifiedOpIndex = lto.opIndex })
@@ -745,19 +745,19 @@ function GBL:_SortExecutor_OnSlotsChanged()
             local srcReverted = not slotEquals(liveSrc, lco.projectedSrc)
             local dstReverted = not slotEquals(liveDst, lco.projectedDst)
             if srcReverted or dstReverted then
-                GBL:AddAuditEntry(string.format(
+                GBL:SortWarn(string.format(
                     "Sort: server reversion suspected on op %d (%s T%d/S%d->T%d/S%d)",
                     lco.opIndex, lco.opLabel or "move",
                     lco.srcTab, lco.srcSlot, lco.dstTab, lco.dstSlot))
                 if srcReverted then
-                    GBL:AddAuditEntry(string.format(
+                    GBL:SortWarn(string.format(
                         "  src T%d/S%d: projected %s, observed %s",
                         lco.srcTab, lco.srcSlot,
                         describePlannerSlot(lco.projectedSrc),
                         describePlannerSlot(liveSrc)))
                 end
                 if dstReverted then
-                    GBL:AddAuditEntry(string.format(
+                    GBL:SortWarn(string.format(
                         "  dst T%d/S%d: projected %s, observed %s",
                         lco.dstTab, lco.dstSlot,
                         describePlannerSlot(lco.projectedDst),
@@ -808,7 +808,7 @@ function GBL:ExecuteSortPlan(plan, onComplete, opts)
         timeoutByClass = { none = 0, partial = 0, complete = 0, other = 0 },
     }
     registerBankEvents()
-    GBL:AddAuditEntry(
+    GBL:SortInfo(
         string.format("Sort: starting execution of %d ops", #plan.ops))
     emitProgress("start")
     step()
@@ -818,7 +818,7 @@ end
 --- Cancel a running sort.
 function GBL:CancelSortExecution()
     if not state then return end
-    GBL:AddAuditEntry(
+    GBL:SortInfo(
         string.format("Sort: cancelled at op %d of %d", state.opIndex, #state.plan.ops))
     finish(false, "cancelled")
 end

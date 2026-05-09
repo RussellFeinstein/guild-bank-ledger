@@ -371,7 +371,7 @@ function GBL:_LayoutEditor_RenderSaveBar(parent, writable)
         local ok, err = self:SaveBankLayout(self._layoutDraft)
         if ok then
             self:Print("Layout saved (v" .. self:GetBankLayout().version .. ").")
-            self:AddAuditEntry("Layout: saved by " ..
+            self:SystemInfo("Layout: saved by " ..
                 (UnitName("player") or "?") .. " (v" .. self:GetBankLayout().version .. ")")
             self._layoutDraft = nil   -- re-init from storage on next render
             self._layoutDirty = false

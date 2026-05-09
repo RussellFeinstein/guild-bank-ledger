@@ -18,7 +18,7 @@ Persistent guild bank transaction logging for World of Warcraft. WoW's built-in 
 - **Transaction list** — Scrolling list with sortable columns: Timestamp, Player, Action, Item, Count, Category, Tab
 - **Filter bar** — Search by player/item, filter by date range, category, transaction type, tab, with reset button
 - **Consumption view** — Guild-wide overview dashboard with guild totals (items + gold in/out/net), top 10 consumers (flat ranked table with gold breakdown), and top 15 most used items (withdrawal counts with 7d/30d/all trend columns). Click player to jump to filtered Transactions tab
-- **Guild-wide sync** — AceComm-based sync: guild members running the addon have their data merged automatically with no duplicates. Fingerprint-based delta sync, LibDeflate compression, chunked transfer (15 records/chunk), retry logic with NACK, FPS-adaptive throttling, zone change protection, peer tracking, audit trail
+- **Guild-wide sync**: AceComm-based sync. Guild members running the addon have their data merged automatically with no duplicates. Fingerprint-based delta sync, LibDeflate compression, chunked transfer (15 records/chunk), retry logic with NACK, FPS-adaptive throttling, zone change protection, peer tracking, per-channel session logs (sync, sort, system) with severity levels, surfaced via `/gbl synclog`, `/gbl sortlog`, and `/gbl logs`
 - **Sync tab** — Enable/disable sync, view online peers with version and directional status (newer/outdated), review sync audit log, GM access control configuration
 - **Changelog tab** — Embedded version history with paginated display (10 versions per page), color-coded sections
 - **About tab** — Addon info, author credit, copyable Ko-fi and CurseForge links, library credits
@@ -56,6 +56,12 @@ Persistent guild bank transaction logging for World of Warcraft. WoW's built-in 
 | `/gbl show` | Toggle the ledger window |
 | `/gbl status` | Show addon version, guild name, transaction count, last scan time |
 | `/gbl scan` | Manually trigger a full guild bank scan |
+| `/gbl synclog` | Show the sync-channel session log in a copy-pastable pop-up |
+| `/gbl sortlog` | Show the sort-channel session log in a copy-pastable pop-up |
+| `/gbl logs` | Show the master log: sync + sort + system, merged in timestamp order |
+| `/gbl logs dump [N]` | Dump the last N master entries to chat (default 50) |
+| `/gbl logs clear sync\|sort\|system\|all` | Truncate a channel |
+| `/gbl logs debug sync\|sort\|system on\|off` | Toggle per-channel DEBUG-to-chat mirroring |
 | `/gbl help` | Show available commands |
 
 Scanning happens automatically when you open the guild bank. Results are saved per-guild in `SavedVariables/GuildBankLedgerDB.lua`.

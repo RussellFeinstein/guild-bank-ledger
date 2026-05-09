@@ -29,6 +29,11 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- NOTE: per the bundle-and-PR carve-out in CLAUDE.md, the in-game changelog
+    -- entry for the channel-split refactor is stamped at PR-open time alongside
+    -- the version artifacts. While the chore/log-channel-split branch is open,
+    -- the user-visible Unreleased history lives in repo-root CHANGELOG.md only.
+
     -- v0.31.1
     {"0.31.1", "2026-05-05", {
         Fixed = {
