@@ -29,10 +29,24 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
-    -- NOTE: per the bundle-and-PR carve-out in CLAUDE.md, the in-game changelog
-    -- entry for the channel-split refactor is stamped at PR-open time alongside
-    -- the version artifacts. While the chore/log-channel-split branch is open,
-    -- the user-visible Unreleased history lives in repo-root CHANGELOG.md only.
+    -- v0.32.0
+    {"0.32.0", "2026-05-08", {
+        Added = {
+            "New Logger module owns the session log and exposes per-channel writers on GBL: SyncInfo / SyncWarn / SyncError / SyncDebug, plus matching Sort* and System* families. Lower-level GBL:LogSync(level, fmt, ...) covers runtime-computed levels. Severity is one of DEBUG / INFO / WARN / ERROR. printf-style formatting goes through pcall(string.format) so a bad format string falls back to the literal pattern instead of crashing.",
+            "/gbl sortlog opens a copy-pastable pop-up of the sort-channel session log.",
+            "/gbl logs opens the master log: sync, sort, and system channels merged in timestamp order with [CHANNEL] [LEVEL] prefixes.",
+            "/gbl logs dump [N] prints the last N master entries to chat (default 50).",
+            "/gbl logs clear sync|sort|system|all truncates a channel.",
+            "/gbl logs debug sync|sort|system on|off toggles per-channel DEBUG-to-chat mirroring.",
+            "Open Sort Log button on the Sort tab and Open Master Log button on the Sync tab, alongside the existing Open Sync Log button. All three open the same AceGUI MultiLineEditBox pop-up the slash commands use.",
+        },
+        Changed = {
+            "Sync and Sort diagnostics moved to separate ring buffers (sync cap 2000, sort cap 1000, system cap 500). Reading the sync log no longer requires mentally filtering out per-op sort lines, and vice versa. Per-channel chat mirroring is gated by db.profile.<channel>.chatLog (INFO/WARN/ERROR) and debugChat (DEBUG). DEBUG entries drop entirely when debugChat is off, preserving the prior chatOnly=true 'do not pollute the buffer with per-chunk noise' property without a separate side channel.",
+            "GBL:AddAuditEntry(msg, chatOnly?) is now a deprecated shim that routes plain calls to SyncInfo and chatOnly=true to SyncDebug. GBL:GetAuditTrail() is a permanent alias for GetLog('sync') that also exposes the legacy entry.timestamp field for older readers.",
+            "Sync tab no longer carries an always-visible audit panel. Logs are a diagnostic artifact, not live UI furniture; they surface only on demand via the slash commands or the new buttons. Removes the constant re-render of the Sync-tab log panel that nobody was actively reading.",
+            "Sync diagnostics that were already WARN- or ERROR-shaped are now tagged at the right severity (version mismatch, oversized chunks, ACK timeout retries / aborts, hard timeout, receive timeout, NACK-limit aborts, sender-offline aborts). Sort diagnostics are similarly tagged: phantom-success suspicions, pre-check failures, server reversions, cursor-stuck failures, and timeouts surface as WARN; success / lifecycle / replan / reclassification surface as INFO.",
+        },
+    }},
 
     -- v0.31.1
     {"0.31.1", "2026-05-05", {
