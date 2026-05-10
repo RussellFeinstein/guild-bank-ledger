@@ -1,0 +1,53 @@
+name: curseforge-description-sync
+
+on:
+  pull_request:
+
+jobs:
+  description-sync-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check whether CurseForge description tracks feature-surface changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+          echo "Changed files in PR:"
+          echo "$changed"
+          echo
+
+          description="docs/CURSEFORGE-DESCRIPTION.md"
+
+          # Feature-surface globs. Matched in bash with case patterns (extglob).
+          shopt -s extglob
+
+          feature_files=()
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              README.md|docs/ROADMAP.md|GuildBankLedger.toc) feature_files+=("$f") ;;
+              src/*.lua|src/**/*.lua) feature_files+=("$f") ;;
+              UI/*.lua|UI/**/*.lua) feature_files+=("$f") ;;
+            esac
+          done <<< "$changed"
+
+          description_changed=false
+          if echo "$changed" | grep -qx "$description"; then
+            description_changed=true
+          fi
+
+          if [ ${#feature_files[@]} -gt 0 ] && [ "$description_changed" = false ]; then
+            joined=$(IFS=,; echo "${feature_files[*]}")
+            echo "::warning file=${description}::Feature-surface files changed (${joined}) without updating CurseForge description. This check is advisory."
+          elif [ ${#feature_files[@]} -gt 0 ] && [ "$description_changed" = true ]; then
+            echo "::notice::CurseForge description updated alongside feature-surface changes."
+          else
+            echo "No feature-surface changes detected; nothing to flag."
+          fi

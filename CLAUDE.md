@@ -66,6 +66,7 @@ luacheck .                 # lint production code
 - Guard `Enum.PlayerInteractionType.GuildBanker` existence for Classic compat
 - Saved variables: `GuildBankLedgerDB` (AceDB), data keyed per guild name
 - **Sync is guild-wide** — all members participate in HELLO/sync, not just officers. Officer rank only gates UI visibility (settings, admin features). Never add rank checks to the sync protocol.
+- **Public description sync**: `docs/CURSEFORGE-DESCRIPTION.md` is the source of truth for the CurseForge project page. When user-facing surface changes (slash commands, UI tabs, access control, sync features, planned-feature framing), update it in the same PR. CI emits a `::warning::` annotation on PRs that change feature-surface files (`README.md`, `docs/ROADMAP.md`, `src/**/*.lua`, `UI/**/*.lua`, `GuildBankLedger.toc`) without updating the description; treat it as a checklist prompt, not a blocking gate. Pasting the updated content into the CurseForge web UI is a manual release step until BigWigsMods/packager#187 lands.
 
 ## Branch Workflow
 
