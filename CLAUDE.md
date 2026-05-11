@@ -4,6 +4,12 @@
 
 WoW addon that persistently logs guild bank transactions. Lua 5.1 + Ace3 stack. Tests via busted.
 
+## Design Principles
+
+**Accessibility first.** Accessibility is a blocking design requirement, not a retrofit. Every new UI feature lists its keyboard-navigation path, focus indicators, color-encoding fallbacks, font-scaling behavior, and screen-reader hooks during the design phase, alongside functional requirements. Implementation pairs with end-to-end verification: tabbing actually advances focus across all visible widgets, triple encoding actually distinguishes transactions without color, font scaling actually clamps without clipping, palettes actually auto-detect from WoW CVars. A claim in user-facing docs (CurseForge description, README, in-game About text, ChangelogView) requires end-to-end verification, not just confirmation that supporting functions exist somewhere in the codebase. See `~/.claude/accessibility.md` for the global standards checklist.
+
+The May 2026 honest-status sweep discovered that `UI/Accessibility.lua` had defined `RegisterFocusable`, `AdvanceFocus`, and `SetFocusIndicator` since v0.3.0 but the functions were almost entirely unused outside `UI/ChangelogView.lua`. No AceGUI Tab key handler hooked into `AdvanceFocus`; no widget called `SetFocus`; no `TabIndex` attributes existed on the frame hierarchy. The README's "Full keyboard navigation (Tab/Shift+Tab)" claim was paper for multiple years. That regression is unacceptable; the audit pass and full widget wiring are a v1.0 release gate, codified in `docs/ROADMAP.md` Pre-1.0 readiness. Push accessibility left in every subsequent design discussion.
+
 ## Architecture
 
 - **src/Core.lua** — AceAddon bootstrap, lifecycle, slash commands, bank open/close detection
