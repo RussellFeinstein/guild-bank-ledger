@@ -29,6 +29,17 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.32.2
+    {"0.32.2", "2026-05-11", {
+        Changed = {
+            "Documentation honest-status sweep across the CurseForge description, README, and ROADMAP. The blanket 'stable and in active guild use' framing is replaced with a three-tier model (mature / active / under audit). Forward plans split into Pre-1.0 readiness gates and Post-1.0 features. Stock is two slots: passive Stock tab in v1.4.0, toggleable Stock alerts in v1.5.0. Analytics added to Post-1.0 v1.1.0 with the full six-section scope. ROADMAP Shipped section updated to v0.1.0-v0.32.1 with sort+layout, logging, and peer-canonicalization milestones called out.",
+            "Softened the 'Full keyboard navigation (Tab/Shift+Tab)' claim in the CurseForge description and README. The supporting functions in UI/Accessibility.lua have existed since v0.3.0 but the wiring across widgets does not exist. Completing the wiring is now codified as a v1.0 release gate in ROADMAP Pre-1.0 readiness.",
+        },
+        Added = {
+            "Project CLAUDE.md Design Principles section pinning accessibility-first as a blocking design requirement. Every new UI feature must list its keyboard-navigation path, focus indicators, color-encoding fallbacks, font-scaling behavior, and screen-reader hooks during the design phase, with end-to-end verification before any user-facing doc claims the feature works.",
+        },
+    }},
+
     -- v0.32.1
     {"0.32.1", "2026-05-09", {
         Changed = {
