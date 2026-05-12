@@ -1,31 +1,55 @@
+# SECURITY: This workflow uses `pull_request_target` to grant `pull-requests: write`
+# permission for posting sticky comments on PRs from forks. The standard
+# `pull_request` event gives fork PRs a read-only GITHUB_TOKEN regardless of the
+# `permissions:` block, which would silently break comment posting.
+#
+# THIS WORKFLOW MUST NEVER:
+# - Check out the PR head ref (`actions/checkout` with `ref: refs/pull/N/head`
+#   or `refs/pull/N/merge`)
+# - Read, source, cat, bash, or otherwise execute content from any file in
+#   the PR diff
+# - Install dependencies, run build scripts, or invoke binaries built from
+#   PR code
+# - Interpolate attacker-controlled `github.event.pull_request.*` fields
+#   (`head_ref`, `title`, `body`, `head.repo.*`) into shell commands
+#
+# The diff is computed via the GitHub REST API on filenames only. No fork
+# code touches the runner. See ~/.claude/projects/.../memory/feedback_curseforge_description_sync.md
+# for the design rationale.
+
 name: curseforge-description-sync
 
 on:
-  pull_request:
+  pull_request_target:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: description-sync-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   description-sync-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Check whether CurseForge description tracks feature-surface changes
+      - name: Compute description-sync state
+        id: diff_check
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
 
-          changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+          changed=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" --paginate -q '.[].filename')
           echo "Changed files in PR:"
           echo "$changed"
           echo
 
           description="docs/CURSEFORGE-DESCRIPTION.md"
 
-          # Feature-surface globs. Matched in bash with case patterns (extglob).
           shopt -s extglob
 
           feature_files=()
@@ -43,11 +67,72 @@ jobs:
             description_changed=true
           fi
 
+          state="none"
           if [ ${#feature_files[@]} -gt 0 ] && [ "$description_changed" = false ]; then
+            state="out_of_sync"
             joined=$(IFS=,; echo "${feature_files[*]}")
             echo "::warning file=${description}::Feature-surface files changed (${joined}) without updating CurseForge description. This check is advisory."
           elif [ ${#feature_files[@]} -gt 0 ] && [ "$description_changed" = true ]; then
-            echo "::notice::CurseForge description updated alongside feature-surface changes."
+            state="in_sync"
+            echo "::notice file=${description}::CurseForge description updated alongside feature-surface changes."
+          elif [ "$description_changed" = true ]; then
+            # Description-only edits (e.g., a manual tweak) still owe the post-merge paste,
+            # so treat as in_sync to fire the reminder.
+            state="in_sync"
+            echo "::notice file=${description}::CurseForge description updated; post-merge paste required."
           else
             echo "No feature-surface changes detected; nothing to flag."
           fi
+
+          echo "state=${state}" >> "$GITHUB_OUTPUT"
+          {
+            echo "triggers_list_markdown<<__GBL_EOF__"
+            if [ ${#feature_files[@]} -gt 0 ]; then
+              for f in "${feature_files[@]}"; do
+                printf -- "- \`%s\`\n" "$f"
+              done
+            fi
+            echo "__GBL_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Sticky comment - description may be stale
+        if: steps.diff_check.outputs.state == 'out_of_sync'
+        uses: marocchino/sticky-pull-request-comment@v3
+        continue-on-error: true
+        with:
+          header: curseforge-description-sync
+          message: |
+            **Heads up: the CurseForge description may need updating.**
+
+            This PR changes feature-surface files but does not touch `docs/CURSEFORGE-DESCRIPTION.md`:
+
+            ${{ steps.diff_check.outputs.triggers_list_markdown }}
+
+            If the change alters what a user would learn from reading the CurseForge project page (slash commands, UI tabs, access control, sync features, planned-feature framing, accessibility claims), update `docs/CURSEFORGE-DESCRIPTION.md` in this PR. Otherwise dismiss this comment.
+
+            _This check is advisory and does not block merge. See `feedback_curseforge_description_sync.md` for the rationale._
+
+      - name: Sticky comment - post-merge paste reminder
+        if: steps.diff_check.outputs.state == 'in_sync'
+        uses: marocchino/sticky-pull-request-comment@v3
+        continue-on-error: true
+        with:
+          header: curseforge-description-sync
+          message: |
+            **CurseForge description updated in this PR. Post-merge paste required.**
+
+            `docs/CURSEFORGE-DESCRIPTION.md` was updated. After this PR merges, paste the new contents (excluding the HTML breadcrumb comment at the top of the file) into the CurseForge project page Manage > Description:
+
+            https://www.curseforge.com/wow/addons/guildbankledger > Manage > Description
+
+            There is no API for this. CurseForge has not shipped a description-update endpoint, and `BigWigsMods/packager#187` (the upstream feature request) has not landed. Until one of those changes, the maintainer paste is the only path from `docs/CURSEFORGE-DESCRIPTION.md` to the public CurseForge page.
+
+            _This reminder is the entire reason the workflow exists. Do not dismiss it without performing the paste._
+
+      - name: Sticky comment - delete when not applicable
+        if: steps.diff_check.outputs.state == 'none'
+        uses: marocchino/sticky-pull-request-comment@v3
+        continue-on-error: true
+        with:
+          header: curseforge-description-sync
+          delete: true
