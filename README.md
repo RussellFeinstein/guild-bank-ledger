@@ -127,4 +127,3 @@ If you find GuildBankLedger useful, consider supporting development:
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
