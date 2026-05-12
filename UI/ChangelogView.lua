@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.32.3
+    {"0.32.3", "2026-05-12", {
+        Fixed = {
+            "ChatFilters: NPC chat event handlers now exit immediately when inside any instance (party, raid, M+, pvp, arena, scenario). Blizzard marks NPC sender values as 'secret' in instanced content, causing a Lua crash when the name was used as a table key. The filter has no purpose in instances — the guild bank doesn't exist there. The sender guard was also tightened from a nil-check to type() == 'string' so any non-string value is safely rejected before the table lookup.",
+        },
+    }},
+
     -- v0.32.2
     {"0.32.2", "2026-05-11", {
         Changed = {

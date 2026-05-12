@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.32.3] - 2026-05-12
+
+### Fixed
+- ChatFilters: `CHAT_MSG_MONSTER_SAY`/`YELL` event handlers now bail out immediately when inside any instance (party, raid, pvp, arena, scenario). Blizzard marks NPC sender values as "secret" in instanced content, causing a Lua error when the name was used as a table key. The filter has no purpose in instances anyway — the guild bank does not exist there. Also tightened the `_IsMutedAmbientNPC` sender guard from a nil-check to a `type() == "string"` check so any non-string value (secret or otherwise) is rejected before reaching the table lookup.
+
 ## [0.32.2] - 2026-05-11
 
 ### Changed

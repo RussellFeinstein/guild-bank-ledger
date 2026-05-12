@@ -33,6 +33,13 @@ describe("ChatFilters", function()
             assert.is_false(GBL:_IsMutedAmbientNPC(nil))
         end)
 
+        it("returns false for non-string sender (secret key regression)", function()
+            GBL.db.profile.chatFilters.muteAmbientNPCs = true
+            assert.is_false(GBL:_IsMutedAmbientNPC(42))
+            assert.is_false(GBL:_IsMutedAmbientNPC(true))
+            assert.is_false(GBL:_IsMutedAmbientNPC({}))
+        end)
+
         it("is case-sensitive (matches WoW chat sender as-is)", function()
             GBL.db.profile.chatFilters.muteAmbientNPCs = true
             assert.is_false(GBL:_IsMutedAmbientNPC("silvermoon citizen"))
@@ -42,6 +49,31 @@ describe("ChatFilters", function()
         it("defaults to off on a fresh profile", function()
             assert.is_false(GBL.db.profile.chatFilters.muteAmbientNPCs)
             assert.is_false(GBL:_IsMutedAmbientNPC("Silvermoon Citizen"))
+        end)
+    end)
+
+    describe("_OnAmbientMonsterChat instance guard", function()
+        before_each(function()
+            GBL:_ClearPendingBubbleSuppressions()
+            GBL.db.profile.chatFilters.muteAmbientNPCs = true
+        end)
+
+        it("queues suppression in open world", function()
+            Helpers.MockWoW.instanceType = "none"
+            GBL:_OnAmbientMonsterChat("CHAT_MSG_MONSTER_SAY", "Welcome.", "Silvermoon Citizen")
+            assert.is_true(GBL:_PendingBubbleHas("Welcome."))
+        end)
+
+        it("skips suppression when in a party instance", function()
+            Helpers.MockWoW.instanceType = "party"
+            GBL:_OnAmbientMonsterChat("CHAT_MSG_MONSTER_SAY", "Welcome.", "Silvermoon Citizen")
+            assert.is_false(GBL:_PendingBubbleHas("Welcome."))
+        end)
+
+        it("skips suppression when in a raid instance", function()
+            Helpers.MockWoW.instanceType = "raid"
+            GBL:_OnAmbientMonsterChat("CHAT_MSG_MONSTER_SAY", "Welcome.", "Silvermoon Citizen")
+            assert.is_false(GBL:_PendingBubbleHas("Welcome."))
         end)
     end)
 
