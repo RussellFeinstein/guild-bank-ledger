@@ -38,7 +38,7 @@ local pendingBubbleTexts = {}
 ------------------------------------------------------------------------
 
 function GBL:_IsMutedAmbientNPC(sender)
-    if not sender then return false end
+    if type(sender) ~= "string" then return false end
     if not self.db or not self.db.profile or not self.db.profile.chatFilters
             or not self.db.profile.chatFilters.muteAmbientNPCs then
         return false
@@ -173,6 +173,7 @@ end
 ------------------------------------------------------------------------
 
 function GBL:_OnAmbientMonsterChat(_event, msg, sender)
+    if IsInInstance and select(2, IsInInstance()) ~= "none" then return end
     if self:_IsMutedAmbientNPC(sender) then
         self:_QueueBubbleSuppression(msg)
     end
@@ -220,6 +221,7 @@ end
 ------------------------------------------------------------------------
 
 local function chatFrameFilter(_chatFrame, _event, _msg, sender)
+    if IsInInstance and select(2, IsInInstance()) ~= "none" then return false end
     return GBL:_IsMutedAmbientNPC(sender)
 end
 

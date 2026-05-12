@@ -74,6 +74,7 @@ function MockWoW.reset()
     }
     MockWoW.player = { name = "TestOfficer", realm = "TestRealm" }
     MockWoW.inRaid = false
+    MockWoW.instanceType = "none"
     MockWoW.itemInfo = {}
     MockWoW.itemNames = {}
     MockWoW.itemInfoRequested = {}
@@ -511,6 +512,12 @@ function MockWoW.install()
     MockWoW.inCombat = false
     _G.InCombatLockdown = function() return MockWoW.inCombat end
     _G.UnitAffectingCombat = function() return MockWoW.inCombat end
+
+    -- Instance state ("none", "party", "raid", "pvp", "arena", "scenario")
+    MockWoW.instanceType = "none"
+    _G.IsInInstance = function()
+        return MockWoW.instanceType ~= "none", MockWoW.instanceType
+    end
 
     -- Bank close (hookable)
     _G.C_PlayerInteractionManager = {
