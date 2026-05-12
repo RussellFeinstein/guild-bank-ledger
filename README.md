@@ -19,7 +19,7 @@ Persistent guild bank transaction logging for World of Warcraft. WoW's built-in 
 - **Filter bar** — Search by player/item, filter by date range, category, transaction type, tab, with reset button
 - **Consumption view** — Guild-wide overview dashboard with guild totals (items + gold in/out/net), top 10 consumers (flat ranked table with gold breakdown), and top 15 most used items (withdrawal counts with 7d/30d/all trend columns). Click player to jump to filtered Transactions tab
 - **Guild-wide sync**: AceComm-based sync. Guild members running the addon have their data merged automatically with no duplicates. Fingerprint-based delta sync, LibDeflate compression, chunked transfer (15 records/chunk), retry logic with NACK, FPS-adaptive throttling, zone change protection, peer tracking, per-channel session logs (sync, sort, system) with severity levels, surfaced via `/gbl synclog`, `/gbl sortlog`, and `/gbl logs`
-- **Sync tab** — Enable/disable sync, view online peers with version and directional status (newer/outdated), review sync audit log, GM access control configuration
+- **Sync tab**: Enable/disable sync, view online peers with version and directional status (newer/outdated), GM access control configuration. Sync diagnostics surface on demand via `/gbl synclog` or the master log via `/gbl logs`
 - **Changelog tab** — Embedded version history with paginated display (10 versions per page), color-coded sections
 - **About tab** — Addon info, author credit, copyable Ko-fi and CurseForge links, library credits
 - **Version label** — Addon version displayed in the top-right corner; turns orange with "update available" when a peer has a newer version
@@ -27,15 +27,26 @@ Persistent guild bank transaction logging for World of Warcraft. WoW's built-in 
 - **Minimap button** — Left-click to toggle the ledger window
 - **Mute ambient NPC chatter**: Optional client-side filter that suppresses `Silvermoon Citizen` say/yell/emote in chat and hides the matching world speech bubbles. Off by default. Toggle on the personal-preferences row at the top of the ledger window.
 - **Access control** — GM configures a rank threshold for full addon access. Players below the threshold are restricted to Sync Only or Own Transactions Only mode (GM's choice). Settings sync to all guild members via the HELLO protocol
-- **Accessibility** — Colorblind-safe palettes (4 modes, auto-detected from WoW settings), high contrast mode, triple encoding (shape + color + text), keyboard navigation (Tab/Shift+Tab), font scaling (8-24pt)
+- **Accessibility**: Colorblind-safe palettes (4 modes, auto-detected from WoW settings), high contrast mode, triple encoding (shape + color + text), keyboard-navigation primitives (partial; Tab/Shift+Tab wiring under audit), font scaling (8-24pt)
 
-### Planned Features
+### Before v1.0
 
-- Raid team management and per-team reports (v1.1.0)
-- Alt linking — manual + guild note parsing (v1.2.0)
-- Stock level alerts (v1.3.0)
-- Guild Bank Sort addon integration (v1.4.0)
-- CSV/Discord/BBCode export (v1.5.0)
+These items block the v1.0 release:
+
+- Accessibility audit and keyboard-nav completion: wire `RegisterFocusable` into every AceGUI widget, hook Tab/Shift+Tab via a key handler, verify focus indicators on every tab, screen-reader audit, palette validation against WCAG AAA contrast targets
+- Sync rate limiting (per-peer bandwidth budgeting)
+- Performance audit (SavedVariables size, compaction verification, UI debouncing)
+- Community feedback iteration
+
+### Planned (Post-1.0)
+
+- Analytics dashboard: headline stats, activity timeline, category breakdown, gold flow, engagement distribution, item velocity. Consumption tab refocuses to per-player view as "Players" (v1.1.0)
+- Raid team management and per-team reports (v1.2.0)
+- Alt linking: manual and guild note parsing (v1.3.0)
+- Stock tab: passive view of current bank inventory, per-item quantities and categories (v1.4.0)
+- Stock alerts: toggleable minimum-level notifications with chat + sound (v1.5.0)
+- Guild Bank Sort addon integration (v1.6.0)
+- CSV/Discord/BBCode export (v1.7.0)
 
 ## Installation
 

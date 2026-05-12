@@ -5,6 +5,15 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.32.2] - 2026-05-11
+
+### Changed
+- Documentation honest-status sweep across CurseForge description, README, and ROADMAP. Replaced the blanket "stable and in active guild use" framing with a three-tier model (mature / active / under audit). Split the forward-plan list into Pre-1.0 readiness gates and Post-1.0 features. Stock is now two roadmap slots (passive Stock tab, then toggleable Stock alerts). Analytics added to Post-1.0 with the full six-section scope from the design plan. Fixed README's stale "sync audit log" reference (panel removed in v0.32.0). Updated ROADMAP Shipped section to v0.1.0--v0.32.1 with sort+layout, logging, and peer-canonicalization milestones called out.
+- Softened the "Full keyboard navigation (Tab/Shift+Tab)" claim in CurseForge description and README. The supporting functions (`RegisterFocusable`, `AdvanceFocus`, `SetFocusIndicator` in `UI/Accessibility.lua`) have existed since v0.3.0 but were almost entirely unused outside `UI/ChangelogView.lua`. No AceGUI key handler was wired, so Tab/Shift+Tab did not advance focus across widgets. Completing the wiring is now codified as a v1.0 release gate in ROADMAP Pre-1.0 readiness.
+
+### Added
+- Project CLAUDE.md gains a "Design Principles" section pinning accessibility-first as a blocking design requirement, with the May 2026 widget-wiring discovery captured as the rationale. Every new UI feature must list its keyboard-navigation path, focus indicators, color-encoding fallbacks, font-scaling behavior, and screen-reader hooks during the design phase, with end-to-end verification before any user-facing doc claims the feature works.
+
 ## [0.32.1] - 2026-05-09
 
 ### Changed

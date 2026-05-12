@@ -47,7 +47,7 @@ Settings sync to all guild members automatically.
 - 4 colorblind-safe palettes (auto-detected from WoW settings)
 - High contrast mode (WCAG AAA)
 - Triple encoding: shape + color + text for all transaction types
-- Full keyboard navigation (Tab/Shift+Tab)
+- Keyboard navigation: partial (Tab/Shift+Tab wiring under audit; complete before v1.0)
 - Font scaling (8–24pt)
 
 ## Commands
@@ -60,6 +60,10 @@ Settings sync to all guild members automatically.
 - `/gbl logs` — Pop up the master log (sync + sort + system, interleaved by timestamp)
 - `/gbl help` — Show all commands
 
-**Status** — Beta. Recording, sync, and UI are stable and in active guild use. Planned: export (CSV/Discord/BBCode), raid team management, alt linking, stock alerts.
+**Status**: Beta. Recording and dedup are mature. Sync, sort, and UI are in active guild use with known improvements queued. Accessibility ships with palettes, contrast, triple encoding, and font scaling, but keyboard navigation is partial pending a v1.0 audit pass.
 
-**Support development** — [Ko-fi](https://ko-fi.com/RexxyBear) · [GitHub Sponsors](https://github.com/sponsors/RussellFeinstein)
+**Before v1.0**: complete accessibility audit and keyboard-nav wiring across all UI widgets, sync rate limiting, performance audit (SavedVariables size, compaction verification, UI debouncing).
+
+**Planned post-1.0**: analytics dashboard (headline stats, activity timeline, category breakdown, gold flow, engagement distribution, item velocity), raid team management, alt linking, stock tab (passive inventory view), stock alerts (toggleable), Guild Bank Sort integration, CSV/Discord/BBCode export.
+
+**Support development**: [Ko-fi](https://ko-fi.com/RexxyBear) · [GitHub Sponsors](https://github.com/sponsors/RussellFeinstein)
