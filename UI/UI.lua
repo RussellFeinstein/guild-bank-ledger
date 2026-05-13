@@ -30,11 +30,6 @@ function GBL:CreateMainFrame()
     -- AceDB and ApplyStatus restores them on the next session.
     frame:SetStatusTable(self.db.profile.ui)
 
-    -- TEMP: show live dimensions in the status bar while tuning minimum size
-    frame.frame:SetScript("OnSizeChanged", function(f)
-        frame:SetStatusText(string.format("%.0f x %.0f", f:GetWidth(), f:GetHeight()))
-    end)
-
     -- After the user releases the resize handle, cascade layout updates so the
     -- scroll area fills the new window height.  AceGUI's List layout clears all
     -- child anchor points each run, so the manual BOTTOMRIGHT anchor on each
