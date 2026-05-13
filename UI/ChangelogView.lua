@@ -29,6 +29,17 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.32.4
+    {"0.32.4", "2026-05-13", {
+        Added = {
+            "Window position and size now persist across reloads. Dragging or resizing the ledger window automatically saves the position and dimensions; they are restored on the next login or /reload.",
+            "Minimum window size enforced (810x500) to prevent the tab bar and filter row from becoming unusable when the window is resized too small.",
+        },
+        Fixed = {
+            "Scroll area now correctly fills the full available height after the window is resized. Previously the scroll container height was only calculated at tab-build time and was not updated when the window was made taller.",
+        },
+    }},
+
     -- v0.32.3
     {"0.32.3", "2026-05-12", {
         Fixed = {
