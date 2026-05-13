@@ -24,6 +24,55 @@ function GBL:CreateMainFrame()
     frame:SetCallback("OnClose", function(widget)
         widget:Hide()
     end)
+
+    -- Route AceGUI's position/size tracking through the persisted profile so
+    -- MoverSizer_OnMouseUp (move and resize) writes top/left/width/height into
+    -- AceDB and ApplyStatus restores them on the next session.
+    frame:SetStatusTable(self.db.profile.ui)
+
+    -- TEMP: show live dimensions in the status bar while tuning minimum size
+    frame.frame:SetScript("OnSizeChanged", function(f)
+        frame:SetStatusText(string.format("%.0f x %.0f", f:GetWidth(), f:GetHeight()))
+    end)
+
+    -- After the user releases the resize handle, cascade layout updates so the
+    -- scroll area fills the new window height.  AceGUI's List layout clears all
+    -- child anchor points each run, so the manual BOTTOMRIGHT anchor on each
+    -- scroll container must be re-applied after every DoLayout call.
+    local function onResizeStop()
+        if not self.tabGroup then return end
+        local fw, fh = frame.frame:GetWidth(), frame.frame:GetHeight()
+        -- Refresh AceGUI's content-size metadata for the new frame dimensions.
+        frame:OnWidthSet(fw)
+        frame:OnHeightSet(fh)
+        -- Fill layout: re-anchors tabGroup and updates tabGroup content metadata.
+        frame:DoLayout()
+        -- List layout: re-stacks tab children with fresh content dimensions.
+        self.tabGroup:DoLayout()
+        -- Re-apply the BOTTOMRIGHT anchor that List layout cleared.
+        local tabContent = self.tabGroup.content
+        for _, container in ipairs({
+            self._ledgerContainer,
+            self._goldLogContainer,
+            self._consumptionContainer,
+        }) do
+            if container then
+                container.frame:SetPoint("BOTTOMRIGHT", tabContent, "BOTTOMRIGHT", 0, 0)
+            end
+        end
+    end
+    frame.sizer_se:HookScript("OnMouseUp", onResizeStop)
+    frame.sizer_s:HookScript("OnMouseUp", onResizeStop)
+    frame.sizer_e:HookScript("OnMouseUp", onResizeStop)
+
+    -- Override AceGUI's 400×200 floor — the settings row and filter bar need
+    -- at least ~806 px wide to remain usable.
+    if frame.frame.SetResizeBounds then
+        frame.frame:SetResizeBounds(810, 500)
+    else
+        frame.frame:SetMinResize(810, 500)
+    end
+
     frame:Hide()
 
     -- Version label (top-right corner, respects font scaling)

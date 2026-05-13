@@ -326,10 +326,25 @@ function MockAce.install()
         widget.Show = function(self) self._shown = true end
         widget.Hide = function(self) self._shown = false end
         -- Mock underlying WoW frame (for IsShown checks)
-        widget.frame = {
+        local mockFrame = {
+            _hookScripts = {},
             IsShown = function() return widget._shown end,
             SetClampedToScreen = function() end,
             SetPoint = function() end,
+            ClearAllPoints = function() end,
+            GetLeft   = function() return 0 end,
+            GetBottom = function() return 0 end,
+            GetWidth  = function() return widget._width or 1000 end,
+            GetHeight = function() return widget._height or 600 end,
+            SetResizeBounds = function() end,
+            SetMinResize    = function() end,
+            SetScript = function(self, event, func)
+                self._hookScripts[event] = { func }
+            end,
+            HookScript = function(self, event, func)
+                self._hookScripts[event] = self._hookScripts[event] or {}
+                table.insert(self._hookScripts[event], func)
+            end,
             CreateFontString = function()
                 local fs = { _text = "" }
                 fs.SetFont = function() end
@@ -339,6 +354,20 @@ function MockAce.install()
                 return fs
             end,
         }
+        widget.frame = mockFrame
+        -- Mock AceGUI Frame sizer sub-frames (exposed for HookScript calls)
+        local function mockSizer()
+            return {
+                _hookScripts = {},
+                HookScript = function(self, event, func)
+                    self._hookScripts[event] = self._hookScripts[event] or {}
+                    table.insert(self._hookScripts[event], func)
+                end,
+            }
+        end
+        widget.sizer_se = mockSizer()
+        widget.sizer_s  = mockSizer()
+        widget.sizer_e  = mockSizer()
         widget.SetDisabled = function(self, d) self._disabled = d end
         widget.SetLayout = function() end
         widget.SetTitle = function(self, t) self._title = t end
