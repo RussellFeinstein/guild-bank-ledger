@@ -215,7 +215,7 @@ describe("UI window persistence (v0.32.4)", function()
             AceGUI = LibStub("AceGUI-3.0")
         end)
 
-        it("clears prior scroll-fill registrations before building the next tab", function()
+        it("clears prior fill-anchor registrations before building the next tab", function()
             -- Seed a fake registration from a prior tab build.
             local stale = { widget = AceGUI:Create("ScrollFrame"), parent = AceGUI:Create("SimpleGroup") }
             GBL._scrollFillContainers = { stale }
@@ -229,6 +229,75 @@ describe("UI window persistence (v0.32.4)", function()
                 assert.is_not.equals(stale.widget, entry.widget,
                     "stale registration survived tab switch")
             end
+        end)
+    end)
+
+    ----------------------------------------------------------------
+    -- Convention enforcement: every state-light tab builder
+    -- registers at least one fill child via AddFillChild.
+    --
+    -- This is the regression net for "future BuildXxxTab forgets the
+    -- helper and silently re-opens the resize-anchor-loss bug."
+    --
+    -- Skipped intentionally: BuildSortTab and BuildLayoutTab need
+    -- state plumbing (RegisterMessage, bank snapshot, guild data,
+    -- _layoutDraft, plus the AceGUI mock's no-op SelectTab) larger
+    -- than this PR's scope.  See project_ui_smoke_test_gaps memory
+    -- for the path to closing those gaps.
+    ----------------------------------------------------------------
+
+    describe("every state-light tab builder registers a fill child", function()
+        local AceGUI
+
+        before_each(function()
+            -- Some builders touch self.activeTab or self.tabGroup, both
+            -- of which CreateMainFrame populates.  Reset the registry
+            -- after CreateMainFrame so each test sees only its own
+            -- builder's contribution.
+            GBL:CreateMainFrame()
+            GBL._scrollFillContainers = nil
+            AceGUI = LibStub("AceGUI-3.0")
+        end)
+
+        -- Some builders crash partway through under the test mock
+        -- (e.g. Label.label:SetWordWrap is a real AceGUI feature the
+        -- mock does not stub).  That post-helper crash is unrelated to
+        -- the convention being tested: as long as AddFillChild was
+        -- reached BEFORE the crash, the convention holds.  pcall the
+        -- builder and assert on the registry afterward.
+        local function buildAndCheck(buildFn)
+            pcall(buildFn)
+            local count = GBL._scrollFillContainers and #GBL._scrollFillContainers or 0
+            assert.is_true(count >= 1,
+                "builder did not call AddFillChild before any subsequent crash")
+        end
+
+        local function freshContainer()
+            return AceGUI:Create("SimpleGroup")
+        end
+
+        it("BuildTransactionsTab", function()
+            buildAndCheck(function() GBL:BuildTransactionsTab(freshContainer(), {}) end)
+        end)
+
+        it("BuildGoldLogTab", function()
+            buildAndCheck(function() GBL:BuildGoldLogTab(freshContainer(), {}) end)
+        end)
+
+        it("BuildConsumptionTab", function()
+            buildAndCheck(function() GBL:BuildConsumptionTab(freshContainer(), {}) end)
+        end)
+
+        it("BuildAboutTab", function()
+            buildAndCheck(function() GBL:BuildAboutTab(freshContainer()) end)
+        end)
+
+        it("BuildChangelogTab", function()
+            buildAndCheck(function() GBL:BuildChangelogTab(freshContainer()) end)
+        end)
+
+        it("BuildSyncTab", function()
+            buildAndCheck(function() GBL:BuildSyncTab(freshContainer()) end)
         end)
     end)
 end)
