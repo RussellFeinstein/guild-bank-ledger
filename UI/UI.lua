@@ -24,6 +24,41 @@ function GBL:CreateMainFrame()
     frame:SetCallback("OnClose", function(widget)
         widget:Hide()
     end)
+
+    -- Route AceGUI's position/size tracking through the persisted profile so
+    -- MoverSizer_OnMouseUp (move and resize) writes top/left/width/height into
+    -- AceDB and ApplyStatus restores them on the next session.
+    frame:SetStatusTable(self.db.profile.ui)
+
+    -- After the user releases the resize handle, cascade layout updates so the
+    -- scroll area fills the new window height.  AceGUI's List layout clears all
+    -- child anchor points each run, so the BOTTOMRIGHT anchors registered via
+    -- AddFillChild must be re-applied after every DoLayout call.
+    local function onResizeStop()
+        if not self.tabGroup then return end
+        local fw, fh = frame.frame:GetWidth(), frame.frame:GetHeight()
+        -- Refresh AceGUI's content-size metadata for the new frame dimensions.
+        frame:OnWidthSet(fw)
+        frame:OnHeightSet(fh)
+        -- Fill layout: re-anchors tabGroup and updates tabGroup content metadata.
+        frame:DoLayout()
+        -- List layout: re-stacks tab children with fresh content dimensions.
+        self.tabGroup:DoLayout()
+        -- Re-apply BOTTOMRIGHT anchors on every registered fill child.
+        self:_RefillScrollContainers()
+    end
+    frame.sizer_se:HookScript("OnMouseUp", onResizeStop)
+    frame.sizer_s:HookScript("OnMouseUp", onResizeStop)
+    frame.sizer_e:HookScript("OnMouseUp", onResizeStop)
+
+    -- Override AceGUI's 400×200 floor — the settings row and filter bar need
+    -- at least ~806 px wide to remain usable.
+    if frame.frame.SetResizeBounds then
+        frame.frame:SetResizeBounds(810, 500)
+    else
+        frame.frame:SetMinResize(810, 500)
+    end
+
     frame:Hide()
 
     -- Version label (top-right corner, respects font scaling)
@@ -47,6 +82,51 @@ function GBL:CreateMainFrame()
 
     -- Build tab list based on access level and select default tab
     self:RebuildTabs()
+end
+
+------------------------------------------------------------------------
+-- Fill-anchor registry
+--
+-- Tabs that host a "below the filter bar" child (usually a ScrollFrame,
+-- sometimes a nested TabGroup) need a manual BOTTOMRIGHT anchor so the
+-- child extends to the bottom of the parent's content frame. AceGUI's
+-- List layout only sets TOP-anchored offsets, so a fresh anchor is
+-- required after every DoLayout call (including the one onResizeStop
+-- triggers when the user releases the resize handle).
+--
+-- AddFillChild is the single registration point: it adds the child to
+-- the parent, applies the BOTTOMRIGHT anchor, and records the pair so
+-- onResizeStop can re-apply the anchor after the layout cascade. New
+-- tabs only need to call this helper to participate in resize.
+------------------------------------------------------------------------
+
+--- Add a child widget that should fill the parent's remaining height.
+-- Pins the child's BOTTOMRIGHT corner to the parent's content frame
+-- and records the pair so the anchor can be re-applied after every
+-- DoLayout pass (which otherwise clears manual anchors).
+-- @param parent AceGUI container with a `content` frame
+-- @param child AceGUI widget (ScrollFrame, TabGroup, etc.) to add and pin
+function GBL:AddFillChild(parent, child)
+    parent:AddChild(child)
+    child.frame:SetPoint("BOTTOMRIGHT", parent.content, "BOTTOMRIGHT", 0, 0)
+    self._scrollFillContainers = self._scrollFillContainers or {}
+    self._scrollFillContainers[#self._scrollFillContainers + 1] = {
+        widget = child,
+        parent = parent,
+    }
+end
+
+--- Re-apply the BOTTOMRIGHT anchor on every registered fill child.
+-- Called from onResizeStop after the layout cascade resets manual anchors.
+function GBL:_RefillScrollContainers()
+    local list = self._scrollFillContainers
+    if not list then return end
+    for _, entry in ipairs(list) do
+        local widget, parent = entry.widget, entry.parent
+        if widget and widget.frame and parent and parent.content then
+            widget.frame:SetPoint("BOTTOMRIGHT", parent.content, "BOTTOMRIGHT", 0, 0)
+        end
+    end
 end
 
 --- Build the tab list based on the player's access level.
@@ -188,6 +268,8 @@ end
 function GBL:SelectTab(tabName)
     if not self.tabGroup then return end
     self.activeTab = tabName
+    -- Drop stale scroll-fill registrations; the next Build*Tab call repopulates.
+    self._scrollFillContainers = nil
     self.tabGroup:ReleaseChildren()
 
     local accessLevel = self:GetAccessLevel()
@@ -390,8 +472,7 @@ function GBL:BuildTransactionsTab(container, transactions)
         self:CreateLedgerView(ledgerGroup, transactions, filters)
     end)
 
-    container:AddChild(ledgerGroup)
-    ledgerGroup.frame:SetPoint("BOTTOMRIGHT", container.content, "BOTTOMRIGHT", 0, 0)
+    self:AddFillChild(container, ledgerGroup)
 
     -- Store references for refresh
     self._ledgerContainer = ledgerGroup
@@ -452,8 +533,7 @@ function GBL:BuildGoldLogTab(container, moneyTransactions)
     contentGroup:SetFullWidth(true)
     contentGroup:SetFullHeight(true)
     contentGroup:SetLayout("Flow")
-    container:AddChild(contentGroup)
-    contentGroup.frame:SetPoint("BOTTOMRIGHT", container.content, "BOTTOMRIGHT", 0, 0)
+    self:AddFillChild(container, contentGroup)
 
     local filters = self:CreateDefaultFilters()
 
@@ -931,8 +1011,7 @@ function GBL:BuildConsumptionTab(container, transactions)
     contentGroup:SetFullWidth(true)
     contentGroup:SetFullHeight(true)
     contentGroup:SetLayout("Flow")
-    container:AddChild(contentGroup)
-    contentGroup.frame:SetPoint("BOTTOMRIGHT", container.content, "BOTTOMRIGHT", 0, 0)
+    self:AddFillChild(container, contentGroup)
 
     -- Store references for refresh
     self._consumptionContainer = contentGroup

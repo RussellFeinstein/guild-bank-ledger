@@ -29,6 +29,17 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.32.4
+    {"0.32.4", "2026-05-13", {
+        Added = {
+            "Window position and size now persist across reloads. Dragging or resizing the ledger window automatically saves the position and dimensions; they are restored on the next login or /reload.",
+            "Minimum window size enforced (810x500) to prevent the tab bar and filter row from becoming unusable when the window is resized too small.",
+        },
+        Fixed = {
+            "Scroll area now correctly fills the full available height after the window is resized. Previously the scroll container height was only calculated at tab-build time and was not updated when the window was made taller.",
+        },
+    }},
+
     -- v0.32.3
     {"0.32.3", "2026-05-12", {
         Fixed = {
@@ -1120,13 +1131,13 @@ function GBL:BuildChangelogTab(container)
     local endIdx = math.min(startIdx + CHANGELOG_PAGE_SIZE - 1, totalEntries)
 
     -- Scrollable content (only direct child of container, so List layout
-    -- gives it proper height — adding siblings before it breaks sizing)
+    -- gives it proper height — adding siblings before it breaks sizing).
+    -- Pinned via the shared AddFillChild helper for resize-stable height.
     local scroll = AceGUI:Create("ScrollFrame")
     scroll:SetFullWidth(true)
     scroll:SetFullHeight(true)
     scroll:SetLayout("List")
-    container:AddChild(scroll)
-    scroll.frame:SetPoint("BOTTOMRIGHT", container.content, "BOTTOMRIGHT", 0, 0)
+    self:AddFillChild(container, scroll)
 
     -- Navigation bar inside scroll (only when multiple pages)
     if totalPages > 1 then

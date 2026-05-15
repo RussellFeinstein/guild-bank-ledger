@@ -33,6 +33,8 @@ Every guild member running the addon automatically logs and shares data. No setu
 - **Changelog** — Embedded version history, paginated (10 versions per page).
 - **About** — Addon info, author credit, support links.
 
+The window remembers its position and size across reloads. A minimum size is enforced so the tab bar and filters remain usable.
+
 ## Access Control
 
 The GM sets a rank threshold. Players below it are restricted to one of two modes (GM's choice):

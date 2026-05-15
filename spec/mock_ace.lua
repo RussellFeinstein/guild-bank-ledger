@@ -326,10 +326,32 @@ function MockAce.install()
         widget.Show = function(self) self._shown = true end
         widget.Hide = function(self) self._shown = false end
         -- Mock underlying WoW frame (for IsShown checks)
-        widget.frame = {
+        local mockFrame = {
+            _hookScripts = {},
+            _anchors     = {},
             IsShown = function() return widget._shown end,
             SetClampedToScreen = function() end,
-            SetPoint = function() end,
+            SetPoint = function(self, ...)
+                self._anchors[#self._anchors + 1] = { ... }
+            end,
+            ClearAllPoints = function(self) self._anchors = {} end,
+            GetLeft   = function() return 0 end,
+            GetBottom = function() return 0 end,
+            GetWidth  = function() return widget._width or 1000 end,
+            GetHeight = function() return widget._height or 600 end,
+            SetResizeBounds = function(self, w, h)
+                self._resizeBounds = { w, h }
+            end,
+            SetMinResize = function(self, w, h)
+                self._minResize = { w, h }
+            end,
+            SetScript = function(self, event, func)
+                self._hookScripts[event] = { func }
+            end,
+            HookScript = function(self, event, func)
+                self._hookScripts[event] = self._hookScripts[event] or {}
+                table.insert(self._hookScripts[event], func)
+            end,
             CreateFontString = function()
                 local fs = { _text = "" }
                 fs.SetFont = function() end
@@ -339,13 +361,35 @@ function MockAce.install()
                 return fs
             end,
         }
+        widget.frame = mockFrame
+        -- Mock AceGUI Frame sizer sub-frames (exposed for HookScript calls)
+        local function mockSizer()
+            return {
+                _hookScripts = {},
+                HookScript = function(self, event, func)
+                    self._hookScripts[event] = self._hookScripts[event] or {}
+                    table.insert(self._hookScripts[event], func)
+                end,
+            }
+        end
+        widget.sizer_se = mockSizer()
+        widget.sizer_s  = mockSizer()
+        widget.sizer_e  = mockSizer()
         widget.SetDisabled = function(self, d) self._disabled = d end
         widget.SetLayout = function() end
         widget.SetTitle = function(self, t) self._title = t end
         widget.SetStatusText = function(self, t) self._statusText = t end
         widget.SetAutoAdjustHeight = function() end
-        widget.SetStatusTable = function() end
+        widget.SetStatusTable = function(self, t) self._statusTable = t end
         widget.EnableResize = function() end
+        -- Mock AceGUI Container helpers used by post-resize layout cascade.
+        widget.DoLayout    = function() end
+        widget.OnWidthSet  = function() end
+        widget.OnHeightSet = function() end
+        -- Stand-in for the AceGUI Container's inner `content` frame.
+        -- A small mock frame is enough; production code only uses it as a
+        -- SetPoint target, and the parent's mock SetPoint accepts any args.
+        widget.content = { _isMockContent = true }
         widget.SetTabs = function(self, tabs)
             self._tabs = tabs
             self.tablist = tabs
