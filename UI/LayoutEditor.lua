@@ -255,10 +255,8 @@ function GBL:BuildLayoutTab(container)
         widget:ReleaseChildren()
         self:_LayoutEditor_BuildInnerTabContent(widget, group, writable, isGM)
     end)
-    container:AddChild(innerTG)
-    -- Fill the remainder under the banner. Same anchor trick used in
-    -- BuildTransactionsTab (UI/UI.lua:365) and friends.
-    innerTG.frame:SetPoint("BOTTOMRIGHT", container.content, "BOTTOMRIGHT", 0, 0)
+    -- Fill the remainder under the banner via the shared AddFillChild helper.
+    self:AddFillChild(container, innerTG)
     self._layoutInnerTG = innerTG
 
     -- Triggers OnGroupSelected, which builds the inner content.
@@ -301,10 +299,8 @@ function GBL:_LayoutEditor_BuildInnerTabContent(parent, innerTabValue, writable,
     scroll:SetFullHeight(true)
     scroll:SetLayout("Flow")
     scroll:SetStatusTable(self._layoutScrollStatuses[innerTabValue])
-    parent:AddChild(scroll)
-    -- Anchor the ScrollFrame to fill the TabGroup's content area —
-    -- same fill-remainder pattern as BuildTransactionsTab et al.
-    scroll.frame:SetPoint("BOTTOMRIGHT", parent.content, "BOTTOMRIGHT", 0, 0)
+    -- Fill the inner TabGroup's content via the shared AddFillChild helper.
+    self:AddFillChild(parent, scroll)
     -- Track the active scroll for RefreshLayoutTab's next-frame
     -- SetScroll fixup (see RefreshLayoutTab for why that fixup exists).
     self._layoutContainer = scroll

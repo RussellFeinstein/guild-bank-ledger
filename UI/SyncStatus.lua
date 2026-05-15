@@ -120,8 +120,7 @@ function GBL:BuildSyncTab(container)
         self:BuildAccessControlRow(container)
     end
 
-    container:AddChild(syncContent)
-    syncContent.frame:SetPoint("BOTTOMRIGHT", container.content, "BOTTOMRIGHT", 0, 0)
+    self:AddFillChild(container, syncContent)
 
     self._syncContent = syncContent
     self:RenderSyncContent(syncContent)

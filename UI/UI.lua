@@ -33,7 +33,7 @@ function GBL:CreateMainFrame()
     -- After the user releases the resize handle, cascade layout updates so the
     -- scroll area fills the new window height.  AceGUI's List layout clears all
     -- child anchor points each run, so the BOTTOMRIGHT anchors registered via
-    -- AddScrollFillChild must be re-applied after every DoLayout call.
+    -- AddFillChild must be re-applied after every DoLayout call.
     local function onResizeStop()
         if not self.tabGroup then return end
         local fw, fh = frame.frame:GetWidth(), frame.frame:GetHeight()
@@ -44,7 +44,7 @@ function GBL:CreateMainFrame()
         frame:DoLayout()
         -- List layout: re-stacks tab children with fresh content dimensions.
         self.tabGroup:DoLayout()
-        -- Re-apply BOTTOMRIGHT anchors on every registered scroll-fill child.
+        -- Re-apply BOTTOMRIGHT anchors on every registered fill child.
         self:_RefillScrollContainers()
     end
     frame.sizer_se:HookScript("OnMouseUp", onResizeStop)
@@ -85,39 +85,38 @@ function GBL:CreateMainFrame()
 end
 
 ------------------------------------------------------------------------
--- Scroll-fill container registry
+-- Fill-anchor registry
 --
--- Tabs that host a ScrollFrame "below" a filter bar need a manual
--- BOTTOMRIGHT anchor so the scroll area extends to the bottom of the
--- tab content frame; AceGUI's List layout only sets TOP-anchored offsets.
--- The anchor survives the initial build, but every DoLayout call (e.g.
--- after the user resizes the window) clears it and the scroll area
--- collapses back to its TOP-anchored default height.
+-- Tabs that host a "below the filter bar" child (usually a ScrollFrame,
+-- sometimes a nested TabGroup) need a manual BOTTOMRIGHT anchor so the
+-- child extends to the bottom of the parent's content frame. AceGUI's
+-- List layout only sets TOP-anchored offsets, so a fresh anchor is
+-- required after every DoLayout call (including the one onResizeStop
+-- triggers when the user releases the resize handle).
 --
--- AddScrollFillChild is the single registration point: it adds the
--- scroll widget as a child of the parent container, applies the
--- BOTTOMRIGHT anchor, and records the pair so onResizeStop can re-apply
--- it after the layout cascade. New scrollable tabs added later only
--- need to call this helper to participate in the resize behavior.
+-- AddFillChild is the single registration point: it adds the child to
+-- the parent, applies the BOTTOMRIGHT anchor, and records the pair so
+-- onResizeStop can re-apply the anchor after the layout cascade. New
+-- tabs only need to call this helper to participate in resize.
 ------------------------------------------------------------------------
 
---- Add a ScrollFrame child that should fill the parent's remaining height.
--- Pins the child's BOTTOMRIGHT corner and registers the pair for re-anchoring
--- after frame resize (AceGUI's List layout clears manual anchors on every
--- DoLayout pass).
--- @param parent AceGUI container with a `content` frame (List layout)
--- @param scrollWidget AceGUI ScrollFrame to add and pin
-function GBL:AddScrollFillChild(parent, scrollWidget)
-    parent:AddChild(scrollWidget)
-    scrollWidget.frame:SetPoint("BOTTOMRIGHT", parent.content, "BOTTOMRIGHT", 0, 0)
+--- Add a child widget that should fill the parent's remaining height.
+-- Pins the child's BOTTOMRIGHT corner to the parent's content frame
+-- and records the pair so the anchor can be re-applied after every
+-- DoLayout pass (which otherwise clears manual anchors).
+-- @param parent AceGUI container with a `content` frame
+-- @param child AceGUI widget (ScrollFrame, TabGroup, etc.) to add and pin
+function GBL:AddFillChild(parent, child)
+    parent:AddChild(child)
+    child.frame:SetPoint("BOTTOMRIGHT", parent.content, "BOTTOMRIGHT", 0, 0)
     self._scrollFillContainers = self._scrollFillContainers or {}
     self._scrollFillContainers[#self._scrollFillContainers + 1] = {
-        widget = scrollWidget,
+        widget = child,
         parent = parent,
     }
 end
 
---- Re-apply the BOTTOMRIGHT anchor on every registered scroll-fill child.
+--- Re-apply the BOTTOMRIGHT anchor on every registered fill child.
 -- Called from onResizeStop after the layout cascade resets manual anchors.
 function GBL:_RefillScrollContainers()
     local list = self._scrollFillContainers
@@ -473,7 +472,7 @@ function GBL:BuildTransactionsTab(container, transactions)
         self:CreateLedgerView(ledgerGroup, transactions, filters)
     end)
 
-    self:AddScrollFillChild(container, ledgerGroup)
+    self:AddFillChild(container, ledgerGroup)
 
     -- Store references for refresh
     self._ledgerContainer = ledgerGroup
@@ -534,7 +533,7 @@ function GBL:BuildGoldLogTab(container, moneyTransactions)
     contentGroup:SetFullWidth(true)
     contentGroup:SetFullHeight(true)
     contentGroup:SetLayout("Flow")
-    self:AddScrollFillChild(container, contentGroup)
+    self:AddFillChild(container, contentGroup)
 
     local filters = self:CreateDefaultFilters()
 
@@ -1012,7 +1011,7 @@ function GBL:BuildConsumptionTab(container, transactions)
     contentGroup:SetFullWidth(true)
     contentGroup:SetFullHeight(true)
     contentGroup:SetLayout("Flow")
-    self:AddScrollFillChild(container, contentGroup)
+    self:AddFillChild(container, contentGroup)
 
     -- Store references for refresh
     self._consumptionContainer = contentGroup

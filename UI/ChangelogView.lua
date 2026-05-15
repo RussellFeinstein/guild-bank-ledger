@@ -1131,13 +1131,13 @@ function GBL:BuildChangelogTab(container)
     local endIdx = math.min(startIdx + CHANGELOG_PAGE_SIZE - 1, totalEntries)
 
     -- Scrollable content (only direct child of container, so List layout
-    -- gives it proper height — adding siblings before it breaks sizing)
+    -- gives it proper height — adding siblings before it breaks sizing).
+    -- Pinned via the shared AddFillChild helper for resize-stable height.
     local scroll = AceGUI:Create("ScrollFrame")
     scroll:SetFullWidth(true)
     scroll:SetFullHeight(true)
     scroll:SetLayout("List")
-    container:AddChild(scroll)
-    scroll.frame:SetPoint("BOTTOMRIGHT", container.content, "BOTTOMRIGHT", 0, 0)
+    self:AddFillChild(container, scroll)
 
     -- Navigation bar inside scroll (only when multiple pages)
     if totalPages > 1 then

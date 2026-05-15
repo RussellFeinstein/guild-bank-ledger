@@ -5,7 +5,7 @@
 --   * SetStatusTable is pointed at db.profile.ui (writes persist via AceDB)
 --   * SetResizeBounds (or SetMinResize on classic) enforces an 810x500 floor
 --   * Each resize sizer has an OnMouseUp hook registered
---   * The scroll-fill registry: AddScrollFillChild + _RefillScrollContainers
+--   * The fill-anchor registry: AddFillChild + _RefillScrollContainers
 --     + tab-switch cleanup
 ------------------------------------------------------------------------
 
@@ -68,10 +68,10 @@ describe("UI window persistence (v0.32.4)", function()
     end)
 
     ----------------------------------------------------------------
-    -- Scroll-fill container registry
+    -- Fill-anchor registry
     ----------------------------------------------------------------
 
-    describe("AddScrollFillChild registry", function()
+    describe("AddFillChild registry", function()
         local AceGUI
 
         before_each(function()
@@ -86,7 +86,7 @@ describe("UI window persistence (v0.32.4)", function()
         it("stores the parent/widget pair for later re-anchoring", function()
             local parent = AceGUI:Create("SimpleGroup")
             local scroll = AceGUI:Create("ScrollFrame")
-            GBL:AddScrollFillChild(parent, scroll)
+            GBL:AddFillChild(parent, scroll)
             assert.equals(1, #GBL._scrollFillContainers)
             assert.equals(scroll, GBL._scrollFillContainers[1].widget)
             assert.equals(parent, GBL._scrollFillContainers[1].parent)
@@ -96,7 +96,7 @@ describe("UI window persistence (v0.32.4)", function()
             local parent = AceGUI:Create("SimpleGroup")
             local scroll = AceGUI:Create("ScrollFrame")
             scroll.frame._anchors = {}   -- isolate from any prior pool state
-            GBL:AddScrollFillChild(parent, scroll)
+            GBL:AddFillChild(parent, scroll)
             local anchor = lastAnchor(scroll.frame)
             assert.is_table(anchor, "expected SetPoint to be called on the scroll frame")
             assert.equals("BOTTOMRIGHT", anchor[1])
@@ -107,7 +107,7 @@ describe("UI window persistence (v0.32.4)", function()
         it("adds the scroll widget as a child of the parent container", function()
             local parent = AceGUI:Create("SimpleGroup")
             local scroll = AceGUI:Create("ScrollFrame")
-            GBL:AddScrollFillChild(parent, scroll)
+            GBL:AddFillChild(parent, scroll)
             -- AceGUI mock tracks children in _children; the scroll widget must
             -- end up there so the layout cascade can find it.
             local found = false
@@ -120,8 +120,8 @@ describe("UI window persistence (v0.32.4)", function()
         it("appends multiple registrations preserving order", function()
             local p1, s1 = AceGUI:Create("SimpleGroup"), AceGUI:Create("ScrollFrame")
             local p2, s2 = AceGUI:Create("SimpleGroup"), AceGUI:Create("ScrollFrame")
-            GBL:AddScrollFillChild(p1, s1)
-            GBL:AddScrollFillChild(p2, s2)
+            GBL:AddFillChild(p1, s1)
+            GBL:AddFillChild(p2, s2)
             assert.equals(2, #GBL._scrollFillContainers)
             assert.equals(s1, GBL._scrollFillContainers[1].widget)
             assert.equals(s2, GBL._scrollFillContainers[2].widget)
@@ -151,8 +151,8 @@ describe("UI window persistence (v0.32.4)", function()
             local p2, s2 = AceGUI:Create("SimpleGroup"), AceGUI:Create("ScrollFrame")
             s1.frame._anchors = {}
             s2.frame._anchors = {}
-            GBL:AddScrollFillChild(p1, s1)
-            GBL:AddScrollFillChild(p2, s2)
+            GBL:AddFillChild(p1, s1)
+            GBL:AddFillChild(p2, s2)
             local before1, before2 = #s1.frame._anchors, #s2.frame._anchors
             fireResize("sizer_se")
             assert.is_true(#s1.frame._anchors > before1, "s1 was not re-anchored")
@@ -167,7 +167,7 @@ describe("UI window persistence (v0.32.4)", function()
             local parent = AceGUI:Create("SimpleGroup")
             local scroll = AceGUI:Create("ScrollFrame")
             scroll.frame._anchors = {}
-            GBL:AddScrollFillChild(parent, scroll)
+            GBL:AddFillChild(parent, scroll)
             local baseline = #scroll.frame._anchors
             fireResize("sizer_se")
             fireResize("sizer_s")
