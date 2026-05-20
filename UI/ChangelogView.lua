@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.32.6
+    {"0.32.6", "2026-05-20", {
+        Fixed = {
+            "Sort no longer risks a duplicate move or a client crash when another guild member changes the bank during the brief pre-warm step at the start of a sort. A bank update arriving in that window could make the sort move an item before its data finished loading, then move it again once pre-warm finished. The sort now ignores bank updates during pre-warm and never issues a second move while one is still in flight.",
+        },
+    }},
+
     -- v0.32.5
     {"0.32.5", "2026-05-20", {
         Fixed = {

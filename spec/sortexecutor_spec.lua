@@ -732,6 +732,88 @@ describe("SortExecutor", function()
             end
         end)
 
+        it("ignores foreign bank activity during the pre-warm window", function()
+            -- Hold pre-warm open by capturing the load callbacks instead of
+            -- firing them, then raise a foreign GUILDBANKBAGSLOTS_CHANGED. With
+            -- the preWarming guard the event is ignored; without it the handler
+            -- replans and issues the first move on a cold cache (re-opening the
+            -- crafted-quality crash), and the later pre-warm step double-issues.
+            local original = _G.Item
+            local pendingCallbacks = {}
+            _G.Item = {
+                CreateFromItemLink = function(_self, _link)
+                    return {
+                        ContinueOnItemLoad = function(_inner, cb)
+                            table.insert(pendingCallbacks, cb)
+                        end,
+                    }
+                end,
+            }
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                },
+            }, function(r) result = r end)
+            assert.is_nil(result, "pre-warm should still be in flight")
+
+            -- Foreign guild activity lands mid-pre-warm.
+            MockAce.fireEvent("GUILDBANKBAGSLOTS_CHANGED")
+            assert.is_nil(result,
+                "a pre-warm-window event must not start execution")
+
+            -- Complete pre-warm and let the executor run.
+            for _, cb in ipairs(pendingCallbacks) do cb() end
+            drainTimers()
+            _G.Item = original
+
+            assert.is_not_nil(result, "onComplete should have fired")
+            assert.is_true(result.ok, result.reason)
+            assert.equals(1, result.done)
+            assert.equals(0, result.replans,
+                "a pre-warm-window event must not trigger a replan")
+            assert.equals(0, countItem(1, 100))
+            assert.equals(20, countItem(2, 100))
+        end)
+
+        it("step() refuses to issue a second op while one is in flight", function()
+            -- Make Pickup a counting no-op so the issued op never confirms and
+            -- state.waiting stays armed after the first step(). A redundant
+            -- step() must then bail on the in-flight guard rather than issuing
+            -- a second Pickup pair for the same op.
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local pickups = 0
+            local origPickup = _G.PickupGuildBankItem
+            local origCursor = _G.CursorHasItem
+            _G.PickupGuildBankItem = function() pickups = pickups + 1 end
+            _G.CursorHasItem = function() return false end
+
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                },
+            }, function() end, { skipPreWarm = true })
+            -- First step ran synchronously: armed waiting + issued one Pickup pair.
+            assert.equals(2, pickups,
+                "first step should issue exactly one src/dst Pickup pair")
+
+            -- A redundant step() while the op is in flight must bail on the guard.
+            GBL:_sortExecutorStep()
+            assert.equals(2, pickups,
+                "in-flight guard should prevent a second Pickup pair")
+
+            _G.PickupGuildBankItem = origPickup
+            _G.CursorHasItem = origCursor
+            GBL:CancelSortExecution()
+        end)
+
         it("detects crafted-quality reagents via the atlas marker", function()
             local link = makeCraftedQualityLink(240900, "Flawless Quick Amethyst")
             -- Inject the crafted-quality link directly into the bank

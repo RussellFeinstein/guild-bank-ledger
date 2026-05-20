@@ -183,6 +183,9 @@ local state = nil
 --   waiting = nil | { tabIndex, slotIndex, itemID, count, startedAt, retries },
 --   onComplete = fn,
 --   gapUntil = seconds,
+--   preWarming = true while the pre-warm phase runs; suppresses the
+--     slots-changed handler so foreign bank activity during the window
+--     can't replan/step before items are loaded (see ExecuteSortPlan).
 -- }
 
 local function isRunning()
@@ -431,6 +434,14 @@ step = function()
         return
     end
 
+    -- An op is already in flight. Its confirmation path (the slots-changed
+    -- handler or the timeout poll) drives the next step; refuse to issue a
+    -- second op on top of it. Without this guard two step() drivers (e.g. a
+    -- replan resume and the pre-warm completion callback) could double-issue
+    -- the same op. Placed after the bank-open check so a redundant step()
+    -- during a bank-close still aborts correctly.
+    if state.waiting then return end
+
     -- Throttle: honor the inter-move gap.
     local now = GetTime()
     if state.gapUntil and now < state.gapUntil then
@@ -664,6 +675,14 @@ end
 
 function GBL:_SortExecutor_OnSlotsChanged()
     if not state then return end
+
+    -- Pre-warm phase: events are registered before pre-warm starts (so the
+    -- frame-hide abort works during the window), but we issue no moves yet.
+    -- Ignore foreign bank activity here: replanning/stepping now would issue
+    -- the first move on a cold item cache, re-opening the crafted-quality
+    -- crash pre-warm exists to prevent. The first step()'s src/dst pre-check
+    -- catches any divergence once pre-warm completes.
+    if state.preWarming then return end
 
     -- First, check if this event is the late ACK for a recently-timed-out
     -- op. The server may have processed the move after we'd already armed
@@ -926,11 +945,18 @@ function GBL:ExecuteSortPlan(plan, onComplete, opts)
         return true, nil
     end
 
+    -- Suppress the slots-changed handler for the duration of pre-warm. No
+    -- async event can interleave between registerBankEvents() above and this
+    -- assignment (synchronous Lua), so there is no gap to leak through.
+    state.preWarming = true
     preWarmForPlan(plan, function(_reason)
         -- State already torn down by an external Cancel or by the
         -- PLAYER_INTERACTION_MANAGER_FRAME_HIDE event handler. finish()
         -- has run, onComplete already fired — nothing to do.
         if not state then return end
+        -- Pre-warm done: re-enable normal slots-changed handling before the
+        -- first step() arms an in-flight op.
+        state.preWarming = nil
         if not GBL:IsBankOpen() then
             finish(false, "bank closed during prewarm")
             return
@@ -970,4 +996,10 @@ function GBL:_sortExecutorInjectTimeout(info)
         itemID = info.itemID, count = info.count,
         at = GetTime(),
     }
+end
+
+-- Test hook: drive the internal step() directly. Used to verify the
+-- in-flight guard refuses to issue a second op while one is already armed.
+function GBL:_sortExecutorStep()
+    return step()
 end
