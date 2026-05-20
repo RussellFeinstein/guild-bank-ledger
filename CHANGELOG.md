@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Sort no longer risks a duplicate move or a client crash when another guild member changes the bank during the brief pre-warm step at the start of a sort. Previously a bank update arriving in that window could make the sort replan and issue its first move before item data finished loading (re-opening the crafted-quality crash that pre-warm guards against), then issue the same move again once pre-warm finished. The sort now ignores bank updates during pre-warm and never issues a second move while one is still in flight.
+
 ## [0.32.5] - 2026-05-20
 
 ### Fixed
