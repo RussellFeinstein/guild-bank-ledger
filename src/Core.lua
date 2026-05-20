@@ -1867,6 +1867,10 @@ end
 function GBL:OnBankClosed()
     local wasScanning = self.scanInProgress
     self.bankOpen = false
+    -- Stop a running sort before the rest of close cleanup. The executor no longer
+    -- registers frame-hide itself (it would shadow this handler), so Core drives the
+    -- abort. Guarded for load-order safety; no-op when no sort is running.
+    if self._SortExecutorOnBankClosed then self:_SortExecutorOnBankClosed() end
     self.scanInProgress = false
     self._initialScanComplete = false
     self:StopPeriodicRescan()

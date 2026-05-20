@@ -204,19 +204,19 @@ local unregisterBankEvents
 
 function registerBankEvents()
     GBL:RegisterEvent("GUILDBANKBAGSLOTS_CHANGED", "_SortExecutor_OnSlotsChanged")
-    -- Core.lua already owns PLAYER_INTERACTION_MANAGER_FRAME_HIDE; we detect
-    -- bank-closed through GBL:IsBankOpen() at step boundaries plus the
-    -- dedicated handler below which we register on top (AceEvent allows
-    -- multiple handlers since we share the addon object).
-    GBL:RegisterEvent("PLAYER_INTERACTION_MANAGER_FRAME_HIDE", "_SortExecutor_OnFrameHide")
+    -- We do NOT register PLAYER_INTERACTION_MANAGER_FRAME_HIDE here. Core owns it
+    -- (Core.lua OnEnable), and AceEvent keeps one callback per (object, event):
+    -- registering it again on the shared GBL object would overwrite Core's handler
+    -- and never restore it, silently disabling Core's OnBankClosed cleanup after
+    -- the first sort. Instead Core's OnBankClosed calls GBL:_SortExecutorOnBankClosed
+    -- to abort a running sort. Bank-close is also caught at step boundaries via
+    -- GBL:IsBankOpen() as a backstop.
 end
 
 function unregisterBankEvents()
     pcall(function()
         GBL:UnregisterEvent("GUILDBANKBAGSLOTS_CHANGED")
     end)
-    -- Leave PLAYER_INTERACTION_MANAGER_FRAME_HIDE registered — Core re-uses it.
-    -- Our handler is idempotent when not running.
 end
 
 --- Project the EXPECTED post-op state for a slot, given the op intent
@@ -788,12 +788,13 @@ function GBL:_SortExecutor_OnSlotsChanged()
     end
 end
 
-function GBL:_SortExecutor_OnFrameHide(_event, interactionType)
+-- Called by Core:OnBankClosed (the single owner of the frame-hide event) so a
+-- running sort aborts on any bank close. Not an AceEvent handler: a second
+-- RegisterEvent on the shared GBL object would overwrite Core's handler, not
+-- stack. Core's handler already gates on the GuildBanker interaction type.
+function GBL:_SortExecutorOnBankClosed()
     if not state then return end
-    if Enum and Enum.PlayerInteractionType and
-       interactionType == Enum.PlayerInteractionType.GuildBanker then
-        finish(false, "bank closed")
-    end
+    finish(false, "bank closed")
 end
 
 ------------------------------------------------------------------------

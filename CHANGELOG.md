@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Closing the guild bank after running a sort once in a session now performs the normal close cleanup again. Previously the sort's bank-close handler permanently replaced the core one, so after the first sort the periodic rescan kept running, the auto-opened ledger window did not close, and the post-close sync broadcast was skipped until the next reload.
+
 ## [0.32.6] - 2026-05-20
 
 ### Fixed
