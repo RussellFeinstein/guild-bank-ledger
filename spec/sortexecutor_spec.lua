@@ -544,4 +544,238 @@ describe("SortExecutor", function()
             assert.is_false(GBL:IsSortRunning())
         end)
     end)
+
+    describe("pre-warm phase (v0.32.5)", function()
+        -- Build a crafted-quality-bearing item link by concatenating the
+        -- atlas marker the executor sniffs into a quality-3 link. The
+        -- helper's makeItemLink() format already has |c..|h[name]|h|r;
+        -- we splice the atlas into the displayed-name slot the way TWW
+        -- crafted-quality links do.
+        local function makeCraftedQualityLink(itemID, name)
+            return "|cff0070dd|Hitem:" .. itemID
+                .. "::::::::70:::::|h[" .. name
+                .. " |A:Professions-ChatIcon-Quality-12-Tier2:17:15::1|a]|h|r"
+        end
+
+        it("invokes step synchronously when Item callbacks fire sync", function()
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            local ok = GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                },
+            }, function(r) result = r end)
+            assert.is_true(ok)
+            drainTimers()
+            assert.is_not_nil(result, "onComplete should have fired")
+            assert.is_true(result.ok, result.reason)
+            assert.equals(1, result.done)
+        end)
+
+        it("logs a pre-warm audit line on completion", function()
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                },
+            }, function() end)
+            drainTimers()
+            local trail = GBL:GetLog("sort")
+            local found = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("Sort pre-warm:", 1, true) then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found,
+                "expected 'Sort pre-warm:' sort-log line; got " ..
+                tostring(#trail) .. " entries")
+        end)
+
+        it("resolves via cap timer when Item callbacks never fire", function()
+            local original = _G.Item
+            _G.Item = {
+                CreateFromItemLink = function(_self, _link)
+                    return {
+                        ContinueOnItemLoad = function() end,  -- never fires
+                    }
+                end,
+            }
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                },
+            }, function(r) result = r end)
+            -- The 3.0s cap timer is scheduled but hasn't fired yet.
+            assert.is_nil(result, "pre-warm should not have resolved yet")
+            -- Drain timers: cap fires, executor proceeds, move completes.
+            drainTimers()
+            _G.Item = original
+            assert.is_not_nil(result, "onComplete should have fired")
+            local trail = GBL:GetLog("sort")
+            local foundCap = false
+            for _, entry in ipairs(trail) do
+                if entry.message:find("Sort pre-warm:", 1, true)
+                   and entry.message:find("(cap)", 1, true) then
+                    foundCap = true
+                    break
+                end
+            end
+            assert.is_true(foundCap,
+                "expected pre-warm audit with reason 'cap'")
+        end)
+
+        it("aborts when bank closes during pre-warm", function()
+            local original = _G.Item
+            local pendingCallbacks = {}
+            _G.Item = {
+                CreateFromItemLink = function(_self, _link)
+                    return {
+                        ContinueOnItemLoad = function(_inner, cb)
+                            table.insert(pendingCallbacks, cb)
+                        end,
+                    }
+                end,
+            }
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                },
+            }, function(r) result = r end)
+            -- Bank closes while pre-warm is pending. Without the
+            -- pre-warm continuation's IsBankOpen guard, step() would
+            -- run after the late Item callback and issue Pickup against
+            -- a closed bank.
+            GBL.bankOpen = false
+            for _, cb in ipairs(pendingCallbacks) do cb() end
+            drainTimers()
+            _G.Item = original
+            assert.is_not_nil(result, "onComplete should have fired")
+            assert.is_false(result.ok)
+            assert.matches("bank closed during prewarm", result.reason)
+            assert.equals(0, result.done)
+            assert.is_nil(MockWoW.cursor, "cursor should be empty")
+        end)
+
+        it("aborts cleanly when cancelled during pre-warm", function()
+            local original = _G.Item
+            local pendingCallbacks = {}
+            _G.Item = {
+                CreateFromItemLink = function(_self, _link)
+                    return {
+                        ContinueOnItemLoad = function(_inner, cb)
+                            table.insert(pendingCallbacks, cb)
+                        end,
+                    }
+                end,
+            }
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                },
+            }, function(r) result = r end)
+            -- Cancel before any Item callback fires.
+            GBL:CancelSortExecution()
+            -- Late callbacks still arrive; pre-warm continuation sees
+            -- state == nil and bails without calling step().
+            for _, cb in ipairs(pendingCallbacks) do cb() end
+            drainTimers()
+            _G.Item = original
+            assert.is_not_nil(result, "onComplete should have fired")
+            assert.is_false(result.ok)
+            assert.matches("cancelled", result.reason)
+            assert.equals(0, result.done)
+            assert.is_nil(MockWoW.cursor, "cursor should be empty")
+        end)
+
+        it("skips pre-warm when opts.skipPreWarm is true", function()
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                },
+            }, function(r) result = r end, { skipPreWarm = true })
+            drainTimers()
+            assert.is_not_nil(result)
+            assert.is_true(result.ok, result.reason)
+            local trail = GBL:GetLog("sort")
+            for _, entry in ipairs(trail) do
+                assert.is_nil(entry.message:find("Sort pre-warm:", 1, true),
+                    "did not expect pre-warm audit but got: " ..
+                    entry.message)
+            end
+        end)
+
+        it("detects crafted-quality reagents via the atlas marker", function()
+            local link = makeCraftedQualityLink(240900, "Flawless Quick Amethyst")
+            -- Inject the crafted-quality link directly into the bank
+            -- mock; populateTab's makeItemLink would otherwise generate
+            -- a plain-quality link.
+            MockWoW.guildBank.tabs[1].slots = {
+                [1] = {
+                    itemLink = link,
+                    texture = "Interface\\Icons\\INV_Misc_QuestionMark",
+                    count = 3,
+                    quality = 3,
+                    locked = false,
+                    isFiltered = false,
+                    itemID = 240900,
+                },
+            }
+            local helper = GBL._sortExecutor_PlanHasCraftedQualityItems
+            assert.is_function(helper)
+            assert.is_true(helper({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 240900, count = 3 },
+                },
+            }))
+        end)
+
+        it("ignores plans whose ops touch only plain-quality items", function()
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local helper = GBL._sortExecutor_PlanHasCraftedQualityItems
+            assert.is_false(helper({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                },
+            }))
+        end)
+
+        it("returns false for an empty plan", function()
+            local helper = GBL._sortExecutor_PlanHasCraftedQualityItems
+            assert.is_false(helper({ ops = {} }))
+            assert.is_false(helper(nil))
+            assert.is_false(helper({}))
+        end)
+    end)
 end)
