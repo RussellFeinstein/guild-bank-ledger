@@ -778,13 +778,117 @@ function GBL:_SortExecutor_OnFrameHide(_event, interactionType)
 end
 
 ------------------------------------------------------------------------
+-- Pre-warm (Item:CreateFromItemLink for crafted-quality crash mitigation)
+------------------------------------------------------------------------
+
+-- Atlas marker present in the link of every TWW crafted-quality reagent
+-- (e.g. Flawless Quick Amethyst). A 2026-05-20 in-game crash bottomed out
+-- in Blizzard's GetItemReagentQualityInfo when GUILDBANKBAGSLOTS_CHANGED
+-- triggered a tab redraw after PickupGuildBankItem; the resident reagent
+-- in any slot with this marker can crash the redraw if Blizzard's quality
+-- cache is cold. Pre-warm is best-effort mitigation; the warning banner
+-- on the Sort tab is the load-bearing user protection.
+local CRAFTED_QUALITY_ATLAS = "Professions-ChatIcon-Quality-"
+
+local PREWARM_CAP_SECONDS = 3.0
+
+--- True if any op in the plan touches a slot whose LIVE item link
+--- contains the TWW crafted-quality atlas marker. Requires the bank
+--- to be open (GetGuildBankItemLink returns nil otherwise). Used by
+--- the Sort tab preview to render a warning banner.
+local function planHasCraftedQualityItems(plan)
+    if not plan or not plan.ops then return false end
+    for _, op in ipairs(plan.ops) do
+        local link = GetGuildBankItemLink(op.srcTab, op.srcSlot)
+        if link and link:find(CRAFTED_QUALITY_ATLAS, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+GBL._sortExecutor_PlanHasCraftedQualityItems = planHasCraftedQualityItems
+
+--- Pre-warm Blizzard's item-data cache for every unique item link in
+--- the plan, then invoke `onReady(reason)`. Best-effort mitigation for
+--- the crafted-quality-reagent crash. `Item:CreateFromItemLink` with
+--- `ContinueOnItemLoad` is Blizzard's canonical "make sure this link
+--- is fully resolved including bonus IDs" primitive; we wait for all
+--- callbacks to fire OR a 3.0s cap, whichever lands first.
+---
+--- onReady is invoked exactly once. Cancel and bank-close DURING
+--- pre-warm are not detected here — the post-resolve continuation in
+--- ExecuteSortPlan re-checks state and IsBankOpen() before calling
+--- step(), so a stale resolve after cancellation is harmless.
+local function preWarmForPlan(plan, onReady)
+    local seen = {}
+    local links = {}
+    for _, op in ipairs(plan.ops or {}) do
+        local link = GetGuildBankItemLink(op.srcTab, op.srcSlot)
+        if link and not seen[link] then
+            seen[link] = true
+            links[#links + 1] = link
+        end
+    end
+
+    local total = #links
+    local loaded = 0
+    local startedAt = GetTime()
+    local resolved = false
+
+    local function resolve(reason)
+        if resolved then return end
+        resolved = true
+        local elapsed = (GetTime() or 0) - (startedAt or 0)
+        GBL:SortInfo(string.format(
+            "Sort pre-warm: %d items, %d loaded in %.1fs (%s)",
+            total, loaded, elapsed, reason))
+        onReady(reason)
+    end
+
+    if total == 0 then
+        resolve("no-items")
+        return
+    end
+
+    local function noteLoaded()
+        if resolved then return end
+        loaded = loaded + 1
+        if loaded >= total then
+            resolve("complete")
+        end
+    end
+
+    for _, link in ipairs(links) do
+        local item = (_G.Item and _G.Item.CreateFromItemLink)
+            and _G.Item:CreateFromItemLink(link) or nil
+        if item and item.ContinueOnItemLoad then
+            item:ContinueOnItemLoad(noteLoaded)
+        else
+            -- Item mixin unavailable (very old client or missing global).
+            -- Treat as already-loaded so we don't hang on the cap.
+            noteLoaded()
+        end
+    end
+
+    -- Hard cap. Without this, a hung Blizzard callback would freeze the
+    -- sort entirely. Pre-warm is best-effort — if it didn't finish in
+    -- time, audit "cap" and let the executor proceed regardless.
+    C_Timer.After(PREWARM_CAP_SECONDS, function()
+        if not resolved then resolve("cap") end
+    end)
+end
+
+GBL._sortExecutorPreWarmCapSeconds = PREWARM_CAP_SECONDS
+
+------------------------------------------------------------------------
 -- Public API
 ------------------------------------------------------------------------
 
 --- Begin executing a plan.
 -- @param plan table from SortPlanner
 -- @param onComplete function(result) called when the run ends
--- @param opts table|nil { layout = layoutForReplan }
+-- @param opts table|nil { layout = layoutForReplan, skipPreWarm = bool }
 -- @return ok, errMessage
 function GBL:ExecuteSortPlan(plan, onComplete, opts)
     if isRunning() then return false, "sort already running" end
@@ -811,7 +915,28 @@ function GBL:ExecuteSortPlan(plan, onComplete, opts)
     GBL:SortInfo(
         string.format("Sort: starting execution of %d ops", #plan.ops))
     emitProgress("start")
-    step()
+
+    -- Pre-warm phase: best-effort load of every unique item link in the
+    -- plan before issuing the first PickupGuildBankItem, mitigating the
+    -- TWW crafted-quality crash that bottomed out in Blizzard's
+    -- GetItemReagentQualityInfo. Skip when there are no ops or when the
+    -- caller (test path) opts out.
+    if (opts and opts.skipPreWarm) or #plan.ops == 0 then
+        step()
+        return true, nil
+    end
+
+    preWarmForPlan(plan, function(_reason)
+        -- State already torn down by an external Cancel or by the
+        -- PLAYER_INTERACTION_MANAGER_FRAME_HIDE event handler. finish()
+        -- has run, onComplete already fired — nothing to do.
+        if not state then return end
+        if not GBL:IsBankOpen() then
+            finish(false, "bank closed during prewarm")
+            return
+        end
+        step()
+    end)
     return true, nil
 end
 

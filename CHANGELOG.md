@@ -5,6 +5,14 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.32.5] - 2026-05-20
+
+### Fixed
+- Sort pre-warms item data for every unique item link in the plan before issuing the first `PickupGuildBankItem`, mitigating a Wow.exe ACCESS_VIOLATION inside Blizzard's `SetItemCraftingQualityOverlay`/`GetItemReagentQualityInfo` that fired during the tab redraw after sort moves on tabs containing TWW crafted-quality reagents (Flawless gems and similar). The pre-warm uses `Item:CreateFromItemLink(link):ContinueOnItemLoad(cb)` with a 3.0 s cap. Audit line `Sort pre-warm: N items, M loaded in T.Ts (reason)` lands in the sort log before the first op. Verified in-game on a 502-slot bank with the full Flawless gem set — sort runs to completion without a client crash.
+
+### Added
+- Warning banner in the Sort tab preview. When the plan touches any slot whose live item link carries the TWW crafted-quality atlas marker, a color-coded banner renders above the move list explaining that pre-warm is a best-effort mitigation against a Blizzard-side crash and that recurring crashes during similar sorts are a signal to organize those items manually first.
+
 ## [0.32.4] - 2026-05-13
 
 ### Added

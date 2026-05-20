@@ -29,6 +29,16 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.32.5
+    {"0.32.5", "2026-05-20", {
+        Fixed = {
+            "Sort pre-warms item data for every unique item link in the plan before issuing the first PickupGuildBankItem. Mitigates a Wow.exe crash inside Blizzard's SetItemCraftingQualityOverlay that fired during the tab redraw after sort moves on tabs containing TWW crafted-quality reagents (Flawless gems and similar). The pre-warm uses Item:CreateFromItemLink:ContinueOnItemLoad with a 3.0s cap and lands an audit line in the sort log before the first op.",
+        },
+        Added = {
+            "Warning banner in the Sort tab preview. When the plan touches any slot whose live item link carries the TWW crafted-quality atlas marker, a color-coded banner renders above the move list explaining that pre-warm is a best-effort mitigation against a Blizzard-side crash. Recurring crashes during similar sorts are a signal to organize those items manually first.",
+        },
+    }},
+
     -- v0.32.4
     {"0.32.4", "2026-05-13", {
         Added = {
