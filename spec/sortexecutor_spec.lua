@@ -121,13 +121,41 @@ describe("SortExecutor", function()
             }, function(r) result = r end)
             -- Fire the first move's confirm, then close the bank before op 2.
             drainTimers(2)
+            -- FRAME_HIDE routes through Core:OnBankClosed, which sets
+            -- bankOpen=false and aborts the running sort via the executor hook.
             MockAce.fireEvent("PLAYER_INTERACTION_MANAGER_FRAME_HIDE",
                 Enum.PlayerInteractionType.GuildBanker)
-            GBL.bankOpen = false
             drainTimers()
             assert.is_not_nil(result)
             assert.is_false(result.ok)
             assert.matches("bank closed", result.reason)
+            assert.is_false(GBL.bankOpen, "Core OnBankClosed should have run")
+        end)
+
+        it("Core OnBankClosed still fires on bank close after a sort completes", function()
+            -- Regression: the executor used to register frame-hide on the shared
+            -- GBL object, overwriting Core's handler and never restoring it, so
+            -- after the first sort a bank close skipped OnBankClosed entirely.
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                },
+            }, function(r) result = r end, { skipPreWarm = true })
+            drainTimers()
+            assert.is_true(result.ok, result.reason)
+            assert.is_true(GBL.bankOpen, "bank still open after the sort")
+
+            -- Close the bank. With the shadow bug, FRAME_HIDE would hit the
+            -- executor's leftover (idle) handler and OnBankClosed would never run.
+            MockAce.fireEvent("PLAYER_INTERACTION_MANAGER_FRAME_HIDE",
+                Enum.PlayerInteractionType.GuildBanker)
+            assert.is_false(GBL.bankOpen,
+                "Core OnBankClosed must run on bank close after a sort")
         end)
 
         it("pre-verification catches foreign changes to src and triggers replan", function()

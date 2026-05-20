@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.32.7
+    {"0.32.7", "2026-05-20", {
+        Fixed = {
+            "Closing the guild bank after running a sort once in a session now performs the normal close cleanup again: the periodic rescan stops, the auto-opened ledger window closes, and the next sync broadcast goes out. Previously the sort's bank-close handler permanently replaced the core one for the rest of the session.",
+        },
+    }},
+
     -- v0.32.6
     {"0.32.6", "2026-05-20", {
         Fixed = {

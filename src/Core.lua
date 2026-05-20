@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.32.6"
+local VERSION = "0.32.7"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -1867,6 +1867,10 @@ end
 function GBL:OnBankClosed()
     local wasScanning = self.scanInProgress
     self.bankOpen = false
+    -- Stop a running sort before the rest of close cleanup. The executor no longer
+    -- registers frame-hide itself (it would shadow this handler), so Core drives the
+    -- abort. Guarded for load-order safety; no-op when no sort is running.
+    if self._SortExecutorOnBankClosed then self:_SortExecutorOnBankClosed() end
     self.scanInProgress = false
     self._initialScanComplete = false
     self:StopPeriodicRescan()
