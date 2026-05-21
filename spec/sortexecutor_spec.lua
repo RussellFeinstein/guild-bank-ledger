@@ -920,11 +920,39 @@ describe("SortExecutor", function()
         end)
 
         it("classifies src+dst-both-have-expected + no-cursor as merge-noop "
-           .. "when planner expected dst empty", function()
+           .. "when dst already held the item pre-op", function()
+            -- Genuine no-op: dst already held this item before the op (a merge
+            -- that bounced), so nothing was deposited. dstPreLive carries the
+            -- pre-op item, distinguishing this from a fresh-deposit drain-pending.
             local op = { itemID = 100, plannerDstAt = nil }
             local class = GBL:_sortExecutorClassifyTimeoutState(
-                op, { itemID = 100, count = 20 }, { itemID = 100, count = 15 }, false)
+                op, { itemID = 100, count = 20 }, { itemID = 100, count = 15 },
+                false, { itemID = 100, count = 15 })
             assert.equals("merge-noop", class)
+        end)
+
+        it("classifies a fresh deposit with lagging source-drain as drain-pending", function()
+            -- Split into a slot that was EMPTY pre-op: dst now holds the item
+            -- (deposit landed) but src still shows the full stack (the
+            -- source-drain has not surfaced in the client yet). dstPreLive is
+            -- nil, so this op deposited what we see. It is in-flight progress,
+            -- not a refusal, and must NOT feed the 3-strike abort.
+            local op = { itemID = 100, plannerDstAt = nil }
+            local class = GBL:_sortExecutorClassifyTimeoutState(
+                op, { itemID = 100, count = 20 }, { itemID = 100, count = 1 },
+                false, nil)
+            assert.equals("drain-pending", class)
+        end)
+
+        it("classifies a deposit into a slot that held a different item "
+           .. "as drain-pending", function()
+            -- dstPreLive holds a DIFFERENT item, so the expected item now at
+            -- dst was deposited by this op. Still a fresh deposit, not a refusal.
+            local op = { itemID = 100, plannerDstAt = nil }
+            local class = GBL:_sortExecutorClassifyTimeoutState(
+                op, { itemID = 100, count = 20 }, { itemID = 100, count = 1 },
+                false, { itemID = 999, count = 3 })
+            assert.equals("drain-pending", class)
         end)
 
         it("classifies src+dst-both-have-expected + no-cursor as complete "

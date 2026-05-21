@@ -184,6 +184,14 @@ end
 ---                     emitted into a slot that was already populated.
 ---                     3-strike abort candidate. Pre-v0.32.8 this fell
 ---                     into "other".
+--- "drain-pending"   — like merge-noop (src unchanged, dst has expected item,
+---                     cursor empty, planner expected dst empty) BUT the live
+---                     pre-op dst was empty/other, so THIS op deposited the
+---                     item we now see and only the source-drain lags. A
+---                     guild-bank split deposits into dst before the client
+---                     reflects the source decrement. NOT a refusal: excluded
+---                     from the 3-strike abort so a real (if slow) sort runs
+---                     to completion instead of bailing on its own progress.
 --- "other"           — some other anomalous combination.
 ---
 --- Classifies from structured live-slot snapshots (srcLive / dstLive are
@@ -193,7 +201,7 @@ end
 --- "it:NNN x" position-1 prefix match never fired and every non-empty timeout
 --- collapsed into "other" — the merge-noop / server-rejected buckets and the
 --- 3-strike abort keyed off them were dead outside the no-item-name test env.
-local function classifyTimeoutState(op, srcLive, dstLive, cursorHasItem)
+local function classifyTimeoutState(op, srcLive, dstLive, cursorHasItem, dstPreLive)
     local srcHasExpected = srcLive ~= nil and srcLive.itemID == op.itemID
     local dstHasExpected = dstLive ~= nil and dstLive.itemID == op.itemID
     local srcEmpty = (srcLive == nil)
@@ -216,6 +224,17 @@ local function classifyTimeoutState(op, srcLive, dstLive, cursorHasItem)
             and (pdst.count or 0) > 0
         if pdstHasSameItem then
             return "complete"
+        end
+        -- src still holds the item AND dst now holds it too, planner expected
+        -- dst empty. Discriminate a fresh deposit whose source-drain merely
+        -- lags (a guild-bank split deposits into dst before the client
+        -- reflects the source decrement) from a genuine no-op (dst already
+        -- held this item pre-op, so nothing was deposited and the move was
+        -- refused). dstPreLive is the live pre-op dst snapshot: nil or a
+        -- different item means THIS op deposited what we now see.
+        local depositedFresh = (dstPreLive == nil) or (dstPreLive.itemID ~= op.itemID)
+        if depositedFresh then
+            return "drain-pending"
         end
         return "merge-noop"
     else
@@ -397,14 +416,14 @@ function finish(ok, reason)
     local tbc = state.timeoutByClass
     GBL:SortInfo(string.format(
         "Sort: %s in %.1fs - %d ops (%d done, %d failed, %d replans, %d reclass)"
-        .. " preCheck=%d cursor=%d timeout[s=%d,p=%d,c=%d,m=%d,o=%d]"
+        .. " preCheck=%d cursor=%d timeout[s=%d,p=%d,c=%d,m=%d,dp=%d,o=%d]"
         .. " drifts=%d avg %.2fs/op",
         ok and "complete" or ("aborted (" .. (reason or "?") .. ")"),
         elapsed, #state.plan.ops, state.done, state.failed,
         state.replans, state.reclassified,
         state.preCheckFails, state.cursorStuck,
         tbc["server-rejected"], tbc.partial, tbc.complete,
-        tbc["merge-noop"], tbc.other,
+        tbc["merge-noop"], tbc["drain-pending"], tbc.other,
         state.projectionDrifts or 0,
         avg))
 
@@ -782,7 +801,8 @@ step = function()
                 op,
                 snapshotLiveSlot(op.srcTab, op.srcSlot),
                 snapshotLiveSlot(op.dstTab, op.dstSlot),
-                cursorHas)
+                cursorHas,
+                state.waiting and state.waiting.dstPreOp)
             if state.timeoutByClass[class] then
                 state.timeoutByClass[class] = state.timeoutByClass[class] + 1
             else
@@ -800,6 +820,19 @@ step = function()
             GBL:SortWarn(string.format(
                 "  observed: src %s, dst %s, cursor %s",
                 srcDesc, dstDesc, cursorHas and "held" or "empty"))
+            -- v0.32.8 Phase-1 instrument: a drain-pending timeout means THIS
+            -- op's deposit landed (dst filled from empty/other) but the source
+            -- decrement hasn't surfaced in the client by the 4s window. It is
+            -- in-flight progress, not a server refusal, so it does NOT feed the
+            -- 3-strike abort and the sort runs to completion. Capturing this
+            -- confirms the split actually succeeds before we switch the
+            -- confirmation rule to recognize the deposit directly.
+            if class == "drain-pending" then
+                GBL:SortWarn(string.format(
+                    "  -> deposit landed (dst was empty/other pre-op); "
+                    .. "source-drain pending past %ds, treated as in-flight",
+                    MOVE_CONFIRM_TIMEOUT))
+            end
             -- v0.32.8 B3: emit the planner-projected secondary line ONLY
             -- when it diverges from the live observed values. Planner
             -- state mutates at emit time without a rollback path, so on
@@ -1121,6 +1154,7 @@ function GBL:ExecuteSortPlan(plan, onComplete, opts)
             partial = 0,
             complete = 0,
             ["merge-noop"] = 0,
+            ["drain-pending"] = 0,
             other = 0,
         },
         -- Per-item consecutive refusal counter (v0.32.8 B1). Increments on
@@ -1230,9 +1264,9 @@ function GBL:_sortExecutorSetRefusalCount(itemID, count)
 end
 
 -- Test hook: expose the pure classifier so unit tests can exercise each
--- branch (server-rejected / partial / complete / merge-noop / other)
--- without simulating a full server-rejection scenario in the mock bank.
--- srcLive / dstLive are {itemID, count} snapshots (or nil for empty).
-function GBL:_sortExecutorClassifyTimeoutState(op, srcLive, dstLive, cursorHasItem)
-    return classifyTimeoutState(op, srcLive, dstLive, cursorHasItem)
+-- branch (server-rejected / partial / complete / merge-noop / drain-pending /
+-- other) without simulating a full server-rejection scenario in the mock bank.
+-- srcLive / dstLive / dstPreLive are {itemID, count} snapshots (or nil for empty).
+function GBL:_sortExecutorClassifyTimeoutState(op, srcLive, dstLive, cursorHasItem, dstPreLive)
+    return classifyTimeoutState(op, srcLive, dstLive, cursorHasItem, dstPreLive)
 end
