@@ -160,13 +160,47 @@ local function auditOpNoop(w, branch)
     if not w then return end
     local itemDesc = (w.itemID and GBL.DescribeItem)
         and GBL:DescribeItem(w.itemID) or ("it:" .. tostring(w.itemID))
+    -- Phase-1 instrument: stamp elapsed-since-issue so the FIRST noop on an op
+    -- marks when the deposit became observable (dst showed the item). This is
+    -- the fast-deposit latency; the slow cases are measured by the deposit
+    -- observer scheduled at the timeout.
+    local elapsed = w.startedAt and (GetTime() - w.startedAt) or 0
     GBL:SortWarn(string.format(
-        "Sort op %d no-op suspected [%s]: %s T%d/S%d->T%d/S%d %s x%d "
+        "Sort op %d no-op suspected [%s] at +%.1fs: %s T%d/S%d->T%d/S%d %s x%d "
         .. "(dst already held expected item; src unchanged)",
-        w.opIndex, branch, w.opLabel or "move",
+        w.opIndex, branch, elapsed, w.opLabel or "move",
         w.srcTab or 0, w.srcSlot or 0,
         w.tabIndex, w.slotIndex,
         itemDesc, w.count or 0))
+end
+
+-- Phase-1 instrument: for an op whose deposit had NOT landed by the timeout
+-- (classified server-rejected with an empty/other pre-op dst), keep watching
+-- the dst slot and log when the deposit actually lands. This measures the
+-- slow-deposit latency the 4s window misses, so Phase 2's wait cap is chosen
+-- from real data rather than an assumption. Pure observation: it never
+-- advances or aborts, only reads the slot and logs. Stops on bank close.
+local DEPOSIT_OBSERVE_CAP = 20  -- seconds
+local function observeDepositLatency(dstTab, dstSlot, itemID, count, opIndex, startedAt)
+    local function tick()
+        if not (GBL.IsBankOpen and GBL:IsBankOpen()) then
+            return  -- bank closed; can't observe further
+        end
+        if slotHasAtLeast(dstTab, dstSlot, itemID, count) then
+            GBL:SortInfo(string.format(
+                "Sort op %d: deposit landed at +%.1fs (dst was empty at 4s)",
+                opIndex, GetTime() - (startedAt or GetTime())))
+            return
+        end
+        if GetTime() - (startedAt or GetTime()) >= DEPOSIT_OBSERVE_CAP then
+            GBL:SortInfo(string.format(
+                "Sort op %d: deposit NOT observed within %ds "
+                .. "(candidate genuine refusal)", opIndex, DEPOSIT_OBSERVE_CAP))
+            return
+        end
+        C_Timer.After(1.0, tick)
+    end
+    C_Timer.After(1.0, tick)
 end
 
 --- Classify a timeout's observed src/dst/cursor state into one of:
@@ -240,6 +274,21 @@ local function classifyTimeoutState(op, srcLive, dstLive, cursorHasItem, dstPreL
     else
         return "other"
     end
+end
+
+--- Decide whether a timeout should count toward the 3-strike refusal abort.
+--- Only a move/merge into a slot that ALREADY held the SAME item can be a
+--- genuine repeated refusal (a max-stack bounce: the server keeps rejecting
+--- the merge). An op into an empty or different-item slot is a deposit whose
+--- confirmation may simply lag (fast = drain-pending, slow = server-rejected
+--- with dst still empty at 4s); neither is a refusal, so excluding them lets a
+--- real sort run to completion instead of aborting on its own in-flight
+--- progress. dstPreLive is the live pre-op dst snapshot.
+local function isAbortableRefusal(class, op, dstPreLive)
+    if class ~= "server-rejected" and class ~= "merge-noop" then
+        return false
+    end
+    return dstPreLive ~= nil and dstPreLive.itemID == op.itemID
 end
 
 ------------------------------------------------------------------------
@@ -794,6 +843,8 @@ step = function()
             local srcDesc = describeSlot(op.srcTab, op.srcSlot)
             local dstDesc = describeSlot(op.dstTab, op.dstSlot)
             local cursorHas = _G.CursorHasItem and _G.CursorHasItem() or false
+            local dstPre = state.waiting and state.waiting.dstPreOp
+            local opStartedAt = state.waiting and state.waiting.startedAt
             -- Classify from structured live-slot state, not the display
             -- strings above: describeSlot carries the resolved item name
             -- in-game, which would defeat the classifier's item match.
@@ -802,7 +853,7 @@ step = function()
                 snapshotLiveSlot(op.srcTab, op.srcSlot),
                 snapshotLiveSlot(op.dstTab, op.dstSlot),
                 cursorHas,
-                state.waiting and state.waiting.dstPreOp)
+                dstPre)
             if state.timeoutByClass[class] then
                 state.timeoutByClass[class] = state.timeoutByClass[class] + 1
             else
@@ -833,6 +884,16 @@ step = function()
                     .. "source-drain pending past %ds, treated as in-flight",
                     MOVE_CONFIRM_TIMEOUT))
             end
+            -- Phase-1 instrument: a server-rejected timeout on an op whose dst
+            -- was empty/other pre-op is EITHER a slow deposit not yet landed or
+            -- a genuine refusal. Watch the dst past the 4s window and log when
+            -- (or whether) the deposit lands, measuring the slow-deposit
+            -- latency directly so Phase 2's wait cap comes from real data.
+            if class == "server-rejected"
+               and not (dstPre and dstPre.itemID == op.itemID) then
+                observeDepositLatency(op.dstTab, op.dstSlot, op.itemID, op.count,
+                    myOpIndex, opStartedAt)
+            end
             -- v0.32.8 B3: emit the planner-projected secondary line ONLY
             -- when it diverges from the live observed values. Planner
             -- state mutates at emit time without a rollback path, so on
@@ -851,11 +912,14 @@ step = function()
                 state.projectionDrifts = (state.projectionDrifts or 0) + 1
             end
 
-            -- v0.32.8 B1: consecutive-refusal abort. Track per-item count
-            -- of server-rejected / merge-noop timeouts; abort with a
-            -- specific reason on 3 strikes rather than fall through to
-            -- step() and compound into a singleton-chain failure.
-            local refused = (class == "server-rejected" or class == "merge-noop")
+            -- v0.32.8 B1: consecutive-refusal abort, refined Phase-1: only a
+            -- move/merge into a slot that already held the SAME item is a
+            -- genuine repeated refusal (max-stack bounce). Ops into an
+            -- empty/other slot are deposits whose confirmation lags (fast =
+            -- drain-pending, slow = server-rejected with dst still empty at
+            -- 4s); excluding them keeps a real sort from aborting on its own
+            -- in-flight progress. Abort still fires on a true stuck merge.
+            local refused = isAbortableRefusal(class, op, dstPre)
             if refused then
                 local n = (state.consecutiveRefusedByItem[op.itemID] or 0) + 1
                 state.consecutiveRefusedByItem[op.itemID] = n
@@ -1269,4 +1333,11 @@ end
 -- srcLive / dstLive / dstPreLive are {itemID, count} snapshots (or nil for empty).
 function GBL:_sortExecutorClassifyTimeoutState(op, srcLive, dstLive, cursorHasItem, dstPreLive)
     return classifyTimeoutState(op, srcLive, dstLive, cursorHasItem, dstPreLive)
+end
+
+-- Test hook: expose the abort-refusal predicate so tests can verify which
+-- timeout classes count toward the 3-strike abort (only genuine merges into
+-- an occupied same-item slot) without driving a full bounce scenario.
+function GBL:_sortExecutorIsAbortableRefusal(class, op, dstPreLive)
+    return isAbortableRefusal(class, op, dstPreLive)
 end

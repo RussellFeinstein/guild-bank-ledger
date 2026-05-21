@@ -992,6 +992,45 @@ describe("SortExecutor", function()
         end)
     end)
 
+    describe("isAbortableRefusal (v0.32.8 Phase-1)", function()
+        -- Only a move/merge into a slot that already held the SAME item counts
+        -- toward the 3-strike abort (a genuine max-stack bounce). Ops into an
+        -- empty/different slot are deposits whose confirmation lags, never
+        -- refusals, so they must not feed the abort.
+        local op = { itemID = 100 }
+
+        it("counts merge-noop into an occupied same-item slot", function()
+            assert.is_true(GBL:_sortExecutorIsAbortableRefusal(
+                "merge-noop", op, { itemID = 100, count = 20 }))
+        end)
+
+        it("counts server-rejected onto an occupied same-item slot", function()
+            assert.is_true(GBL:_sortExecutorIsAbortableRefusal(
+                "server-rejected", op, { itemID = 100, count = 20 }))
+        end)
+
+        it("does NOT count server-rejected into an empty slot (lagging deposit)", function()
+            assert.is_false(GBL:_sortExecutorIsAbortableRefusal(
+                "server-rejected", op, nil))
+        end)
+
+        it("does NOT count server-rejected into a different-item slot", function()
+            assert.is_false(GBL:_sortExecutorIsAbortableRefusal(
+                "server-rejected", op, { itemID = 999, count = 3 }))
+        end)
+
+        it("does NOT count drain-pending, partial, complete, or other", function()
+            assert.is_false(GBL:_sortExecutorIsAbortableRefusal(
+                "drain-pending", op, nil))
+            assert.is_false(GBL:_sortExecutorIsAbortableRefusal(
+                "partial", op, nil))
+            assert.is_false(GBL:_sortExecutorIsAbortableRefusal(
+                "complete", op, { itemID = 100, count = 5 }))
+            assert.is_false(GBL:_sortExecutorIsAbortableRefusal(
+                "other", op, { itemID = 100, count = 5 }))
+        end)
+    end)
+
     describe("consecutive-refusal abort (v0.32.8 B1)", function()
         -- Drive a real timeout-path classification by exploiting the mock's
         -- bounce-on-max-stack-overflow behavior: when a merge would exceed
