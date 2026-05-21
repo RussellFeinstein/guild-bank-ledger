@@ -376,6 +376,7 @@ function finish(ok, reason)
         preCheckFails = state.preCheckFails,
         cursorStuck = state.cursorStuck,
         timeoutByClass = state.timeoutByClass,
+        projectionDrifts = state.projectionDrifts or 0,
     }
 
     -- Single-line execution summary so the audit trail / chat log shows
@@ -389,13 +390,15 @@ function finish(ok, reason)
     local tbc = state.timeoutByClass
     GBL:SortInfo(string.format(
         "Sort: %s in %.1fs - %d ops (%d done, %d failed, %d replans, %d reclass)"
-        .. " preCheck=%d cursor=%d timeout[s=%d,p=%d,c=%d,m=%d,o=%d] avg %.2fs/op",
+        .. " preCheck=%d cursor=%d timeout[s=%d,p=%d,c=%d,m=%d,o=%d]"
+        .. " drifts=%d avg %.2fs/op",
         ok and "complete" or ("aborted (" .. (reason or "?") .. ")"),
         elapsed, #state.plan.ops, state.done, state.failed,
         state.replans, state.reclassified,
         state.preCheckFails, state.cursorStuck,
         tbc["server-rejected"], tbc.partial, tbc.complete,
         tbc["merge-noop"], tbc.other,
+        state.projectionDrifts or 0,
         avg))
 
     -- Emit the final progress message BEFORE clearing state so listeners
@@ -783,13 +786,23 @@ step = function()
             GBL:SortWarn(string.format(
                 "  observed: src %s, dst %s, cursor %s",
                 srcDesc, dstDesc, cursorHas and "held" or "empty"))
-            -- Planner-expected pre-state at emit time. Pairs with the
-            -- "observed" line above to show whether the planner's view
-            -- and the live bank diverge for THIS op specifically.
-            GBL:SortWarn(string.format(
-                "  planner expected: src %s, dst %s",
-                describePlannerSlot(op.plannerSrcAt),
-                describePlannerSlot(op.plannerDstAt)))
+            -- v0.32.8 B3: emit the planner-projected secondary line ONLY
+            -- when it diverges from the live observed values. Planner
+            -- state mutates at emit time without a rollback path, so on
+            -- a chain of failed ops the planner's projection drifts from
+            -- live by one or more for every later op. Suppressing the
+            -- redundant "planner expected: x = observed: x" line keeps
+            -- the audit signal-to-noise high. When divergent, increment
+            -- state.projectionDrifts so finish() can report cumulative
+            -- drift count.
+            local plannerSrcStr = describePlannerSlot(op.plannerSrcAt)
+            local plannerDstStr = describePlannerSlot(op.plannerDstAt)
+            if plannerSrcStr ~= srcDesc or plannerDstStr ~= dstDesc then
+                GBL:SortWarn(string.format(
+                    "  (planner projected: src %s, dst %s)",
+                    plannerSrcStr, plannerDstStr))
+                state.projectionDrifts = (state.projectionDrifts or 0) + 1
+            end
 
             -- v0.32.8 B1: consecutive-refusal abort. Track per-item count
             -- of server-rejected / merge-noop timeouts; abort with a
@@ -1103,6 +1116,14 @@ function GBL:ExecuteSortPlan(plan, onComplete, opts)
         -- singleton-chain pattern compounds into chain failure rather
         -- than failing fast.
         consecutiveRefusedByItem = {},
+        -- v0.32.8 B3: count of timeouts where the planner's emit-time
+        -- projection of src/dst diverged from the live observed values.
+        -- Surfaced in the finish() summary. Non-zero means the planner's
+        -- in-memory state has drifted from server reality during this
+        -- run; expected when the executor took the timeout path for any
+        -- ops since the planner doesn't rollback its working state on
+        -- a no-op.
+        projectionDrifts = 0,
     }
     registerBankEvents()
     GBL:SortInfo(

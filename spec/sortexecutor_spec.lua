@@ -363,6 +363,8 @@ describe("SortExecutor", function()
             assert.equals(0, result.timeoutByClass.complete)
             assert.equals(0, result.timeoutByClass["merge-noop"])
             assert.equals(0, result.timeoutByClass.other)
+            -- v0.32.8 B3: projection-drift counter surfaces in the result.
+            assert.equals(0, result.projectionDrifts)
         end)
 
         it("audits server reversion when last op's dst slot reverts before next event", function()
@@ -1237,6 +1239,103 @@ describe("SortExecutor", function()
             Helpers.setupMocks()
             assert.is_false(MockWoW.deferredBankEvents)
             assert.equals(0, #MockWoW.queuedBankEvents)
+        end)
+
+        it("audit emits secondary planner line only on divergence (v0.32.8 B3)", function()
+            -- Force a merge-noop timeout (bounce mechanism) but stamp the
+            -- op's planner projection to MATCH the observed values. The
+            -- planner-projected line should NOT appear, and
+            -- projectionDrifts should stay 0.
+            MockWoW.itemNames[100] = { stackCount = 20 }
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 10 },
+            })
+            Helpers.populateTab(2, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    -- plannerSrcAt/plannerDstAt deliberately match what
+                    -- the bounce-induced timeout observes: src still has
+                    -- 10 (bounced back), dst still has 20.
+                    {
+                        op = "move", srcTab = 1, srcSlot = 1,
+                        dstTab = 2, dstSlot = 1, itemID = 100, count = 10,
+                        plannerSrcAt = { itemID = 100, count = 10 },
+                        plannerDstAt = { itemID = 100, count = 20 },
+                    },
+                },
+            }, function(r) result = r end)
+            -- Drive past the 4 s late-poll.
+            for _ = 1, 30 do
+                if #MockWoW.pendingTimers == 0 then break end
+                MockWoW.serverTime = MockWoW.serverTime + 5.0
+                MockWoW.fireTimers()
+            end
+            assert.is_not_nil(result)
+            -- Op classified as complete because plannerDstAt has the same
+            -- item (B1 classifier disambiguates merge-noop vs complete).
+            -- This op shows up as "complete" timeout (real merge ACK lost).
+            -- Either way, planner-projected == observed → no drift.
+            assert.equals(0, result.projectionDrifts,
+                "no divergence expected when planner projection matches observed")
+            -- The secondary "(planner projected: …)" line must NOT appear.
+            local trail = GBL:GetLog("sort")
+            local sawProjectedLine = false
+            for _, entry in ipairs(trail or {}) do
+                if entry.message and entry.message:find("planner projected:", 1, true) then
+                    sawProjectedLine = true
+                    break
+                end
+            end
+            assert.is_false(sawProjectedLine,
+                "secondary planner-projected line must be suppressed when matching observed")
+        end)
+
+        it("audit emits secondary planner line on real divergence (v0.32.8 B3)", function()
+            -- Same bounce setup as above but stamp plannerSrcAt with a
+            -- DIFFERENT count than what observed will show. The planner-
+            -- projected line MUST appear and projectionDrifts increments.
+            MockWoW.itemNames[100] = { stackCount = 20 }
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 10 },
+            })
+            Helpers.populateTab(2, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    {
+                        op = "move", srcTab = 1, srcSlot = 1,
+                        dstTab = 2, dstSlot = 1, itemID = 100, count = 10,
+                        -- Deliberately mismatch live: planner thought src
+                        -- had 6 (it actually has 10 post-bounce).
+                        plannerSrcAt = { itemID = 100, count = 6 },
+                        plannerDstAt = { itemID = 100, count = 20 },
+                    },
+                },
+            }, function(r) result = r end)
+            for _ = 1, 30 do
+                if #MockWoW.pendingTimers == 0 then break end
+                MockWoW.serverTime = MockWoW.serverTime + 5.0
+                MockWoW.fireTimers()
+            end
+            assert.is_not_nil(result)
+            -- Real drift detected.
+            assert.equals(1, result.projectionDrifts)
+            -- Audit trail contains the secondary planner-projected line.
+            local trail = GBL:GetLog("sort")
+            local sawProjectedLine = false
+            for _, entry in ipairs(trail or {}) do
+                if entry.message and entry.message:find("planner projected:", 1, true) then
+                    sawProjectedLine = true
+                    break
+                end
+            end
+            assert.is_true(sawProjectedLine,
+                "secondary planner-projected line must appear on divergence")
         end)
 
         it("interim-poll advances when predicates pass after deferred event", function()
