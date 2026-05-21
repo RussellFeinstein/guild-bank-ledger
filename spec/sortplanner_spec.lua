@@ -697,6 +697,141 @@ describe("SortPlanner", function()
         end
     end)
 
+    describe("Phase 2 instrumentation (v0.32.8 B4a)", function()
+        -- Phase 2 audit lines emit via self:SortDebug, which only records
+        -- to the buffer when db.profile.sort.debugChat is true. Each test
+        -- in this block flips the flag before running PlanSort so the
+        -- audit lines land in the log buffer for inspection.
+
+        before_each(function()
+            GBL.db.profile.sort.debugChat = true
+        end)
+
+        it("emits cycle + pivot audit lines when Phase 2 resolves a 2-cycle", function()
+            -- Reuse the 2-cycle shape from the existing "breaks a 2-cycle"
+            -- test: T1/S1 has Y, T1/S2 has X; layout expects X@1, Y@2.
+            -- Phase 2 detects the cycle (T1/S1 wants X but holds Y) and
+            -- chooses a pivot (an unclaimed empty slot in T1).
+            local snap = snapshot({
+                [1] = {
+                    [1] = { itemID = 200, count = 5 },
+                    [2] = { itemID = 100, count = 10 },
+                },
+                [2] = {},
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab(
+                        {
+                            [100] = { slots = 1, perSlot = 10 },
+                            [200] = { slots = 1, perSlot = 5 },
+                        },
+                        { [1] = 100, [2] = 200 }
+                    ),
+                    [2] = overflow(),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout)
+            assert.equals(3, #plan.ops, "2-cycle resolves in 3 ops")
+            -- Both audit lines must appear: cycle-blocked + pivot-chosen.
+            local trail = GBL:GetLog("sort")
+            local sawCycleLine, sawPivotLine = false, false
+            for _, entry in ipairs(trail or {}) do
+                local m = entry.message or ""
+                if m:find("sort plan Phase 2: cycle blocked at", 1, true) then
+                    sawCycleLine = true
+                end
+                if m:find("sort plan Phase 2: pivot", 1, true) then
+                    sawPivotLine = true
+                end
+            end
+            assert.is_true(sawCycleLine,
+                "expected cycle-blocked debug line; got nothing")
+            assert.is_true(sawPivotLine,
+                "expected pivot-chosen debug line; got nothing")
+        end)
+
+        it("emits no-pivot abort when cycle is unreachable", function()
+            -- Reuse the "unreachable cycle" shape: T1 has every slot
+            -- claimed by a distinct item and overflow has no room either.
+            -- Phase 2 detects the cycle and fails to find a pivot.
+            local items = {
+                [100] = { slots = 1, perSlot = 10 },
+                [200] = { slots = 1, perSlot = 5 },
+            }
+            local slotOrder = { [1] = 100, [2] = 200 }
+            for i = 3, 98 do
+                local id = 10000 + i
+                items[id] = { slots = 1, perSlot = 1 }
+                slotOrder[i] = id
+            end
+            -- Pre-fill tab 1's "filler" slots and overflow's 98 slots so
+            -- findPivot returns nil.
+            local bankT1 = {
+                [1] = { itemID = 200, count = 5 },
+                [2] = { itemID = 100, count = 10 },
+            }
+            for i = 3, 98 do
+                bankT1[i] = { itemID = 10000 + i, count = 1 }
+            end
+            local bankT2 = {}
+            for i = 1, 98 do
+                bankT2[i] = { itemID = 99999, count = 1 }
+            end
+            local snap = snapshot({ [1] = bankT1, [2] = bankT2 })
+            local layout = {
+                tabs = {
+                    [1] = displayTab(items, slotOrder),
+                    [2] = overflow(),
+                },
+            }
+            GBL:PlanSort(snap, layout)
+            local trail = GBL:GetLog("sort")
+            local sawNoPivot = false
+            for _, entry in ipairs(trail or {}) do
+                if entry.message
+                   and entry.message:find("Phase 2: no-pivot abort", 1, true) then
+                    sawNoPivot = true
+                    break
+                end
+            end
+            assert.is_true(sawNoPivot,
+                "expected no-pivot abort debug line; got nothing")
+        end)
+
+        it("does not emit Phase 2 lines when sort.debugChat is off", function()
+            -- Verify the SortDebug gating: with debugChat off, the audit
+            -- lines must not land in the log buffer at all.
+            GBL.db.profile.sort.debugChat = false
+            local snap = snapshot({
+                [1] = {
+                    [1] = { itemID = 200, count = 5 },
+                    [2] = { itemID = 100, count = 10 },
+                },
+                [2] = {},
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab(
+                        {
+                            [100] = { slots = 1, perSlot = 10 },
+                            [200] = { slots = 1, perSlot = 5 },
+                        },
+                        { [1] = 100, [2] = 200 }
+                    ),
+                    [2] = overflow(),
+                },
+            }
+            GBL:PlanSort(snap, layout)
+            local trail = GBL:GetLog("sort")
+            for _, entry in ipairs(trail or {}) do
+                local m = entry.message or ""
+                assert.is_nil(m:find("sort plan Phase 2:", 1, true),
+                    "Phase 2 debug line leaked into log when debugChat off")
+            end
+        end)
+    end)
+
     it("honors items[id].slots as authoritative when slotOrder has fewer entries (UI slots-edit mismatch)", function()
         -- Regression for the v0.29.7 field report: user captured 3 slots of X,
         -- then edited the Slots field in the Layout UI to 5. items[X].slots

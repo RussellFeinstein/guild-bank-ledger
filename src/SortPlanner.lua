@@ -137,20 +137,28 @@ end
 ---     false if merging would exceed maxStack. This is the guard that
 ---     prevents Phase 4 packing from emitting cascades that depend on
 ---     illegal in-state over-stack accumulations.
+-- v0.32.8 B4a: returns (ok, reason) where reason names the failing
+-- predicate on a false return. Existing callers in greedyDrain and the
+-- emit-feasibility checks wrap canExecute in a boolean condition, so
+-- Lua picks up only the first return value and their control flow is
+-- unchanged. Phase 2 instrumentation reads the reason on a refusal to
+-- attribute WHY the planner couldn't emit the assignment.
 local function canExecute(op, state, getMaxStack)
     local src = state[op.srcTab] and state[op.srcTab][op.srcSlot]
     if not src or src.itemID ~= op.itemID or src.count < op.count then
-        return false
+        return false, "src-shortfall"
     end
     local dst = state[op.dstTab] and state[op.dstTab][op.dstSlot]
     if dst then
-        if dst.itemID ~= op.itemID then return false end
+        if dst.itemID ~= op.itemID then return false, "dst-mismatch" end
         if getMaxStack then
             local m = getMaxStack(op.itemID)
-            if m and (dst.count + op.count) > m then return false end
+            if m and (dst.count + op.count) > m then
+                return false, "max-stack-overflow"
+            end
         end
     end
-    return true
+    return true, nil
 end
 
 --- Pick "split" or "move" label based on whether the op fully drains src.
@@ -210,6 +218,20 @@ function GBL:PlanSort(snapshot, layout, opts)
         demandPinned = 0, demandExtendRight = 0,
         demandExtendLeft = 0, demandFirstEmpty = 0,
     }
+
+    -- v0.32.8 B4a: Phase 2 instrumentation. SortDebug emissions are
+    -- gated by db.profile.sort.debugChat in Logger.lua, so normal users
+    -- see clean sort logs; debugging a cycle requires flipping the flag.
+    -- Cap emissions per plan to avoid flooding the debug channel when
+    -- the planner refuses many ops in a degenerate input.
+    local PHASE2_EMIT_CAP = 20
+    local phase2EmitCount = 0
+    local function phase2Debug(fmt, ...)
+        if phase2EmitCount >= PHASE2_EMIT_CAP then return end
+        if not self.SortDebug then return end
+        phase2EmitCount = phase2EmitCount + 1
+        self:SortDebug(fmt, ...)
+    end
 
     -- --------------------------------------------------------------
     -- Classify tabs.
@@ -758,10 +780,20 @@ function GBL:PlanSort(snapshot, layout, opts)
             for i = 1, #assignments do
                 if remaining[i] then
                     local ass = assignments[i]
-                    if canExecute(ass, state, getMaxStack) then
+                    -- v0.32.8 B4a: capture canExecute's reason on refusal
+                    -- so a cycle-blocked op's blocking predicate is named
+                    -- in the debug audit trail.
+                    local ok, reason = canExecute(ass, state, getMaxStack)
+                    if ok then
                         emitAssignment(ass)
                         remaining[i] = nil
                         progressed = true
+                    else
+                        phase2Debug(string.format(
+                            "sort plan Phase 2: refused emit T%d/S%d->T%d/S%d "
+                            .. "(item %d x%d): %s",
+                            ass.srcTab, ass.srcSlot, ass.dstTab, ass.dstSlot,
+                            ass.itemID or 0, ass.count or 0, reason or "unknown"))
                     end
                 end
             end
@@ -826,6 +858,15 @@ function GBL:PlanSort(snapshot, layout, opts)
             if not stuckIdx then
                 -- No op is dst-blocked but some remain — should only happen if
                 -- a src drifted (shouldn't in pure-planner mode). Bail safely.
+                -- v0.32.8 B4a: log the abort cause so a planner-state-desync
+                -- shows up in the debug trace.
+                local remainingCount = 0
+                for i = 1, #assignments do
+                    if remaining[i] then remainingCount = remainingCount + 1 end
+                end
+                phase2Debug(string.format(
+                    "sort plan Phase 2: no-stuck abort with %d remaining "
+                    .. "(unexpected src drift)", remainingCount))
                 for i = 1, #assignments do
                     if remaining[i] then
                         local a = assignments[i]
@@ -839,8 +880,33 @@ function GBL:PlanSort(snapshot, layout, opts)
             end
 
             local stuck = assignments[stuckIdx]
+            -- v0.32.8 B4a: cycle detected. Record the stuck op (the one
+            -- whose dst is occupied by a foreign item) so a chain like
+            -- T6/S6 → S5 → S4 → … shows up in the debug trace. The full
+            -- chain isn't enumerated here because the planner doesn't
+            -- track the chain structure explicitly; what it sees is one
+            -- blocked assignment at a time. The accompanying pivot or
+            -- no-pivot log lines below cover what happened.
+            local stuckBlocker = state[stuck.dstTab][stuck.dstSlot]
+            phase2Debug(string.format(
+                "sort plan Phase 2: cycle blocked at T%d/S%d "
+                .. "(wants item %d x%d; blocked by item %d x%d)",
+                stuck.dstTab, stuck.dstSlot, stuck.itemID or 0,
+                stuck.count or 0,
+                stuckBlocker and stuckBlocker.itemID or 0,
+                stuckBlocker and stuckBlocker.count or 0))
+
             local pivotTab, pivotSlot = findPivot(stuck.dstTab)
             if not pivotTab then
+                -- v0.32.8 B4a: no-pivot abort — Phase 2 gave up.
+                local remainingCount = 0
+                for i = 1, #assignments do
+                    if remaining[i] then remainingCount = remainingCount + 1 end
+                end
+                phase2Debug(string.format(
+                    "sort plan Phase 2: no-pivot abort for cycle at T%d/S%d "
+                    .. "(%d remaining ops unplaced)",
+                    stuck.dstTab, stuck.dstSlot, remainingCount))
                 for i = 1, #assignments do
                     if remaining[i] then
                         local a = assignments[i]
@@ -865,6 +931,12 @@ function GBL:PlanSort(snapshot, layout, opts)
             table.insert(plan.ops, pivotOp)
             applyOpToState(state, pivotOp, getMaxStack)
             diag.phase2Pivots = diag.phase2Pivots + 1
+            -- v0.32.8 B4a: pivot chosen — log the destination slot.
+            phase2Debug(string.format(
+                "sort plan Phase 2: pivot T%d/S%d chosen for blocker at "
+                .. "T%d/S%d (item %d x%d)",
+                pivotTab, pivotSlot, stuck.dstTab, stuck.dstSlot,
+                blockerSlot.itemID or 0, blockerSlot.count or 0))
 
             -- Redirect any still-remaining assignment whose src was the pivot's
             -- original source slot — the item now lives at the pivot.
