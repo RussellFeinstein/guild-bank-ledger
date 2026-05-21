@@ -4,7 +4,7 @@
 
 - **Phase A** shipped as v0.32.5 on `main` (commit `eee8a83`). Pre-warm + warning banner prevented the TWW crafted-quality reagent crash; verified in-game on a 502-slot bank.
 - **Phase B** scope: late-poll dominance, singleton-chain emit, planner state desync on splits, `[other]` timeout bucket overload. Originally identified in `~/.claude/projects/.../memory/project_sort_log_2026_05_14_late_poll_storm.md`; reproduced on 2026-05-20 (see `docs/sort-logs/2026-05-20-prewarm-success-late-poll-recurrence.md`).
-- **This document** is the Phase B audit and milestone proposal. Current branch: `layout-sort`. Target version: `v0.32.6` (patch).
+- **This document** is the Phase B audit and milestone proposal. Current branch: `layout-sort`. Target version: `v0.32.8` (patch; v0.32.6 and v0.32.7 consumed by two intervening hotfixes).
 
 ## Data points
 

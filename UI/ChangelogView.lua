@@ -29,6 +29,22 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.32.8
+    {"0.32.8", "2026-05-20", {
+        Changed = {
+            "Sort timeout summary format expanded. The single-line execution audit now reads timeout[s=N,p=N,c=N,m=N,o=N] drifts=N where s is server-rejected (the bucket previously labeled n/none), p is partial, c is complete, m is the new merge-noop bucket, o is residual other, and drifts counts timeouts where the planner's emit-time projection diverged from live observed values. The new merge-noop bucket captures the singleton-chain refusal pattern that previously hid inside 'other'.",
+            "Sort timeout audit no longer prints the planner-projected line on every timeout. It now prints only when the planner's projection actually diverges from the live observed values, formatted as '(planner projected: src ..., dst ...)'. Healthy timeouts get one fewer noise line in the log.",
+        },
+        Fixed = {
+            "Sort now aborts with a specific reason after three consecutive server refusals on the same item rather than compounding into a chain of refused moves until the replan cap aborts. The new abort fires before the executor advances past the third refused op, ending the run with a reason like 'repeated server refusal on item N (3 consecutive merge-noop)'. Failing early means the user can see which item is stuck without scrolling the whole sort log.",
+            "Sort now confirms each op via an interim polling cascade at 0.25, 0.5, 1.0, and 2.0 seconds after the Pickup pair rather than always waiting for the 4.0-second late-poll backstop. In-game captures showed every op confirming via the 4.0-second floor even when the server processed in well under a second, dominating wall-clock sort time. Successful interim advances use a slightly longer 0.5-second inter-move cushion than the default 0.3 to give the server breathing room after the faster confirmation.",
+            "Sort no longer carries a per-item refusal counter across a replan. Previously two refusals followed by foreign-activity replan followed by one refusal on the same item would falsely trip the 3-strike abort even though the plan structure between strikes 2 and 3 had changed.",
+        },
+        Added = {
+            "Sort planner Phase 2 cycle resolution now emits debug audit lines describing what the planner saw: which slot is cycle-blocked and what item blocks it, which pivot slot was chosen, or whether the cycle aborted with no pivot available. Lines route through GBL:SortDebug so they only land in the sort log buffer when db.profile.sort.debugChat is on. The greedy emit loop also logs the failing predicate (src-shortfall, dst-mismatch, or max-stack-overflow) on any refused canExecute. Emissions cap at 20 per plan to avoid flooding the debug channel on degenerate inputs.",
+        },
+    }},
+
     -- v0.32.7
     {"0.32.7", "2026-05-20", {
         Fixed = {
