@@ -358,9 +358,10 @@ describe("SortExecutor", function()
             assert.equals(0, result.preCheckFails)
             assert.equals(0, result.cursorStuck)
             assert.is_not_nil(result.timeoutByClass)
-            assert.equals(0, result.timeoutByClass.none)
+            assert.equals(0, result.timeoutByClass["server-rejected"])
             assert.equals(0, result.timeoutByClass.partial)
             assert.equals(0, result.timeoutByClass.complete)
+            assert.equals(0, result.timeoutByClass["merge-noop"])
             assert.equals(0, result.timeoutByClass.other)
         end)
 
@@ -886,6 +887,187 @@ describe("SortExecutor", function()
             assert.is_false(helper({ ops = {} }))
             assert.is_false(helper(nil))
             assert.is_false(helper({}))
+        end)
+    end)
+
+    describe("classifyTimeoutState (v0.32.8 B1)", function()
+        -- Unit-tests the pure classifier exposed via the test hook. Avoids
+        -- having to fake a server-rejection scenario through the mock bank
+        -- (the mock's PickupGuildBankItem always succeeds, so producing a
+        -- merge-noop or server-rejected post-state via real ops is not
+        -- possible without a "refuse this pickup" mock affordance).
+        it("classifies src-unchanged + dst-empty + no-cursor as server-rejected", function()
+            local op = { itemID = 100, plannerDstAt = nil }
+            local class = GBL:_sortExecutorClassifyTimeoutState(
+                op, "it:100 x20", "empty", false)
+            assert.equals("server-rejected", class)
+        end)
+
+        it("classifies src-empty + cursor-held as partial", function()
+            local op = { itemID = 100, plannerDstAt = nil }
+            local class = GBL:_sortExecutorClassifyTimeoutState(
+                op, "empty", "empty", true)
+            assert.equals("partial", class)
+        end)
+
+        it("classifies src-empty + dst-has-expected + no-cursor as complete", function()
+            local op = { itemID = 100, plannerDstAt = nil }
+            local class = GBL:_sortExecutorClassifyTimeoutState(
+                op, "empty", "it:100 x20", false)
+            assert.equals("complete", class)
+        end)
+
+        it("classifies src+dst-both-have-expected + no-cursor as merge-noop "
+           .. "when planner expected dst empty", function()
+            local op = { itemID = 100, plannerDstAt = nil }
+            local class = GBL:_sortExecutorClassifyTimeoutState(
+                op, "it:100 x20", "it:100 x15", false)
+            assert.equals("merge-noop", class)
+        end)
+
+        it("classifies src+dst-both-have-expected + no-cursor as complete "
+           .. "when planner intended a same-item merge", function()
+            -- Real merge-into-non-empty whose ACK was lost: planner emitted
+            -- this op KNOWING dst already held the item, and the timeout
+            -- observation shows both src empty (drained into cursor then
+            -- placed) and dst still has the item. Without planner intent,
+            -- this looks identical to merge-noop. With it, we know the
+            -- merge happened and the executor should treat it as success.
+            local op = {
+                itemID = 100,
+                plannerDstAt = { itemID = 100, count = 5 },
+            }
+            -- This particular combination is unusual in real WoW (src would
+            -- normally drain), but it lets us exercise the planner-intent
+            -- branch without other state interaction.
+            local class = GBL:_sortExecutorClassifyTimeoutState(
+                op, "it:100 x20", "it:100 x15", false)
+            assert.equals("complete", class)
+        end)
+
+        it("classifies other anomalous combinations as other", function()
+            local op = { itemID = 100, plannerDstAt = nil }
+            -- src empty + dst empty + cursor empty: nothing observable;
+            -- should NOT match any of the named cases.
+            local class = GBL:_sortExecutorClassifyTimeoutState(
+                op, "empty", "empty", false)
+            assert.equals("other", class)
+        end)
+    end)
+
+    describe("consecutive-refusal abort (v0.32.8 B1)", function()
+        -- Drive a real timeout-path classification by exploiting the mock's
+        -- bounce-on-max-stack-overflow behavior: when a merge would exceed
+        -- the item's stackCount, MockWoW's PickupGuildBankItem drop branch
+        -- bounces the cursor item back to its source slot. Post-Pickup
+        -- observation: src still holds the item, dst still at max stack,
+        -- cursor empty. classifyTimeoutState returns "merge-noop" when the
+        -- op's plannerDstAt is nil (planner intended dst to be empty).
+        -- Three such ops in a row on the same itemID trip the 3-strike abort.
+
+        local function makeBouncingPlan()
+            -- Three move ops, all item 100, each srcN→dstN. Set maxStack=20
+            -- and pre-populate each src with x10, each dst with x20. The
+            -- merge overflows on every op → bounce → src retains x10, dst
+            -- retains x20, cursor empty → classifier reads merge-noop.
+            MockWoW.itemNames[100] = { stackCount = 20 }
+            -- Add more tabs so we have somewhere to route the ops.
+            MockWoW.addTab("Tab 3", nil, true)
+            MockWoW.addTab("Tab 4", nil, true)
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 10 },
+                [2] = { itemID = 100, name = "Flask", count = 10 },
+                [3] = { itemID = 100, name = "Flask", count = 10 },
+            })
+            Helpers.populateTab(2, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+                [2] = { itemID = 100, name = "Flask", count = 20 },
+                [3] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            return {
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 10,
+                      plannerDstAt = nil },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 2, dstSlot = 2, itemID = 100, count = 10,
+                      plannerDstAt = nil },
+                    { op = "move", srcTab = 1, srcSlot = 3,
+                      dstTab = 2, dstSlot = 3, itemID = 100, count = 10,
+                      plannerDstAt = nil },
+                },
+            }
+        end
+
+        --- Drive the executor through pending timers while advancing
+        --- serverTime so the inter-move gap doesn't stall the loop and the
+        --- MOVE_CONFIRM_TIMEOUT C_Timer.After actually crosses its delay.
+        local function drainSortWithTimeAdvance(maxRounds)
+            maxRounds = maxRounds or 30
+            for _ = 1, maxRounds do
+                if #MockWoW.pendingTimers == 0 then return end
+                MockWoW.serverTime = MockWoW.serverTime + 5.0  -- past 4s timeout
+                MockWoW.fireTimers()
+            end
+        end
+
+        it("aborts with refusal reason after 3 consecutive refusals on same item", function()
+            local plan = makeBouncingPlan()
+            local result
+            GBL:ExecuteSortPlan(plan, function(r) result = r end)
+            drainSortWithTimeAdvance()
+            assert.is_not_nil(result)
+            assert.is_false(result.ok)
+            assert.matches("repeated server refusal on item 100", result.reason)
+            assert.matches("3 consecutive merge%-noop", result.reason)
+            -- Three merge-noop timeouts before the abort fires.
+            assert.equals(3, result.timeoutByClass["merge-noop"])
+            assert.equals(0, result.timeoutByClass["server-rejected"])
+            -- Abort fires before opIndex advances past op 3 — so 3 failed,
+            -- 0 done.
+            assert.equals(0, result.done)
+            assert.equals(3, result.failed)
+        end)
+
+        it("does not abort when a refusal is interrupted by a success", function()
+            -- First op bounces (merge-noop, counter=1). Second op succeeds
+            -- (counter reset). Third op bounces again (counter=1 again).
+            -- No abort.
+            MockWoW.itemNames[100] = { stackCount = 20 }
+            MockWoW.addTab("Tab 3", nil, true)
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 10 },
+                [2] = { itemID = 200, name = "Vial",  count = 10 },
+                [3] = { itemID = 100, name = "Flask", count = 10 },
+            })
+            Helpers.populateTab(2, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+                -- slot 3 left empty so op 3 can also bounce
+                [3] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    -- Op 1: bounces (merge-noop)
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 10,
+                      plannerDstAt = nil },
+                    -- Op 2: succeeds (different item, empty dst)
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 3, dstSlot = 1, itemID = 200, count = 10 },
+                    -- Op 3: bounces (merge-noop)
+                    { op = "move", srcTab = 1, srcSlot = 3,
+                      dstTab = 2, dstSlot = 3, itemID = 100, count = 10,
+                      plannerDstAt = nil },
+                },
+            }, function(r) result = r end)
+            drainSortWithTimeAdvance()
+            assert.is_not_nil(result)
+            -- Sort runs to completion (no abort): 1 succeeded, 2 timed out.
+            assert.is_true(result.ok)
+            assert.equals(1, result.done)
+            assert.equals(2, result.failed)
+            assert.equals(2, result.timeoutByClass["merge-noop"])
         end)
     end)
 end)

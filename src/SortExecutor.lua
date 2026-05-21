@@ -147,10 +147,21 @@ local function auditOpNoop(w, branch)
 end
 
 --- Classify a timeout's observed src/dst/cursor state into one of:
---- "none"    — src unchanged, dst empty (server dropped the request outright)
---- "partial" — src emptied, cursor holds item (pickup done, drop never landed)
---- "complete"— src drained, dst has expected item (move succeeded, ACK lost)
---- "other"   — some other anomalous combination
+--- "server-rejected" — src unchanged, dst empty (server dropped the pickup
+---                     before drop landed). 3-strike abort candidate.
+--- "partial"         — src emptied, cursor holds item (pickup done, drop
+---                     never landed).
+--- "complete"        — src drained, dst has expected item (move succeeded,
+---                     ACK lost). Also covers the merge case where the
+---                     planner intended a same-item merge and got one.
+--- "merge-noop"      — src unchanged, dst has expected item, cursor empty,
+---                     and planner intended dst to be EMPTY at emit time.
+---                     Op was a no-op because some other item arrived at
+---                     dst between emit and execute, or the planner
+---                     emitted into a slot that was already populated.
+---                     3-strike abort candidate. Pre-v0.32.8 this fell
+---                     into "other".
+--- "other"           — some other anomalous combination.
 local function classifyTimeoutState(op, srcDesc, dstDesc, cursorHasItem)
     local srcExpected = string.format("it:%d x", op.itemID)  -- prefix match
     local srcHasExpected = srcDesc:find(srcExpected, 1, true) == 1
@@ -158,11 +169,25 @@ local function classifyTimeoutState(op, srcDesc, dstDesc, cursorHasItem)
     local srcEmpty = (srcDesc == "empty")
     local dstEmpty = (dstDesc == "empty")
     if srcHasExpected and dstEmpty and not cursorHasItem then
-        return "none"
+        return "server-rejected"
     elseif srcEmpty and cursorHasItem then
         return "partial"
     elseif srcEmpty and dstHasExpected and not cursorHasItem then
         return "complete"
+    elseif srcHasExpected and dstHasExpected and not cursorHasItem then
+        -- Planner intent disambiguates a real merge-success-with-lost-ACK
+        -- (treated as "complete") from a no-op refusal (treated as
+        -- "merge-noop"). The planner's emit-time projection of dst is
+        -- frozen on the op as plannerDstAt. If the planner expected dst
+        -- to already hold this item, the timeout-observed dst state is
+        -- consistent with the intended merge and the ACK was just lost.
+        local pdst = op.plannerDstAt
+        local pdstHasSameItem = pdst and pdst.itemID == op.itemID
+            and (pdst.count or 0) > 0
+        if pdstHasSameItem then
+            return "complete"
+        end
+        return "merge-noop"
     else
         return "other"
     end
@@ -341,12 +366,13 @@ function finish(ok, reason)
     local tbc = state.timeoutByClass
     GBL:SortInfo(string.format(
         "Sort: %s in %.1fs - %d ops (%d done, %d failed, %d replans, %d reclass)"
-        .. " preCheck=%d cursor=%d timeout[n=%d,p=%d,c=%d,o=%d] avg %.2fs/op",
+        .. " preCheck=%d cursor=%d timeout[s=%d,p=%d,c=%d,m=%d,o=%d] avg %.2fs/op",
         ok and "complete" or ("aborted (" .. (reason or "?") .. ")"),
         elapsed, #state.plan.ops, state.done, state.failed,
         state.replans, state.reclassified,
         state.preCheckFails, state.cursorStuck,
-        tbc.none, tbc.partial, tbc.complete, tbc.other,
+        tbc["server-rejected"], tbc.partial, tbc.complete,
+        tbc["merge-noop"], tbc.other,
         avg))
 
     -- Emit the final progress message BEFORE clearing state so listeners
@@ -561,6 +587,7 @@ step = function()
             local w = state.waiting
             if srcDrainedAsExpected(w) then
                 state.done = state.done + 1
+                state.consecutiveRefusedByItem = {}  -- v0.32.8 B1
                 state.waiting = nil
                 state.opIndex = myOpIndex + 1
                 state.gapUntil = GetTime() + INTER_MOVE_GAP
@@ -611,6 +638,10 @@ step = function()
             state.done = state.done + 1
             state.lastTimedOutOp = nil
             auditOpSuccess(state.waiting, "[late-poll]")
+            -- v0.32.8 B1: any forward progress resets the per-item
+            -- consecutive-refusal counter so a recovered op doesn't
+            -- inherit pre-recovery strikes.
+            state.consecutiveRefusedByItem = {}
         else
             state.failed = state.failed + 1
             -- Record the timeout so a late GUILDBANKBAGSLOTS_CHANGED arriving
@@ -656,6 +687,24 @@ step = function()
                 "  planner expected: src %s, dst %s",
                 describePlannerSlot(op.plannerSrcAt),
                 describePlannerSlot(op.plannerDstAt)))
+
+            -- v0.32.8 B1: consecutive-refusal abort. Track per-item count
+            -- of server-rejected / merge-noop timeouts; abort with a
+            -- specific reason on 3 strikes rather than fall through to
+            -- step() and compound into a singleton-chain failure.
+            local refused = (class == "server-rejected" or class == "merge-noop")
+            if refused then
+                local n = (state.consecutiveRefusedByItem[op.itemID] or 0) + 1
+                state.consecutiveRefusedByItem[op.itemID] = n
+                if n >= 3 then
+                    finish(false, string.format(
+                        "repeated server refusal on item %d (%d consecutive %s)",
+                        op.itemID, n, class))
+                    return
+                end
+            else
+                state.consecutiveRefusedByItem = {}
+            end
         end
         state.waiting = nil
         state.opIndex = myOpIndex + 1
@@ -698,6 +747,7 @@ function GBL:_SortExecutor_OnSlotsChanged()
         state.done = state.done + 1
         state.failed = state.failed - 1
         state.reclassified = state.reclassified + 1
+        state.consecutiveRefusedByItem = {}  -- v0.32.8 B1
         GBL:SortInfo(string.format(
             "Sort: op %d confirmed by late event after timeout - reclassified as success",
             lto.opIndex))
@@ -727,6 +777,7 @@ function GBL:_SortExecutor_OnSlotsChanged()
             -- the optimistic-but-rejected client update.
             if srcDrainedAsExpected(w) then
                 state.done = state.done + 1
+                state.consecutiveRefusedByItem = {}  -- v0.32.8 B1
                 state.waiting = nil
                 state.lastTimedOutOp = nil
                 state.opIndex = state.opIndex + 1
@@ -929,7 +980,20 @@ function GBL:ExecuteSortPlan(plan, onComplete, opts)
         reclassified = 0,
         preCheckFails = 0,
         cursorStuck = 0,
-        timeoutByClass = { none = 0, partial = 0, complete = 0, other = 0 },
+        timeoutByClass = {
+            ["server-rejected"] = 0,
+            partial = 0,
+            complete = 0,
+            ["merge-noop"] = 0,
+            other = 0,
+        },
+        -- Per-item consecutive refusal counter (v0.32.8 B1). Increments on
+        -- every server-rejected / merge-noop timeout for the same itemID.
+        -- Resets on any other class or any success. On count >= 3 the
+        -- executor aborts via finish(false, ...). Without this, the
+        -- singleton-chain pattern compounds into chain failure rather
+        -- than failing fast.
+        consecutiveRefusedByItem = {},
     }
     registerBankEvents()
     GBL:SortInfo(
@@ -1003,4 +1067,11 @@ end
 -- in-flight guard refuses to issue a second op while one is already armed.
 function GBL:_sortExecutorStep()
     return step()
+end
+
+-- Test hook: expose the pure classifier so unit tests can exercise each
+-- branch (server-rejected / partial / complete / merge-noop / other)
+-- without simulating a full server-rejection scenario in the mock bank.
+function GBL:_sortExecutorClassifyTimeoutState(op, srcDesc, dstDesc, cursorHasItem)
+    return classifyTimeoutState(op, srcDesc, dstDesc, cursorHasItem)
 end
