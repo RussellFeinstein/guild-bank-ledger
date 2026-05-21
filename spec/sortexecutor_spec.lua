@@ -1088,6 +1088,62 @@ describe("SortExecutor", function()
         end)
     end)
 
+    describe("destination-tab view (v0.32.8 Phase-2 cold-tab fix)", function()
+        -- WoW only refreshes slot reads for the currently-viewed tab, so the
+        -- executor must view the destination tab for confirm-on-deposit to see
+        -- the deposit. It queries on an actual tab change only.
+        -- Multi-op plans need serverTime advanced to clear the inter-move gap.
+        local function drainSort(maxRounds)
+            maxRounds = maxRounds or 40
+            for _ = 1, maxRounds do
+                if #MockWoW.pendingTimers == 0 then return end
+                MockWoW.serverTime = MockWoW.serverTime + 5.0
+                MockWoW.fireTimers()
+            end
+        end
+
+        it("views each destination tab when it differs from the current tab", function()
+            MockWoW.addTab("Tab 3", nil, true)
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 5 },
+                [2] = { itemID = 101, name = "Vial", count = 5 },
+            })
+            MockWoW.guildBank.currentTab = nil
+            MockWoW.guildBank.queriedTabs = {}
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 3, dstSlot = 1, itemID = 101, count = 5 },
+                },
+            }, function() end)
+            drainSort()
+            assert.is_true(MockWoW.guildBank.queriedTabs[2] or false)
+            assert.is_true(MockWoW.guildBank.queriedTabs[3] or false)
+        end)
+
+        it("does not re-query when the destination tab is already viewed", function()
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 5 },
+                [2] = { itemID = 100, name = "Flask", count = 5 },
+            })
+            MockWoW.guildBank.currentTab = 2  -- tab 2 already viewed
+            MockWoW.guildBank.queriedTabs = {}
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 2, dstSlot = 2, itemID = 100, count = 5 },
+                },
+            }, function() end)
+            drainSort()
+            -- Tab 2 was already the viewed tab, so no re-query was issued.
+            assert.is_nil(MockWoW.guildBank.queriedTabs[2])
+        end)
+    end)
+
     describe("consecutive-refusal abort (v0.32.8 B1)", function()
         -- Drive a real timeout-path classification by exploiting the mock's
         -- bounce-on-max-stack-overflow behavior: when a merge would exceed

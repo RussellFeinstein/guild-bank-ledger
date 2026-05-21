@@ -631,6 +631,22 @@ step = function()
     local op = state.plan.ops[state.opIndex]
     local myOpIndex = state.opIndex
 
+    -- v0.32.8 Phase-2 cold-tab fix: view the destination tab so its slot reads
+    -- are fresh and confirm-on-deposit can see the deposit land. WoW only
+    -- refreshes GetGuildBankItemInfo for the currently-viewed tab; a deposit
+    -- into a non-viewed tab still happens server-side but reads stale-empty,
+    -- which previously surfaced as a false server-rejected timeout. Only query
+    -- on an actual change (no event when already viewing the dst), and
+    -- suppress the foreign-activity replan for the query's own event.
+    if _G.GetCurrentGuildBankTab and _G.QueryGuildBankTab
+       and _G.GetCurrentGuildBankTab() ~= op.dstTab then
+        -- One-shot suppression of the slots-changed event this query fires, so
+        -- it isn't mistaken for foreign activity. A flag (not a time window)
+        -- so a genuine foreign event arriving later is NOT swallowed.
+        state.pendingViewQuery = true
+        _G.QueryGuildBankTab(op.dstTab)
+    end
+
     -- Pre-verify src: must have at least op.count of op.itemID.
     local srcLink = GetGuildBankItemLink(op.srcTab, op.srcSlot)
     local srcID = srcLink and extractItemID(srcLink) or nil
@@ -994,6 +1010,16 @@ function GBL:_SortExecutor_OnSlotsChanged()
     -- crash pre-warm exists to prevent. The first step()'s src/dst pre-check
     -- catches any divergence once pre-warm completes.
     if state.preWarming then return end
+
+    -- v0.32.8 Phase-2 cold-tab fix: the destination-tab view-query issued in
+    -- step() fires a slots-changed event. It only refreshes the viewed tab so
+    -- later polls can see the deposit; it is not foreign activity and has no
+    -- op to confirm yet. Consume the one-shot flag and ignore exactly this
+    -- event (a genuine foreign event arriving later finds the flag clear).
+    if state.pendingViewQuery then
+        state.pendingViewQuery = false
+        return
+    end
 
     -- First, check if this event is the late ACK for a recently-timed-out
     -- op. The server may have processed the move after we'd already armed
