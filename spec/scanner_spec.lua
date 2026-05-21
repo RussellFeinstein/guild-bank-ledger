@@ -240,6 +240,9 @@ describe("Scanner", function()
             assert.equals(1, results[1].itemCount)
             assert.is_not_nil(results[1].slots[1])
             assert.is_nil(results[1].slots[2])
+            -- The locked slot is skipped from the snapshot but counted, so a
+            -- sort planned against this scan can be diagnosed.
+            assert.equals(1, results[1].lockedSkips)
         end)
 
         it("waits for GUILDBANKBAGSLOTS_CHANGED before scanning (first-open safety)", function()
@@ -286,6 +289,55 @@ describe("Scanner", function()
             assert.is_not_nil(results[1])
             assert.equals(2, results[1].itemCount,
                 "scan should have captured the delayed data, not the empty pre-data state")
+
+            _G.QueryGuildBankTab = mockQuery
+        end)
+    end)
+
+    describe("scan diagnostics (v0.32.8)", function()
+        -- completedVia distinguishes a warm scan (driven by the server's
+        -- GUILDBANKBAGSLOTS_CHANGED) from one that fell back to the query
+        -- timeout (server data may never have arrived — the cold-cache
+        -- fingerprint behind phantom sort plans).
+        it("records completedVia 'event' when a tab scans from the slots-changed event", function()
+            MockWoW.addTab("Tab 1", nil, true)
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 5 },
+            })
+            GBL:CancelPendingScan()
+            GBL.scanInProgress = false
+            GBL.bankOpen = true
+
+            -- Default mock fires GUILDBANKBAGSLOTS_CHANGED synchronously on
+            -- QueryGuildBankTab, so the tab scans via the event path.
+            GBL:StartFullScan()
+
+            local results = GBL:GetLastScanResults()
+            assert.equals("event", results[1].completedVia)
+        end)
+
+        it("records completedVia 'timeout' when the event never fires", function()
+            MockWoW.addTab("Tab 1", nil, true)
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 5 },
+            })
+            GBL:CancelPendingScan()
+            GBL.scanInProgress = false
+            GBL.bankOpen = true
+
+            -- Suppress the synchronous event so the query-timeout fallback
+            -- drives the scan instead (the cold-cache code path).
+            local mockQuery = _G.QueryGuildBankTab
+            _G.QueryGuildBankTab = function(tabIndex)
+                MockWoW.guildBank.queriedTabs[tabIndex] = true
+            end
+
+            GBL:StartFullScan()
+            -- Fire the SCAN_TIMEOUT fallback timer.
+            MockWoW.fireTimers()
+
+            local results = GBL:GetLastScanResults()
+            assert.equals("timeout", results[1].completedVia)
 
             _G.QueryGuildBankTab = mockQuery
         end)

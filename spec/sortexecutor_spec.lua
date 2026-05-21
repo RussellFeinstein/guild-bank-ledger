@@ -893,29 +893,29 @@ describe("SortExecutor", function()
     end)
 
     describe("classifyTimeoutState (v0.32.8 B1)", function()
-        -- Unit-tests the pure classifier exposed via the test hook. Avoids
-        -- having to fake a server-rejection scenario through the mock bank
-        -- (the mock's PickupGuildBankItem always succeeds, so producing a
-        -- merge-noop or server-rejected post-state via real ops is not
-        -- possible without a "refuse this pickup" mock affordance).
+        -- Unit-tests the pure classifier exposed via the test hook. Args are
+        -- structured live-slot snapshots ({itemID, count} or nil for empty),
+        -- matching what the executor passes from snapshotLiveSlot. The
+        -- classifier no longer parses describeSlot strings (those carry the
+        -- resolved item name in-game, which defeated the old prefix match).
         it("classifies src-unchanged + dst-empty + no-cursor as server-rejected", function()
             local op = { itemID = 100, plannerDstAt = nil }
             local class = GBL:_sortExecutorClassifyTimeoutState(
-                op, "it:100 x20", "empty", false)
+                op, { itemID = 100, count = 20 }, nil, false)
             assert.equals("server-rejected", class)
         end)
 
         it("classifies src-empty + cursor-held as partial", function()
             local op = { itemID = 100, plannerDstAt = nil }
             local class = GBL:_sortExecutorClassifyTimeoutState(
-                op, "empty", "empty", true)
+                op, nil, nil, true)
             assert.equals("partial", class)
         end)
 
         it("classifies src-empty + dst-has-expected + no-cursor as complete", function()
             local op = { itemID = 100, plannerDstAt = nil }
             local class = GBL:_sortExecutorClassifyTimeoutState(
-                op, "empty", "it:100 x20", false)
+                op, nil, { itemID = 100, count = 20 }, false)
             assert.equals("complete", class)
         end)
 
@@ -923,7 +923,7 @@ describe("SortExecutor", function()
            .. "when planner expected dst empty", function()
             local op = { itemID = 100, plannerDstAt = nil }
             local class = GBL:_sortExecutorClassifyTimeoutState(
-                op, "it:100 x20", "it:100 x15", false)
+                op, { itemID = 100, count = 20 }, { itemID = 100, count = 15 }, false)
             assert.equals("merge-noop", class)
         end)
 
@@ -931,28 +931,35 @@ describe("SortExecutor", function()
            .. "when planner intended a same-item merge", function()
             -- Real merge-into-non-empty whose ACK was lost: planner emitted
             -- this op KNOWING dst already held the item, and the timeout
-            -- observation shows both src empty (drained into cursor then
-            -- placed) and dst still has the item. Without planner intent,
-            -- this looks identical to merge-noop. With it, we know the
-            -- merge happened and the executor should treat it as success.
+            -- observation shows both src and dst still hold it. Without
+            -- planner intent, this looks identical to merge-noop. With it,
+            -- we know the merge happened and treat it as success.
             local op = {
                 itemID = 100,
                 plannerDstAt = { itemID = 100, count = 5 },
             }
-            -- This particular combination is unusual in real WoW (src would
-            -- normally drain), but it lets us exercise the planner-intent
-            -- branch without other state interaction.
             local class = GBL:_sortExecutorClassifyTimeoutState(
-                op, "it:100 x20", "it:100 x15", false)
+                op, { itemID = 100, count = 20 }, { itemID = 100, count = 15 }, false)
             assert.equals("complete", class)
         end)
 
-        it("classifies other anomalous combinations as other", function()
+        it("classifies src-empty + dst-empty + no-cursor as other", function()
             local op = { itemID = 100, plannerDstAt = nil }
-            -- src empty + dst empty + cursor empty: nothing observable;
-            -- should NOT match any of the named cases.
+            -- Nothing observable; should NOT match any of the named cases.
             local class = GBL:_sortExecutorClassifyTimeoutState(
-                op, "empty", "empty", false)
+                op, nil, nil, false)
+            assert.equals("other", class)
+        end)
+
+        it("classifies dst holding a different item as other "
+           .. "(foreign activity, not a refusal)", function()
+            -- src still has the expected item but dst now holds something
+            -- else (another player dropped an item into the target slot).
+            -- Must NOT bucket as merge-noop / server-rejected, so it never
+            -- feeds the 3-strike refusal abort.
+            local op = { itemID = 100, plannerDstAt = nil }
+            local class = GBL:_sortExecutorClassifyTimeoutState(
+                op, { itemID = 100, count = 20 }, { itemID = 999, count = 5 }, false)
             assert.equals("other", class)
         end)
     end)
@@ -1029,6 +1036,35 @@ describe("SortExecutor", function()
             -- 0 done.
             assert.equals(0, result.done)
             assert.equals(3, result.failed)
+        end)
+
+        it("classifies + aborts even when the item name resolves "
+           .. "(in-game regression: classifier must not parse describeSlot)", function()
+            -- Regression for the v0.32.8 dead-classifier bug. In-game,
+            -- DescribeItem prefixes the resolved name, so describeSlot
+            -- returns "Flask of the Currents (it:100) x10" rather than the
+            -- bare "it:100 x10" the no-name test env produces. The old
+            -- classifier prefix-matched "it:100 x" at position 1, so it
+            -- bucketed every real refusal as "other" — silently disabling
+            -- the merge-noop bucket and the 3-strike abort. Warm the
+            -- ItemCache so describeSlot WOULD carry the name, then assert the
+            -- structured classifier still reads merge-noop and aborts.
+            local plan = makeBouncingPlan()
+            MockWoW.itemNames[100].name = "Flask of the Currents"
+            GBL:GetCachedItemInfo(100)  -- synchronously warms the name cache
+            -- Premise: the in-game name-prefixed describeSlot form is in play.
+            assert.matches("Flask of the Currents %(it:100%)", GBL:DescribeItem(100))
+
+            local result
+            GBL:ExecuteSortPlan(plan, function(r) result = r end)
+            drainSortWithTimeAdvance()
+            assert.is_not_nil(result)
+            assert.is_false(result.ok)
+            assert.matches("repeated server refusal on item 100", result.reason)
+            assert.matches("3 consecutive merge%-noop", result.reason)
+            assert.equals(3, result.timeoutByClass["merge-noop"])
+            -- The whole point: nothing leaked into "other".
+            assert.equals(0, result.timeoutByClass["other"])
         end)
 
         it("does not abort when a refusal is interrupted by a success", function()

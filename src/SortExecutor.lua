@@ -185,12 +185,19 @@ end
 ---                     3-strike abort candidate. Pre-v0.32.8 this fell
 ---                     into "other".
 --- "other"           — some other anomalous combination.
-local function classifyTimeoutState(op, srcDesc, dstDesc, cursorHasItem)
-    local srcExpected = string.format("it:%d x", op.itemID)  -- prefix match
-    local srcHasExpected = srcDesc:find(srcExpected, 1, true) == 1
-    local dstHasExpected = dstDesc:find(srcExpected, 1, true) == 1
-    local srcEmpty = (srcDesc == "empty")
-    local dstEmpty = (dstDesc == "empty")
+---
+--- Classifies from structured live-slot snapshots (srcLive / dstLive are
+--- {itemID, count} tables or nil for empty, as returned by snapshotLiveSlot),
+--- NOT from the human-readable describeSlot string. In-game DescribeItem
+--- prefixes the resolved item name (e.g. "Flask (it:NNN) xN"), so the old
+--- "it:NNN x" position-1 prefix match never fired and every non-empty timeout
+--- collapsed into "other" — the merge-noop / server-rejected buckets and the
+--- 3-strike abort keyed off them were dead outside the no-item-name test env.
+local function classifyTimeoutState(op, srcLive, dstLive, cursorHasItem)
+    local srcHasExpected = srcLive ~= nil and srcLive.itemID == op.itemID
+    local dstHasExpected = dstLive ~= nil and dstLive.itemID == op.itemID
+    local srcEmpty = (srcLive == nil)
+    local dstEmpty = (dstLive == nil)
     if srcHasExpected and dstEmpty and not cursorHasItem then
         return "server-rejected"
     elseif srcEmpty and cursorHasItem then
@@ -768,7 +775,14 @@ step = function()
             local srcDesc = describeSlot(op.srcTab, op.srcSlot)
             local dstDesc = describeSlot(op.dstTab, op.dstSlot)
             local cursorHas = _G.CursorHasItem and _G.CursorHasItem() or false
-            local class = classifyTimeoutState(op, srcDesc, dstDesc, cursorHas)
+            -- Classify from structured live-slot state, not the display
+            -- strings above: describeSlot carries the resolved item name
+            -- in-game, which would defeat the classifier's item match.
+            local class = classifyTimeoutState(
+                op,
+                snapshotLiveSlot(op.srcTab, op.srcSlot),
+                snapshotLiveSlot(op.dstTab, op.dstSlot),
+                cursorHas)
             if state.timeoutByClass[class] then
                 state.timeoutByClass[class] = state.timeoutByClass[class] + 1
             else
@@ -1218,6 +1232,7 @@ end
 -- Test hook: expose the pure classifier so unit tests can exercise each
 -- branch (server-rejected / partial / complete / merge-noop / other)
 -- without simulating a full server-rejection scenario in the mock bank.
-function GBL:_sortExecutorClassifyTimeoutState(op, srcDesc, dstDesc, cursorHasItem)
-    return classifyTimeoutState(op, srcDesc, dstDesc, cursorHasItem)
+-- srcLive / dstLive are {itemID, count} snapshots (or nil for empty).
+function GBL:_sortExecutorClassifyTimeoutState(op, srcLive, dstLive, cursorHasItem)
+    return classifyTimeoutState(op, srcLive, dstLive, cursorHasItem)
 end

@@ -192,13 +192,17 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- same path, so this captures both first-plan and replan latency.
     local profileStart = debugprofilestop and debugprofilestop() or nil
     local inputSlots, inputTabs = 0, 0
-    for _, tabResult in pairs(snapshot or {}) do
+    local perTabOccupied = {}
+    for tabIndex, tabResult in pairs(snapshot or {}) do
         inputTabs = inputTabs + 1
+        local n = 0
         if tabResult and tabResult.slots then
             for _ in pairs(tabResult.slots) do
-                inputSlots = inputSlots + 1
+                n = n + 1
             end
         end
+        perTabOccupied[tabIndex] = n
+        inputSlots = inputSlots + n
     end
 
     -- Per-phase counters. Populated as each phase runs and dumped to the
@@ -1096,10 +1100,25 @@ function GBL:PlanSort(snapshot, layout, opts)
         local elapsed = profileStart and (debugprofilestop() - profileStart) or 0
         local deficitCount = 0
         for _ in pairs(plan.deficits) do deficitCount = deficitCount + 1 end
+        -- Per-tab occupied breakdown (tab-sorted) so a cold tab is visible in
+        -- /gbl sortlog without the master log. Comparing a cold pre-execution
+        -- plan's breakdown to the warm post-execution plan's breakdown shows
+        -- exactly which tab gained the slots a stale snapshot missed.
+        local tabKeys = {}
+        for tabIndex in pairs(perTabOccupied) do
+            table.insert(tabKeys, tabIndex)
+        end
+        table.sort(tabKeys)
+        local breakdownParts = {}
+        for _, tabIndex in ipairs(tabKeys) do
+            table.insert(breakdownParts,
+                string.format("T%d:%d", tabIndex, perTabOccupied[tabIndex]))
+        end
         self:SortInfo(string.format(
-            "Sort plan: %.1fms, %d ops, %d deficits, %d unplaced (input: %d slots / %d tabs)",
+            "Sort plan: %.1fms, %d ops, %d deficits, %d unplaced "
+            .. "(input: %d slots / %d tabs) [%s]",
             elapsed, #plan.ops, deficitCount, #plan.unplaced,
-            inputSlots, inputTabs))
+            inputSlots, inputTabs, table.concat(breakdownParts, " ")))
 
         local totalDemands = diag.demandPinned + diag.demandExtendRight
             + diag.demandExtendLeft + diag.demandFirstEmpty
