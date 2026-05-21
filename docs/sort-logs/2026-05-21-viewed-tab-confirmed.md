@@ -1,5 +1,20 @@
 # 2026-05-21: Cold tab confirmed = destination tab not viewed
 
+> **Correction (2026-05-21, later the same day):** the mechanism analysis below
+> (confirmation is observation-gated, not server-slow) holds, but the fix proposed
+> in the "Implication" section (view the destination tab via
+> `QueryGuildBankTab(destTab)` on tab-change) was implemented in commit `ddb2f2a`
+> and proved **ineffective**. A clean follow-up capture, with the user viewing T6
+> for the entire run and never toggling tabs, stamped all 184 ops `viewed=T6` and
+> confirmed each about 5s late. In-game `QueryGuildBankTab` pulls a tab's data but
+> does NOT change the selected tab, and issuing it at the next op's step start
+> surfaces the *previous* op's deposit one op cycle late. The "viewed=T5 succeed /
+> viewed=T6 fail" correlation below came from a tab-toggling capture (clicking T5
+> forced a fresh pull); it does not mean the executor can reach that state through
+> `QueryGuildBankTab`. The real fix (shipped in PR #30) re-queries the destination
+> tab during the in-flight op's own window (0.5/1.5/3s) so its slots-changed event
+> confirms the deposit in-window. The next capture verifies it.
+
 In-game capture on `layout-sort` at v0.32.8 (PR #30) with the passive `viewed=TN`
 instrument. The user filled T5 while manually clicking between tabs and noticed it
 "adjusted the speed and whether things were failing." That observation plus the

@@ -47,6 +47,13 @@ local INTER_MOVE_GAP_AFTER_INTERIM = 0.5
 -- poll re-runs the same advance predicates the sync path uses; first one
 -- to pass advances the op via the [interim-poll] audit tag.
 local INTERIM_POLL_OFFSETS = { 0.25, 0.5, 1.0, 2.0 }
+-- v0.32.8 Phase-2: when the destination tab is not the currently-viewed tab,
+-- WoW pushes no slot updates for it, so a cross-tab deposit is invisible to our
+-- reads until something re-pulls that tab. Re-query the dst at these offsets
+-- during the in-flight op's window so its GUILDBANKBAGSLOTS_CHANGED drives the
+-- async-confirm path in-window instead of one op cycle (~5s) later. Interleaved
+-- with INTERIM_POLL_OFFSETS so a poll reads the freshened cache right after.
+local DST_REQUERY_OFFSETS = { 0.5, 1.5, 3.0 }
 
 ------------------------------------------------------------------------
 -- Helpers
@@ -631,22 +638,6 @@ step = function()
     local op = state.plan.ops[state.opIndex]
     local myOpIndex = state.opIndex
 
-    -- v0.32.8 Phase-2 cold-tab fix: view the destination tab so its slot reads
-    -- are fresh and confirm-on-deposit can see the deposit land. WoW only
-    -- refreshes GetGuildBankItemInfo for the currently-viewed tab; a deposit
-    -- into a non-viewed tab still happens server-side but reads stale-empty,
-    -- which previously surfaced as a false server-rejected timeout. Only query
-    -- on an actual change (no event when already viewing the dst), and
-    -- suppress the foreign-activity replan for the query's own event.
-    if _G.GetCurrentGuildBankTab and _G.QueryGuildBankTab
-       and _G.GetCurrentGuildBankTab() ~= op.dstTab then
-        -- One-shot suppression of the slots-changed event this query fires, so
-        -- it isn't mistaken for foreign activity. A flag (not a time window)
-        -- so a genuine foreign event arriving later is NOT swallowed.
-        state.pendingViewQuery = true
-        _G.QueryGuildBankTab(op.dstTab)
-    end
-
     -- Pre-verify src: must have at least op.count of op.itemID.
     local srcLink = GetGuildBankItemLink(op.srcTab, op.srcSlot)
     local srcID = srcLink and extractItemID(srcLink) or nil
@@ -849,6 +840,39 @@ step = function()
                 table.insert(waiter.pollTimers, t)
             end
         end
+
+        -- v0.32.8 Phase-2: keep the destination tab fresh during this op's
+        -- window. WoW only pushes slot updates for the currently-viewed tab; a
+        -- deposit into any other tab lands server-side but is invisible to our
+        -- reads until we re-pull that tab. Without this, the only re-pull is the
+        -- NEXT op's step(), so each cross-tab deposit surfaces ~one op cycle
+        -- (~5s) late. Re-querying here fires GUILDBANKBAGSLOTS_CHANGED while
+        -- state.waiting is still armed, so the async-confirm path advances the
+        -- op in-window. Gated on a known viewed tab differing from the dst (cur
+        -- is nil only in cold/test states; in-game a tab is always selected).
+        -- Timers ride pollTimers so a confirm cancels the rest.
+        local cur = _G.GetCurrentGuildBankTab and _G.GetCurrentGuildBankTab()
+        if _G.QueryGuildBankTab and cur and cur ~= op.dstTab then
+            for _, offset in ipairs(DST_REQUERY_OFFSETS) do
+                local rt = C_Timer.After(offset, function()
+                    if not state or state.opIndex ~= myOpIndex
+                       or not state.waiting or state.waiting.opIndex ~= myOpIndex then
+                        return
+                    end
+                    if not state.dstReQueryNoticed then
+                        state.dstReQueryNoticed = true
+                        GBL:SortInfo(string.format(
+                            "Sort: destination tab not viewed (viewed %s); re-querying "
+                            .. "dst in-window to confirm cross-tab deposits",
+                            viewedTabStr()))
+                    end
+                    _G.QueryGuildBankTab(op.dstTab)
+                end)
+                if waiter and waiter.pollTimers then
+                    table.insert(waiter.pollTimers, rt)
+                end
+            end
+        end
     end
 
     -- Safety timeout: verify-by-polling if no event resolves us in time.
@@ -1011,16 +1035,6 @@ function GBL:_SortExecutor_OnSlotsChanged()
     -- catches any divergence once pre-warm completes.
     if state.preWarming then return end
 
-    -- v0.32.8 Phase-2 cold-tab fix: the destination-tab view-query issued in
-    -- step() fires a slots-changed event. It only refreshes the viewed tab so
-    -- later polls can see the deposit; it is not foreign activity and has no
-    -- op to confirm yet. Consume the one-shot flag and ignore exactly this
-    -- event (a genuine foreign event arriving later finds the flag clear).
-    if state.pendingViewQuery then
-        state.pendingViewQuery = false
-        return
-    end
-
     -- First, check if this event is the late ACK for a recently-timed-out
     -- op. The server may have processed the move after we'd already armed
     -- the next op's waiting state, so this check must run independent of
@@ -1097,7 +1111,15 @@ function GBL:_SortExecutor_OnSlotsChanged()
         -- updates on Pickup so the [sync] / async success paths can't
         -- tell apart "server processed" from "server will reject" — but
         -- THIS event (the second one) carries the authoritative answer.
+        -- Only replan on a genuine divergence. A GUILDBANKBAGSLOTS_CHANGED that
+        -- leaves our most-recently-completed op's slots matching their projected
+        -- post-state is our own destination re-query refresh echo (or a
+        -- redundant server update), NOT foreign activity — replanning on it
+        -- would storm the sort with needless rescans. A real foreign mutation to
+        -- a slot we still depend on is caught by the next op's src/dst pre-check.
+        -- With no completed op to explain the event, stay conservative and replan.
         local lco = state.lastCompletedOp
+        local diverged = true
         if lco then
             local liveSrc = snapshotLiveSlot(lco.srcTab, lco.srcSlot)
             local liveDst = snapshotLiveSlot(lco.dstTab, lco.dstSlot)
@@ -1122,9 +1144,15 @@ function GBL:_SortExecutor_OnSlotsChanged()
                         describePlannerSlot(lco.projectedDst),
                         describePlannerSlot(liveDst)))
                 end
+            else
+                -- Event consistent with our just-completed op: our own dst
+                -- re-query echo, not foreign activity.
+                diverged = false
             end
         end
-        doReplan("foreign activity (unexpected event)")
+        if diverged then
+            doReplan("foreign activity (unexpected event)")
+        end
     end
 end
 
