@@ -86,6 +86,11 @@ function MockWoW.reset()
     MockWoW.framerate = 60
     MockWoW.chatMessageFilters = {}
     MockWoW.cursor = nil
+    -- v0.32.8 B2: deferred-bank-events test affordance. Default off so
+    -- existing tests retain their synchronous-event semantics; opt-in
+    -- per test for the interim-poll cascade integration tests.
+    MockWoW.deferredBankEvents = false
+    MockWoW.queuedBankEvents = {}
 end
 
 ---------------------------------------------------------------------------
@@ -295,6 +300,18 @@ function MockWoW.install()
     local function fireBankEvent()
         local handlers = MockWoW.frames  -- not used here
         handlers = nil
+        -- v0.32.8 B2: deferred-event mode for testing the interim-poll
+        -- cascade. When MockWoW.deferredBankEvents is true, queue the
+        -- event into MockWoW.queuedBankEvents instead of firing
+        -- synchronously. Tests pop them one at a time via
+        -- MockWoW.fireQueuedBankEvent(). The QueryGuildBankTab direct
+        -- fire (above) is intentionally NOT gated — scan setup must
+        -- continue firing synchronously for StartFullScan-based
+        -- fixtures.
+        if MockWoW.deferredBankEvents then
+            table.insert(MockWoW.queuedBankEvents, "GUILDBANKBAGSLOTS_CHANGED")
+            return
+        end
         -- Mock addon events go through MockAce; we call through to any
         -- registered AceEvent handler via the global MockAce fireEvent shim.
         if _G.__MockAce_fireEvent then
@@ -302,6 +319,19 @@ function MockWoW.install()
         end
     end
     MockWoW.fireGuildBankBagslotsChanged = fireBankEvent
+
+    --- v0.32.8 B2: pop one queued bank event off the deferred queue and
+    --- fire it. Returns true if an event was fired, false if the queue
+    --- was empty.
+    function MockWoW.fireQueuedBankEvent()
+        local q = MockWoW.queuedBankEvents
+        if not q or #q == 0 then return false end
+        local evt = table.remove(q, 1)
+        if _G.__MockAce_fireEvent then
+            _G.__MockAce_fireEvent(evt)
+        end
+        return true
+    end
 
     _G.ClearCursor = function()
         MockWoW.cursor = nil

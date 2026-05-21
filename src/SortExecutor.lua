@@ -37,6 +37,16 @@ local SCAN_WAIT_TIMEOUT   = 10.0  -- seconds to wait for replan scan
 -- can retroactively reclassify that op as success. Without this, a genuine
 -- late server ACK is misread as foreign activity and triggers replan.
 local LATE_ACK_GRACE      = 5.0
+-- v0.32.8 B2: gap to use after an interim-poll advance (vs the default
+-- INTER_MOVE_GAP after a sync or async-event advance). Interim polls fire
+-- at 0.25/0.5/1.0/2.0 s; an advance via these has had less real time on
+-- the server than a 4.0 s late-poll path, so we give the server a slightly
+-- longer cushion before issuing the next op.
+local INTER_MOVE_GAP_AFTER_INTERIM = 0.5
+-- v0.32.8 B2: schedule poll attempts at these offsets after Pickup. Each
+-- poll re-runs the same advance predicates the sync path uses; first one
+-- to pass advances the op via the [interim-poll] audit tag.
+local INTERIM_POLL_OFFSETS = { 0.25, 0.5, 1.0, 2.0 }
 
 ------------------------------------------------------------------------
 -- Helpers
@@ -127,6 +137,19 @@ local function srcDrainedAsExpected(w)
     end
     -- Move (default): src empty OR different item.
     return (srcPost == nil) or (srcPost.itemID ~= w.itemID)
+end
+
+--- v0.32.8 B2: cancel any interim-poll timers attached to the given
+--- waiting record. Called from every advance / abort / cleanup path so
+--- a poll firing after state tears down can't double-advance or trip
+--- assertions. Tolerant of missing `pollTimers` field (legacy waiters,
+--- or a waiter cleaned up partway).
+local function cancelPollTimers(w)
+    if not w or not w.pollTimers then return end
+    for _, t in ipairs(w.pollTimers) do
+        if t and t.Cancel then t:Cancel() end
+    end
+    w.pollTimers = {}
 end
 
 --- Audit a "no-op suspected" line for an op whose dst+cursor look like
@@ -379,6 +402,11 @@ function finish(ok, reason)
     -- get the completion summary without needing a separate event shape.
     emitProgress("finish", { ok = ok, reason = reason })
     ClearCursor()
+    -- v0.32.8 B2: clear any interim-poll timers still pending before we
+    -- drop state. The poll callbacks' state-first guard would handle a
+    -- post-finish fire, but explicit cancel avoids a class of bugs where
+    -- a future change to the guard accidentally drops the check.
+    cancelPollTimers(state.waiting)
     unregisterBankEvents()
     state = nil
     if cb then
@@ -401,7 +429,18 @@ local function doReplan(reason)
     end
     state.replans = state.replans + 1
     ClearCursor()
+    -- v0.32.8 B2: cancel any pending interim-poll timers before clearing
+    -- state.waiting; otherwise the timers fire against a stale opIndex and
+    -- their state-first guard correctly no-ops, but cancelling here is
+    -- cheaper and clearer.
+    cancelPollTimers(state.waiting)
     state.waiting = nil
+    -- v0.32.8 B1.F1: replan changes plan structure, so the per-item
+    -- consecutive-refusal counter no longer reflects the same plan.
+    -- Without this reset, 2 refusals + replan + 1 refusal on the same
+    -- item would falsely trip the 3-strike abort even though the plan
+    -- between strikes 2 and 3 changed.
+    state.consecutiveRefusedByItem = {}
 
     GBL:SortInfo(
         string.format("Sort: replan %d/%d (%s)", state.replans, MAX_REPLANS, reason))
@@ -554,6 +593,9 @@ step = function()
         -- AFTER we advanced past this op, the server rejected the move.
         srcPreOp = snapshotLiveSlot(op.srcTab, op.srcSlot),
         dstPreOp = snapshotLiveSlot(op.dstTab, op.dstSlot),
+        -- v0.32.8 B2: timers scheduled by the interim-poll cascade; cleared
+        -- by cancelPollTimers() on every advance / abort path.
+        pollTimers = {},
     }
 
     -- Notify UI subscribers that this op is now executing. SortView uses
@@ -588,6 +630,7 @@ step = function()
             if srcDrainedAsExpected(w) then
                 state.done = state.done + 1
                 state.consecutiveRefusedByItem = {}  -- v0.32.8 B1
+                cancelPollTimers(w)                   -- v0.32.8 B2
                 state.waiting = nil
                 state.opIndex = myOpIndex + 1
                 state.gapUntil = GetTime() + INTER_MOVE_GAP
@@ -599,8 +642,8 @@ step = function()
                 return
             else
                 auditOpNoop(w, "sync")
-                -- Fall through: timeout-poll path will catch this as a
-                -- real failure and trigger replan.
+                -- Fall through: interim-poll cascade + timeout-poll
+                -- path will catch this as a real failure and trigger replan.
             end
         end
     end
@@ -608,6 +651,7 @@ step = function()
     -- Cursor stuck after placement? Clear and fail this op, advance.
     if _G.CursorHasItem and _G.CursorHasItem() then
         ClearCursor()
+        cancelPollTimers(state.waiting)             -- v0.32.8 B2
         state.failed = state.failed + 1
         state.cursorStuck = state.cursorStuck + 1
         state.waiting = nil
@@ -620,6 +664,65 @@ step = function()
             if isRunning() then step() end
         end)
         return
+    end
+
+    -- v0.32.8 B2: interim polling cascade. The sync post-Pickup check above
+    -- runs synchronously after the Pickup pair; in retail the server hasn't
+    -- yet processed the move so the predicates almost always fail there.
+    -- Without this cascade, the next chance to advance is the 4.0 s
+    -- MOVE_CONFIRM_TIMEOUT — that's wall-clock waste of ~3.5 s per op when
+    -- the server actually processed in well under a second. Schedule polls
+    -- at 0.25/0.5/1.0/2.0 s; first to pass advances via [interim-poll].
+    -- The late-poll at 4.0 s remains as backstop.
+    --
+    -- State-alive guard: in synchronous-mock environments the async-event
+    -- handler invoked by PickupGuildBankItem can advance, then call step()
+    -- recursively, which can reach the "all done" branch and finish() the
+    -- sort (clearing state). When control returns to the outer step() here,
+    -- state is nil and we must NOT schedule interim polls.
+    if not state or not state.waiting or state.waiting.opIndex ~= myOpIndex then
+        -- The op already advanced (sync or async path) before we got here;
+        -- nothing to poll for.
+        return
+    end
+    do
+        local waiter = state.waiting
+        for _, offset in ipairs(INTERIM_POLL_OFFSETS) do
+            local t = C_Timer.After(offset, function()
+                -- State-first guard: pre-warm cancel / bank close can tear
+                -- down state from under us. Then verify this poll is still
+                -- attached to the same in-flight op (replan or advance
+                -- would have changed state.opIndex or state.waiting).
+                if not state or state.opIndex ~= myOpIndex
+                   or not state.waiting or state.waiting.opIndex ~= myOpIndex then
+                    return
+                end
+                local w = state.waiting
+                if slotHasAtLeast(op.dstTab, op.dstSlot, op.itemID, op.count) and
+                   not (_G.CursorHasItem and _G.CursorHasItem()) and
+                   srcDrainedAsExpected(w) then
+                    state.done = state.done + 1
+                    state.consecutiveRefusedByItem = {}
+                    cancelPollTimers(w)
+                    state.waiting = nil
+                    state.opIndex = myOpIndex + 1
+                    -- Slightly longer cushion than INTER_MOVE_GAP: the
+                    -- server had less real time to confirm than a late-poll
+                    -- path would have given it.
+                    state.gapUntil = GetTime() + INTER_MOVE_GAP_AFTER_INTERIM
+                    auditOpSuccess(w, "[interim-poll]")
+                    emitProgress("complete", { completedOpIndex = myOpIndex })
+                    C_Timer.After(INTER_MOVE_GAP_AFTER_INTERIM, function()
+                        if isRunning() then step() end
+                    end)
+                end
+                -- Predicates failed: poll silently rejected; next poll or
+                -- the late-poll backstop will resolve.
+            end)
+            if waiter and waiter.pollTimers then
+                table.insert(waiter.pollTimers, t)
+            end
+        end
     end
 
     -- Safety timeout: verify-by-polling if no event resolves us in time.
@@ -706,6 +809,11 @@ step = function()
                 state.consecutiveRefusedByItem = {}
             end
         end
+        -- v0.32.8 B2: any interim-poll timers will have already fired by
+        -- the time we reach the 4.0s late-poll, so this cancel is mostly
+        -- defensive; it keeps the cleanup path uniform with the other
+        -- advance/abort sites.
+        cancelPollTimers(state.waiting)
         state.waiting = nil
         state.opIndex = myOpIndex + 1
         state.gapUntil = GetTime() + INTER_MOVE_GAP
@@ -778,6 +886,7 @@ function GBL:_SortExecutor_OnSlotsChanged()
             if srcDrainedAsExpected(w) then
                 state.done = state.done + 1
                 state.consecutiveRefusedByItem = {}  -- v0.32.8 B1
+                cancelPollTimers(w)                   -- v0.32.8 B2
                 state.waiting = nil
                 state.lastTimedOutOp = nil
                 state.opIndex = state.opIndex + 1
@@ -1067,6 +1176,22 @@ end
 -- in-flight guard refuses to issue a second op while one is already armed.
 function GBL:_sortExecutorStep()
     return step()
+end
+
+-- Test hook: inspect the per-item refusal counter. Returns the count for
+-- a given itemID (0 if absent). Used by tests that need to assert the
+-- counter state mid-sort without driving through finish().
+function GBL:_sortExecutorGetRefusalCount(itemID)
+    if not state or not state.consecutiveRefusedByItem then return 0 end
+    return state.consecutiveRefusedByItem[itemID] or 0
+end
+
+-- Test hook: synthetically set the per-item refusal counter. Used to
+-- verify reset paths (replan, success) without forcing the executor
+-- through three real refusals first.
+function GBL:_sortExecutorSetRefusalCount(itemID, count)
+    if not state then return end
+    state.consecutiveRefusedByItem[itemID] = count
 end
 
 -- Test hook: expose the pure classifier so unit tests can exercise each
