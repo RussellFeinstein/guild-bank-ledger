@@ -139,6 +139,37 @@ local function srcDrainedAsExpected(w)
     return (srcPost == nil) or (srcPost.itemID ~= w.itemID)
 end
 
+--- v0.32.8 Phase-2: did the op succeed? A move/split into a slot that was
+--- EMPTY or held a DIFFERENT item pre-op is confirmed by the destination now
+--- holding the expected item: the deposit is server-driven (it fires the
+--- slots-changed event) and persists, while the source-stack decrement lags
+--- well past the confirmation window for guild-bank splits. Requiring
+--- src-drain there only wastes ~3.4s per op (in-game data: deposit lands
+--- ~0.6s, src-drain >4s). For a MERGE into a slot that already held the same
+--- item, the destination is ambiguous (an optimistic bounce looks identical),
+--- so the src-drained predicate is still required there.
+local function opSucceeded(w)
+    if not w then return false end
+    if _G.CursorHasItem and _G.CursorHasItem() then return false end
+    if not slotHasAtLeast(w.tabIndex, w.slotIndex, w.itemID, w.count) then
+        return false
+    end
+    local dstWasOther = (w.dstPreOp == nil) or (w.dstPreOp.itemID ~= w.itemID)
+    if dstWasOther then return true end
+    return srcDrainedAsExpected(w)
+end
+
+-- v0.32.8 Phase-2 instrument (passive): the currently-viewed guild bank tab.
+-- WoW actively tracks one viewed tab and returns cached slot data for others.
+-- Stamping it on the success / timeout / deposit-observer audit lines lets a
+-- post-mortem correlate the viewed tab with deposit latency, testing whether
+-- cross-tab deposits into a non-viewed tab cause the cold-tab >20s tail. Pure
+-- read; never changes the viewed tab.
+local function viewedTabStr()
+    local v = _G.GetCurrentGuildBankTab and _G.GetCurrentGuildBankTab()
+    return v and ("T" .. tostring(v)) or "T?"
+end
+
 --- v0.32.8 B2: cancel any interim-poll timers attached to the given
 --- waiting record. Called from every advance / abort / cleanup path so
 --- a poll firing after state tears down can't double-advance or trip
@@ -188,14 +219,16 @@ local function observeDepositLatency(dstTab, dstSlot, itemID, count, opIndex, st
         end
         if slotHasAtLeast(dstTab, dstSlot, itemID, count) then
             GBL:SortInfo(string.format(
-                "Sort op %d: deposit landed at +%.1fs (dst was empty at 4s)",
-                opIndex, GetTime() - (startedAt or GetTime())))
+                "Sort op %d: deposit landed at +%.1fs (into T%d, dst was empty "
+                .. "at 4s, viewed %s)",
+                opIndex, GetTime() - (startedAt or GetTime()), dstTab, viewedTabStr()))
             return
         end
         if GetTime() - (startedAt or GetTime()) >= DEPOSIT_OBSERVE_CAP then
             GBL:SortInfo(string.format(
-                "Sort op %d: deposit NOT observed within %ds "
-                .. "(candidate genuine refusal)", opIndex, DEPOSIT_OBSERVE_CAP))
+                "Sort op %d: deposit NOT observed within %ds (into T%d, viewed "
+                .. "%s, candidate genuine refusal)",
+                opIndex, DEPOSIT_OBSERVE_CAP, dstTab, viewedTabStr()))
             return
         end
         C_Timer.After(1.0, tick)
@@ -387,14 +420,15 @@ local function auditOpSuccess(w, suffix)
     local srcPost = snapshotLiveSlot(w.srcTab or 0, w.srcSlot or 0)
     local dstPost = snapshotLiveSlot(w.tabIndex, w.slotIndex)
     GBL:SortInfo(string.format(
-        "Sort op %d done: %s T%d/S%d->T%d/S%d %s x%d (%.1fs)%s src=%s dst=%s",
+        "Sort op %d done: %s T%d/S%d->T%d/S%d %s x%d (%.1fs)%s src=%s dst=%s viewed=%s",
         w.opIndex, w.opLabel or "move",
         w.srcTab or 0, w.srcSlot or 0,
         w.tabIndex, w.slotIndex,
         itemDesc, w.count, elapsed,
         suffix and (" " .. suffix) or "",
         describePlannerSlot(srcPost),
-        describePlannerSlot(dstPost)))
+        describePlannerSlot(dstPost),
+        viewedTabStr()))
 
     -- Stash for server-reversion detection on the next foreign-activity
     -- event. We compare slot state at that future time against the
@@ -705,7 +739,7 @@ step = function()
         if slotHasAtLeast(op.dstTab, op.dstSlot, op.itemID, op.count) and
            not (_G.CursorHasItem and _G.CursorHasItem()) then
             local w = state.waiting
-            if srcDrainedAsExpected(w) then
+            if opSucceeded(w) then
                 state.done = state.done + 1
                 state.consecutiveRefusedByItem = {}  -- v0.32.8 B1
                 cancelPollTimers(w)                   -- v0.32.8 B2
@@ -776,9 +810,7 @@ step = function()
                     return
                 end
                 local w = state.waiting
-                if slotHasAtLeast(op.dstTab, op.dstSlot, op.itemID, op.count) and
-                   not (_G.CursorHasItem and _G.CursorHasItem()) and
-                   srcDrainedAsExpected(w) then
+                if opSucceeded(w) then
                     state.done = state.done + 1
                     state.consecutiveRefusedByItem = {}
                     cancelPollTimers(w)
@@ -808,13 +840,11 @@ step = function()
         if not state or not state.waiting or state.waiting.opIndex ~= myOpIndex then
             return  -- already advanced
         end
-        -- The dst-has-expected-item check is necessary but not sufficient:
-        -- when dst already held same-item at max-stack capacity, a no-op
-        -- looks identical to a success. The src-drained predicate
-        -- distinguishes real completion from a phantom.
-        local completedAtTimeout =
-            slotHasAtLeast(op.dstTab, op.dstSlot, op.itemID, op.count)
-            and srcDrainedAsExpected(state.waiting)
+        -- Confirm via opSucceeded: a deposit into an empty/other slot is
+        -- confirmed by dst holding the item (the warm case has usually already
+        -- advanced via an interim poll well before this 4s backstop); a merge
+        -- into an occupied same-item slot still requires src-drain.
+        local completedAtTimeout = opSucceeded(state.waiting)
         if completedAtTimeout then
             state.done = state.done + 1
             state.lastTimedOutOp = nil
@@ -869,8 +899,8 @@ step = function()
                 GBL.DescribeItem and GBL:DescribeItem(op.itemID) or ("it:" .. op.itemID),
                 op.count))
             GBL:SortWarn(string.format(
-                "  observed: src %s, dst %s, cursor %s",
-                srcDesc, dstDesc, cursorHas and "held" or "empty"))
+                "  observed: src %s, dst %s, cursor %s, viewed %s",
+                srcDesc, dstDesc, cursorHas and "held" or "empty", viewedTabStr()))
             -- v0.32.8 Phase-1 instrument: a drain-pending timeout means THIS
             -- op's deposit landed (dst filled from empty/other) but the source
             -- decrement hasn't surfaced in the client by the 4s window. It is
@@ -1003,11 +1033,11 @@ function GBL:_SortExecutor_OnSlotsChanged()
         local cursorHeld = _G.CursorHasItem and _G.CursorHasItem()
         if slotHasAtLeast(w.tabIndex, w.slotIndex, w.itemID, w.count)
            and not cursorHeld then
-            -- Same caveat as the [sync] path: dst-has-item passes trivially
-            -- when dst already held same-item at max-stack capacity. The
-            -- src-drained predicate is what distinguishes real ACK from
-            -- the optimistic-but-rejected client update.
-            if srcDrainedAsExpected(w) then
+            -- opSucceeded: a deposit into an empty/other slot is confirmed by
+            -- dst holding the item; a merge into an occupied same-item slot
+            -- still needs src-drain to distinguish a real ACK from the
+            -- optimistic-but-rejected client update (max-stack bounce).
+            if opSucceeded(w) then
                 state.done = state.done + 1
                 state.consecutiveRefusedByItem = {}  -- v0.32.8 B1
                 cancelPollTimers(w)                   -- v0.32.8 B2
@@ -1340,4 +1370,12 @@ end
 -- an occupied same-item slot) without driving a full bounce scenario.
 function GBL:_sortExecutorIsAbortableRefusal(class, op, dstPreLive)
     return isAbortableRefusal(class, op, dstPreLive)
+end
+
+-- Test hook: expose the success predicate so tests can verify confirm-on-
+-- deposit (a split/move into an empty/other slot succeeds on dst-has-item,
+-- without waiting for source-drain) vs. a merge into an occupied same-item
+-- slot (still requires source-drain). `w` is a waiting record shape.
+function GBL:_sortExecutorOpSucceeded(w)
+    return opSucceeded(w)
 end

@@ -230,9 +230,17 @@ function MockWoW.install()
     -- scanner flows don't need explicit event firing.
     _G.QueryGuildBankTab = function(tabIndex)
         MockWoW.guildBank.queriedTabs[tabIndex] = true
+        MockWoW.guildBank.currentTab = tabIndex  -- querying a tab "views" it
         if _G.__MockAce_fireEvent then
             _G.__MockAce_fireEvent("GUILDBANKBAGSLOTS_CHANGED")
         end
+    end
+
+    -- Currently-viewed guild bank tab (real WoW: the tab the player has open).
+    -- Set by QueryGuildBankTab; used by the sort executor's viewed-tab
+    -- diagnostic to correlate the viewed tab with deposit latency.
+    _G.GetCurrentGuildBankTab = function()
+        return MockWoW.guildBank.currentTab
     end
 
     -- Query transaction log (marks tab log as ready)

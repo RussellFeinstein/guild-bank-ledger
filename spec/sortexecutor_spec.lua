@@ -1031,6 +1031,63 @@ describe("SortExecutor", function()
         end)
     end)
 
+    describe("opSucceeded (v0.32.8 Phase-2 confirm-on-deposit)", function()
+        -- Destination is the waiter's tabIndex/slotIndex (tab 2); source is
+        -- srcTab/srcSlot (tab 1). Populate live slots and call the hook.
+        local function waiter(opLabel, dstPreItemID)
+            return {
+                tabIndex = 2, slotIndex = 1,   -- dst
+                srcTab = 1, srcSlot = 1,       -- src
+                itemID = 100, count = 1,
+                opLabel = opLabel or "move",
+                dstPreOp = dstPreItemID
+                    and { itemID = dstPreItemID, count = 1 } or nil,
+                srcPreOp = { itemID = 100, count = 2 },
+            }
+        end
+
+        it("confirms a move into an EMPTY slot on dst-has-item, no src-drain", function()
+            -- dst holds the item; src still holds it (not drained); dstPreOp nil.
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 2 } })
+            Helpers.populateTab(2, { [1] = { itemID = 100, name = "Flask", count = 1 } })
+            assert.is_true(GBL:_sortExecutorOpSucceeded(waiter("move", nil)))
+        end)
+
+        it("confirms a deposit into a DIFFERENT-item slot on dst-has-item", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 2 } })
+            Helpers.populateTab(2, { [1] = { itemID = 100, name = "Flask", count = 1 } })
+            assert.is_true(GBL:_sortExecutorOpSucceeded(waiter("move", 999)))
+        end)
+
+        it("does NOT confirm a merge into an occupied same-item slot until src drains", function()
+            -- dst held the same item pre-op; src still holds it -> not drained.
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 2 } })
+            Helpers.populateTab(2, { [1] = { itemID = 100, name = "Flask", count = 1 } })
+            assert.is_false(GBL:_sortExecutorOpSucceeded(waiter("move", 100)))
+        end)
+
+        it("confirms a merge once the source has drained", function()
+            -- src empty -> drained; dst holds the item; merge pre-op.
+            Helpers.populateTab(2, { [1] = { itemID = 100, name = "Flask", count = 1 } })
+            assert.is_true(GBL:_sortExecutorOpSucceeded(waiter("move", 100)))
+        end)
+
+        it("does NOT confirm when the destination is still empty", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 2 } })
+            assert.is_false(GBL:_sortExecutorOpSucceeded(waiter("move", nil)))
+        end)
+
+        it("does NOT confirm while the cursor still holds an item", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 2 } })
+            Helpers.populateTab(2, { [1] = { itemID = 100, name = "Flask", count = 1 } })
+            local origCursor = _G.CursorHasItem
+            _G.CursorHasItem = function() return true end
+            local ok = GBL:_sortExecutorOpSucceeded(waiter("move", nil))
+            _G.CursorHasItem = origCursor
+            assert.is_false(ok)
+        end)
+    end)
+
     describe("consecutive-refusal abort (v0.32.8 B1)", function()
         -- Drive a real timeout-path classification by exploiting the mock's
         -- bounce-on-max-stack-overflow behavior: when a merge would exceed
