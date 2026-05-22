@@ -5,6 +5,7 @@
 - **Phase A** shipped as v0.32.5 on `main` (commit `eee8a83`). Pre-warm + warning banner prevented the TWW crafted-quality reagent crash; verified in-game on a 502-slot bank.
 - **Phase B** scope: late-poll dominance, singleton-chain emit, planner state desync on splits, `[other]` timeout bucket overload. Originally identified in `~/.claude/projects/.../memory/project_sort_log_2026_05_14_late_poll_storm.md`; reproduced on 2026-05-20 (see `docs/sort-logs/2026-05-20-prewarm-success-late-poll-recurrence.md`).
 - **This document** is the Phase B audit and milestone proposal. Current branch: `layout-sort`. Target version: `v0.32.8` (patch; v0.32.6 and v0.32.7 consumed by two intervening hotfixes).
+- **SHIPPED** in v0.32.8 (PR #30). B1-B4a landed as planned. Driven by in-game captures, Phase B also grew to fix how the executor confirms moves: the classifier was dead in-game (it string-matched the name-prefixed `describeSlot`; it now reads structured slot state), a new `drain-pending` class plus confirm-on-deposit (a move/split into an empty or different-item slot confirms on the deposit, not the lagging source-drain), and a cross-tab in-window re-query (a deposit into a non-viewed tab is invisible until the executor re-queries that tab in-window). The shipped audit format is `timeout[s,p,c,m,dp,o]`; the `n`/`r` bucket names in the verification criteria below were pre-implementation guesses (see CHANGELOG.md for the final). B4b (planner singleton-chain) and B5 (replan-scan race) remain deferred; confirm-speed tuning is queued for v0.32.9.
 
 ## Data points
 

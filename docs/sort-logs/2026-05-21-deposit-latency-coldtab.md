@@ -42,6 +42,15 @@ proven by the bank converging correctly across hundreds of them. The change is g
 
 ## Cold-tab: still open, now instrumented (passively)
 
+> **Resolved (2026-05-21, same day, commit `5df8ea2`):** the cause is observation
+> staleness, now confirmed. WoW pushes slot updates only for the currently-viewed
+> tab, so a deposit into a non-viewed tab is invisible until that tab is re-queried.
+> The "query/view the destination tab on tab-change" fix proposed below was tried
+> (`ddb2f2a`) and proved ineffective: `QueryGuildBankTab` does not change the
+> selected tab. The working fix re-queries the destination tab during the in-flight
+> op's own window. See `2026-05-21-viewed-tab-confirmed.md`. The text below is the
+> original (superseded) open-question framing.
+
 We do not yet know *why* first-deposits into a sparse tab are >20s. Candidates:
 observation staleness (the deposit lands server-side but `GetGuildBankItemInfo` returns
 cached data for a tab we are not "viewing"), server lazy-init of a sparse tab, or server

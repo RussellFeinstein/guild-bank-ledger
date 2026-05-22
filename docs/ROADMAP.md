@@ -68,7 +68,7 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 Per-area status:
 
 - **Mature**: recording, categorization, deduplication, tiered storage, schema migrations.
-- **Active** (in guild use, improvements queued): sync (rate limiting and manifest tuning pending), UI (sort/filter polish, pagination layout, window resize), sort + layout (planner correctness across cold caches, layout editor slot visibility, refresh flicker).
+- **Active** (in guild use, improvements queued): sync (rate limiting and manifest tuning pending), UI (sort/filter polish, pagination layout, window resize), sort + layout (confirmation-speed tuning, the overflow-pack full-stack-merge edge case, layout editor slot visibility, refresh flicker).
 - **Under audit**: accessibility. Palettes, contrast, triple encoding, and font scaling are wired; keyboard-navigation primitives exist but are not threaded through all UI widgets. An independent audit pass is the next planned milestone and is a v1.0 release gate.
 
 ---
