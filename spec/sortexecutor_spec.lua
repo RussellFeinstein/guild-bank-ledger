@@ -1098,6 +1098,89 @@ describe("SortExecutor", function()
     -- view-gated-reads mock mode plus a regression test asserting a cross-tab
     -- op confirms via the in-window re-query rather than the 4s late-poll.
 
+    describe("cross-tab confirm under view-gated reads (v0.32.8 Phase-2)", function()
+        -- These exercise the in-game behavior the synchronous mock could not:
+        -- WoW pushes slot data only for the selected tab, so a deposit into a
+        -- tab the user is not viewing is invisible until QueryGuildBankTab pulls
+        -- it. With viewGatedReads on, a cross-tab op can only confirm because the
+        -- executor re-queries the destination tab in-window. Multi-op plans need
+        -- serverTime advanced to clear the inter-move gap between ops.
+        local function drainSort(maxRounds)
+            maxRounds = maxRounds or 60
+            for _ = 1, maxRounds do
+                if #MockWoW.pendingTimers == 0 then return end
+                MockWoW.serverTime = MockWoW.serverTime + 5.0
+                MockWoW.fireTimers()
+            end
+        end
+
+        it("mock self-check: a deposit into a non-viewed tab is invisible until queried", function()
+            MockWoW.guildBank.currentTab = 1
+            MockWoW.guildBank.viewGatedReads = true
+            -- Place an item directly into tab 2's store; tab 2 is not viewed.
+            Helpers.populateTab(2, { [1] = { itemID = 100, name = "Flask", count = 5 } })
+            -- Not visible: tab 2 was never queried.
+            assert.is_nil(_G.GetGuildBankItemLink(2, 1))
+            -- Querying pulls it into view and fires the event.
+            _G.QueryGuildBankTab(2)
+            assert.is_not_nil(_G.GetGuildBankItemLink(2, 1))
+            -- The query did NOT change the selected tab (query != select).
+            assert.equals(1, _G.GetCurrentGuildBankTab())
+        end)
+
+        it("confirms a cross-tab deposit via the in-window re-query, not the timeout", function()
+            MockWoW.addTab("Tab 3", nil, true)
+            -- Source tab (T1) is viewed; destinations (T2, T3) are not.
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 5 },
+                [2] = { itemID = 101, name = "Vial", count = 5 },
+            })
+            MockWoW.guildBank.currentTab = 1
+            MockWoW.guildBank.viewGatedReads = true
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 3, dstSlot = 1, itemID = 101, count = 5 },
+                },
+            }, function(r) result = r end)
+            drainSort()
+            assert.is_not_nil(result)
+            assert.is_true(result.ok)
+            assert.equals(2, result.done)
+            assert.equals(0, result.failed)
+            -- Confirmed in-window, NOT via the 4s server-rejected timeout path.
+            assert.equals(0, result.timeoutByClass["server-rejected"])
+            -- The destinations were re-queried so their deposits became visible.
+            assert.is_true(MockWoW.guildBank.queriedTabs[2] or false)
+            assert.is_true(MockWoW.guildBank.queriedTabs[3] or false)
+            -- The deposits actually landed in the store.
+            assert.is_not_nil(MockWoW.guildBank.tabs[2].slots[1])
+            assert.is_not_nil(MockWoW.guildBank.tabs[3].slots[1])
+        end)
+
+        it("does not replan on the re-query's own slots-changed echo", function()
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 5 },
+            })
+            MockWoW.guildBank.currentTab = 1
+            MockWoW.guildBank.viewGatedReads = true
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
+                },
+            }, function(r) result = r end)
+            drainSort()
+            assert.is_not_nil(result)
+            assert.is_true(result.ok)
+            assert.equals(0, result.replans)
+        end)
+    end)
+
     describe("consecutive-refusal abort (v0.32.8 B1)", function()
         -- Drive a real timeout-path classification by exploiting the mock's
         -- bounce-on-max-stack-overflow behavior: when a merge would exceed
