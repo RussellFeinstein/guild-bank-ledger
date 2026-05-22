@@ -108,20 +108,30 @@ function GBL:QueryAndScanTab()
     scanState.pendingTimer = C_Timer.After(SCAN_TIMEOUT, function()
         if scanState.inProgress and scanState.waitingForData
            and scanState.currentTab == tabAtStart then
-            GBL:TryScanCurrentTab()
+            GBL:TryScanCurrentTab(false)
         end
     end)
 end
 
 --- Attempt to scan the current tab's slots.
 -- Called after QueryGuildBankTab and on GUILDBANKBAGSLOTS_CHANGED.
-function GBL:TryScanCurrentTab()
+-- @param viaEvent boolean true when driven by GUILDBANKBAGSLOTS_CHANGED,
+--   false when driven by the query-timeout fallback. Recorded per tab so a
+--   cold-snapshot can be diagnosed after the fact. nil defaults to "timeout".
+function GBL:TryScanCurrentTab(viaEvent)
     if not scanState.inProgress then
         return
     end
 
     local tabIndex = scanState.currentTab
     self:ScanTab(tabIndex)
+
+    -- Record how this tab's data arrived: a real GUILDBANKBAGSLOTS_CHANGED
+    -- event (warm) vs the query-timeout fallback (server data may never have
+    -- arrived — the cold-cache fingerprint behind phantom sort plans).
+    if scanState.results[tabIndex] then
+        scanState.results[tabIndex].completedVia = viaEvent and "event" or "timeout"
+    end
 
     scanState.waitingForData = false
     self:UnregisterEvent("GUILDBANKBAGSLOTS_CHANGED")
@@ -131,7 +141,7 @@ end
 --- Scan all 98 slots in a single tab.
 -- @param tabIndex number The tab to scan
 function GBL:ScanTab(tabIndex)
-    local tabResult = { slots = {}, itemCount = 0 }
+    local tabResult = { slots = {}, itemCount = 0, lockedSkips = 0 }
 
     for slotIndex = 1, MAX_SLOTS do
         local itemLink = GetGuildBankItemLink(tabIndex, slotIndex)
@@ -146,6 +156,11 @@ function GBL:ScanTab(tabIndex)
                     tabIndex = tabIndex,
                 }
                 tabResult.itemCount = tabResult.itemCount + 1
+            else
+                -- Slot holds an item but is transiently locked (e.g. mid
+                -- server mutation). Skipped from the snapshot — count it so a
+                -- sort planned against this scan can be diagnosed.
+                tabResult.lockedSkips = tabResult.lockedSkips + 1
             end
         end
     end
@@ -196,6 +211,25 @@ function GBL:FinalizeScan()
             totalItems, tabCount, elapsed))
     end
 
+    -- Per-tab diagnostic summary: occupied count, how the tab's data arrived
+    -- (event vs query-timeout), and any locked-slot skips. A display tab
+    -- reading 0(timeout) or locked=N while reality holds items is the
+    -- cold-snapshot fingerprint behind phantom sort plans.
+    local parts = {}
+    for _, tabIndex in ipairs(scanState.viewableTabs) do
+        local tr = results[tabIndex]
+        if tr then
+            local seg = string.format("T%d=%d(%s", tabIndex, tr.itemCount,
+                tr.completedVia or "?")
+            if (tr.lockedSkips or 0) > 0 then
+                seg = seg .. string.format(",locked=%d", tr.lockedSkips)
+            end
+            table.insert(parts, seg .. ")")
+        end
+    end
+    self:SystemInfo("Scan: %s (%d total, %ds)",
+        table.concat(parts, " "), totalItems, elapsed)
+
     self:SendMessage("GBL_SCAN_COMPLETE", results, totalItems)
 end
 
@@ -226,6 +260,6 @@ end
 
 function GBL:GUILDBANKBAGSLOTS_CHANGED()
     if scanState.inProgress and scanState.waitingForData then
-        self:TryScanCurrentTab()
+        self:TryScanCurrentTab(true)
     end
 end

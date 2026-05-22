@@ -14,6 +14,12 @@ MockWoW.guildBank = {
     transactionLogs = {},  -- tabIndex -> array of {type, name, itemLink, count, tab1, tab2, year, month, day, hour}
     moneyTransactions = {},  -- array of {type, name, amount, year, month, day, hour}
     queriedLogs = {},  -- tabIndex -> true after QueryGuildBankLog
+    -- v0.32.8 Phase-2: opt-in non-viewed-tab staleness. When true, reads of a
+    -- tab other than currentTab come from visibleSlots (refreshed only by
+    -- QueryGuildBankTab), modelling WoW pushing slot data only for the selected
+    -- tab. Default false keeps every existing test on the synchronous model.
+    viewGatedReads = false,
+    visibleSlots = {},  -- tabIndex -> { slotIndex -> slot copy } (view-gated only)
 }
 
 -- Mock guild state
@@ -63,6 +69,8 @@ function MockWoW.reset()
         transactionLogs = {},
         moneyTransactions = {},
         queriedLogs = {},
+        viewGatedReads = false,
+        visibleSlots = {},
     }
     MockWoW.guild = {
         name = nil,
@@ -86,6 +94,11 @@ function MockWoW.reset()
     MockWoW.framerate = 60
     MockWoW.chatMessageFilters = {}
     MockWoW.cursor = nil
+    -- v0.32.8 B2: deferred-bank-events test affordance. Default off so
+    -- existing tests retain their synchronous-event semantics; opt-in
+    -- per test for the interim-poll cascade integration tests.
+    MockWoW.deferredBankEvents = false
+    MockWoW.queuedBankEvents = {}
 end
 
 ---------------------------------------------------------------------------
@@ -225,9 +238,24 @@ function MockWoW.install()
     -- scanner flows don't need explicit event firing.
     _G.QueryGuildBankTab = function(tabIndex)
         MockWoW.guildBank.queriedTabs[tabIndex] = true
+        if MockWoW.guildBank.viewGatedReads then
+            -- A query pulls the tab's current store into the visible snapshot
+            -- and fires the event, but does NOT change the selected tab (in
+            -- real WoW, QueryGuildBankTab is not the same as selecting the tab).
+            MockWoW._snapshotTabVisible(tabIndex)
+        else
+            MockWoW.guildBank.currentTab = tabIndex  -- querying a tab "views" it
+        end
         if _G.__MockAce_fireEvent then
             _G.__MockAce_fireEvent("GUILDBANKBAGSLOTS_CHANGED")
         end
+    end
+
+    -- Currently-viewed guild bank tab (real WoW: the tab the player has open).
+    -- Set by QueryGuildBankTab; used by the sort executor's viewed-tab
+    -- diagnostic to correlate the viewed tab with deposit latency.
+    _G.GetCurrentGuildBankTab = function()
+        return MockWoW.guildBank.currentTab
     end
 
     -- Query transaction log (marks tab log as ready)
@@ -260,19 +288,48 @@ function MockWoW.install()
         return tx.type, tx.name, tx.amount, tx.year, tx.month, tx.day, tx.hour
     end
 
+    -- v0.32.8 Phase-2: copy a tab's authoritative slots into its visible
+    -- snapshot. Called by QueryGuildBankTab (a pull) and by a mutation to the
+    -- selected tab. Stored as per-slot copies, not references, so a later
+    -- in-place count change to the store does not leak into the snapshot.
+    function MockWoW._snapshotTabVisible(tabIndex)
+        local gb = MockWoW.guildBank
+        local tab = gb.tabs[tabIndex]
+        if not tab then return end
+        local snap = {}
+        for slotIndex, slot in pairs(tab.slots) do
+            snap[slotIndex] = {
+                itemLink = slot.itemLink, texture = slot.texture,
+                count = slot.count, locked = slot.locked,
+                isFiltered = slot.isFiltered, quality = slot.quality,
+                itemID = slot.itemID,
+            }
+        end
+        gb.visibleSlots[tabIndex] = snap
+    end
+
+    -- Resolve the slot a read should see. Authoritative for the current tab and
+    -- whenever view-gating is off; the last-pulled snapshot for any other tab.
+    function MockWoW._readableSlot(tabIndex, slotIndex)
+        local gb = MockWoW.guildBank
+        local tab = gb.tabs[tabIndex]
+        if not tab then return nil end
+        if gb.viewGatedReads and tabIndex ~= gb.currentTab then
+            local vis = gb.visibleSlots[tabIndex]
+            return vis and vis[slotIndex] or nil
+        end
+        return tab.slots[slotIndex]
+    end
+
     -- Guild bank item access
     _G.GetGuildBankItemLink = function(tabIndex, slotIndex)
-        local tab = MockWoW.guildBank.tabs[tabIndex]
-        if not tab then return nil end
-        local slot = tab.slots[slotIndex]
+        local slot = MockWoW._readableSlot(tabIndex, slotIndex)
         if not slot then return nil end
         return slot.itemLink
     end
 
     _G.GetGuildBankItemInfo = function(tabIndex, slotIndex)
-        local tab = MockWoW.guildBank.tabs[tabIndex]
-        if not tab then return nil end
-        local slot = tab.slots[slotIndex]
+        local slot = MockWoW._readableSlot(tabIndex, slotIndex)
         if not slot then return nil end
         return slot.texture, slot.count, slot.locked, slot.isFiltered, slot.quality
     end
@@ -293,8 +350,28 @@ function MockWoW.install()
     MockWoW.cursor = nil
 
     local function fireBankEvent()
-        local handlers = MockWoW.frames  -- not used here
-        handlers = nil
+        -- v0.32.8 Phase-2: under view-gated reads, a mutation to a tab other
+        -- than the selected (currentTab) one is invisible: it fires no push
+        -- event and reads stay stale until QueryGuildBankTab pulls it. A
+        -- mutation to the selected tab refreshes its snapshot and fires as
+        -- usual. The mutating function records the tab in _lastMutatedTab; we
+        -- consume it here so a later generic fire (nil) is never gated.
+        local gb = MockWoW.guildBank
+        local mutatedTab = gb._lastMutatedTab
+        gb._lastMutatedTab = nil
+        if gb.viewGatedReads and mutatedTab ~= nil then
+            if mutatedTab ~= gb.currentTab then
+                return
+            end
+            MockWoW._snapshotTabVisible(mutatedTab)
+        end
+        -- v0.32.8 B2: deferred-event mode for testing the interim-poll cascade.
+        -- When MockWoW.deferredBankEvents is true, queue the event instead of
+        -- firing synchronously; tests pop them via MockWoW.fireQueuedBankEvent().
+        if MockWoW.deferredBankEvents then
+            table.insert(MockWoW.queuedBankEvents, "GUILDBANKBAGSLOTS_CHANGED")
+            return
+        end
         -- Mock addon events go through MockAce; we call through to any
         -- registered AceEvent handler via the global MockAce fireEvent shim.
         if _G.__MockAce_fireEvent then
@@ -302,6 +379,19 @@ function MockWoW.install()
         end
     end
     MockWoW.fireGuildBankBagslotsChanged = fireBankEvent
+
+    --- v0.32.8 B2: pop one queued bank event off the deferred queue and
+    --- fire it. Returns true if an event was fired, false if the queue
+    --- was empty.
+    function MockWoW.fireQueuedBankEvent()
+        local q = MockWoW.queuedBankEvents
+        if not q or #q == 0 then return false end
+        local evt = table.remove(q, 1)
+        if _G.__MockAce_fireEvent then
+            _G.__MockAce_fireEvent(evt)
+        end
+        return true
+    end
 
     _G.ClearCursor = function()
         MockWoW.cursor = nil
@@ -321,6 +411,7 @@ function MockWoW.install()
     _G.PickupGuildBankItem = function(tabIndex, slotIndex)
         local tab = MockWoW.guildBank.tabs[tabIndex]
         if not tab then return end
+        MockWoW.guildBank._lastMutatedTab = tabIndex
         local slot = tab.slots[slotIndex]
         if MockWoW.cursor == nil then
             -- Pickup: grab whole slot.
@@ -425,6 +516,7 @@ function MockWoW.install()
         if not tab then return end
         local slot = tab.slots[slotIndex]
         if not slot or MockWoW.cursor ~= nil then return end
+        MockWoW.guildBank._lastMutatedTab = tabIndex
         amount = math.min(amount or slot.count, slot.count)
         if amount <= 0 then return end
         MockWoW.cursor = {
@@ -449,6 +541,7 @@ function MockWoW.install()
         local tab = MockWoW.guildBank.tabs[tabIndex]
         if tab and tab.slots[slotIndex] then
             tab.slots[slotIndex] = nil
+            MockWoW.guildBank._lastMutatedTab = tabIndex
             fireBankEvent()
         end
     end
@@ -462,6 +555,7 @@ function MockWoW.install()
             itemLink = link, texture = "", count = count or 1,
             locked = false, isFiltered = false, itemID = itemID, quality = 1,
         }
+        MockWoW.guildBank._lastMutatedTab = tabIndex
         fireBankEvent()
     end
 

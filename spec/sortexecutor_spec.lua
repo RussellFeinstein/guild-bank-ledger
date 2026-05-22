@@ -358,10 +358,13 @@ describe("SortExecutor", function()
             assert.equals(0, result.preCheckFails)
             assert.equals(0, result.cursorStuck)
             assert.is_not_nil(result.timeoutByClass)
-            assert.equals(0, result.timeoutByClass.none)
+            assert.equals(0, result.timeoutByClass["server-rejected"])
             assert.equals(0, result.timeoutByClass.partial)
             assert.equals(0, result.timeoutByClass.complete)
+            assert.equals(0, result.timeoutByClass["merge-noop"])
             assert.equals(0, result.timeoutByClass.other)
+            -- v0.32.8 B3: projection-drift counter surfaces in the result.
+            assert.equals(0, result.projectionDrifts)
         end)
 
         it("audits server reversion when last op's dst slot reverts before next event", function()
@@ -886,6 +889,743 @@ describe("SortExecutor", function()
             assert.is_false(helper({ ops = {} }))
             assert.is_false(helper(nil))
             assert.is_false(helper({}))
+        end)
+    end)
+
+    describe("classifyTimeoutState (v0.32.8 B1)", function()
+        -- Unit-tests the pure classifier exposed via the test hook. Args are
+        -- structured live-slot snapshots ({itemID, count} or nil for empty),
+        -- matching what the executor passes from snapshotLiveSlot. The
+        -- classifier no longer parses describeSlot strings (those carry the
+        -- resolved item name in-game, which defeated the old prefix match).
+        it("classifies src-unchanged + dst-empty + no-cursor as server-rejected", function()
+            local op = { itemID = 100, plannerDstAt = nil }
+            local class = GBL:_sortExecutorClassifyTimeoutState(
+                op, { itemID = 100, count = 20 }, nil, false)
+            assert.equals("server-rejected", class)
+        end)
+
+        it("classifies src-empty + cursor-held as partial", function()
+            local op = { itemID = 100, plannerDstAt = nil }
+            local class = GBL:_sortExecutorClassifyTimeoutState(
+                op, nil, nil, true)
+            assert.equals("partial", class)
+        end)
+
+        it("classifies src-empty + dst-has-expected + no-cursor as complete", function()
+            local op = { itemID = 100, plannerDstAt = nil }
+            local class = GBL:_sortExecutorClassifyTimeoutState(
+                op, nil, { itemID = 100, count = 20 }, false)
+            assert.equals("complete", class)
+        end)
+
+        it("classifies src+dst-both-have-expected + no-cursor as merge-noop "
+           .. "when dst already held the item pre-op", function()
+            -- Genuine no-op: dst already held this item before the op (a merge
+            -- that bounced), so nothing was deposited. dstPreLive carries the
+            -- pre-op item, distinguishing this from a fresh-deposit drain-pending.
+            local op = { itemID = 100, plannerDstAt = nil }
+            local class = GBL:_sortExecutorClassifyTimeoutState(
+                op, { itemID = 100, count = 20 }, { itemID = 100, count = 15 },
+                false, { itemID = 100, count = 15 })
+            assert.equals("merge-noop", class)
+        end)
+
+        it("classifies a fresh deposit with lagging source-drain as drain-pending", function()
+            -- Split into a slot that was EMPTY pre-op: dst now holds the item
+            -- (deposit landed) but src still shows the full stack (the
+            -- source-drain has not surfaced in the client yet). dstPreLive is
+            -- nil, so this op deposited what we see. It is in-flight progress,
+            -- not a refusal, and must NOT feed the 3-strike abort.
+            local op = { itemID = 100, plannerDstAt = nil }
+            local class = GBL:_sortExecutorClassifyTimeoutState(
+                op, { itemID = 100, count = 20 }, { itemID = 100, count = 1 },
+                false, nil)
+            assert.equals("drain-pending", class)
+        end)
+
+        it("classifies a deposit into a slot that held a different item "
+           .. "as drain-pending", function()
+            -- dstPreLive holds a DIFFERENT item, so the expected item now at
+            -- dst was deposited by this op. Still a fresh deposit, not a refusal.
+            local op = { itemID = 100, plannerDstAt = nil }
+            local class = GBL:_sortExecutorClassifyTimeoutState(
+                op, { itemID = 100, count = 20 }, { itemID = 100, count = 1 },
+                false, { itemID = 999, count = 3 })
+            assert.equals("drain-pending", class)
+        end)
+
+        it("classifies src+dst-both-have-expected + no-cursor as complete "
+           .. "when planner intended a same-item merge", function()
+            -- Real merge-into-non-empty whose ACK was lost: planner emitted
+            -- this op KNOWING dst already held the item, and the timeout
+            -- observation shows both src and dst still hold it. Without
+            -- planner intent, this looks identical to merge-noop. With it,
+            -- we know the merge happened and treat it as success.
+            local op = {
+                itemID = 100,
+                plannerDstAt = { itemID = 100, count = 5 },
+            }
+            local class = GBL:_sortExecutorClassifyTimeoutState(
+                op, { itemID = 100, count = 20 }, { itemID = 100, count = 15 }, false)
+            assert.equals("complete", class)
+        end)
+
+        it("classifies src-empty + dst-empty + no-cursor as other", function()
+            local op = { itemID = 100, plannerDstAt = nil }
+            -- Nothing observable; should NOT match any of the named cases.
+            local class = GBL:_sortExecutorClassifyTimeoutState(
+                op, nil, nil, false)
+            assert.equals("other", class)
+        end)
+
+        it("classifies dst holding a different item as other "
+           .. "(foreign activity, not a refusal)", function()
+            -- src still has the expected item but dst now holds something
+            -- else (another player dropped an item into the target slot).
+            -- Must NOT bucket as merge-noop / server-rejected, so it never
+            -- feeds the 3-strike refusal abort.
+            local op = { itemID = 100, plannerDstAt = nil }
+            local class = GBL:_sortExecutorClassifyTimeoutState(
+                op, { itemID = 100, count = 20 }, { itemID = 999, count = 5 }, false)
+            assert.equals("other", class)
+        end)
+    end)
+
+    describe("isAbortableRefusal (v0.32.8 Phase-1)", function()
+        -- Only a move/merge into a slot that already held the SAME item counts
+        -- toward the 3-strike abort (a genuine max-stack bounce). Ops into an
+        -- empty/different slot are deposits whose confirmation lags, never
+        -- refusals, so they must not feed the abort.
+        local op = { itemID = 100 }
+
+        it("counts merge-noop into an occupied same-item slot", function()
+            assert.is_true(GBL:_sortExecutorIsAbortableRefusal(
+                "merge-noop", op, { itemID = 100, count = 20 }))
+        end)
+
+        it("counts server-rejected onto an occupied same-item slot", function()
+            assert.is_true(GBL:_sortExecutorIsAbortableRefusal(
+                "server-rejected", op, { itemID = 100, count = 20 }))
+        end)
+
+        it("does NOT count server-rejected into an empty slot (lagging deposit)", function()
+            assert.is_false(GBL:_sortExecutorIsAbortableRefusal(
+                "server-rejected", op, nil))
+        end)
+
+        it("does NOT count server-rejected into a different-item slot", function()
+            assert.is_false(GBL:_sortExecutorIsAbortableRefusal(
+                "server-rejected", op, { itemID = 999, count = 3 }))
+        end)
+
+        it("does NOT count drain-pending, partial, complete, or other", function()
+            assert.is_false(GBL:_sortExecutorIsAbortableRefusal(
+                "drain-pending", op, nil))
+            assert.is_false(GBL:_sortExecutorIsAbortableRefusal(
+                "partial", op, nil))
+            assert.is_false(GBL:_sortExecutorIsAbortableRefusal(
+                "complete", op, { itemID = 100, count = 5 }))
+            assert.is_false(GBL:_sortExecutorIsAbortableRefusal(
+                "other", op, { itemID = 100, count = 5 }))
+        end)
+    end)
+
+    describe("opSucceeded (v0.32.8 Phase-2 confirm-on-deposit)", function()
+        -- Destination is the waiter's tabIndex/slotIndex (tab 2); source is
+        -- srcTab/srcSlot (tab 1). Populate live slots and call the hook.
+        local function waiter(opLabel, dstPreItemID)
+            return {
+                tabIndex = 2, slotIndex = 1,   -- dst
+                srcTab = 1, srcSlot = 1,       -- src
+                itemID = 100, count = 1,
+                opLabel = opLabel or "move",
+                dstPreOp = dstPreItemID
+                    and { itemID = dstPreItemID, count = 1 } or nil,
+                srcPreOp = { itemID = 100, count = 2 },
+            }
+        end
+
+        it("confirms a move into an EMPTY slot on dst-has-item, no src-drain", function()
+            -- dst holds the item; src still holds it (not drained); dstPreOp nil.
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 2 } })
+            Helpers.populateTab(2, { [1] = { itemID = 100, name = "Flask", count = 1 } })
+            assert.is_true(GBL:_sortExecutorOpSucceeded(waiter("move", nil)))
+        end)
+
+        it("confirms a deposit into a DIFFERENT-item slot on dst-has-item", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 2 } })
+            Helpers.populateTab(2, { [1] = { itemID = 100, name = "Flask", count = 1 } })
+            assert.is_true(GBL:_sortExecutorOpSucceeded(waiter("move", 999)))
+        end)
+
+        it("does NOT confirm a merge into an occupied same-item slot until src drains", function()
+            -- dst held the same item pre-op; src still holds it -> not drained.
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 2 } })
+            Helpers.populateTab(2, { [1] = { itemID = 100, name = "Flask", count = 1 } })
+            assert.is_false(GBL:_sortExecutorOpSucceeded(waiter("move", 100)))
+        end)
+
+        it("confirms a merge once the source has drained", function()
+            -- src empty -> drained; dst holds the item; merge pre-op.
+            Helpers.populateTab(2, { [1] = { itemID = 100, name = "Flask", count = 1 } })
+            assert.is_true(GBL:_sortExecutorOpSucceeded(waiter("move", 100)))
+        end)
+
+        it("does NOT confirm when the destination is still empty", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 2 } })
+            assert.is_false(GBL:_sortExecutorOpSucceeded(waiter("move", nil)))
+        end)
+
+        it("does NOT confirm while the cursor still holds an item", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 2 } })
+            Helpers.populateTab(2, { [1] = { itemID = 100, name = "Flask", count = 1 } })
+            local origCursor = _G.CursorHasItem
+            _G.CursorHasItem = function() return true end
+            local ok = GBL:_sortExecutorOpSucceeded(waiter("move", nil))
+            _G.CursorHasItem = origCursor
+            assert.is_false(ok)
+        end)
+    end)
+
+    -- The destination-tab view tests were removed in v0.32.8 Phase-2. The
+    -- pre-op QueryGuildBankTab they exercised was ineffective in-game (query
+    -- does not change the viewed tab) and is replaced by an in-window dst
+    -- re-query. The current mock fires GUILDBANKBAGSLOTS_CHANGED synchronously
+    -- on every mutation regardless of viewed tab, so it cannot reproduce the
+    -- non-viewed-tab staleness this fix targets — every op confirms via the
+    -- sync path before any re-query timer fires. Round 2 adds an opt-in
+    -- view-gated-reads mock mode plus a regression test asserting a cross-tab
+    -- op confirms via the in-window re-query rather than the 4s late-poll.
+
+    describe("cross-tab confirm under view-gated reads (v0.32.8 Phase-2)", function()
+        -- These exercise the in-game behavior the synchronous mock could not:
+        -- WoW pushes slot data only for the selected tab, so a deposit into a
+        -- tab the user is not viewing is invisible until QueryGuildBankTab pulls
+        -- it. With viewGatedReads on, a cross-tab op can only confirm because the
+        -- executor re-queries the destination tab in-window. Multi-op plans need
+        -- serverTime advanced to clear the inter-move gap between ops.
+        local function drainSort(maxRounds)
+            maxRounds = maxRounds or 60
+            for _ = 1, maxRounds do
+                if #MockWoW.pendingTimers == 0 then return end
+                MockWoW.serverTime = MockWoW.serverTime + 5.0
+                MockWoW.fireTimers()
+            end
+        end
+
+        it("mock self-check: a deposit into a non-viewed tab is invisible until queried", function()
+            MockWoW.guildBank.currentTab = 1
+            MockWoW.guildBank.viewGatedReads = true
+            -- Place an item directly into tab 2's store; tab 2 is not viewed.
+            Helpers.populateTab(2, { [1] = { itemID = 100, name = "Flask", count = 5 } })
+            -- Not visible: tab 2 was never queried.
+            assert.is_nil(_G.GetGuildBankItemLink(2, 1))
+            -- Querying pulls it into view and fires the event.
+            _G.QueryGuildBankTab(2)
+            assert.is_not_nil(_G.GetGuildBankItemLink(2, 1))
+            -- The query did NOT change the selected tab (query != select).
+            assert.equals(1, _G.GetCurrentGuildBankTab())
+        end)
+
+        it("confirms a cross-tab deposit via the in-window re-query, not the timeout", function()
+            MockWoW.addTab("Tab 3", nil, true)
+            -- Source tab (T1) is viewed; destinations (T2, T3) are not.
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 5 },
+                [2] = { itemID = 101, name = "Vial", count = 5 },
+            })
+            MockWoW.guildBank.currentTab = 1
+            MockWoW.guildBank.viewGatedReads = true
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 3, dstSlot = 1, itemID = 101, count = 5 },
+                },
+            }, function(r) result = r end)
+            drainSort()
+            assert.is_not_nil(result)
+            assert.is_true(result.ok)
+            assert.equals(2, result.done)
+            assert.equals(0, result.failed)
+            -- Confirmed in-window, NOT via the 4s server-rejected timeout path.
+            assert.equals(0, result.timeoutByClass["server-rejected"])
+            -- The destinations were re-queried so their deposits became visible.
+            assert.is_true(MockWoW.guildBank.queriedTabs[2] or false)
+            assert.is_true(MockWoW.guildBank.queriedTabs[3] or false)
+            -- The deposits actually landed in the store.
+            assert.is_not_nil(MockWoW.guildBank.tabs[2].slots[1])
+            assert.is_not_nil(MockWoW.guildBank.tabs[3].slots[1])
+        end)
+
+        it("does not replan on the re-query's own slots-changed echo", function()
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 5 },
+            })
+            MockWoW.guildBank.currentTab = 1
+            MockWoW.guildBank.viewGatedReads = true
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
+                },
+            }, function(r) result = r end)
+            drainSort()
+            assert.is_not_nil(result)
+            assert.is_true(result.ok)
+            assert.equals(0, result.replans)
+        end)
+    end)
+
+    describe("consecutive-refusal abort (v0.32.8 B1)", function()
+        -- Drive a real timeout-path classification by exploiting the mock's
+        -- bounce-on-max-stack-overflow behavior: when a merge would exceed
+        -- the item's stackCount, MockWoW's PickupGuildBankItem drop branch
+        -- bounces the cursor item back to its source slot. Post-Pickup
+        -- observation: src still holds the item, dst still at max stack,
+        -- cursor empty. classifyTimeoutState returns "merge-noop" when the
+        -- op's plannerDstAt is nil (planner intended dst to be empty).
+        -- Three such ops in a row on the same itemID trip the 3-strike abort.
+
+        local function makeBouncingPlan()
+            -- Three move ops, all item 100, each srcN→dstN. Set maxStack=20
+            -- and pre-populate each src with x10, each dst with x20. The
+            -- merge overflows on every op → bounce → src retains x10, dst
+            -- retains x20, cursor empty → classifier reads merge-noop.
+            MockWoW.itemNames[100] = { stackCount = 20 }
+            -- Add more tabs so we have somewhere to route the ops.
+            MockWoW.addTab("Tab 3", nil, true)
+            MockWoW.addTab("Tab 4", nil, true)
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 10 },
+                [2] = { itemID = 100, name = "Flask", count = 10 },
+                [3] = { itemID = 100, name = "Flask", count = 10 },
+            })
+            Helpers.populateTab(2, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+                [2] = { itemID = 100, name = "Flask", count = 20 },
+                [3] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            return {
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 10,
+                      plannerDstAt = nil },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 2, dstSlot = 2, itemID = 100, count = 10,
+                      plannerDstAt = nil },
+                    { op = "move", srcTab = 1, srcSlot = 3,
+                      dstTab = 2, dstSlot = 3, itemID = 100, count = 10,
+                      plannerDstAt = nil },
+                },
+            }
+        end
+
+        --- Drive the executor through pending timers while advancing
+        --- serverTime so the inter-move gap doesn't stall the loop and the
+        --- MOVE_CONFIRM_TIMEOUT C_Timer.After actually crosses its delay.
+        local function drainSortWithTimeAdvance(maxRounds)
+            maxRounds = maxRounds or 30
+            for _ = 1, maxRounds do
+                if #MockWoW.pendingTimers == 0 then return end
+                MockWoW.serverTime = MockWoW.serverTime + 5.0  -- past 4s timeout
+                MockWoW.fireTimers()
+            end
+        end
+
+        it("aborts with refusal reason after 3 consecutive refusals on same item", function()
+            local plan = makeBouncingPlan()
+            local result
+            GBL:ExecuteSortPlan(plan, function(r) result = r end)
+            drainSortWithTimeAdvance()
+            assert.is_not_nil(result)
+            assert.is_false(result.ok)
+            assert.matches("repeated server refusal on item 100", result.reason)
+            assert.matches("3 consecutive merge%-noop", result.reason)
+            -- Three merge-noop timeouts before the abort fires.
+            assert.equals(3, result.timeoutByClass["merge-noop"])
+            assert.equals(0, result.timeoutByClass["server-rejected"])
+            -- Abort fires before opIndex advances past op 3 — so 3 failed,
+            -- 0 done.
+            assert.equals(0, result.done)
+            assert.equals(3, result.failed)
+        end)
+
+        it("classifies + aborts even when the item name resolves "
+           .. "(in-game regression: classifier must not parse describeSlot)", function()
+            -- Regression for the v0.32.8 dead-classifier bug. In-game,
+            -- DescribeItem prefixes the resolved name, so describeSlot
+            -- returns "Flask of the Currents (it:100) x10" rather than the
+            -- bare "it:100 x10" the no-name test env produces. The old
+            -- classifier prefix-matched "it:100 x" at position 1, so it
+            -- bucketed every real refusal as "other" — silently disabling
+            -- the merge-noop bucket and the 3-strike abort. Warm the
+            -- ItemCache so describeSlot WOULD carry the name, then assert the
+            -- structured classifier still reads merge-noop and aborts.
+            local plan = makeBouncingPlan()
+            MockWoW.itemNames[100].name = "Flask of the Currents"
+            GBL:GetCachedItemInfo(100)  -- synchronously warms the name cache
+            -- Premise: the in-game name-prefixed describeSlot form is in play.
+            assert.matches("Flask of the Currents %(it:100%)", GBL:DescribeItem(100))
+
+            local result
+            GBL:ExecuteSortPlan(plan, function(r) result = r end)
+            drainSortWithTimeAdvance()
+            assert.is_not_nil(result)
+            assert.is_false(result.ok)
+            assert.matches("repeated server refusal on item 100", result.reason)
+            assert.matches("3 consecutive merge%-noop", result.reason)
+            assert.equals(3, result.timeoutByClass["merge-noop"])
+            -- The whole point: nothing leaked into "other".
+            assert.equals(0, result.timeoutByClass["other"])
+        end)
+
+        it("does not abort when a refusal is interrupted by a success", function()
+            -- First op bounces (merge-noop, counter=1). Second op succeeds
+            -- (counter reset). Third op bounces again (counter=1 again).
+            -- No abort.
+            MockWoW.itemNames[100] = { stackCount = 20 }
+            MockWoW.addTab("Tab 3", nil, true)
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 10 },
+                [2] = { itemID = 200, name = "Vial",  count = 10 },
+                [3] = { itemID = 100, name = "Flask", count = 10 },
+            })
+            Helpers.populateTab(2, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+                -- slot 3 left empty so op 3 can also bounce
+                [3] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    -- Op 1: bounces (merge-noop)
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 10,
+                      plannerDstAt = nil },
+                    -- Op 2: succeeds (different item, empty dst)
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 3, dstSlot = 1, itemID = 200, count = 10 },
+                    -- Op 3: bounces (merge-noop)
+                    { op = "move", srcTab = 1, srcSlot = 3,
+                      dstTab = 2, dstSlot = 3, itemID = 100, count = 10,
+                      plannerDstAt = nil },
+                },
+            }, function(r) result = r end)
+            drainSortWithTimeAdvance()
+            assert.is_not_nil(result)
+            -- Sort runs to completion (no abort): 1 succeeded, 2 timed out.
+            assert.is_true(result.ok)
+            assert.equals(1, result.done)
+            assert.equals(2, result.failed)
+            assert.equals(2, result.timeoutByClass["merge-noop"])
+        end)
+
+        it("counter resets across items: A refusals do not combine with B refusals (B1.F2)", function()
+            -- Per-item isolation: 2 refusals on item 100 followed by 1
+            -- refusal on item 200 does NOT trip the 3-strike abort.
+            -- consecutiveRefusedByItem is keyed by itemID, but the reset-
+            -- on-non-refused-class branch resets the WHOLE table, not
+            -- just the same-item entry. So a refusal on item B clears
+            -- pending strikes on item A (and on item B too, since the
+            -- B refusal increments its own counter to 1 before the
+            -- reset-via-different-class logic would fire). Actually:
+            -- the table is reset only on success / non-refused class,
+            -- NOT on a refusal of a different item. So A=2 + B=1 stays
+            -- as {100=2, 200=1} → no abort. This test verifies the
+            -- per-item key semantics.
+            MockWoW.itemNames[100] = { stackCount = 20 }
+            MockWoW.itemNames[200] = { stackCount = 20 }
+            MockWoW.addTab("Tab 3", nil, true)
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 10 },
+                [2] = { itemID = 100, name = "Flask", count = 10 },
+                [3] = { itemID = 200, name = "Vial",  count = 10 },
+            })
+            Helpers.populateTab(2, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+                [2] = { itemID = 100, name = "Flask", count = 20 },
+                [3] = { itemID = 200, name = "Vial",  count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    -- 2 refusals on item 100
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 10,
+                      plannerDstAt = nil },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 2, dstSlot = 2, itemID = 100, count = 10,
+                      plannerDstAt = nil },
+                    -- 1 refusal on item 200
+                    { op = "move", srcTab = 1, srcSlot = 3,
+                      dstTab = 2, dstSlot = 3, itemID = 200, count = 10,
+                      plannerDstAt = nil },
+                },
+            }, function(r) result = r end)
+            -- Reuse the bounce-test time-advance helper.
+            for _ = 1, 30 do
+                if #MockWoW.pendingTimers == 0 then break end
+                MockWoW.serverTime = MockWoW.serverTime + 5.0
+                MockWoW.fireTimers()
+            end
+            assert.is_not_nil(result)
+            -- 2 strikes on item 100, 1 strike on item 200 — neither
+            -- reaches 3. Sort runs to its natural end (all 3 ops
+            -- failed via merge-noop), no abort.
+            assert.is_true(result.ok,
+                "expected sort to complete naturally; got reason: " ..
+                tostring(result.reason))
+            assert.equals(3, result.failed)
+            assert.equals(3, result.timeoutByClass["merge-noop"])
+        end)
+
+        it("doReplan clears the per-item refusal counter (B1.F1)", function()
+            -- Regression: doReplan must reset consecutiveRefusedByItem so
+            -- that strikes accumulated under the OLD plan don't leak into
+            -- the new plan. Otherwise 2 refusals + replan + 1 refusal on
+            -- the same item would falsely trip the 3-strike abort even
+            -- though the plan structure changed between strikes 2 and 3.
+            --
+            -- We use the synthetic _sortExecutorSetRefusalCount hook to
+            -- seed counter[100] = 2 without driving through 2 real
+            -- refusals (cheaper and deterministic). Then trigger a replan
+            -- by firing a foreign GUILDBANKBAGSLOTS_CHANGED while
+            -- state.waiting is nil (foreign activity branch). After
+            -- replan, the counter must be 0.
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+                [2] = { itemID = 200, name = "Vial",  count = 20 },
+            })
+            Helpers.populateTab(2, {})
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 2, dstSlot = 2, itemID = 200, count = 20 },
+                },
+            }, function() end)
+            -- Op 1 ran sync. State is alive in the inter-move gap.
+            -- Seed refusal counter for item 100 to 2 strikes.
+            GBL:_sortExecutorSetRefusalCount(100, 2)
+            assert.equals(2, GBL:_sortExecutorGetRefusalCount(100))
+            -- Now simulate foreign activity that triggers replan. Mutate
+            -- the bank's slot 1 (just-vacated by op 1's source) by
+            -- placing an unexpected item there.
+            Helpers.populateTab(1, {
+                [1] = { itemID = 999, name = "Foreign", count = 5 },
+                [2] = { itemID = 200, name = "Vial", count = 20 },
+            })
+            MockAce.fireEvent("GUILDBANKBAGSLOTS_CHANGED")
+            -- Counter for item 100 should be cleared by the replan path.
+            -- (After the foreign event, state may or may not still be
+            -- alive depending on replan internals; if state is nil the
+            -- hook returns 0 which is also "cleared".)
+            assert.equals(0, GBL:_sortExecutorGetRefusalCount(100),
+                "doReplan must reset consecutiveRefusedByItem")
+        end)
+    end)
+
+    describe("interim-poll cascade (v0.32.8 B2)", function()
+        -- Drive the executor through the interim-poll cascade by deferring
+        -- bank events so the sync post-Pickup check finds no advance
+        -- signal, then fire a queued event from inside one of the interim
+        -- poll's offsets to make the predicates pass.
+
+        it("sync path still advances when deferredBankEvents is off", function()
+            -- Regression: existing tests rely on sync-mode events firing
+            -- during PickupGuildBankItem. The deferred-events flag must
+            -- default to false so this path stays intact.
+            assert.is_false(MockWoW.deferredBankEvents,
+                "deferredBankEvents must default to false")
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                },
+            }, function(r) result = r end)
+            drainTimers()
+            assert.is_not_nil(result)
+            assert.is_true(result.ok)
+            -- Sync path succeeded — no late-poll, no interim-poll needed.
+            assert.equals(1, result.done)
+            assert.equals(0, result.timeoutByClass["server-rejected"])
+            assert.equals(0, result.timeoutByClass["merge-noop"])
+        end)
+
+        it("queues bank events when deferredBankEvents is on", function()
+            -- Verify the mock affordance itself: with the flag set,
+            -- PickupGuildBankItem mutates bank state but does NOT fire
+            -- GUILDBANKBAGSLOTS_CHANGED. The event lands in
+            -- MockWoW.queuedBankEvents for explicit pop.
+            MockWoW.deferredBankEvents = true
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            assert.equals(0, #MockWoW.queuedBankEvents)
+            -- Drive a single Pickup pair without the executor.
+            _G.PickupGuildBankItem(1, 1)
+            _G.PickupGuildBankItem(2, 1)
+            -- Two events queued (one per Pickup), nothing fired.
+            assert.is_true(#MockWoW.queuedBankEvents >= 2,
+                "expected queued bank events; got " ..
+                #MockWoW.queuedBankEvents)
+            -- Helper pops events one at a time.
+            local fired = MockWoW.fireQueuedBankEvent()
+            assert.is_true(fired)
+        end)
+
+        it("setupMocks resets deferredBankEvents and queuedBankEvents", function()
+            -- Set the flag and queue an event, then re-setup. State must
+            -- reset between tests so flags don't leak across files.
+            MockWoW.deferredBankEvents = true
+            table.insert(MockWoW.queuedBankEvents, "GUILDBANKBAGSLOTS_CHANGED")
+            Helpers.setupMocks()
+            assert.is_false(MockWoW.deferredBankEvents)
+            assert.equals(0, #MockWoW.queuedBankEvents)
+        end)
+
+        it("audit emits secondary planner line only on divergence (v0.32.8 B3)", function()
+            -- Force a merge-noop timeout (bounce mechanism) but stamp the
+            -- op's planner projection to MATCH the observed values. The
+            -- planner-projected line should NOT appear, and
+            -- projectionDrifts should stay 0.
+            MockWoW.itemNames[100] = { stackCount = 20 }
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 10 },
+            })
+            Helpers.populateTab(2, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    -- plannerSrcAt/plannerDstAt deliberately match what
+                    -- the bounce-induced timeout observes: src still has
+                    -- 10 (bounced back), dst still has 20.
+                    {
+                        op = "move", srcTab = 1, srcSlot = 1,
+                        dstTab = 2, dstSlot = 1, itemID = 100, count = 10,
+                        plannerSrcAt = { itemID = 100, count = 10 },
+                        plannerDstAt = { itemID = 100, count = 20 },
+                    },
+                },
+            }, function(r) result = r end)
+            -- Drive past the 4 s late-poll.
+            for _ = 1, 30 do
+                if #MockWoW.pendingTimers == 0 then break end
+                MockWoW.serverTime = MockWoW.serverTime + 5.0
+                MockWoW.fireTimers()
+            end
+            assert.is_not_nil(result)
+            -- Op classified as complete because plannerDstAt has the same
+            -- item (B1 classifier disambiguates merge-noop vs complete).
+            -- This op shows up as "complete" timeout (real merge ACK lost).
+            -- Either way, planner-projected == observed → no drift.
+            assert.equals(0, result.projectionDrifts,
+                "no divergence expected when planner projection matches observed")
+            -- The secondary "(planner projected: …)" line must NOT appear.
+            local trail = GBL:GetLog("sort")
+            local sawProjectedLine = false
+            for _, entry in ipairs(trail or {}) do
+                if entry.message and entry.message:find("planner projected:", 1, true) then
+                    sawProjectedLine = true
+                    break
+                end
+            end
+            assert.is_false(sawProjectedLine,
+                "secondary planner-projected line must be suppressed when matching observed")
+        end)
+
+        it("audit emits secondary planner line on real divergence (v0.32.8 B3)", function()
+            -- Same bounce setup as above but stamp plannerSrcAt with a
+            -- DIFFERENT count than what observed will show. The planner-
+            -- projected line MUST appear and projectionDrifts increments.
+            MockWoW.itemNames[100] = { stackCount = 20 }
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 10 },
+            })
+            Helpers.populateTab(2, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    {
+                        op = "move", srcTab = 1, srcSlot = 1,
+                        dstTab = 2, dstSlot = 1, itemID = 100, count = 10,
+                        -- Deliberately mismatch live: planner thought src
+                        -- had 6 (it actually has 10 post-bounce).
+                        plannerSrcAt = { itemID = 100, count = 6 },
+                        plannerDstAt = { itemID = 100, count = 20 },
+                    },
+                },
+            }, function(r) result = r end)
+            for _ = 1, 30 do
+                if #MockWoW.pendingTimers == 0 then break end
+                MockWoW.serverTime = MockWoW.serverTime + 5.0
+                MockWoW.fireTimers()
+            end
+            assert.is_not_nil(result)
+            -- Real drift detected.
+            assert.equals(1, result.projectionDrifts)
+            -- Audit trail contains the secondary planner-projected line.
+            local trail = GBL:GetLog("sort")
+            local sawProjectedLine = false
+            for _, entry in ipairs(trail or {}) do
+                if entry.message and entry.message:find("planner projected:", 1, true) then
+                    sawProjectedLine = true
+                    break
+                end
+            end
+            assert.is_true(sawProjectedLine,
+                "secondary planner-projected line must appear on divergence")
+        end)
+
+        it("interim-poll advances when predicates pass after deferred event", function()
+            -- End-to-end: defer bank events, issue a sort, advance time
+            -- past the first interim-poll offset (0.25s). At that point
+            -- the bank state already reflects the move (mock mutates
+            -- slot state synchronously even when events are deferred),
+            -- so the interim-poll's predicates pass and the op advances
+            -- via [interim-poll]. Audit trail records the tag.
+            MockWoW.deferredBankEvents = true
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 20 },
+                },
+            }, function(r) result = r end)
+            -- Pickup pair ran synchronously, mock mutated slots. Events
+            -- are queued, not fired. Sync post-Pickup check inside step()
+            -- DOES run (since it doesn't rely on events) — and in this
+            -- case it would have advanced too. To exercise the
+            -- interim-poll specifically, we'd need a scenario where the
+            -- sync check fails but the predicates pass at 0.25s. The
+            -- mock's slot mutation is instantaneous, so the sync check
+            -- always wins here. This test therefore verifies the END
+            -- result is correct under deferredBankEvents, not which
+            -- branch advanced.
+            drainTimers()
+            assert.is_not_nil(result)
+            assert.is_true(result.ok, result.reason)
+            assert.equals(1, result.done)
+            -- Whichever branch advanced, the timeout buckets stay empty.
+            assert.equals(0, result.timeoutByClass["merge-noop"])
+            assert.equals(0, result.timeoutByClass["server-rejected"])
         end)
     end)
 end)

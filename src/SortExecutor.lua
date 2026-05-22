@@ -37,6 +37,23 @@ local SCAN_WAIT_TIMEOUT   = 10.0  -- seconds to wait for replan scan
 -- can retroactively reclassify that op as success. Without this, a genuine
 -- late server ACK is misread as foreign activity and triggers replan.
 local LATE_ACK_GRACE      = 5.0
+-- v0.32.8 B2: gap to use after an interim-poll advance (vs the default
+-- INTER_MOVE_GAP after a sync or async-event advance). Interim polls fire
+-- at 0.25/0.5/1.0/2.0 s; an advance via these has had less real time on
+-- the server than a 4.0 s late-poll path, so we give the server a slightly
+-- longer cushion before issuing the next op.
+local INTER_MOVE_GAP_AFTER_INTERIM = 0.5
+-- v0.32.8 B2: schedule poll attempts at these offsets after Pickup. Each
+-- poll re-runs the same advance predicates the sync path uses; first one
+-- to pass advances the op via the [interim-poll] audit tag.
+local INTERIM_POLL_OFFSETS = { 0.25, 0.5, 1.0, 2.0 }
+-- v0.32.8 Phase-2: when the destination tab is not the currently-viewed tab,
+-- WoW pushes no slot updates for it, so a cross-tab deposit is invisible to our
+-- reads until something re-pulls that tab. Re-query the dst at these offsets
+-- during the in-flight op's window so its GUILDBANKBAGSLOTS_CHANGED drives the
+-- async-confirm path in-window instead of one op cycle (~5s) later. Interleaved
+-- with INTERIM_POLL_OFFSETS so a poll reads the freshened cache right after.
+local DST_REQUERY_OFFSETS = { 0.5, 1.5, 3.0 }
 
 ------------------------------------------------------------------------
 -- Helpers
@@ -129,6 +146,50 @@ local function srcDrainedAsExpected(w)
     return (srcPost == nil) or (srcPost.itemID ~= w.itemID)
 end
 
+--- v0.32.8 Phase-2: did the op succeed? A move/split into a slot that was
+--- EMPTY or held a DIFFERENT item pre-op is confirmed by the destination now
+--- holding the expected item: the deposit is server-driven (it fires the
+--- slots-changed event) and persists, while the source-stack decrement lags
+--- well past the confirmation window for guild-bank splits. Requiring
+--- src-drain there only wastes ~3.4s per op (in-game data: deposit lands
+--- ~0.6s, src-drain >4s). For a MERGE into a slot that already held the same
+--- item, the destination is ambiguous (an optimistic bounce looks identical),
+--- so the src-drained predicate is still required there.
+local function opSucceeded(w)
+    if not w then return false end
+    if _G.CursorHasItem and _G.CursorHasItem() then return false end
+    if not slotHasAtLeast(w.tabIndex, w.slotIndex, w.itemID, w.count) then
+        return false
+    end
+    local dstWasOther = (w.dstPreOp == nil) or (w.dstPreOp.itemID ~= w.itemID)
+    if dstWasOther then return true end
+    return srcDrainedAsExpected(w)
+end
+
+-- v0.32.8 Phase-2 instrument (passive): the currently-viewed guild bank tab.
+-- WoW actively tracks one viewed tab and returns cached slot data for others.
+-- Stamping it on the success / timeout / deposit-observer audit lines lets a
+-- post-mortem correlate the viewed tab with deposit latency, testing whether
+-- cross-tab deposits into a non-viewed tab cause the cold-tab >20s tail. Pure
+-- read; never changes the viewed tab.
+local function viewedTabStr()
+    local v = _G.GetCurrentGuildBankTab and _G.GetCurrentGuildBankTab()
+    return v and ("T" .. tostring(v)) or "T?"
+end
+
+--- v0.32.8 B2: cancel any interim-poll timers attached to the given
+--- waiting record. Called from every advance / abort / cleanup path so
+--- a poll firing after state tears down can't double-advance or trip
+--- assertions. Tolerant of missing `pollTimers` field (legacy waiters,
+--- or a waiter cleaned up partway).
+local function cancelPollTimers(w)
+    if not w or not w.pollTimers then return end
+    for _, t in ipairs(w.pollTimers) do
+        if t and t.Cancel then t:Cancel() end
+    end
+    w.pollTimers = {}
+end
+
 --- Audit a "no-op suspected" line for an op whose dst+cursor look like
 --- success but whose src never drained. Surfaces phantom success cases
 --- so the post-mortem identifies which op was rejected by the server
@@ -137,35 +198,137 @@ local function auditOpNoop(w, branch)
     if not w then return end
     local itemDesc = (w.itemID and GBL.DescribeItem)
         and GBL:DescribeItem(w.itemID) or ("it:" .. tostring(w.itemID))
+    -- Phase-1 instrument: stamp elapsed-since-issue so the FIRST noop on an op
+    -- marks when the deposit became observable (dst showed the item). This is
+    -- the fast-deposit latency; the slow cases are measured by the deposit
+    -- observer scheduled at the timeout.
+    local elapsed = w.startedAt and (GetTime() - w.startedAt) or 0
     GBL:SortWarn(string.format(
-        "Sort op %d no-op suspected [%s]: %s T%d/S%d->T%d/S%d %s x%d "
+        "Sort op %d no-op suspected [%s] at +%.1fs: %s T%d/S%d->T%d/S%d %s x%d "
         .. "(dst already held expected item; src unchanged)",
-        w.opIndex, branch, w.opLabel or "move",
+        w.opIndex, branch, elapsed, w.opLabel or "move",
         w.srcTab or 0, w.srcSlot or 0,
         w.tabIndex, w.slotIndex,
         itemDesc, w.count or 0))
 end
 
+-- Phase-1 instrument: for an op whose deposit had NOT landed by the timeout
+-- (classified server-rejected with an empty/other pre-op dst), keep watching
+-- the dst slot and log when the deposit actually lands. This measures the
+-- slow-deposit latency the 4s window misses, so Phase 2's wait cap is chosen
+-- from real data rather than an assumption. Pure observation: it never
+-- advances or aborts, only reads the slot and logs. Stops on bank close.
+local DEPOSIT_OBSERVE_CAP = 20  -- seconds
+local function observeDepositLatency(dstTab, dstSlot, itemID, count, opIndex, startedAt)
+    local function tick()
+        if not (GBL.IsBankOpen and GBL:IsBankOpen()) then
+            return  -- bank closed; can't observe further
+        end
+        if slotHasAtLeast(dstTab, dstSlot, itemID, count) then
+            GBL:SortInfo(string.format(
+                "Sort op %d: deposit landed at +%.1fs (into T%d, dst was empty "
+                .. "at 4s, viewed %s)",
+                opIndex, GetTime() - (startedAt or GetTime()), dstTab, viewedTabStr()))
+            return
+        end
+        if GetTime() - (startedAt or GetTime()) >= DEPOSIT_OBSERVE_CAP then
+            GBL:SortInfo(string.format(
+                "Sort op %d: deposit NOT observed within %ds (into T%d, viewed "
+                .. "%s, candidate genuine refusal)",
+                opIndex, DEPOSIT_OBSERVE_CAP, dstTab, viewedTabStr()))
+            return
+        end
+        C_Timer.After(1.0, tick)
+    end
+    C_Timer.After(1.0, tick)
+end
+
 --- Classify a timeout's observed src/dst/cursor state into one of:
---- "none"    — src unchanged, dst empty (server dropped the request outright)
---- "partial" — src emptied, cursor holds item (pickup done, drop never landed)
---- "complete"— src drained, dst has expected item (move succeeded, ACK lost)
---- "other"   — some other anomalous combination
-local function classifyTimeoutState(op, srcDesc, dstDesc, cursorHasItem)
-    local srcExpected = string.format("it:%d x", op.itemID)  -- prefix match
-    local srcHasExpected = srcDesc:find(srcExpected, 1, true) == 1
-    local dstHasExpected = dstDesc:find(srcExpected, 1, true) == 1
-    local srcEmpty = (srcDesc == "empty")
-    local dstEmpty = (dstDesc == "empty")
+--- "server-rejected" — src unchanged, dst empty (server dropped the pickup
+---                     before drop landed). 3-strike abort candidate.
+--- "partial"         — src emptied, cursor holds item (pickup done, drop
+---                     never landed).
+--- "complete"        — src drained, dst has expected item (move succeeded,
+---                     ACK lost). Also covers the merge case where the
+---                     planner intended a same-item merge and got one.
+--- "merge-noop"      — src unchanged, dst has expected item, cursor empty,
+---                     and planner intended dst to be EMPTY at emit time.
+---                     Op was a no-op because some other item arrived at
+---                     dst between emit and execute, or the planner
+---                     emitted into a slot that was already populated.
+---                     3-strike abort candidate. Pre-v0.32.8 this fell
+---                     into "other".
+--- "drain-pending"   — like merge-noop (src unchanged, dst has expected item,
+---                     cursor empty, planner expected dst empty) BUT the live
+---                     pre-op dst was empty/other, so THIS op deposited the
+---                     item we now see and only the source-drain lags. A
+---                     guild-bank split deposits into dst before the client
+---                     reflects the source decrement. NOT a refusal: excluded
+---                     from the 3-strike abort so a real (if slow) sort runs
+---                     to completion instead of bailing on its own progress.
+--- "other"           — some other anomalous combination.
+---
+--- Classifies from structured live-slot snapshots (srcLive / dstLive are
+--- {itemID, count} tables or nil for empty, as returned by snapshotLiveSlot),
+--- NOT from the human-readable describeSlot string. In-game DescribeItem
+--- prefixes the resolved item name (e.g. "Flask (it:NNN) xN"), so the old
+--- "it:NNN x" position-1 prefix match never fired and every non-empty timeout
+--- collapsed into "other" — the merge-noop / server-rejected buckets and the
+--- 3-strike abort keyed off them were dead outside the no-item-name test env.
+local function classifyTimeoutState(op, srcLive, dstLive, cursorHasItem, dstPreLive)
+    local srcHasExpected = srcLive ~= nil and srcLive.itemID == op.itemID
+    local dstHasExpected = dstLive ~= nil and dstLive.itemID == op.itemID
+    local srcEmpty = (srcLive == nil)
+    local dstEmpty = (dstLive == nil)
     if srcHasExpected and dstEmpty and not cursorHasItem then
-        return "none"
+        return "server-rejected"
     elseif srcEmpty and cursorHasItem then
         return "partial"
     elseif srcEmpty and dstHasExpected and not cursorHasItem then
         return "complete"
+    elseif srcHasExpected and dstHasExpected and not cursorHasItem then
+        -- Planner intent disambiguates a real merge-success-with-lost-ACK
+        -- (treated as "complete") from a no-op refusal (treated as
+        -- "merge-noop"). The planner's emit-time projection of dst is
+        -- frozen on the op as plannerDstAt. If the planner expected dst
+        -- to already hold this item, the timeout-observed dst state is
+        -- consistent with the intended merge and the ACK was just lost.
+        local pdst = op.plannerDstAt
+        local pdstHasSameItem = pdst and pdst.itemID == op.itemID
+            and (pdst.count or 0) > 0
+        if pdstHasSameItem then
+            return "complete"
+        end
+        -- src still holds the item AND dst now holds it too, planner expected
+        -- dst empty. Discriminate a fresh deposit whose source-drain merely
+        -- lags (a guild-bank split deposits into dst before the client
+        -- reflects the source decrement) from a genuine no-op (dst already
+        -- held this item pre-op, so nothing was deposited and the move was
+        -- refused). dstPreLive is the live pre-op dst snapshot: nil or a
+        -- different item means THIS op deposited what we now see.
+        local depositedFresh = (dstPreLive == nil) or (dstPreLive.itemID ~= op.itemID)
+        if depositedFresh then
+            return "drain-pending"
+        end
+        return "merge-noop"
     else
         return "other"
     end
+end
+
+--- Decide whether a timeout should count toward the 3-strike refusal abort.
+--- Only a move/merge into a slot that ALREADY held the SAME item can be a
+--- genuine repeated refusal (a max-stack bounce: the server keeps rejecting
+--- the merge). An op into an empty or different-item slot is a deposit whose
+--- confirmation may simply lag (fast = drain-pending, slow = server-rejected
+--- with dst still empty at 4s); neither is a refusal, so excluding them lets a
+--- real sort run to completion instead of aborting on its own in-flight
+--- progress. dstPreLive is the live pre-op dst snapshot.
+local function isAbortableRefusal(class, op, dstPreLive)
+    if class ~= "server-rejected" and class ~= "merge-noop" then
+        return false
+    end
+    return dstPreLive ~= nil and dstPreLive.itemID == op.itemID
 end
 
 ------------------------------------------------------------------------
@@ -264,14 +427,15 @@ local function auditOpSuccess(w, suffix)
     local srcPost = snapshotLiveSlot(w.srcTab or 0, w.srcSlot or 0)
     local dstPost = snapshotLiveSlot(w.tabIndex, w.slotIndex)
     GBL:SortInfo(string.format(
-        "Sort op %d done: %s T%d/S%d->T%d/S%d %s x%d (%.1fs)%s src=%s dst=%s",
+        "Sort op %d done: %s T%d/S%d->T%d/S%d %s x%d (%.1fs)%s src=%s dst=%s viewed=%s",
         w.opIndex, w.opLabel or "move",
         w.srcTab or 0, w.srcSlot or 0,
         w.tabIndex, w.slotIndex,
         itemDesc, w.count, elapsed,
         suffix and (" " .. suffix) or "",
         describePlannerSlot(srcPost),
-        describePlannerSlot(dstPost)))
+        describePlannerSlot(dstPost),
+        viewedTabStr()))
 
     -- Stash for server-reversion detection on the next foreign-activity
     -- event. We compare slot state at that future time against the
@@ -328,6 +492,7 @@ function finish(ok, reason)
         preCheckFails = state.preCheckFails,
         cursorStuck = state.cursorStuck,
         timeoutByClass = state.timeoutByClass,
+        projectionDrifts = state.projectionDrifts or 0,
     }
 
     -- Single-line execution summary so the audit trail / chat log shows
@@ -341,18 +506,26 @@ function finish(ok, reason)
     local tbc = state.timeoutByClass
     GBL:SortInfo(string.format(
         "Sort: %s in %.1fs - %d ops (%d done, %d failed, %d replans, %d reclass)"
-        .. " preCheck=%d cursor=%d timeout[n=%d,p=%d,c=%d,o=%d] avg %.2fs/op",
+        .. " preCheck=%d cursor=%d timeout[s=%d,p=%d,c=%d,m=%d,dp=%d,o=%d]"
+        .. " drifts=%d avg %.2fs/op",
         ok and "complete" or ("aborted (" .. (reason or "?") .. ")"),
         elapsed, #state.plan.ops, state.done, state.failed,
         state.replans, state.reclassified,
         state.preCheckFails, state.cursorStuck,
-        tbc.none, tbc.partial, tbc.complete, tbc.other,
+        tbc["server-rejected"], tbc.partial, tbc.complete,
+        tbc["merge-noop"], tbc["drain-pending"], tbc.other,
+        state.projectionDrifts or 0,
         avg))
 
     -- Emit the final progress message BEFORE clearing state so listeners
     -- get the completion summary without needing a separate event shape.
     emitProgress("finish", { ok = ok, reason = reason })
     ClearCursor()
+    -- v0.32.8 B2: clear any interim-poll timers still pending before we
+    -- drop state. The poll callbacks' state-first guard would handle a
+    -- post-finish fire, but explicit cancel avoids a class of bugs where
+    -- a future change to the guard accidentally drops the check.
+    cancelPollTimers(state.waiting)
     unregisterBankEvents()
     state = nil
     if cb then
@@ -375,7 +548,18 @@ local function doReplan(reason)
     end
     state.replans = state.replans + 1
     ClearCursor()
+    -- v0.32.8 B2: cancel any pending interim-poll timers before clearing
+    -- state.waiting; otherwise the timers fire against a stale opIndex and
+    -- their state-first guard correctly no-ops, but cancelling here is
+    -- cheaper and clearer.
+    cancelPollTimers(state.waiting)
     state.waiting = nil
+    -- v0.32.8 B1.F1: replan changes plan structure, so the per-item
+    -- consecutive-refusal counter no longer reflects the same plan.
+    -- Without this reset, 2 refusals + replan + 1 refusal on the same
+    -- item would falsely trip the 3-strike abort even though the plan
+    -- between strikes 2 and 3 changed.
+    state.consecutiveRefusedByItem = {}
 
     GBL:SortInfo(
         string.format("Sort: replan %d/%d (%s)", state.replans, MAX_REPLANS, reason))
@@ -528,6 +712,9 @@ step = function()
         -- AFTER we advanced past this op, the server rejected the move.
         srcPreOp = snapshotLiveSlot(op.srcTab, op.srcSlot),
         dstPreOp = snapshotLiveSlot(op.dstTab, op.dstSlot),
+        -- v0.32.8 B2: timers scheduled by the interim-poll cascade; cleared
+        -- by cancelPollTimers() on every advance / abort path.
+        pollTimers = {},
     }
 
     -- Notify UI subscribers that this op is now executing. SortView uses
@@ -559,8 +746,10 @@ step = function()
         if slotHasAtLeast(op.dstTab, op.dstSlot, op.itemID, op.count) and
            not (_G.CursorHasItem and _G.CursorHasItem()) then
             local w = state.waiting
-            if srcDrainedAsExpected(w) then
+            if opSucceeded(w) then
                 state.done = state.done + 1
+                state.consecutiveRefusedByItem = {}  -- v0.32.8 B1
+                cancelPollTimers(w)                   -- v0.32.8 B2
                 state.waiting = nil
                 state.opIndex = myOpIndex + 1
                 state.gapUntil = GetTime() + INTER_MOVE_GAP
@@ -572,8 +761,8 @@ step = function()
                 return
             else
                 auditOpNoop(w, "sync")
-                -- Fall through: timeout-poll path will catch this as a
-                -- real failure and trigger replan.
+                -- Fall through: interim-poll cascade + timeout-poll
+                -- path will catch this as a real failure and trigger replan.
             end
         end
     end
@@ -581,6 +770,7 @@ step = function()
     -- Cursor stuck after placement? Clear and fail this op, advance.
     if _G.CursorHasItem and _G.CursorHasItem() then
         ClearCursor()
+        cancelPollTimers(state.waiting)             -- v0.32.8 B2
         state.failed = state.failed + 1
         state.cursorStuck = state.cursorStuck + 1
         state.waiting = nil
@@ -595,22 +785,114 @@ step = function()
         return
     end
 
+    -- v0.32.8 B2: interim polling cascade. The sync post-Pickup check above
+    -- runs synchronously after the Pickup pair; in retail the server hasn't
+    -- yet processed the move so the predicates almost always fail there.
+    -- Without this cascade, the next chance to advance is the 4.0 s
+    -- MOVE_CONFIRM_TIMEOUT — that's wall-clock waste of ~3.5 s per op when
+    -- the server actually processed in well under a second. Schedule polls
+    -- at 0.25/0.5/1.0/2.0 s; first to pass advances via [interim-poll].
+    -- The late-poll at 4.0 s remains as backstop.
+    --
+    -- State-alive guard: in synchronous-mock environments the async-event
+    -- handler invoked by PickupGuildBankItem can advance, then call step()
+    -- recursively, which can reach the "all done" branch and finish() the
+    -- sort (clearing state). When control returns to the outer step() here,
+    -- state is nil and we must NOT schedule interim polls.
+    if not state or not state.waiting or state.waiting.opIndex ~= myOpIndex then
+        -- The op already advanced (sync or async path) before we got here;
+        -- nothing to poll for.
+        return
+    end
+    do
+        local waiter = state.waiting
+        for _, offset in ipairs(INTERIM_POLL_OFFSETS) do
+            local t = C_Timer.After(offset, function()
+                -- State-first guard: pre-warm cancel / bank close can tear
+                -- down state from under us. Then verify this poll is still
+                -- attached to the same in-flight op (replan or advance
+                -- would have changed state.opIndex or state.waiting).
+                if not state or state.opIndex ~= myOpIndex
+                   or not state.waiting or state.waiting.opIndex ~= myOpIndex then
+                    return
+                end
+                local w = state.waiting
+                if opSucceeded(w) then
+                    state.done = state.done + 1
+                    state.consecutiveRefusedByItem = {}
+                    cancelPollTimers(w)
+                    state.waiting = nil
+                    state.opIndex = myOpIndex + 1
+                    -- Slightly longer cushion than INTER_MOVE_GAP: the
+                    -- server had less real time to confirm than a late-poll
+                    -- path would have given it.
+                    state.gapUntil = GetTime() + INTER_MOVE_GAP_AFTER_INTERIM
+                    auditOpSuccess(w, "[interim-poll]")
+                    emitProgress("complete", { completedOpIndex = myOpIndex })
+                    C_Timer.After(INTER_MOVE_GAP_AFTER_INTERIM, function()
+                        if isRunning() then step() end
+                    end)
+                end
+                -- Predicates failed: poll silently rejected; next poll or
+                -- the late-poll backstop will resolve.
+            end)
+            if waiter and waiter.pollTimers then
+                table.insert(waiter.pollTimers, t)
+            end
+        end
+
+        -- v0.32.8 Phase-2: keep the destination tab fresh during this op's
+        -- window. WoW only pushes slot updates for the currently-viewed tab; a
+        -- deposit into any other tab lands server-side but is invisible to our
+        -- reads until we re-pull that tab. Without this, the only re-pull is the
+        -- NEXT op's step(), so each cross-tab deposit surfaces ~one op cycle
+        -- (~5s) late. Re-querying here fires GUILDBANKBAGSLOTS_CHANGED while
+        -- state.waiting is still armed, so the async-confirm path advances the
+        -- op in-window. Gated on a known viewed tab differing from the dst (cur
+        -- is nil only in cold/test states; in-game a tab is always selected).
+        -- Timers ride pollTimers so a confirm cancels the rest.
+        local cur = _G.GetCurrentGuildBankTab and _G.GetCurrentGuildBankTab()
+        if _G.QueryGuildBankTab and cur and cur ~= op.dstTab then
+            for _, offset in ipairs(DST_REQUERY_OFFSETS) do
+                local rt = C_Timer.After(offset, function()
+                    if not state or state.opIndex ~= myOpIndex
+                       or not state.waiting or state.waiting.opIndex ~= myOpIndex then
+                        return
+                    end
+                    if not state.dstReQueryNoticed then
+                        state.dstReQueryNoticed = true
+                        GBL:SortInfo(string.format(
+                            "Sort: destination tab not viewed (viewed %s); re-querying "
+                            .. "dst in-window to confirm cross-tab deposits",
+                            viewedTabStr()))
+                    end
+                    _G.QueryGuildBankTab(op.dstTab)
+                end)
+                if waiter and waiter.pollTimers then
+                    table.insert(waiter.pollTimers, rt)
+                end
+            end
+        end
+    end
+
     -- Safety timeout: verify-by-polling if no event resolves us in time.
     C_Timer.After(MOVE_CONFIRM_TIMEOUT, function()
         if not state or not state.waiting or state.waiting.opIndex ~= myOpIndex then
             return  -- already advanced
         end
-        -- The dst-has-expected-item check is necessary but not sufficient:
-        -- when dst already held same-item at max-stack capacity, a no-op
-        -- looks identical to a success. The src-drained predicate
-        -- distinguishes real completion from a phantom.
-        local completedAtTimeout =
-            slotHasAtLeast(op.dstTab, op.dstSlot, op.itemID, op.count)
-            and srcDrainedAsExpected(state.waiting)
+        -- Confirm via opSucceeded: a deposit into an empty/other slot is
+        -- confirmed by dst holding the item (the warm case has usually already
+        -- advanced via an interim poll well before this 4s backstop); a merge
+        -- into an occupied same-item slot still requires src-drain.
+        local completedAtTimeout = opSucceeded(state.waiting)
         if completedAtTimeout then
             state.done = state.done + 1
             state.lastTimedOutOp = nil
             auditOpSuccess(state.waiting, "[late-poll]")
+            -- v0.32.8 B1: any forward progress resets the per-item
+            -- consecutive-refusal counter so a recovered op doesn't
+            -- inherit pre-recovery strikes.
+            state.consecutiveRefusedByItem = {}
         else
             state.failed = state.failed + 1
             -- Record the timeout so a late GUILDBANKBAGSLOTS_CHANGED arriving
@@ -631,7 +913,17 @@ step = function()
             local srcDesc = describeSlot(op.srcTab, op.srcSlot)
             local dstDesc = describeSlot(op.dstTab, op.dstSlot)
             local cursorHas = _G.CursorHasItem and _G.CursorHasItem() or false
-            local class = classifyTimeoutState(op, srcDesc, dstDesc, cursorHas)
+            local dstPre = state.waiting and state.waiting.dstPreOp
+            local opStartedAt = state.waiting and state.waiting.startedAt
+            -- Classify from structured live-slot state, not the display
+            -- strings above: describeSlot carries the resolved item name
+            -- in-game, which would defeat the classifier's item match.
+            local class = classifyTimeoutState(
+                op,
+                snapshotLiveSlot(op.srcTab, op.srcSlot),
+                snapshotLiveSlot(op.dstTab, op.dstSlot),
+                cursorHas,
+                dstPre)
             if state.timeoutByClass[class] then
                 state.timeoutByClass[class] = state.timeoutByClass[class] + 1
             else
@@ -647,16 +939,75 @@ step = function()
                 GBL.DescribeItem and GBL:DescribeItem(op.itemID) or ("it:" .. op.itemID),
                 op.count))
             GBL:SortWarn(string.format(
-                "  observed: src %s, dst %s, cursor %s",
-                srcDesc, dstDesc, cursorHas and "held" or "empty"))
-            -- Planner-expected pre-state at emit time. Pairs with the
-            -- "observed" line above to show whether the planner's view
-            -- and the live bank diverge for THIS op specifically.
-            GBL:SortWarn(string.format(
-                "  planner expected: src %s, dst %s",
-                describePlannerSlot(op.plannerSrcAt),
-                describePlannerSlot(op.plannerDstAt)))
+                "  observed: src %s, dst %s, cursor %s, viewed %s",
+                srcDesc, dstDesc, cursorHas and "held" or "empty", viewedTabStr()))
+            -- v0.32.8 Phase-1 instrument: a drain-pending timeout means THIS
+            -- op's deposit landed (dst filled from empty/other) but the source
+            -- decrement hasn't surfaced in the client by the 4s window. It is
+            -- in-flight progress, not a server refusal, so it does NOT feed the
+            -- 3-strike abort and the sort runs to completion. Capturing this
+            -- confirms the split actually succeeds before we switch the
+            -- confirmation rule to recognize the deposit directly.
+            if class == "drain-pending" then
+                GBL:SortWarn(string.format(
+                    "  -> deposit landed (dst was empty/other pre-op); "
+                    .. "source-drain pending past %ds, treated as in-flight",
+                    MOVE_CONFIRM_TIMEOUT))
+            end
+            -- Phase-1 instrument: a server-rejected timeout on an op whose dst
+            -- was empty/other pre-op is EITHER a slow deposit not yet landed or
+            -- a genuine refusal. Watch the dst past the 4s window and log when
+            -- (or whether) the deposit lands, measuring the slow-deposit
+            -- latency directly so Phase 2's wait cap comes from real data.
+            if class == "server-rejected"
+               and not (dstPre and dstPre.itemID == op.itemID) then
+                observeDepositLatency(op.dstTab, op.dstSlot, op.itemID, op.count,
+                    myOpIndex, opStartedAt)
+            end
+            -- v0.32.8 B3: emit the planner-projected secondary line ONLY
+            -- when it diverges from the live observed values. Planner
+            -- state mutates at emit time without a rollback path, so on
+            -- a chain of failed ops the planner's projection drifts from
+            -- live by one or more for every later op. Suppressing the
+            -- redundant "planner expected: x = observed: x" line keeps
+            -- the audit signal-to-noise high. When divergent, increment
+            -- state.projectionDrifts so finish() can report cumulative
+            -- drift count.
+            local plannerSrcStr = describePlannerSlot(op.plannerSrcAt)
+            local plannerDstStr = describePlannerSlot(op.plannerDstAt)
+            if plannerSrcStr ~= srcDesc or plannerDstStr ~= dstDesc then
+                GBL:SortWarn(string.format(
+                    "  (planner projected: src %s, dst %s)",
+                    plannerSrcStr, plannerDstStr))
+                state.projectionDrifts = (state.projectionDrifts or 0) + 1
+            end
+
+            -- v0.32.8 B1: consecutive-refusal abort, refined Phase-1: only a
+            -- move/merge into a slot that already held the SAME item is a
+            -- genuine repeated refusal (max-stack bounce). Ops into an
+            -- empty/other slot are deposits whose confirmation lags (fast =
+            -- drain-pending, slow = server-rejected with dst still empty at
+            -- 4s); excluding them keeps a real sort from aborting on its own
+            -- in-flight progress. Abort still fires on a true stuck merge.
+            local refused = isAbortableRefusal(class, op, dstPre)
+            if refused then
+                local n = (state.consecutiveRefusedByItem[op.itemID] or 0) + 1
+                state.consecutiveRefusedByItem[op.itemID] = n
+                if n >= 3 then
+                    finish(false, string.format(
+                        "repeated server refusal on item %d (%d consecutive %s)",
+                        op.itemID, n, class))
+                    return
+                end
+            else
+                state.consecutiveRefusedByItem = {}
+            end
         end
+        -- v0.32.8 B2: any interim-poll timers will have already fired by
+        -- the time we reach the 4.0s late-poll, so this cancel is mostly
+        -- defensive; it keeps the cleanup path uniform with the other
+        -- advance/abort sites.
+        cancelPollTimers(state.waiting)
         state.waiting = nil
         state.opIndex = myOpIndex + 1
         state.gapUntil = GetTime() + INTER_MOVE_GAP
@@ -698,6 +1049,7 @@ function GBL:_SortExecutor_OnSlotsChanged()
         state.done = state.done + 1
         state.failed = state.failed - 1
         state.reclassified = state.reclassified + 1
+        state.consecutiveRefusedByItem = {}  -- v0.32.8 B1
         GBL:SortInfo(string.format(
             "Sort: op %d confirmed by late event after timeout - reclassified as success",
             lto.opIndex))
@@ -721,12 +1073,14 @@ function GBL:_SortExecutor_OnSlotsChanged()
         local cursorHeld = _G.CursorHasItem and _G.CursorHasItem()
         if slotHasAtLeast(w.tabIndex, w.slotIndex, w.itemID, w.count)
            and not cursorHeld then
-            -- Same caveat as the [sync] path: dst-has-item passes trivially
-            -- when dst already held same-item at max-stack capacity. The
-            -- src-drained predicate is what distinguishes real ACK from
-            -- the optimistic-but-rejected client update.
-            if srcDrainedAsExpected(w) then
+            -- opSucceeded: a deposit into an empty/other slot is confirmed by
+            -- dst holding the item; a merge into an occupied same-item slot
+            -- still needs src-drain to distinguish a real ACK from the
+            -- optimistic-but-rejected client update (max-stack bounce).
+            if opSucceeded(w) then
                 state.done = state.done + 1
+                state.consecutiveRefusedByItem = {}  -- v0.32.8 B1
+                cancelPollTimers(w)                   -- v0.32.8 B2
                 state.waiting = nil
                 state.lastTimedOutOp = nil
                 state.opIndex = state.opIndex + 1
@@ -757,7 +1111,15 @@ function GBL:_SortExecutor_OnSlotsChanged()
         -- updates on Pickup so the [sync] / async success paths can't
         -- tell apart "server processed" from "server will reject" — but
         -- THIS event (the second one) carries the authoritative answer.
+        -- Only replan on a genuine divergence. A GUILDBANKBAGSLOTS_CHANGED that
+        -- leaves our most-recently-completed op's slots matching their projected
+        -- post-state is our own destination re-query refresh echo (or a
+        -- redundant server update), NOT foreign activity — replanning on it
+        -- would storm the sort with needless rescans. A real foreign mutation to
+        -- a slot we still depend on is caught by the next op's src/dst pre-check.
+        -- With no completed op to explain the event, stay conservative and replan.
         local lco = state.lastCompletedOp
+        local diverged = true
         if lco then
             local liveSrc = snapshotLiveSlot(lco.srcTab, lco.srcSlot)
             local liveDst = snapshotLiveSlot(lco.dstTab, lco.dstSlot)
@@ -782,9 +1144,15 @@ function GBL:_SortExecutor_OnSlotsChanged()
                         describePlannerSlot(lco.projectedDst),
                         describePlannerSlot(liveDst)))
                 end
+            else
+                -- Event consistent with our just-completed op: our own dst
+                -- re-query echo, not foreign activity.
+                diverged = false
             end
         end
-        doReplan("foreign activity (unexpected event)")
+        if diverged then
+            doReplan("foreign activity (unexpected event)")
+        end
     end
 end
 
@@ -929,7 +1297,29 @@ function GBL:ExecuteSortPlan(plan, onComplete, opts)
         reclassified = 0,
         preCheckFails = 0,
         cursorStuck = 0,
-        timeoutByClass = { none = 0, partial = 0, complete = 0, other = 0 },
+        timeoutByClass = {
+            ["server-rejected"] = 0,
+            partial = 0,
+            complete = 0,
+            ["merge-noop"] = 0,
+            ["drain-pending"] = 0,
+            other = 0,
+        },
+        -- Per-item consecutive refusal counter (v0.32.8 B1). Increments on
+        -- every server-rejected / merge-noop timeout for the same itemID.
+        -- Resets on any other class or any success. On count >= 3 the
+        -- executor aborts via finish(false, ...). Without this, the
+        -- singleton-chain pattern compounds into chain failure rather
+        -- than failing fast.
+        consecutiveRefusedByItem = {},
+        -- v0.32.8 B3: count of timeouts where the planner's emit-time
+        -- projection of src/dst diverged from the live observed values.
+        -- Surfaced in the finish() summary. Non-zero means the planner's
+        -- in-memory state has drifted from server reality during this
+        -- run; expected when the executor took the timeout path for any
+        -- ops since the planner doesn't rollback its working state on
+        -- a no-op.
+        projectionDrifts = 0,
     }
     registerBankEvents()
     GBL:SortInfo(
@@ -1003,4 +1393,43 @@ end
 -- in-flight guard refuses to issue a second op while one is already armed.
 function GBL:_sortExecutorStep()
     return step()
+end
+
+-- Test hook: inspect the per-item refusal counter. Returns the count for
+-- a given itemID (0 if absent). Used by tests that need to assert the
+-- counter state mid-sort without driving through finish().
+function GBL:_sortExecutorGetRefusalCount(itemID)
+    if not state or not state.consecutiveRefusedByItem then return 0 end
+    return state.consecutiveRefusedByItem[itemID] or 0
+end
+
+-- Test hook: synthetically set the per-item refusal counter. Used to
+-- verify reset paths (replan, success) without forcing the executor
+-- through three real refusals first.
+function GBL:_sortExecutorSetRefusalCount(itemID, count)
+    if not state then return end
+    state.consecutiveRefusedByItem[itemID] = count
+end
+
+-- Test hook: expose the pure classifier so unit tests can exercise each
+-- branch (server-rejected / partial / complete / merge-noop / drain-pending /
+-- other) without simulating a full server-rejection scenario in the mock bank.
+-- srcLive / dstLive / dstPreLive are {itemID, count} snapshots (or nil for empty).
+function GBL:_sortExecutorClassifyTimeoutState(op, srcLive, dstLive, cursorHasItem, dstPreLive)
+    return classifyTimeoutState(op, srcLive, dstLive, cursorHasItem, dstPreLive)
+end
+
+-- Test hook: expose the abort-refusal predicate so tests can verify which
+-- timeout classes count toward the 3-strike abort (only genuine merges into
+-- an occupied same-item slot) without driving a full bounce scenario.
+function GBL:_sortExecutorIsAbortableRefusal(class, op, dstPreLive)
+    return isAbortableRefusal(class, op, dstPreLive)
+end
+
+-- Test hook: expose the success predicate so tests can verify confirm-on-
+-- deposit (a split/move into an empty/other slot succeeds on dst-has-item,
+-- without waiting for source-drain) vs. a merge into an occupied same-item
+-- slot (still requires source-drain). `w` is a waiting record shape.
+function GBL:_sortExecutorOpSucceeded(w)
+    return opSucceeded(w)
 end
