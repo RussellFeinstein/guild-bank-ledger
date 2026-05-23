@@ -147,10 +147,10 @@ function GBL:RebuildTabs()
             { value = "transactions", text = "Transactions" },
             { value = "goldlog", text = "Gold Log" },
             { value = "consumption", text = "Consumption" },
-            { value = "sort", text = "Sort" },
         }
-        -- Layout editor: only visible to characters with sort access.
+        -- Sort and Layout tabs: only visible to characters with sort access.
         if self.HasSortAccess and self:HasSortAccess() then
+            table.insert(tabs, { value = "sort", text = "Sort" })
             table.insert(tabs, { value = "layout", text = "Layout" })
         end
         table.insert(tabs, { value = "sync", text = "Sync" })
