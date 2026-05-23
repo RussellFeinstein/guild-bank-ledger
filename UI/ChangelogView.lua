@@ -29,6 +29,19 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.32.9
+    {"0.32.9", "2026-05-22", {
+        Changed = {
+            "Sort engine replaced with a fire-and-forget pump. Each move fires once per second with no per-move confirmation wait, then at the end of a pass the bank is re-scanned and re-planned; if any moves remain, another pass runs automatically (up to 5 passes). In-game runs that used to take roughly 632 seconds for 184 moves should run closer to 190 seconds in one pass.",
+            "Sort runs are now self-healing if the client's frame loop wedges mid-run. A stall watchdog re-kicks the pump after about six seconds of no progress so the run resumes when the loop catches up, instead of needing the bank closed and the sort restarted.",
+            "Sort automatically throttles the periodic transaction-log re-scan for its duration so it does not slow the pump. While the sort runs, the addon flushes the transaction log every fifteen moves instead of every three seconds, so every move is still captured to the ledger but the re-scan does not hitch the pump. Your re-scan setting is restored when the sort ends.",
+            "The sort log buffer now holds 3000 entries (was 1000) so a full large sort run stays in the open sort log view without dropping its start.",
+        },
+        Removed = {
+            "The per-move confirmation machinery: the interim polling cascade at 0.25, 0.5, 1.0, and 2.0 seconds, the cross-tab re-queries at 1.5 and 3.0 seconds, the 4-second confirmation timeout, the 3-strike consecutive-refusal abort, and the related timeout classification. These were the old engine's way of knowing each move had landed before issuing the next; the new pump does not wait for confirmation, so they are gone along with the per-move confirm tag and the Sort confirm histogram summary line.",
+        },
+    }},
+
     -- v0.32.8
     {"0.32.8", "2026-05-20", {
         Changed = {

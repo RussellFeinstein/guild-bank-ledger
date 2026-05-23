@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.9] - 2026-05-22
+
 ### Changed
 - Sort engine replaced with a fire-and-forget pump. Each move fires once per second on a fixed cadence with no per-move confirmation wait, then at the end of a pass the bank is re-scanned and re-planned; if any moves remain, another pass runs automatically (up to 5 passes). The previous per-move confirmation that waited for a slots-changed event with re-queries at 1.5 and 3.0 seconds is gone. In-game runs that used to take roughly 632 seconds for 184 moves should run closer to 190 seconds in one pass.
 - Sort runs are now self-healing if the client's frame loop wedges mid-run (the "stops partway and needs a restart" hang). A stall watchdog re-kicks the pump after about six seconds of no progress so the run resumes when the loop catches up, instead of needing the bank to be closed and the sort restarted.
