@@ -5,6 +5,19 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.32.9] - 2026-05-22
+
+### Changed
+- Sort engine replaced with a fire-and-forget pump. Each move fires once per second on a fixed cadence with no per-move confirmation wait, then at the end of a pass the bank is re-scanned and re-planned; if any moves remain, another pass runs automatically (up to 5 passes). The previous per-move confirmation that waited for a slots-changed event with re-queries at 1.5 and 3.0 seconds is gone. In-game runs that used to take roughly 632 seconds for 184 moves should run closer to 190 seconds in one pass.
+- Sort runs are now self-healing if the client's frame loop wedges mid-run (the "stops partway and needs a restart" hang). A stall watchdog re-kicks the pump after about six seconds of no progress so the run resumes when the loop catches up, instead of needing the bank to be closed and the sort restarted.
+- Sort automatically throttles the periodic transaction-log re-scan for its duration so it does not slow the pump. The re-scan would otherwise hitch the main thread every three seconds and stretch per-move time from one second to three or four; in-game captures showed exactly that. While the sort is running, the addon flushes the transaction log every fifteen moves instead (well under the bank's per-tab log cap), so every move is still captured to the ledger. Your re-scan setting is restored when the sort ends.
+- The sort log buffer now holds 3000 entries (was 1000) so a full large sort run stays in the "open sort log" view without dropping its start.
+
+### Removed
+- The interim-poll cascade (0.25 / 0.5 / 1.0 / 2.0 seconds), the cross-tab re-queries at 1.5 and 3.0 seconds, the 4-second confirmation timeout, the 3-strike consecutive-refusal abort, and the related per-move timeout classification. These were the machinery the old confirmation model used to know each move had landed before issuing the next; the new pump does not wait for confirmation, so they are gone. The per-move confirm tag (for example `[async-event via requery@1.5]`) and the `Sort confirm histogram` summary line are gone with them.
+
 ## [0.32.8] - 2026-05-20
 
 ### Changed

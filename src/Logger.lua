@@ -29,7 +29,10 @@ local ADDON_NAME = "GuildBankLedger"
 local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 
 local CHANNELS = { sync = true, sort = true, system = true }
-local CAPS     = { sync = 2000, sort = 1000, system = 500 }
+-- sort is the largest because a single sort run can emit thousands of lines
+-- (per-op done/timeout/reclassify + the v0.32.9 confirm timeline), and the
+-- "open sort log" pop-up is meant to hold a full run without evicting its start.
+local CAPS     = { sync = 2000, sort = 3000, system = 500 }
 local LEVELS   = { DEBUG = true, INFO = true, WARN = true, ERROR = true }
 
 local CHAT_PREFIXES = { sync = "Sync: ", sort = "Sort: ", system = "System: " }

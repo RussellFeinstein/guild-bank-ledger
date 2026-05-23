@@ -50,6 +50,11 @@ MockWoW.serverTime = 1711700000
 -- Mock framerate (for FPS-adaptive throttling)
 MockWoW.framerate = 60
 
+-- Mock network latency (ms), returned by GetNetStats. Tests can override to
+-- simulate a laggy session.
+MockWoW.lagHome = 50
+MockWoW.lagWorld = 120
+
 -- Pending timers (for C_Timer.After)
 MockWoW.pendingTimers = {}
 
@@ -92,6 +97,8 @@ function MockWoW.reset()
     MockWoW.frames = {}
     MockWoW.cvars = {}
     MockWoW.framerate = 60
+    MockWoW.lagHome = 50
+    MockWoW.lagWorld = 120
     MockWoW.chatMessageFilters = {}
     MockWoW.cursor = nil
     -- v0.32.8 B2: deferred-bank-events test affordance. Default off so
@@ -740,6 +747,26 @@ function MockWoW.install()
                 fs.GetText = function() return fs._text end
                 return fs
             end,
+            -- Minimal AnimationGroup so the sort render-keepalive can be tested:
+            -- tracks play state; the addon only needs Play/Stop/SetLooping plus a
+            -- single Alpha animation with the usual setters.
+            CreateAnimationGroup = function()
+                local ag = { _playing = false, _looping = nil }
+                ag.CreateAnimation = function()
+                    local a = {}
+                    a.SetDuration = function() end
+                    a.SetFromAlpha = function() end
+                    a.SetToAlpha = function() end
+                    a.SetOffset = function() end
+                    a.SetOrder = function() end
+                    return a
+                end
+                ag.SetLooping = function(_, mode) ag._looping = mode end
+                ag.Play = function() ag._playing = true end
+                ag.Stop = function() ag._playing = false end
+                ag.IsPlaying = function() return ag._playing end
+                return ag
+            end,
         }
         table.insert(MockWoW.frames, frame)
         return frame
@@ -756,6 +783,12 @@ function MockWoW.install()
     -- GetTime (game time in seconds, fractional)
     _G.GetTime = function()
         return MockWoW.serverTime + 0.0
+    end
+
+    -- GetNetStats: bandwidthIn, bandwidthOut, lagHome(ms), lagWorld(ms).
+    -- Used by the sort speed instrumentation to record per-session latency.
+    _G.GetNetStats = function()
+        return 0, 0, MockWoW.lagHome or 0, MockWoW.lagWorld or 0
     end
 
     -- High-resolution profiling timer (ms since engine load).
