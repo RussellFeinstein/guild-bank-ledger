@@ -188,11 +188,11 @@ describe("Logger", function()
             assert.equal("entry 4", log[#log].message)
         end)
 
-        it("sort cap is 1000", function()
-            for i = 1, 1003 do
+        it("sort cap is 3000", function()
+            for i = 1, 3003 do
                 GBL:SortInfo("op %d", i)
             end
-            assert.equal(1000, #GBL:GetLog("sort"))
+            assert.equal(3000, #GBL:GetLog("sort"))
         end)
 
         it("system cap is 500", function()

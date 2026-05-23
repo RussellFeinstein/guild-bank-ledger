@@ -416,6 +416,13 @@ function GBL:RescanTransactionLogs(callback)
         return
     end
 
+    -- v0.32.9 confounder investigation: a real rescan is about to run. If a sort
+    -- is in progress, let it count this so the sort env summary shows how many
+    -- periodic rescans competed with the sort.
+    if self.IsSortRunning and self:IsSortRunning() and self._sortNoteRescanTick then
+        self:_sortNoteRescanTick()
+    end
+
     local completed = false
     local debounceTimer = nil
 
