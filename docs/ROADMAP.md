@@ -107,3 +107,9 @@ v1.0.0 signals production readiness, not a feature gate. It means:
 | v1.5.0 | **Stock alerts** | Configurable minimum stock levels per item; chat + sound notifications with per-item on/off toggle; auto re-arm after restock |
 | v1.6.0 | **GBS integration** | Guild Bank Sort detection, pause recording during sorts, single "Sort" meta-transaction |
 | v1.7.0 | **Export** | CSV, Discord Markdown, BBCode; filter-aware copy-to-clipboard from Transactions, Gold Log, Players |
+
+## Engineering / Technical debt
+
+Non-feature internal work, scheduled opportunistically (not version-gated).
+
+- **Core.lua decomposition**: `src/Core.lua` is a roughly 2200-line monolith (AceAddon bootstrap, lifecycle, slash commands, migrations, access control, and more). Break it into focused `src/` modules over time. The identified first slice is access control: extract `IsGuildMaster`, `GetAccessLevel`, `HasFullAccess`, `HasLayoutWrite`, `HasSortAccess`, `SaveSortAccess`, `MigrateSortAccessShape`, and their file-local helpers into a new `src/Access.lua` (methods stay on `GBL`, so the call sites do not change), optionally adding `BuildAccessPayload` / `MergeRemoteAccess` helpers so `src/Sync.lua` stops embedding access internals. Mechanical only, fully covered by existing access specs (`sortaccess_spec`, `access_control_spec`, `layout_write_access_spec`). Best done after the sortAccess sync work lands so those helpers absorb its merge code.
