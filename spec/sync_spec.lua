@@ -6009,6 +6009,183 @@ describe("Sync", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Sort access (sortAccess) propagation via HELLO
+    ---------------------------------------------------------------------------
+
+    describe("HELLO sort access propagation", function()
+        -- A configured two-tier policy: sort tier granted to rank<=2 plus one
+        -- named delegate. updatedAt>0 marks it as GM-configured.
+        local function configured(updatedAt)
+            return {
+                write = { rankThreshold = nil, delegates = {} },
+                sort  = { rankThreshold = 2, delegates = { ["Officer-TestRealm"] = true } },
+                updatedBy = "GM-TestRealm",
+                updatedAt = updatedAt,
+            }
+        end
+
+        it("includes sortAccess in HELLO payload when configured", function()
+            guildData.sortAccess = configured(5000)
+
+            GBL:BroadcastHello()
+
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok)
+            assert.is_not_nil(data.sortAccess)
+            assert.equals(2, data.sortAccess.sort.rankThreshold)
+            assert.is_true(data.sortAccess.sort.delegates["Officer-TestRealm"])
+            assert.equals(5000, data.sortAccess.updatedAt)
+        end)
+
+        it("omits sortAccess from HELLO when unconfigured (updatedAt 0)", function()
+            guildData.sortAccess = {
+                write = { rankThreshold = nil, delegates = {} },
+                sort  = { rankThreshold = nil, delegates = {} },
+                updatedAt = 0,
+            }
+
+            GBL:BroadcastHello()
+
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok)
+            assert.is_nil(data.sortAccess)
+        end)
+
+        it("updates local sortAccess from a newer remote HELLO", function()
+            guildData.sortAccess = configured(1000)
+
+            GBL:HandleHello("GMPlayer", {
+                version = GBL.version,
+                txCount = 0,
+                sortAccess = {
+                    write = { rankThreshold = nil, delegates = {} },
+                    sort  = { rankThreshold = 1, delegates = {} },
+                    updatedBy = "GMPlayer-TestRealm",
+                    updatedAt = 5000,
+                },
+            })
+
+            assert.equals(5000, guildData.sortAccess.updatedAt)
+            assert.equals(1, guildData.sortAccess.sort.rankThreshold)
+            -- Whole policy replaced (not merged): the old delegate is gone.
+            assert.is_nil(guildData.sortAccess.sort.delegates["Officer-TestRealm"])
+        end)
+
+        it("does not overwrite with an older sortAccess", function()
+            guildData.sortAccess = configured(9000)
+
+            GBL:HandleHello("OtherPlayer", {
+                version = GBL.version,
+                txCount = 0,
+                sortAccess = {
+                    write = { rankThreshold = 4, delegates = {} },
+                    sort  = { rankThreshold = 4, delegates = {} },
+                    updatedBy = "OtherGM-TestRealm",
+                    updatedAt = 1000,
+                },
+            })
+
+            assert.equals(9000, guildData.sortAccess.updatedAt)
+            assert.equals(2, guildData.sortAccess.sort.rankThreshold)
+        end)
+
+        it("normalizes a legacy flat policy arriving on the wire", function()
+            guildData.sortAccess = configured(1000)
+
+            -- Older peer sends the pre-two-tier flat shape (top-level
+            -- rankThreshold/delegates). It must migrate into the write tier.
+            GBL:HandleHello("OldPeer", {
+                version = GBL.version,
+                txCount = 0,
+                sortAccess = {
+                    rankThreshold = 3,
+                    delegates = { ["Legacy-TestRealm"] = true },
+                    updatedBy = "OldGM-TestRealm",
+                    updatedAt = 6000,
+                },
+            })
+
+            assert.equals(6000, guildData.sortAccess.updatedAt)
+            assert.equals(3, guildData.sortAccess.write.rankThreshold)
+            assert.is_true(guildData.sortAccess.write.delegates["Legacy-TestRealm"])
+            assert.is_not_nil(guildData.sortAccess.sort)
+        end)
+
+        it("ignores a HELLO without a sortAccess field", function()
+            guildData.sortAccess = configured(5000)
+
+            GBL:HandleHello("OfficerB", { version = GBL.version, txCount = 0 })
+
+            assert.equals(5000, guildData.sortAccess.updatedAt)
+            assert.equals(2, guildData.sortAccess.sort.rankThreshold)
+        end)
+
+        it("ignores sortAccess with zero updatedAt", function()
+            guildData.sortAccess = configured(5000)
+
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version,
+                txCount = 0,
+                sortAccess = {
+                    write = { rankThreshold = nil, delegates = {} },
+                    sort  = { rankThreshold = nil, delegates = {} },
+                    updatedAt = 0,
+                },
+            })
+
+            assert.equals(5000, guildData.sortAccess.updatedAt)
+        end)
+
+        it("fires GBL_ACCESS_CONTROL_CHANGED on a sortAccess update", function()
+            guildData.sortAccess = configured(1000)
+
+            GBL:HandleHello("GMPlayer", {
+                version = GBL.version,
+                txCount = 0,
+                sortAccess = configured(5000),
+            })
+
+            local found = false
+            for _, msg in ipairs(MockAce.sentMessages) do
+                if msg.message == "GBL_ACCESS_CONTROL_CHANGED" then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found, "Expected GBL_ACCESS_CONTROL_CHANGED message")
+        end)
+
+        it("SaveSortAccess broadcasts the policy and signals a local rebuild", function()
+            MockWoW.player.name = "GM"
+            MockWoW.guild.rankIndex = 0  -- GM passes IsGuildMaster
+            GBL.db.profile.sync.enabled = true
+            MockAce.sentMessages = {}
+            MockAce.sentCommMessages = {}
+
+            local ok = GBL:SaveSortAccess({
+                write = { rankThreshold = nil, delegates = {} },
+                sort  = { rankThreshold = 2, delegates = {} },
+            })
+            assert.is_true(ok)
+
+            local signaled = false
+            for _, msg in ipairs(MockAce.sentMessages) do
+                if msg.message == "GBL_ACCESS_CONTROL_CHANGED" then
+                    signaled = true
+                    break
+                end
+            end
+            assert.is_true(signaled, "Expected GBL_ACCESS_CONTROL_CHANGED after save")
+
+            assert.is_true(#MockAce.sentCommMessages > 0, "Expected a HELLO broadcast")
+            local okD, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(okD)
+            assert.is_not_nil(data.sortAccess)
+            assert.equals(2, data.sortAccess.sort.rankThreshold)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- eventCounts sync
     ---------------------------------------------------------------------------
 

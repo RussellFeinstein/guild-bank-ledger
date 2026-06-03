@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Sort access grants now reach the officers they are given to. The Guild Master's sort-access policy (rank threshold and delegate list) was stored only on the GM's own client and never shared, so granting another officer access had no effect on their game. The policy now travels with the addon's normal guild sync, and a grant takes effect on the granted player's client without a reload.
+
 ## [0.32.9] - 2026-05-22
 
 ### Changed
