@@ -31,6 +31,20 @@ local function formatOpRow(op, marker)
 end
 
 ------------------------------------------------------------------------
+-- Helpers
+------------------------------------------------------------------------
+
+--- Message shown on the Sort tab when no bank layout is configured. Layout-
+-- write users can fix it themselves; sort-only users are pointed at an officer.
+-- Pure (depends only on HasLayoutWrite) so it is unit-testable without AceGUI.
+function GBL:_SortNoLayoutMessage()
+    if self:HasLayoutWrite() then
+        return "|cffffcc00No bank layout configured. Open the Layout tab to set one up.|r"
+    end
+    return "|cffffcc00No bank layout configured. Ask a guild officer with layout access to set one up.|r"
+end
+
+------------------------------------------------------------------------
 -- Tab builder
 ------------------------------------------------------------------------
 
@@ -215,13 +229,7 @@ function GBL:_SortView_Preview()
         if not layout or not next(layout.tabs) then
             local lbl = AceGUI:Create("Label")
             lbl:SetFullWidth(true)
-            local msg
-            if self:HasLayoutWrite() then
-                msg = "|cffffcc00No bank layout configured. Open the Layout tab to set one up.|r"
-            else
-                msg = "|cffffcc00No bank layout configured. Ask a guild officer with layout access to set one up.|r"
-            end
-            lbl:SetText(msg)
+            lbl:SetText(self:_SortNoLayoutMessage())
             content:AddChild(lbl)
             return
         end

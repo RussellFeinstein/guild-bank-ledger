@@ -1774,6 +1774,12 @@ function GBL:GUILD_ROSTER_UPDATE()
             self:BroadcastHello(true) -- force past cooldown
         end
     end
+
+    -- Roster/rank can warm after the window was first built (cold-roster login)
+    -- or change mid-session (promotion/demotion). Sort/Layout tab visibility is
+    -- derived from guild rank, so re-evaluate and rebuild the tabs if (and only
+    -- if) the access-gated set changed.
+    if self.RefreshAccessTabsIfChanged then self:RefreshAccessTabsIfChanged() end
 end
 
 ------------------------------------------------------------------------

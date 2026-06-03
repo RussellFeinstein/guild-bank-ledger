@@ -148,9 +148,13 @@ function GBL:RebuildTabs()
             { value = "goldlog", text = "Gold Log" },
             { value = "consumption", text = "Consumption" },
         }
-        -- Sort and Layout tabs: only visible to characters with sort access.
+        -- Sort tab: any sort-access tier (execute-only or layout-write).
         if self.HasSortAccess and self:HasSortAccess() then
             table.insert(tabs, { value = "sort", text = "Sort" })
+        end
+        -- Layout tab: only the layout-write tier edits templates, so it stays
+        -- hidden from sort-only users (the Sort tab tells them to ask an officer).
+        if self.HasLayoutWrite and self:HasLayoutWrite() then
             table.insert(tabs, { value = "layout", text = "Layout" })
         end
         table.insert(tabs, { value = "sync", text = "Sync" })
@@ -204,6 +208,28 @@ function GBL:RebuildTabs()
     end
 
     self.tabGroup:SelectTab(self.activeTab)
+
+    -- Remember the access-derived tab signature so GUILD_ROSTER_UPDATE can skip
+    -- redundant rebuilds (see RefreshAccessTabsIfChanged).
+    self._accessTabSig = self:_AccessTabSignature()
+end
+
+--- Compact signature of the access-derived tab set: access level plus the
+-- Sort (HasSortAccess) and Layout (HasLayoutWrite) gates. Cheap to recompute.
+function GBL:_AccessTabSignature()
+    return tostring(self:GetAccessLevel())
+        .. "|" .. ((self.HasSortAccess and self:HasSortAccess()) and "S" or "-")
+        .. ((self.HasLayoutWrite and self:HasLayoutWrite()) and "L" or "-")
+end
+
+--- Rebuild the tab bar only if the access-derived tab set changed. Called from
+-- GUILD_ROSTER_UPDATE so the Sort/Layout tabs appear once the roster/rank warms
+-- (cold-roster login) or after a promotion/demotion, without tearing down the
+-- active tab (and its filter/scroll state) on every roster tick.
+function GBL:RefreshAccessTabsIfChanged()
+    if not self.tabGroup then return end
+    if self:_AccessTabSignature() == self._accessTabSig then return end
+    self:RebuildTabs()
 end
 
 --- Toggle the main frame visibility.
