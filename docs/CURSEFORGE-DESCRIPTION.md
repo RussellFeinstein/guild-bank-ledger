@@ -27,8 +27,8 @@ Every guild member running the addon automatically logs and shares data. No setu
 - **Transactions** — Scrollable, sortable, filterable log of every item movement. Filter by player, item, date range, category, type, or tab. Paginated (100 per page).
 - **Gold Log** — Deposits, withdrawals, repairs, tab purchases with a summary breakdown panel.
 - **Consumption** — Guild-wide overview dashboard: total items and gold in/out/net, top 10 consumers with gold breakdown (click a name to jump to their transactions), top 15 most-used items with 7d/30d/all-time trend columns.
-- **Sort**: Preview the planned moves to reshape the bank against a saved layout, then execute them on a fixed one-second cadence and auto-rerun any remaining moves until the bank matches the layout. Self-heals if the client's frame loop wedges mid-run. Rank-gated execute.
-- **Layout** — Per-tab template editor (display, overflow, ignore modes) with per-item slot counts and stack sizes. Capture-from-current-tab shortcut, two-tier access control (Layout Write and Sort-only). Rank-gated write.
+- **Sort**: Preview the planned moves to reshape the bank against a saved layout, then execute them on a fixed one-second cadence and auto-rerun any remaining moves until the bank matches the layout. Self-heals if the client's frame loop wedges mid-run. Hidden from members without sort access.
+- **Layout**: Per-tab template editor (display, overflow, ignore modes) with per-item slot counts and stack sizes. Capture-from-current-tab shortcut. Hidden from members without layout-write access. Sort access is a two-tier policy (Layout Write and Sort-only, by rank threshold or named delegate) that the GM manages and that syncs guild-wide, so a grant reaches the granted officer automatically.
 - **Sync** — Enable/disable sync, online peers with version and directional status (newer/outdated), GM access control configuration.
 - **Changelog** — Embedded version history, paginated (10 versions per page).
 - **About** — Addon info, author credit, support links.
