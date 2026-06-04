@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.10] - 2026-06-04
+
 ### Changed
 - The Sort tab is now hidden from guild members without sort access, and the Layout tab is hidden from anyone without layout-write access (sort-only users no longer see a Layout tab they cannot edit). Previously the Sort tab was shown to everyone even though only authorized members could use it.
 
