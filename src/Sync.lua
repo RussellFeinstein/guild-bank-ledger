@@ -455,6 +455,10 @@ function GBL:BroadcastHello(force)
         dataHash = dataHash,
         lastScanTime = self.lastScanTime or 0,
         accessControl = guildData.accessControl,
+        -- Only ride sortAccess on the wire once a GM has configured it
+        -- (updatedAt > 0); keeps HELLO lean for guilds with no policy.
+        sortAccess = (guildData.sortAccess and (guildData.sortAccess.updatedAt or 0) > 0)
+            and guildData.sortAccess or nil,
     })
     msg = compressMessage(msg)
 
@@ -573,6 +577,8 @@ function GBL:SendHelloReply(target)
         lastScanTime = self.lastScanTime or 0,
         isReply = true,
         accessControl = guildData.accessControl,
+        sortAccess = (guildData.sortAccess and (guildData.sortAccess.updatedAt or 0) > 0)
+            and guildData.sortAccess or nil,
     })
     msg = compressMessage(msg)
 
@@ -718,6 +724,30 @@ function GBL:HandleHello(sender, data)
                     .. tostring(data.accessControl.configuredBy)
                     .. " (threshold=" .. tostring(data.accessControl.rankThreshold)
                     .. ", mode=" .. tostring(data.accessControl.restrictedMode) .. ")")
+                self:SendMessage("GBL_ACCESS_CONTROL_CHANGED")
+            end
+        end
+    end
+
+    -- Accept the sort-access policy if the remote copy is newer (last-writer-
+    -- wins on updatedAt, the timestamp SaveSortAccess stamps). Mirrors the
+    -- accessControl merge above. sortAccess gates Sort/Layout tab visibility, so
+    -- a GM's grant only takes effect on the granted member once it arrives here.
+    if data.sortAccess and type(data.sortAccess) == "table"
+        and (data.sortAccess.updatedAt or 0) > 0 then
+        local gd = self:GetGuildData()
+        if gd then
+            local localTS = (gd.sortAccess and gd.sortAccess.updatedAt) or 0
+            local remoteTS = data.sortAccess.updatedAt or 0
+            if remoteTS > localTS then
+                gd.sortAccess = data.sortAccess
+                -- Normalize whatever arrived into the canonical two-tier shape
+                -- (idempotent; also upgrades a legacy flat policy from an older
+                -- peer). updatedAt/updatedBy survive the migration.
+                self:MigrateSortAccessShape(gd)
+                self:AddAuditEntry("Updated sort access from "
+                    .. tostring(data.sortAccess.updatedBy)
+                    .. " (updatedAt=" .. tostring(remoteTS) .. ")")
                 self:SendMessage("GBL_ACCESS_CONTROL_CHANGED")
             end
         end

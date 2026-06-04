@@ -2204,6 +2204,15 @@ function GBL:SaveSortAccess(policy)
         updatedBy = normalizedPlayerName(),
         updatedAt = GetServerTime(),
     }
+
+    -- Propagate to guildmates and refresh our own tab visibility. sortAccess
+    -- gates the Sort/Layout tabs, so a grant must reach the granted member's
+    -- client to take effect. Mirrors the accessControl save path in
+    -- UI/SyncStatus.lua: a forced HELLO carries the new policy (rate-limited, so
+    -- rapid edits do not storm) and the local message rebuilds our tabs.
+    if self.BroadcastHello then self:BroadcastHello(true) end
+    self:SendMessage("GBL_ACCESS_CONTROL_CHANGED")
+
     return true, nil
 end
 
