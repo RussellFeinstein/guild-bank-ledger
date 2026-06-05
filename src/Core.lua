@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.32.9"
+local VERSION = "0.32.10"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -1774,6 +1774,12 @@ function GBL:GUILD_ROSTER_UPDATE()
             self:BroadcastHello(true) -- force past cooldown
         end
     end
+
+    -- Roster/rank can warm after the window was first built (cold-roster login)
+    -- or change mid-session (promotion/demotion). Sort/Layout tab visibility is
+    -- derived from guild rank, so re-evaluate and rebuild the tabs if (and only
+    -- if) the access-gated set changed.
+    if self.RefreshAccessTabsIfChanged then self:RefreshAccessTabsIfChanged() end
 end
 
 ------------------------------------------------------------------------

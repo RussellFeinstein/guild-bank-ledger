@@ -29,6 +29,17 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.32.10
+    {"0.32.10", "2026-06-04", {
+        Changed = {
+            "The Sort tab is now hidden from guild members without sort access, and the Layout tab is hidden from anyone without layout-write access (sort-only users no longer see a Layout tab they cannot edit). Previously the Sort tab was shown to everyone even though only authorized members could use it.",
+        },
+        Fixed = {
+            "Sort access grants now reach the officers they are given to. The Guild Master's sort-access policy (rank threshold and delegate list) was stored only on the GM's own client and never shared, so granting another officer access had no effect on their game. The policy now travels with the addon's normal guild sync, and a grant takes effect on the granted player's client without a reload.",
+            "The Sort and Layout tabs now appear as soon as your access is granted or your guild rank loads, without a reload. They were previously re-evaluated only when the window was first opened or when an access-control change synced in.",
+        },
+    }},
+
     -- v0.32.9
     {"0.32.9", "2026-05-22", {
         Changed = {
