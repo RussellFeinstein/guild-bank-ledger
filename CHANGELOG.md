@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.11] - 2026-06-09
+
+### Added
+- The bank layout template now syncs to guildmates who have sort access. Before this, granting an officer sort access shared the permission but not the layout itself, so their Sort tab had nothing to work with. The Guild Master's layout (and stock reserve counts) now travels with the addon's normal guild sync: a granted officer's client pulls it automatically and can sort against it. Only the layout's timestamp rides the regular guild ping; the full template transfers point to point and only to members who can actually sort, so it stays off the wire for almost everyone. A dropped transfer is re-fetched on the next ping until both clients match.
+
+### Changed
+- The Layout tab's "Layout-write access: GM" banner now also shows who else the Guild Master has granted layout-write access to (the rank threshold and delegate count), so the configured policy is visible at a glance instead of only the viewer's own access path.
+
 ## [0.32.10] - 2026-06-04
 
 ### Changed

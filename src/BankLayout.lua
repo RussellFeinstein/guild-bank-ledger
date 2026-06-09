@@ -197,6 +197,93 @@ function GBL:SaveBankLayout(layout, updatedBy)
         store.tabs[tabIndex] = copy
     end
     guild.bankLayout = store
+
+    -- Advertise the new layout promptly so officers pull it without waiting for
+    -- the next gossip tick. The forced HELLO is rate-limited
+    -- (FORCED_HELLO_COOLDOWN), so rapid saves coalesce. Mirrors SaveSortAccess.
+    if self.BroadcastHello then self:BroadcastHello(true) end
+
+    return true, nil
+end
+
+--- Build the wire payload for layout sync: the layout template plus stock
+-- reserves, bundled under one cursor (bankLayout.updatedAt). Returns nil when
+-- no layout has been saved yet (version 0), so callers can skip the send.
+-- Because version > 0 only happens via SaveBankLayout (which validates first),
+-- a non-nil payload is always a structurally valid layout.
+-- @return table|nil { bankLayout, stockReserves }
+function GBL:BuildLayoutPayload()
+    local guild = getStore(self)
+    if not guild then return nil end
+    local bl = guild.bankLayout
+    if not bl or (bl.version or 0) <= 0 then return nil end
+    return {
+        bankLayout = self:GetBankLayout(),       -- deep copy, severed from storage
+        stockReserves = self:GetStockReserves(),  -- deep copy
+    }
+end
+
+--- Adopt a layout payload arriving from a guildmate over sync. Bypasses the
+-- HasLayoutWrite gate (this is sync intake, not a local edit) but validates the
+-- structure and only replaces local state when the remote copy is strictly
+-- newer (last-writer-wins on bankLayout.updatedAt). Preserves the remote
+-- version/updatedAt/updatedBy verbatim so the cursor stays coherent guild-wide.
+-- @param payload table { bankLayout, stockReserves }
+-- @param _fromPeer string|nil canonical peer key (for logging by the caller)
+-- @return boolean changed, string|nil err
+function GBL:AdoptRemoteBankLayout(payload, _fromPeer)
+    if type(payload) ~= "table" or type(payload.bankLayout) ~= "table" then
+        return false, "payload.bankLayout missing"
+    end
+    local incoming = payload.bankLayout
+    local ok, err = BankLayout.Validate(incoming)
+    if not ok then return false, err end
+
+    local guild = getStore(self)
+    if not guild then return false, "no active guild" end
+
+    local localTS = (guild.bankLayout and guild.bankLayout.updatedAt) or 0
+    local remoteTS = incoming.updatedAt or 0
+    if remoteTS <= localTS then
+        return false, nil  -- not newer; nothing to do (not an error)
+    end
+
+    -- Deep-copy the template into storage, severing the network table ref and
+    -- keeping only the fields we recognize. updatedAt/version/updatedBy are
+    -- preserved from the remote so guild-wide last-writer-wins stays coherent.
+    local store = {
+        version = incoming.version or 0,
+        updatedAt = remoteTS,
+        updatedBy = incoming.updatedBy,
+        tabs = {},
+    }
+    for tabIndex, tab in pairs(incoming.tabs or {}) do
+        local copy = { mode = tab.mode, name = tab.name }
+        if tab.mode == "display" then
+            copy.items = {}
+            for itemID, row in pairs(tab.items or {}) do
+                copy.items[itemID] = { slots = row.slots, perSlot = row.perSlot }
+            end
+            copy.slotOrder = {}
+            for slotIndex, itemID in pairs(tab.slotOrder or {}) do
+                copy.slotOrder[slotIndex] = itemID
+            end
+        end
+        store.tabs[tabIndex] = copy
+    end
+    guild.bankLayout = store
+
+    -- Stock reserves ride the same cursor; replace wholesale.
+    local reserves = {}
+    if type(payload.stockReserves) == "table" then
+        for itemID, n in pairs(payload.stockReserves) do
+            if type(itemID) == "number" and type(n) == "number" and n > 0 then
+                reserves[itemID] = math.floor(n)
+            end
+        end
+    end
+    guild.stockReserves = reserves
+
     return true, nil
 end
 
@@ -213,6 +300,16 @@ function GBL:SetStockReserve(itemID, reserve)
         guild.stockReserves[itemID] = nil
     else
         guild.stockReserves[itemID] = math.floor(reserve)
+    end
+    -- Reserves are part of the layout config and ride its sync cursor. Bump the
+    -- cursor so the change re-advertises, but only when a valid layout already
+    -- exists (version > 0 implies SaveBankLayout validated it). This keeps the
+    -- invariant "version > 0 ⇒ structurally valid", so the advertise gate never
+    -- ships an unservable layout. Reserves set before any layout is configured
+    -- stay local until a layout exists.
+    if guild.bankLayout and (guild.bankLayout.version or 0) > 0 then
+        guild.bankLayout.version = guild.bankLayout.version + 1
+        guild.bankLayout.updatedAt = GetServerTime()
     end
     return true, nil
 end
