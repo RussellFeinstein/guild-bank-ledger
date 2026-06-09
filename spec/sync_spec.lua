@@ -6323,6 +6323,25 @@ describe("Sync", function()
             assert.equals(0, #sentOfType("LAYOUT_DATA"))
         end)
 
+        it("forces a HELLO advertising the new cursor when a layout is saved", function()
+            MockWoW.guild.rankIndex = 0  -- GM ⇒ HasLayoutWrite
+            MockAce.sentCommMessages = {}
+            local ok = GBL:SaveBankLayout({
+                tabs = {
+                    [1] = {
+                        mode = "display",
+                        items = { [100] = { slots = 1, perSlot = 5 } },
+                        slotOrder = { [1] = 100 },
+                    },
+                    [2] = { mode = "overflow" },
+                },
+            }, "GM")
+            assert.is_true(ok)
+            local hellos = sentOfType("HELLO")
+            assert.is_true(#hellos >= 1)
+            assert.is_not_nil(hellos[1].layoutUpdatedAt)
+        end)
+
         -- Adopt ------------------------------------------------------------
 
         it("adopts received LAYOUT_DATA and fires GBL_LAYOUT_CHANGED", function()

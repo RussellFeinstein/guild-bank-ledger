@@ -197,6 +197,12 @@ function GBL:SaveBankLayout(layout, updatedBy)
         store.tabs[tabIndex] = copy
     end
     guild.bankLayout = store
+
+    -- Advertise the new layout promptly so officers pull it without waiting for
+    -- the next gossip tick. The forced HELLO is rate-limited
+    -- (FORCED_HELLO_COOLDOWN), so rapid saves coalesce. Mirrors SaveSortAccess.
+    if self.BroadcastHello then self:BroadcastHello(true) end
+
     return true, nil
 end
 
