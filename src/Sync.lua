@@ -26,6 +26,7 @@ local ACK_TIMEOUT = 8
 local RECEIVE_CHUNK_TIMEOUT = 20
 local MAX_NACK_RETRIES = 3
 local HELLO_COOLDOWN = 60
+local SUPERSET_NUDGE_THROTTLE = 60  -- min seconds between re-nudges to one behind peer
 local WHISPER_SAFE_BYTES = 2000
 local ZONE_COOLDOWN = 5
 local COMBAT_COOLDOWN = 2
@@ -69,6 +70,7 @@ GBL.SYNC_BUSY_COOLDOWN = BUSY_COOLDOWN
 GBL.SYNC_PEER_STARVATION_SECONDS = PEER_STARVATION_SECONDS
 GBL.SYNC_MAX_RECEIVE_DURATION = MAX_RECEIVE_DURATION
 GBL.SYNC_FORCED_HELLO_COOLDOWN = FORCED_HELLO_COOLDOWN
+GBL.SYNC_SUPERSET_NUDGE_THROTTLE = SUPERSET_NUDGE_THROTTLE
 GBL.SYNC_MANIFEST_INTERVAL = MANIFEST_INTERVAL
 GBL.SYNC_MANIFEST_MAX_BUCKETS = MANIFEST_MAX_BUCKETS
 GBL.SYNC_LAYOUT_REQUEST_THROTTLE = LAYOUT_REQUEST_THROTTLE
@@ -162,6 +164,7 @@ local syncState = {
     -- HELLO traffic management (M4)
     lastForcedHelloTime = 0,
     lastHelloReplyHash = {},  -- name → hash we last communicated to this peer
+    lastSupersetNudge = {},   -- peerKey → GetServerTime() of our last superset re-nudge
 
     -- Bank layout advertise-and-pull (v0.32.11): timestamp of our last
     -- LAYOUT_REQUEST. Single in-flight guard so a newer-layout cursor seen on
@@ -409,6 +412,7 @@ function GBL:DisableSync()
     syncState.pendingPeersCount = 0
     syncState.lastForcedHelloTime = 0
     syncState.lastHelloReplyHash = {}
+    syncState.lastSupersetNudge = {}
     syncState.peerManifests = {}
     syncState.lastManifestHash = 0
     syncState.lastManifestTime = 0
@@ -860,6 +864,10 @@ function GBL:HandleHello(sender, data)
     -- Reply to broadcast HELLOs so the sender discovers us.
     -- Hash-gated: only reply when our data changed since we last told this peer,
     -- or on first contact. Suppresses O(N²) reply traffic in large guilds.
+    -- replyDecision records what the gate did this round so the superset skip
+    -- below can log whether the behind peer got a fresh HELLO (diagnostic only;
+    -- stays nil for an isReply HELLO, which never runs the gate).
+    local replyDecision
     if not data.isReply then
         local cleanSenderReply = self:CanonicalPeerKey(sender)
         local gd = self:GetGuildData()
@@ -871,10 +879,24 @@ function GBL:HandleHello(sender, data)
                     (syncState.helloRepliesDuringSync or 0) + 1
                 self:AddAuditEntry("Suppressed HELLO reply to "
                     .. cleanSenderReply .. " [sync active]")
+                replyDecision = "suppressed-sync-active"
             else
                 self:SendHelloReply(sender)
+                replyDecision = "sent"
             end
             syncState.lastHelloReplyHash[cleanSenderReply] = currentHash
+        else
+            -- Reply suppressed because our data has not changed since we last
+            -- told this peer. If the peer is behind us, this is the silent
+            -- deadlock: they get no fresh HELLO, never see we are ahead, and
+            -- never request, while our superset check below skips. Logged at
+            -- DEBUG so it only surfaces during a deliberate sync capture.
+            replyDecision = "suppressed-hash-unchanged"
+            self:SyncDebug(
+                "Suppressed HELLO reply to %s: hash unchanged since last reply "
+                .. "(their tx=%d, our tx=%d)",
+                cleanSenderReply, data.txCount or 0,
+                gd and (#gd.transactions + #gd.moneyTransactions) or 0)
         end
     end
 
@@ -928,6 +950,31 @@ function GBL:HandleHello(sender, data)
             self:AddAuditEntry("Skipped request from " .. sender
                 .. " — likely superset (local=" .. localCount
                 .. " > remote=" .. remoteCount .. ")")
+            -- Correlate the skip with the reply gate above: if we are ahead AND
+            -- the reply was suppressed-hash-unchanged AND no SYNC_REQUEST follows
+            -- from this peer, the silent hash-gate deadlock is confirmed.
+            self:SyncDebug(
+                "Superset skip detail for %s: replyThisRound=%s",
+                self:CanonicalPeerKey(sender), tostring(replyDecision))
+            -- Behind peer + suppressed-hash-unchanged reply is the silent
+            -- deadlock: we are ahead, our data is stable, so the hash gate
+            -- stopped telling this peer we are ahead and they never request.
+            -- Re-send the HELLO reply (throttled per peer) so their HandleHello
+            -- re-evaluates and pulls. An isReply HELLO drives their shouldSync
+            -- path, so this is a real nudge, not just discovery. Only fires for
+            -- the hash-unchanged case (replyDecision "sent" already pinged them
+            -- this round; "suppressed-sync-active" means we are mid-sync).
+            if replyDecision == "suppressed-hash-unchanged" then
+                local nudgeKey = self:CanonicalPeerKey(sender)
+                local nudgeNow = GetServerTime()
+                if nudgeNow - (syncState.lastSupersetNudge[nudgeKey] or 0)
+                        >= SUPERSET_NUDGE_THROTTLE then
+                    self:SendHelloReply(sender)
+                    syncState.lastSupersetNudge[nudgeKey] = nudgeNow
+                    self:AddAuditEntry("Nudged behind peer " .. nudgeKey
+                        .. " to pull (superset, hash-gate bypass)")
+                end
+            end
             return
         end
         -- Hashes differ and peer has equal or more records — request sync
@@ -2630,6 +2677,7 @@ function GBL:ResetSyncState()
     syncState.pendingPeersCount = 0
     syncState.lastForcedHelloTime = 0
     syncState.lastHelloReplyHash = {}
+    syncState.lastSupersetNudge = {}
     syncState.peerManifests = {}
     syncState.lastManifestHash = 0
     syncState.lastManifestTime = 0

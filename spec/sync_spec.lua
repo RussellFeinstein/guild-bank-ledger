@@ -397,6 +397,44 @@ describe("Sync", function()
             assert.is_false(foundReply, "Hash unchanged — reply should be suppressed")
         end)
 
+        it("logs a DEBUG diagnostic when a hash-unchanged reply is suppressed", function()
+            -- DEBUG entries only record when sync debug is enabled (the state a
+            -- user is in when capturing a sync log to diagnose non-convergence).
+            GBL.db.profile.sync.debugChat = true
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- First HELLO establishes lastHelloReplyHash for OfficerB (reply sent).
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version, txCount = 0, lastScanTime = 1000,
+            })
+            MockAce.sentCommMessages = {}
+
+            -- Second broadcast HELLO with unchanged hash: reply is suppressed and
+            -- the diagnostic should fire (this is the suspected silent deadlock
+            -- condition when the peer is also behind us).
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version, txCount = 0, lastScanTime = 2000,
+            })
+
+            -- No reply went out this round.
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                assert.is_false(ok and data.type == "HELLO" and data.isReply == true)
+            end
+
+            -- The suppression diagnostic was recorded in the sync log at DEBUG.
+            local found = false
+            for _, e in ipairs(GBL:GetLog("sync")) do
+                if e.level == "DEBUG"
+                    and e.message:find("Suppressed HELLO reply to", 1, true)
+                    and e.message:find("hash unchanged since last reply", 1, true) then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found, "expected hash-unchanged suppression DEBUG line")
+        end)
+
         it("SendHelloReply payload includes isReply=true", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
             GBL:SendHelloReply("OfficerB")
@@ -602,6 +640,130 @@ describe("Sync", function()
                 end
             end
             assert.is_true(found, "audit trail should contain 'likely superset' entry")
+        end)
+
+        it("re-nudges a behind peer whose reply was hash-gate suppressed", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            for i = 1, 10 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000 + i, id = "localmore" .. i .. ":0",
+                })
+            end
+            local localHash = GBL:GetDataHash(guildData)
+            local hello = {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 5,
+                dataHash = localHash + 1,
+            }
+
+            -- First HELLO: peer behind, reply sent, registers lastHelloReplyHash.
+            hello.lastScanTime = 2000
+            GBL:HandleHello("OfficerB", hello)
+            fireJitterTimers()
+            MockAce.sentCommMessages = {}
+
+            -- Second HELLO: hash unchanged so the normal reply is suppressed, but
+            -- because the peer is behind us the superset branch re-nudges.
+            hello.lastScanTime = 3000
+            GBL:HandleHello("OfficerB", hello)
+            fireJitterTimers()
+
+            local nudged = false
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                if ok and data.type == "HELLO" and data.isReply
+                    and sent.distribution == "WHISPER" and sent.target == "OfficerB" then
+                    nudged = true
+                end
+            end
+            assert.is_true(nudged, "behind peer should be re-nudged with a HELLO reply")
+
+            local audited = false
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message and entry.message:find("Nudged behind peer", 1, true) then
+                    audited = true
+                end
+            end
+            assert.is_true(audited, "audit trail should record the nudge")
+        end)
+
+        it("throttles superset re-nudges to one per window per peer", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            for i = 1, 10 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000 + i, id = "localmore" .. i .. ":0",
+                })
+            end
+            local localHash = GBL:GetDataHash(guildData)
+            local hello = {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 5,
+                dataHash = localHash + 1,
+            }
+
+            -- First HELLO sends a reply; second triggers the (throttled) nudge.
+            hello.lastScanTime = 2000
+            GBL:HandleHello("OfficerB", hello)
+            fireJitterTimers()
+            hello.lastScanTime = 3000
+            GBL:HandleHello("OfficerB", hello)
+            fireJitterTimers()
+            MockAce.sentCommMessages = {}
+
+            -- Third HELLO immediately (same server time, within the throttle):
+            -- no second nudge.
+            hello.lastScanTime = 4000
+            GBL:HandleHello("OfficerB", hello)
+            fireJitterTimers()
+
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                assert.is_false(ok and data.type == "HELLO" and data.isReply == true,
+                    "no second nudge within the throttle window")
+            end
+        end)
+
+        it("does not nudge on first contact (reply already sent)", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            for i = 1, 10 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000 + i, id = "localmore" .. i .. ":0",
+                })
+            end
+            local localHash = GBL:GetDataHash(guildData)
+
+            -- Single HELLO from a never-seen behind peer: the reply gate sends a
+            -- normal reply (replyDecision "sent"), so the superset branch must not
+            -- also fire a nudge. Exactly one HELLO reply, no "Nudged" audit line.
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 5,
+                dataHash = localHash + 1,
+                lastScanTime = 2000,
+            })
+            fireJitterTimers()
+
+            local replyCount = 0
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                if ok and data.type == "HELLO" and data.isReply then
+                    replyCount = replyCount + 1
+                end
+            end
+            assert.equals(1, replyCount, "first contact sends exactly one reply, no extra nudge")
+
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message then
+                    assert.is_nil(entry.message:find("Nudged behind peer", 1, true),
+                        "no nudge on first contact")
+                end
+            end
         end)
 
         it("skips sync when hash matches and counts match", function()
@@ -8511,7 +8673,10 @@ describe("Sync", function()
             GBL:BroadcastHello(true)
 
             -- Now a HELLO from PeerA should NOT trigger a reply
-            -- (broadcast-mark optimization)
+            -- (broadcast-mark optimization). PeerA reports the same hash/count as
+            -- us here so it is NOT behind: a behind peer is now deliberately
+            -- re-nudged past the broadcast-mark (covered by the superset re-nudge
+            -- tests), which would otherwise fire SendHelloReply here.
             local replySent = false
             local origSendHelloReply = GBL.SendHelloReply
             GBL.SendHelloReply = function(self, target)
@@ -8522,7 +8687,7 @@ describe("Sync", function()
             GBL:HandleHello("PeerA", {
                 version = GBL.version,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
-                txCount = 0, dataHash = 0,
+                txCount = 1, dataHash = GBL:GetDataHash(guildData),
                 isReply = false,
             })
             assert.is_false(replySent, "Broadcast-mark should suppress reply")
