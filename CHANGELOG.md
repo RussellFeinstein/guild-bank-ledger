@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Sync now sends the most recent transactions first when catching a guildmate up. It used to send oldest first, so a member who only lacked recent activity had to wait through the entire history (often thousands of records they already had) before reaching what they actually needed, and any interruption (combat, zoning, a disconnect) before the end meant the catch-up made almost no progress. Sending newest first means an interrupted sync still delivers current activity, and the next comparison between the two clients is smaller, so the guild converges faster. What ends up stored is unchanged: records are matched by identity, so the order they arrive in does not change the result.
+
 ## [0.32.11] - 2026-06-09
 
 ### Added

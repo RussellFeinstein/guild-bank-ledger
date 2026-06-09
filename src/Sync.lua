@@ -1279,6 +1279,24 @@ function GBL:HandleSyncRequest(sender, data)
             .. " item tx + " .. #moneyToSend .. " money tx")
     end
 
+    -- Send the most recent buckets first. A far-behind peer needs current
+    -- activity, which lives in the newest buckets; routing those into the
+    -- early chunks means an aborted sync (combat/zone/disconnect/ACK timeout)
+    -- still delivers useful records instead of front-loading old history the
+    -- peer already has. The receiver dedups by record id, so merge order never
+    -- changes the stored result (see the order-independence spec).
+    self:SortSendListNewestFirst(txToSend)
+    self:SortSendListNewestFirst(moneyToSend)
+    if #txToSend > 0 or #moneyToSend > 0 then
+        local newestRec = txToSend[1] or moneyToSend[1]
+        local oldestRec = txToSend[#txToSend] or moneyToSend[#moneyToSend]
+        local newestTs = self:BucketKeyForRecord(newestRec) * 6 * 3600
+        local oldestTs = self:BucketKeyForRecord(oldestRec) * 6 * 3600
+        self:AddAuditEntry("Send order newest-first: "
+            .. date("%Y-%m-%d %H:00", newestTs) .. " back to "
+            .. date("%Y-%m-%d %H:00", oldestTs))
+    end
+
     -- Prepare and send chunks
     local chunks = self:PrepareChunks(txToSend, moneyToSend)
 
@@ -1367,6 +1385,31 @@ function GBL:PartitionEventCounts(eventCounts, batchSize)
     end
 
     return batches
+end
+
+--- Sort a sync send list so the most recent 6-hour buckets come first.
+-- PrepareChunks packs records into chunks in list order, so a newest-first
+-- list puts current activity in the early chunks. A peer that is far behind
+-- needs those recent records first; if the sync aborts before the tail it has
+-- still made progress instead of resending old history the peer already has.
+-- Keyed on BucketKeyForRecord (the same basis the bucket filter uses), with
+-- the record id as a deterministic tiebreaker so the order is total. Sorts in
+-- place. Order is irrelevant to correctness: the receiver dedups by id, so this
+-- only changes which records arrive first, never the merged result.
+-- @param list table Array of stripped sync records
+-- @return table The same list, sorted newest-bucket-first
+function GBL:SortSendListNewestFirst(list)
+    if not list or #list < 2 then return list end
+    local bucketOf = {}
+    for i = 1, #list do
+        bucketOf[list[i]] = self:BucketKeyForRecord(list[i])
+    end
+    table.sort(list, function(a, b)
+        local ka, kb = bucketOf[a], bucketOf[b]
+        if ka ~= kb then return ka > kb end
+        return (a.id or "") > (b.id or "")
+    end)
+    return list
 end
 
 --- Split transaction arrays into size-aware chunks.
