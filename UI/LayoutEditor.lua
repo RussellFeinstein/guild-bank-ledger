@@ -175,6 +175,28 @@ end
 -- after any edit and still land the user back where they were.
 ------------------------------------------------------------------------
 
+--- Human summary of who currently holds layout-write access beyond the GM.
+-- Pure (reads the policy, touches no UI), so the banner can show a GM the grant
+-- they configured instead of just "GM" (which is always the viewer's own path).
+-- Returns e.g. "GM only", "GM + ranks <= 3", "GM + ranks <= 3 + 2 delegate(s)".
+function GBL:_LayoutGrantSummary()
+    local sa = self:GetSortAccess()
+    local tier = sa and sa.write or nil
+    local who = "GM only"
+    if tier and tier.rankThreshold ~= nil then
+        who = "GM + ranks \226\137\164 " .. tier.rankThreshold  -- "<="
+    end
+    local n = 0
+    if tier and type(tier.delegates) == "table" then
+        for _ in pairs(tier.delegates) do n = n + 1 end
+    end
+    if n > 0 then
+        if who == "GM only" then who = "GM" end
+        who = who .. " + " .. n .. " delegate(s)"
+    end
+    return who
+end
+
 --- Build the Layout tab inside a container.
 -- @param container AceGUI container (the TabGroup content area)
 function GBL:BuildLayoutTab(container)
@@ -210,11 +232,15 @@ function GBL:BuildLayoutTab(container)
             "|cffffcc00Read-only view.|r Only players with layout-write access " ..
             "(Guild Master or a delegated rank/character) can edit the layout. " ..
             "Ask the GM to grant you Layout Write access via the Sort Access tab.")
+    elseif self:IsGuildMaster() then
+        -- The GM always has write via being GM, so showing only "GM" looked
+        -- like the policy never changed. Append the configured grant so the GM
+        -- can confirm at a glance who else they granted.
+        banner:SetText(format(
+            "|cff00ff88Layout-write access:|r GM. |cff888888Granted to: %s|r",
+            self:_LayoutGrantSummary()))
     else
-        local why
-        if self:IsGuildMaster() then why = "GM"
-        else why = "rank-or-delegate" end
-        banner:SetText(format("|cff00ff88Layout-write access:|r %s.", why))
+        banner:SetText("|cff00ff88Layout-write access:|r rank-or-delegate.")
     end
     container:AddChild(banner)
 

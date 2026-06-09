@@ -170,6 +170,124 @@ describe("BankLayout", function()
         end)
     end)
 
+    describe("Layout sync intake (BuildLayoutPayload / AdoptRemoteBankLayout)", function()
+        local validLayout = {
+            tabs = {
+                [1] = {
+                    mode = "display",
+                    items = { [100] = { slots = 2, perSlot = 5 } },
+                    slotOrder = { [1] = 100, [2] = 100 },
+                },
+                [2] = { mode = "overflow" },
+            },
+        }
+
+        local function remotePayload(updatedAt, perSlot)
+            return {
+                bankLayout = {
+                    version = 7,
+                    updatedAt = updatedAt,
+                    updatedBy = "RemoteGM-Realm",
+                    tabs = {
+                        [1] = {
+                            mode = "display",
+                            items = { [100] = { slots = 2, perSlot = perSlot or 5 } },
+                            slotOrder = { [1] = 100, [2] = 100 },
+                        },
+                        [2] = { mode = "overflow" },
+                    },
+                },
+                stockReserves = { [100] = 250 },
+            }
+        end
+
+        describe("BuildLayoutPayload", function()
+            it("returns nil when no layout is configured (version 0)", function()
+                assert.is_nil(GBL:BuildLayoutPayload())
+            end)
+
+            it("returns the layout plus stock reserves once configured", function()
+                GBL:SaveBankLayout(validLayout, "GM")
+                GBL:SetStockReserve(100, 400)
+                local payload = GBL:BuildLayoutPayload()
+                assert.truthy(payload)
+                assert.equals("display", payload.bankLayout.tabs[1].mode)
+                assert.equals(400, payload.stockReserves[100])
+            end)
+
+            it("returns deep copies severed from storage", function()
+                GBL:SaveBankLayout(validLayout, "GM")
+                local payload = GBL:BuildLayoutPayload()
+                payload.bankLayout.tabs[1].items[100].perSlot = 999
+                assert.equals(5, GBL:GetBankLayout().tabs[1].items[100].perSlot)
+            end)
+        end)
+
+        describe("AdoptRemoteBankLayout", function()
+            it("rejects a non-table payload", function()
+                local changed, err = GBL:AdoptRemoteBankLayout(nil)
+                assert.is_false(changed)
+                assert.truthy(err)
+            end)
+
+            it("rejects a structurally invalid layout", function()
+                local bad = remotePayload(MockWoW.serverTime + 100)
+                bad.bankLayout.tabs[2] = nil  -- remove the sole overflow tab
+                local changed, err = GBL:AdoptRemoteBankLayout(bad)
+                assert.is_false(changed)
+                assert.matches("overflow", err)
+            end)
+
+            it("adopts a newer layout and reserves, preserving the remote cursor", function()
+                local ts = MockWoW.serverTime + 500
+                local changed = GBL:AdoptRemoteBankLayout(remotePayload(ts, 9))
+                assert.is_true(changed)
+                local got = GBL:GetBankLayout()
+                assert.equals(ts, got.updatedAt)
+                assert.equals(7, got.version)
+                assert.equals("RemoteGM-Realm", got.updatedBy)
+                assert.equals(9, got.tabs[1].items[100].perSlot)
+                assert.equals(250, GBL:GetStockReserves()[100])
+            end)
+
+            it("ignores an older-or-equal layout (last-writer-wins)", function()
+                local ts = MockWoW.serverTime + 500
+                GBL:AdoptRemoteBankLayout(remotePayload(ts, 9))
+                -- Equal cursor: no overwrite.
+                assert.is_false(GBL:AdoptRemoteBankLayout(remotePayload(ts, 1)))
+                assert.equals(9, GBL:GetBankLayout().tabs[1].items[100].perSlot)
+                -- Older cursor: no overwrite.
+                assert.is_false(GBL:AdoptRemoteBankLayout(remotePayload(ts - 100, 2)))
+                assert.equals(9, GBL:GetBankLayout().tabs[1].items[100].perSlot)
+            end)
+
+            it("adopts without local write access (sync intake bypasses the gate)", function()
+                MockWoW.guild.rankIndex = 5  -- not GM, no write access
+                assert.is_false(GBL:HasLayoutWrite())
+                local changed = GBL:AdoptRemoteBankLayout(remotePayload(MockWoW.serverTime + 500))
+                assert.is_true(changed)
+                assert.equals(5, GBL:GetBankLayout().tabs[1].items[100].perSlot)
+            end)
+        end)
+
+        describe("SetStockReserve sync cursor", function()
+            it("bumps the layout cursor when a layout exists so the change re-advertises", function()
+                GBL:SaveBankLayout(validLayout, "GM")
+                local before = GBL:GetBankLayout()
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                GBL:SetStockReserve(100, 400)
+                local after = GBL:GetBankLayout()
+                assert.is_true(after.version > before.version)
+                assert.is_true(after.updatedAt > before.updatedAt)
+            end)
+
+            it("does not bump the cursor when no layout exists (reserves stay local)", function()
+                GBL:SetStockReserve(100, 400)
+                assert.equals(0, GBL:GetBankLayout().version)
+            end)
+        end)
+    end)
+
     describe("CaptureTabLayout", function()
         before_each(function()
             MockWoW.addTab("Potions", nil, true)

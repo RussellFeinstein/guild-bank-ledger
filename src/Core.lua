@@ -5,7 +5,7 @@
 
 local ADDON_NAME = "GuildBankLedger"
 local VERSION = "0.32.10"
-local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
+local DEV_BUILD = "sync"  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
@@ -190,6 +190,9 @@ function GBL:OnEnable()
     -- Rebuild UI tabs when access control settings change via sync
     self:RegisterMessage("GBL_ACCESS_CONTROL_CHANGED", "OnAccessControlChanged")
 
+    -- Refresh layout-dependent tabs when a newer bank layout arrives via sync
+    self:RegisterMessage("GBL_LAYOUT_CHANGED", "OnBankLayoutChanged")
+
     -- Initialize sync system (M5)
     self:InitSync()
 
@@ -202,6 +205,13 @@ function GBL:OnAccessControlChanged()
     if self.tabGroup then
         self:RebuildTabs()
     end
+end
+
+--- A newer bank layout arrived via sync (advertise-and-pull). Refresh whichever
+-- layout-dependent tab is open; each refresh self-guards on the active tab.
+function GBL:OnBankLayoutChanged()
+    if self.RefreshLayoutTab then self:RefreshLayoutTab() end
+    if self.RefreshSortTab then self:RefreshSortTab() end
 end
 
 ------------------------------------------------------------------------

@@ -6186,6 +6186,166 @@ describe("Sync", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Bank layout advertise-and-pull via HELLO
+    ---------------------------------------------------------------------------
+
+    describe("HELLO bank layout advertise-and-pull", function()
+        local function layoutStore(updatedAt)
+            return {
+                version = 3,
+                updatedAt = updatedAt,
+                updatedBy = "GM-TestRealm",
+                tabs = {
+                    [1] = {
+                        mode = "display",
+                        items = { [100] = { slots = 2, perSlot = 5 } },
+                        slotOrder = { [1] = 100, [2] = 100 },
+                    },
+                    [2] = { mode = "overflow" },
+                },
+            }
+        end
+
+        local function validRemote(updatedAt)
+            return {
+                type = "LAYOUT_DATA",
+                bankLayout = layoutStore(updatedAt),
+                stockReserves = { [100] = 250 },
+            }
+        end
+
+        local function sentOfType(t)
+            local out = {}
+            for _, m in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(m.text)
+                if ok and data.type == t then out[#out + 1] = data end
+            end
+            return out
+        end
+
+        local function messageFired(name)
+            for _, m in ipairs(MockAce.sentMessages) do
+                if m.message == name then return true end
+            end
+            return false
+        end
+
+        -- Advertise (cursor only, never the template) ----------------------
+
+        it("advertises layoutUpdatedAt on HELLO when a layout is configured", function()
+            guildData.bankLayout = layoutStore(5000)
+            GBL:BroadcastHello()
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok)
+            assert.equals(5000, data.layoutUpdatedAt)
+        end)
+
+        it("omits layoutUpdatedAt when no layout is saved (version 0)", function()
+            guildData.bankLayout = { version = 0, updatedAt = 0, tabs = {} }
+            GBL:BroadcastHello()
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok)
+            assert.is_nil(data.layoutUpdatedAt)
+        end)
+
+        it("advertises layoutUpdatedAt on the HELLO reply too", function()
+            guildData.bankLayout = layoutStore(7000)
+            MockAce.sentCommMessages = {}
+            GBL:SendHelloReply("SomePeer")
+            local replies = sentOfType("HELLO")
+            assert.is_true(#replies >= 1)
+            assert.equals(7000, replies[1].layoutUpdatedAt)
+        end)
+
+        -- Pull gate (need it AND it's newer) -------------------------------
+
+        it("requests the layout when the player can sort and the cursor is newer", function()
+            MockWoW.guild.rankIndex = 0  -- GM ⇒ HasSortAccess
+            guildData.bankLayout = layoutStore(1000)
+            MockAce.sentCommMessages = {}
+            GBL:HandleHello("GMPlayer", {
+                version = GBL.version, txCount = 0, layoutUpdatedAt = 5000,
+            })
+            assert.equals(1, #sentOfType("LAYOUT_REQUEST"))
+        end)
+
+        it("does not request when the player cannot sort", function()
+            MockWoW.guild.rankIndex = 5  -- not GM
+            guildData.sortAccess = nil    -- no grant ⇒ HasSortAccess false
+            guildData.bankLayout = { version = 0, updatedAt = 0, tabs = {} }
+            MockAce.sentCommMessages = {}
+            GBL:HandleHello("GMPlayer", {
+                version = GBL.version, txCount = 0, layoutUpdatedAt = 5000,
+            })
+            assert.equals(0, #sentOfType("LAYOUT_REQUEST"))
+        end)
+
+        it("does not request when the advertised cursor is not newer", function()
+            MockWoW.guild.rankIndex = 0
+            guildData.bankLayout = layoutStore(9000)
+            MockAce.sentCommMessages = {}
+            GBL:HandleHello("GMPlayer", {
+                version = GBL.version, txCount = 0, layoutUpdatedAt = 5000,
+            })
+            assert.equals(0, #sentOfType("LAYOUT_REQUEST"))
+        end)
+
+        it("throttles repeated requests to one in-flight", function()
+            MockWoW.guild.rankIndex = 0
+            guildData.bankLayout = layoutStore(1000)
+            MockAce.sentCommMessages = {}
+            GBL:HandleHello("PeerA", {
+                version = GBL.version, txCount = 0, layoutUpdatedAt = 5000,
+            })
+            GBL:HandleHello("PeerB", {
+                version = GBL.version, txCount = 0, layoutUpdatedAt = 5000,
+            })
+            assert.equals(1, #sentOfType("LAYOUT_REQUEST"))
+        end)
+
+        -- Serve ------------------------------------------------------------
+
+        it("serves LAYOUT_DATA with template and reserves on request", function()
+            guildData.bankLayout = layoutStore(5000)
+            guildData.stockReserves = { [100] = 250 }
+            MockAce.sentCommMessages = {}
+            GBL:HandleLayoutRequest("Requester", {})
+            local served = sentOfType("LAYOUT_DATA")
+            assert.equals(1, #served)
+            assert.equals(5000, served[1].bankLayout.updatedAt)
+            assert.equals(250, served[1].stockReserves[100])
+        end)
+
+        it("serves nothing when no layout is configured", function()
+            guildData.bankLayout = { version = 0, updatedAt = 0, tabs = {} }
+            MockAce.sentCommMessages = {}
+            GBL:HandleLayoutRequest("Requester", {})
+            assert.equals(0, #sentOfType("LAYOUT_DATA"))
+        end)
+
+        -- Adopt ------------------------------------------------------------
+
+        it("adopts received LAYOUT_DATA and fires GBL_LAYOUT_CHANGED", function()
+            guildData.bankLayout = { version = 0, updatedAt = 0, tabs = {} }
+            MockAce.sentMessages = {}
+            GBL:HandleLayoutData("Peer", validRemote(5000))
+            assert.equals(5000, guildData.bankLayout.updatedAt)
+            assert.equals(250, guildData.stockReserves[100])
+            assert.is_true(messageFired("GBL_LAYOUT_CHANGED"))
+        end)
+
+        it("rejects invalid LAYOUT_DATA without firing a refresh", function()
+            guildData.bankLayout = { version = 0, updatedAt = 0, tabs = {} }
+            MockAce.sentMessages = {}
+            local bad = validRemote(5000)
+            bad.bankLayout.tabs[2] = nil  -- drop the sole overflow tab
+            GBL:HandleLayoutData("Peer", bad)
+            assert.equals(0, guildData.bankLayout.version)
+            assert.is_false(messageFired("GBL_LAYOUT_CHANGED"))
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- eventCounts sync
     ---------------------------------------------------------------------------
 

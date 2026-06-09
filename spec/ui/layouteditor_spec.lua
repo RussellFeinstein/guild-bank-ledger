@@ -269,3 +269,49 @@ describe("LayoutEditor.applyBulkToItems", function()
         assert.is_table(tab.slotOrder)
     end)
 end)
+
+describe("LayoutEditor._LayoutGrantSummary", function()
+    local MockWoW = Helpers.MockWoW
+    local GBL
+
+    before_each(function()
+        Helpers.setupMocks()
+        GBL = Helpers.loadAddon()
+        GBL:OnInitialize()
+        MockWoW.guild.name = "Test Guild"
+        MockWoW.guild.rankIndex = 0
+        GBL:OnEnable()
+    end)
+
+    local function setWrite(tier)
+        local gd = GBL:GetGuildData()
+        gd.sortAccess = {
+            write = tier,
+            sort  = { rankThreshold = nil, delegates = {} },
+            updatedAt = 1,
+        }
+    end
+
+    it("says GM only when nothing beyond the GM is granted", function()
+        assert.equals("GM only", GBL:_LayoutGrantSummary())
+    end)
+
+    it("names the rank threshold", function()
+        setWrite({ rankThreshold = 3, delegates = {} })
+        local s = GBL:_LayoutGrantSummary()
+        assert.matches("ranks", s)
+        assert.matches("3", s)
+    end)
+
+    it("counts delegates", function()
+        setWrite({ rankThreshold = nil, delegates = { ["A-R"] = true, ["B-R"] = true } })
+        assert.matches("2 delegate", GBL:_LayoutGrantSummary())
+    end)
+
+    it("combines rank threshold and delegate count", function()
+        setWrite({ rankThreshold = 2, delegates = { ["A-R"] = true } })
+        local s = GBL:_LayoutGrantSummary()
+        assert.matches("ranks", s)
+        assert.matches("1 delegate", s)
+    end)
+end)

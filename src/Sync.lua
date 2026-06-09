@@ -49,6 +49,7 @@ local PEER_STARVATION_SECONDS = 60
 local FORCED_HELLO_COOLDOWN = 10
 local MANIFEST_INTERVAL = 300  -- 5 minutes
 local MANIFEST_MAX_BUCKETS = 200
+local LAYOUT_REQUEST_THROTTLE = 30  -- min seconds between bank-layout pull requests
 local WHISPER_TRACK_EXPIRE = 30
 local MAX_RECEIVE_DURATION = 1800  -- 30 minutes absolute maximum receive time
 
@@ -70,6 +71,7 @@ GBL.SYNC_MAX_RECEIVE_DURATION = MAX_RECEIVE_DURATION
 GBL.SYNC_FORCED_HELLO_COOLDOWN = FORCED_HELLO_COOLDOWN
 GBL.SYNC_MANIFEST_INTERVAL = MANIFEST_INTERVAL
 GBL.SYNC_MANIFEST_MAX_BUCKETS = MANIFEST_MAX_BUCKETS
+GBL.SYNC_LAYOUT_REQUEST_THROTTLE = LAYOUT_REQUEST_THROTTLE
 GBL.SYNC_COMBAT_COOLDOWN = COMBAT_COOLDOWN
 GBL.SYNC_INTER_CHUNK_GAP_FLOOR = INTER_CHUNK_GAP_FLOOR
 
@@ -160,6 +162,11 @@ local syncState = {
     -- HELLO traffic management (M4)
     lastForcedHelloTime = 0,
     lastHelloReplyHash = {},  -- name → hash we last communicated to this peer
+
+    -- Bank layout advertise-and-pull (v0.32.11): timestamp of our last
+    -- LAYOUT_REQUEST. Single in-flight guard so a newer-layout cursor seen on
+    -- several peers' HELLOs does not fan out one request per peer.
+    lastLayoutRequestAt = 0,
 
     -- GUILD manifest broadcast (M5)
     peerManifests = {},        -- name → { buckets={}, txCount, dataHash, receivedAt }
@@ -459,6 +466,13 @@ function GBL:BroadcastHello(force)
         -- (updatedAt > 0); keeps HELLO lean for guilds with no policy.
         sortAccess = (guildData.sortAccess and (guildData.sortAccess.updatedAt or 0) > 0)
             and guildData.sortAccess or nil,
+        -- Advertise only the layout cursor (one timestamp), never the template
+        -- itself. A populated layout is several KB; putting it on every HELLO
+        -- broadcast would regress sync reliability for the whole guild. Peers
+        -- that can sort and see a newer cursor pull the full template via
+        -- LAYOUT_REQUEST. Gated on version > 0 (a saved, validated layout).
+        layoutUpdatedAt = (guildData.bankLayout and (guildData.bankLayout.version or 0) > 0)
+            and guildData.bankLayout.updatedAt or nil,
     })
     msg = compressMessage(msg)
 
@@ -579,12 +593,85 @@ function GBL:SendHelloReply(target)
         accessControl = guildData.accessControl,
         sortAccess = (guildData.sortAccess and (guildData.sortAccess.updatedAt or 0) > 0)
             and guildData.sortAccess or nil,
+        layoutUpdatedAt = (guildData.bankLayout and (guildData.bankLayout.version or 0) > 0)
+            and guildData.bankLayout.updatedAt or nil,
     })
     msg = compressMessage(msg)
 
     if not self:SendSyncWhisper(PREFIX, msg, target) then return end
     self:AddAuditEntry("Sent HELLO reply to " .. target
         .. " (tx: " .. txCount .. ", hash: " .. dataHash .. ")")
+end
+
+------------------------------------------------------------------------
+-- Bank layout sync (advertise-and-pull, v0.32.11)
+--
+-- HELLO carries only layoutUpdatedAt (a cursor). A peer that HasSortAccess and
+-- sees a newer cursor sends a LAYOUT_REQUEST; the holder replies with
+-- LAYOUT_DATA carrying the full template + stock reserves. No ACK: each HELLO
+-- re-advertises the cursor, so a dropped LAYOUT_DATA is re-pulled on the next
+-- gossip tick until the receiver's cursor matches. Convergence, not per-message
+-- proof (same philosophy as the sort executor).
+------------------------------------------------------------------------
+
+--- Send a LAYOUT_REQUEST to a peer, throttled to one in-flight request so a
+-- newer cursor seen on several peers' HELLOs does not fan out N requests.
+-- @param peer string raw sender name (canonicalized before use)
+function GBL:MaybeRequestLayout(peer)
+    local now = GetServerTime()
+    if now - (syncState.lastLayoutRequestAt or 0) < LAYOUT_REQUEST_THROTTLE then
+        return
+    end
+    local key = self:CanonicalPeerKey(peer)
+    local msg = compressMessage(self:Serialize({
+        type = "LAYOUT_REQUEST",
+        guild = self:GetGuildName(),
+    }))
+    if self:SendSyncWhisper(PREFIX, msg, key) then
+        syncState.lastLayoutRequestAt = now
+        self:SyncDebug("Requested bank layout from %s", key)
+    end
+end
+
+--- Serve our layout to a requester. Not access-gated (the layout is not
+-- sensitive and epidemic spread needs any holder to serve), but only sent when
+-- we actually have a configured layout to give.
+function GBL:HandleLayoutRequest(sender, _data)
+    local payload = self.BuildLayoutPayload and self:BuildLayoutPayload()
+    if not payload then return end
+    local key = self:CanonicalPeerKey(sender)
+    local msg = compressMessage(self:Serialize({
+        type = "LAYOUT_DATA",
+        guild = self:GetGuildName(),
+        nchunks = 1,   -- reserved for future chunking; always 1 for now
+        chunk = 1,
+        bankLayout = payload.bankLayout,
+        stockReserves = payload.stockReserves,
+    }))
+    -- AceComm WHISPER drops payloads over ~WHISPER_SAFE_BYTES. Log the size so a
+    -- real layout that exceeds the ceiling is visible (chunking is the fix).
+    if #msg > WHISPER_SAFE_BYTES then
+        self:SyncWarn("Layout payload for %s is %d B (> %d safe); transfer may drop, chunking needed",
+            key, #msg, WHISPER_SAFE_BYTES)
+    else
+        self:SyncDebug("Serving bank layout to %s (%d B)", key, #msg)
+    end
+    self:SendSyncWhisper(PREFIX, msg, key)
+end
+
+--- Adopt a layout payload from a peer (validated, last-writer-wins). Fires
+-- GBL_LAYOUT_CHANGED on a real change so an open Sort/Layout tab refreshes.
+function GBL:HandleLayoutData(sender, data)
+    local key = self:CanonicalPeerKey(sender)
+    if not self.AdoptRemoteBankLayout then return end
+    local changed, err = self:AdoptRemoteBankLayout(data, key)
+    if changed then
+        local ts = data.bankLayout and data.bankLayout.updatedAt
+        self:SyncInfo("Adopted bank layout from %s (updatedAt=%s)", key, tostring(ts))
+        self:SendMessage("GBL_LAYOUT_CHANGED")
+    elseif err then
+        self:SyncWarn("Rejected bank layout from %s: %s", key, err)
+    end
 end
 
 ------------------------------------------------------------------------
@@ -684,6 +771,10 @@ function GBL:OnSyncMessage(_prefix, message, distribution, sender)
         self:HandleBusy(sender, data)
     elseif msgType == "MANIFEST" then
         self:HandleManifest(sender, data)
+    elseif msgType == "LAYOUT_REQUEST" then
+        self:HandleLayoutRequest(sender, data)
+    elseif msgType == "LAYOUT_DATA" then
+        self:HandleLayoutData(sender, data)
     end
 end
 
@@ -750,6 +841,19 @@ function GBL:HandleHello(sender, data)
                     .. " (updatedAt=" .. tostring(remoteTS) .. ")")
                 self:SendMessage("GBL_ACCESS_CONTROL_CHANGED")
             end
+        end
+    end
+
+    -- Bank layout advertise-and-pull. We only fetch the template if we can
+    -- actually use it (HasSortAccess) AND the peer advertises a newer cursor.
+    -- Members who cannot sort never request it, so the big payload stays off
+    -- the wire for almost everyone. The GM and granted officers converge on
+    -- the newest layout; the throttle keeps a single request in flight.
+    if data.layoutUpdatedAt and self:HasSortAccess() then
+        local gd = self:GetGuildData()
+        local localTS = (gd and gd.bankLayout and gd.bankLayout.updatedAt) or 0
+        if data.layoutUpdatedAt > localTS then
+            self:MaybeRequestLayout(sender)
         end
     end
 
@@ -2492,6 +2596,7 @@ function GBL:ResetSyncState()
     end
     syncState.helloRepliesDuringSync = 0
     syncState.nacksReceivedDuringSync = 0
+    syncState.lastLayoutRequestAt = 0
     syncState.lastChunkBytes = 0
     syncState.lastSendIssuedAt = 0
     syncState.sendChunkTransmittedAt = 0
