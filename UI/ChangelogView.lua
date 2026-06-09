@@ -29,6 +29,16 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.32.11
+    {"0.32.11", "2026-06-09", {
+        Added = {
+            "The bank layout now syncs to guildmates who have sort access, so granting an officer sort access actually gives their Sort tab something to work with. The Guild Master's layout and stock reserve counts travel with the addon's normal guild sync. Only the layout's timestamp rides the regular guild ping; the full layout transfers privately and only to members who can sort, so it stays off the wire for everyone else. A dropped transfer is re-fetched on the next ping until both clients match.",
+        },
+        Changed = {
+            "The Layout tab's 'Layout-write access: GM' line now also shows who else has been granted layout-write access (the rank threshold and delegate count), so you can see the policy you configured at a glance instead of only your own access.",
+        },
+    }},
+
     -- v0.32.10
     {"0.32.10", "2026-06-04", {
         Changed = {
