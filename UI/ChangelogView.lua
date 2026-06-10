@@ -29,6 +29,19 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.32.12
+    {"0.32.12", "2026-06-09", {
+        Added = {
+            "Sync debug logging to diagnose guildmates who never catch up to a client that is ahead of them. With sync debug on, the log now shows when a discovery ping is held back because your data has not changed, so a silent stall is visible in a capture. Turn it on with /gbl logs debug sync on, then view it with /gbl synclog.",
+        },
+        Changed = {
+            "Sync sends the most recent transactions first when catching a guildmate up. An interrupted catch-up now still delivers current activity instead of working through old history first, and what ends up stored is unchanged since records are matched by identity.",
+        },
+        Fixed = {
+            "Guildmates who had fallen behind a client whose data had stopped changing now get caught up instead of stalling. The addon only pinged a peer when its own data changed, so once a caught-up client went idle it stopped telling a behind peer it had more, and the behind peer never asked. The ahead client now re-pings a behind peer (at most once a minute) so the catch-up starts even when nothing new is happening.",
+        },
+    }},
+
     -- v0.32.11
     {"0.32.11", "2026-06-09", {
         Added = {

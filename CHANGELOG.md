@@ -5,7 +5,16 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.32.12] - 2026-06-09
+
+### Added
+- Sync debug logging to diagnose guildmates who never catch up to a client that is ahead of them. When sync debug is on, the log now records when a HELLO reply is held back because our data has not changed since we last told that peer, and annotates the "likely superset" skip with whether the peer got a fresh ping that round. This makes the suspected silent stall (an ahead client that never nudges a behind peer, and a behind peer that therefore never asks) visible in a capture. Enable with `/gbl logs debug sync on`, reproduce, then `/gbl synclog`.
+
+### Fixed
+- Guildmates who were behind a client whose data had stopped changing now get caught up instead of stalling. The addon only pings a peer when its own data changes, so once an ahead client went idle it stopped telling a behind peer it had more, and the behind peer never asked, leaving the two stuck out of sync indefinitely. The ahead client now re-pings a behind peer (at most once a minute per peer) so the catch-up starts even when nothing new is happening.
+
+### Changed
+- Sync now sends the most recent transactions first when catching a guildmate up. It used to send oldest first, so a member who only lacked recent activity had to wait through the entire history (often thousands of records they already had) before reaching what they actually needed, and any interruption (combat, zoning, a disconnect) before the end meant the catch-up made almost no progress. Sending newest first means an interrupted sync still delivers current activity, and the next comparison between the two clients is smaller, so the guild converges faster. What ends up stored is unchanged: records are matched by identity, so the order they arrive in does not change the result.
 
 ## [0.32.11] - 2026-06-09
 

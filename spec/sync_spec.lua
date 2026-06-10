@@ -397,6 +397,44 @@ describe("Sync", function()
             assert.is_false(foundReply, "Hash unchanged — reply should be suppressed")
         end)
 
+        it("logs a DEBUG diagnostic when a hash-unchanged reply is suppressed", function()
+            -- DEBUG entries only record when sync debug is enabled (the state a
+            -- user is in when capturing a sync log to diagnose non-convergence).
+            GBL.db.profile.sync.debugChat = true
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- First HELLO establishes lastHelloReplyHash for OfficerB (reply sent).
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version, txCount = 0, lastScanTime = 1000,
+            })
+            MockAce.sentCommMessages = {}
+
+            -- Second broadcast HELLO with unchanged hash: reply is suppressed and
+            -- the diagnostic should fire (this is the suspected silent deadlock
+            -- condition when the peer is also behind us).
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version, txCount = 0, lastScanTime = 2000,
+            })
+
+            -- No reply went out this round.
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                assert.is_false(ok and data.type == "HELLO" and data.isReply == true)
+            end
+
+            -- The suppression diagnostic was recorded in the sync log at DEBUG.
+            local found = false
+            for _, e in ipairs(GBL:GetLog("sync")) do
+                if e.level == "DEBUG"
+                    and e.message:find("Suppressed HELLO reply to", 1, true)
+                    and e.message:find("hash unchanged since last reply", 1, true) then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found, "expected hash-unchanged suppression DEBUG line")
+        end)
+
         it("SendHelloReply payload includes isReply=true", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
             GBL:SendHelloReply("OfficerB")
@@ -602,6 +640,130 @@ describe("Sync", function()
                 end
             end
             assert.is_true(found, "audit trail should contain 'likely superset' entry")
+        end)
+
+        it("re-nudges a behind peer whose reply was hash-gate suppressed", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            for i = 1, 10 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000 + i, id = "localmore" .. i .. ":0",
+                })
+            end
+            local localHash = GBL:GetDataHash(guildData)
+            local hello = {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 5,
+                dataHash = localHash + 1,
+            }
+
+            -- First HELLO: peer behind, reply sent, registers lastHelloReplyHash.
+            hello.lastScanTime = 2000
+            GBL:HandleHello("OfficerB", hello)
+            fireJitterTimers()
+            MockAce.sentCommMessages = {}
+
+            -- Second HELLO: hash unchanged so the normal reply is suppressed, but
+            -- because the peer is behind us the superset branch re-nudges.
+            hello.lastScanTime = 3000
+            GBL:HandleHello("OfficerB", hello)
+            fireJitterTimers()
+
+            local nudged = false
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                if ok and data.type == "HELLO" and data.isReply
+                    and sent.distribution == "WHISPER" and sent.target == "OfficerB" then
+                    nudged = true
+                end
+            end
+            assert.is_true(nudged, "behind peer should be re-nudged with a HELLO reply")
+
+            local audited = false
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message and entry.message:find("Nudged behind peer", 1, true) then
+                    audited = true
+                end
+            end
+            assert.is_true(audited, "audit trail should record the nudge")
+        end)
+
+        it("throttles superset re-nudges to one per window per peer", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            for i = 1, 10 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000 + i, id = "localmore" .. i .. ":0",
+                })
+            end
+            local localHash = GBL:GetDataHash(guildData)
+            local hello = {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 5,
+                dataHash = localHash + 1,
+            }
+
+            -- First HELLO sends a reply; second triggers the (throttled) nudge.
+            hello.lastScanTime = 2000
+            GBL:HandleHello("OfficerB", hello)
+            fireJitterTimers()
+            hello.lastScanTime = 3000
+            GBL:HandleHello("OfficerB", hello)
+            fireJitterTimers()
+            MockAce.sentCommMessages = {}
+
+            -- Third HELLO immediately (same server time, within the throttle):
+            -- no second nudge.
+            hello.lastScanTime = 4000
+            GBL:HandleHello("OfficerB", hello)
+            fireJitterTimers()
+
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                assert.is_false(ok and data.type == "HELLO" and data.isReply == true,
+                    "no second nudge within the throttle window")
+            end
+        end)
+
+        it("does not nudge on first contact (reply already sent)", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            for i = 1, 10 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000 + i, id = "localmore" .. i .. ":0",
+                })
+            end
+            local localHash = GBL:GetDataHash(guildData)
+
+            -- Single HELLO from a never-seen behind peer: the reply gate sends a
+            -- normal reply (replyDecision "sent"), so the superset branch must not
+            -- also fire a nudge. Exactly one HELLO reply, no "Nudged" audit line.
+            GBL:HandleHello("OfficerB", {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 5,
+                dataHash = localHash + 1,
+                lastScanTime = 2000,
+            })
+            fireJitterTimers()
+
+            local replyCount = 0
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                if ok and data.type == "HELLO" and data.isReply then
+                    replyCount = replyCount + 1
+                end
+            end
+            assert.equals(1, replyCount, "first contact sends exactly one reply, no extra nudge")
+
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message then
+                    assert.is_nil(entry.message:find("Nudged behind peer", 1, true),
+                        "no nudge on first contact")
+                end
+            end
         end)
 
         it("skips sync when hash matches and counts match", function()
@@ -3186,6 +3348,116 @@ describe("Sync", function()
 
             local peers = GBL:GetSyncPeers()
             assert.equals(12345, peers["OfficerB"].dataHash)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Send order (newest-first)
+    ---------------------------------------------------------------------------
+
+    describe("send order (newest-first)", function()
+        local BASE = 86400 * 20000  -- WoW-era seconds (multiple of BUCKET_SECONDS)
+
+        it("SortSendListNewestFirst orders records newest-bucket-first", function()
+            local B = GBL.BUCKET_SECONDS
+            -- Supplied out of order; the sort must put the newest bucket first.
+            local list = {
+                { id = "b2:0", timestamp = BASE + 2 * B + 10 },
+                { id = "b7:0", timestamp = BASE + 7 * B + 10 },
+                { id = "b4:0", timestamp = BASE + 4 * B + 10 },
+                { id = "b9:0", timestamp = BASE + 9 * B + 10 },
+            }
+            GBL:SortSendListNewestFirst(list)
+            local ids = {}
+            for i, r in ipairs(list) do ids[i] = r.id end
+            assert.same({ "b9:0", "b7:0", "b4:0", "b2:0" }, ids)
+        end)
+
+        it("SortSendListNewestFirst no-ops on empty or single-element lists", function()
+            assert.same({}, GBL:SortSendListNewestFirst({}))
+            local one = { { id = "x:0", timestamp = BASE } }
+            assert.equals(one, GBL:SortSendListNewestFirst(one))
+            assert.equals("x:0", one[1].id)
+        end)
+
+        it("HandleSyncRequest puts the newest buckets in the first chunk", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            local B = GBL.BUCKET_SECONDS
+            -- Five records in distinct buckets, inserted oldest-first. The chunk
+            -- record cap is 4, so the oldest bucket (1) must spill to a later
+            -- chunk; the first chunk leads with the newest (5).
+            for _, b in ipairs({ 1, 2, 3, 4, 5 }) do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "A", timestamp = BASE + b * B + 10,
+                    scanTime = BASE + b * B + 10, id = "b" .. b .. ":0",
+                    itemID = 100, count = 1, tab = 1,
+                })
+            end
+
+            -- Empty bucketHashes => every local bucket differs => all sent.
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0, bucketHashes = {} })
+
+            -- The first chunk sends synchronously; inspect it without firing timers.
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok)
+            assert.equals("SYNC_DATA", data.type)
+            assert.is_true(#data.transactions >= 1)
+            assert.equals("b5:0", data.transactions[1].id)  -- newest bucket leads
+            for _, tx in ipairs(data.transactions) do
+                assert.is_true(tx.id ~= "b1:0",
+                    "oldest bucket must not ride in the first chunk")
+            end
+
+            -- The diagnostic line records the span being sent.
+            local found = false
+            for _, e in ipairs(GBL:GetAuditTrail()) do
+                if e.message:find("Send order newest%-first") then found = true end
+            end
+            assert.is_true(found, "expected a newest-first send-order audit line")
+        end)
+
+        it("merge result is identical regardless of receive order", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            -- Three distinct records; ids are the dedup key. Format mirrors the
+            -- proven HandleSyncData records above.
+            local function rec(n)
+                return {
+                    type = "deposit", player = "P" .. n,
+                    itemID = 1000 + n, count = n, tab = 1,
+                    timestamp = BASE + n * 100, scanTime = BASE + n * 100,
+                    scannedBy = "OfficerB",
+                    id = "deposit|P" .. n .. "|" .. (1000 + n) .. "|" .. n .. "|1|0",
+                }
+            end
+
+            -- Fresh tables per call so the two runs never share mutated records.
+            -- Each batch is the same multiset and includes an intra-batch
+            -- duplicate of rec(1), in opposite orders.
+            local function receiveAndCollect(makeBatch)
+                guildData.transactions = {}
+                guildData.moneyTransactions = {}
+                guildData.seenTxHashes = {}
+                guildData.eventCounts = {}
+                GBL:ResetSyncState()
+                GBL:HandleSyncData("OfficerB", {
+                    chunk = 1, totalChunks = 1,
+                    transactions = makeBatch(), moneyTransactions = {},
+                })
+                local ids = {}
+                for _, tx in ipairs(guildData.transactions) do ids[#ids + 1] = tx.id end
+                table.sort(ids)
+                return ids
+            end
+
+            local idsForward = receiveAndCollect(function()
+                return { rec(1), rec(2), rec(1), rec(3) }
+            end)
+            local idsReverse = receiveAndCollect(function()
+                return { rec(3), rec(1), rec(2), rec(1) }
+            end)
+
+            assert.equals(3, #idsForward)  -- the intra-batch duplicate was dropped
+            assert.same(idsForward, idsReverse)  -- receive order did not change the merge
         end)
     end)
 
@@ -8401,7 +8673,10 @@ describe("Sync", function()
             GBL:BroadcastHello(true)
 
             -- Now a HELLO from PeerA should NOT trigger a reply
-            -- (broadcast-mark optimization)
+            -- (broadcast-mark optimization). PeerA reports the same hash/count as
+            -- us here so it is NOT behind: a behind peer is now deliberately
+            -- re-nudged past the broadcast-mark (covered by the superset re-nudge
+            -- tests), which would otherwise fire SendHelloReply here.
             local replySent = false
             local origSendHelloReply = GBL.SendHelloReply
             GBL.SendHelloReply = function(self, target)
@@ -8412,7 +8687,7 @@ describe("Sync", function()
             GBL:HandleHello("PeerA", {
                 version = GBL.version,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
-                txCount = 0, dataHash = 0,
+                txCount = 1, dataHash = GBL:GetDataHash(guildData),
                 isReply = false,
             })
             assert.is_false(replySent, "Broadcast-mark should suppress reply")
