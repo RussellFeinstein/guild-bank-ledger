@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.32.12] - 2026-06-09
 
 ### Added
 - Sync debug logging to diagnose guildmates who never catch up to a client that is ahead of them. When sync debug is on, the log now records when a HELLO reply is held back because our data has not changed since we last told that peer, and annotates the "likely superset" skip with whether the peer got a fresh ping that round. This makes the suspected silent stall (an ahead client that never nudges a behind peer, and a behind peer that therefore never asks) visible in a capture. Enable with `/gbl logs debug sync on`, reproduce, then `/gbl synclog`.
