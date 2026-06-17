@@ -7993,6 +7993,191 @@ describe("Sync", function()
             assert.equals("PeerB", GBL:GetSyncStatus().receiveSource,
                 "should process pending queue instead of requesting from peer with fewer records")
         end)
+
+        it("re-nudges the behind peer on a bidirectional superset skip", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            -- Local holds more records than the peer.
+            for i = 1, 10 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "P1", tab = 1, itemID = 100 + i,
+                    classID = 0, subclassID = 0, count = 1,
+                    timestamp = 1000 * 3600 + i, id = "bidir_nudge" .. i .. ":277:0",
+                    _occurrence = 0, scanTime = 1000 * 3600 + i, scannedBy = "OfficerA",
+                })
+                guildData.seenTxHashes["bidir_nudge" .. i .. ":277:0"] = 1000 * 3600 + i
+            end
+
+            -- Peer is behind: fewer records, different hash.
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 3, dataHash = 999 })
+
+            GBL:HandleSyncRequest("PeerA", {
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            GBL:FinishSending()
+            MockAce.sentCommMessages = {}
+
+            -- Fire the 0.5s bidirectional check timer.
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if t.delay == 0.5 and not t.cancelled then
+                    t.callback()
+                    break
+                end
+            end
+
+            -- The behind peer should be re-nudged with an isReply HELLO whisper.
+            local expectedKey = GBL:CanonicalPeerKey("PeerA")
+            local nudged = false
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                if ok and data.type == "HELLO" and data.isReply
+                    and sent.distribution == "WHISPER"
+                    and GBL:CanonicalPeerKey(sent.target) == expectedKey then
+                    nudged = true
+                end
+            end
+            assert.is_true(nudged,
+                "behind peer should be re-nudged after a bidirectional superset skip")
+
+            local audited = false
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message
+                    and entry.message:find("bidirectional hash-gate bypass", 1, true) then
+                    audited = true
+                end
+            end
+            assert.is_true(audited, "audit trail should record the bidirectional nudge")
+        end)
+
+        it("throttles the bidirectional superset nudge to one per window per peer", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            for i = 1, 10 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "P1", tab = 1, itemID = 100 + i,
+                    classID = 0, subclassID = 0, count = 1,
+                    timestamp = 1000 * 3600 + i, id = "bidir_thr" .. i .. ":277:0",
+                    _occurrence = 0, scanTime = 1000 * 3600 + i, scannedBy = "OfficerA",
+                })
+                guildData.seenTxHashes["bidir_thr" .. i .. ":277:0"] = 1000 * 3600 + i
+            end
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 3, dataHash = 999 })
+
+            -- First skip sets lastSupersetNudge for the peer.
+            GBL:HandleSyncRequest("PeerA", {
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            MockWoW.pendingTimers = {}
+            GBL:FinishSending()
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if t.delay == 0.5 and not t.cancelled then t.callback() break end
+            end
+            MockAce.sentCommMessages = {}
+
+            -- Second skip at the same server time is inside the throttle window.
+            GBL:HandleSyncRequest("PeerA", {
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            MockWoW.pendingTimers = {}
+            GBL:FinishSending()
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if t.delay == 0.5 and not t.cancelled then t.callback() break end
+            end
+
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                assert.is_false(ok and data.type == "HELLO" and data.isReply == true,
+                    "no second bidirectional nudge within the throttle window")
+            end
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Epoch-0 (bucket 0) diagnostic
+    ---------------------------------------------------------------------------
+
+    describe("epoch-0 diagnostic", function()
+        it("CollectEpochZeroRecords classifies bucket-0 records", function()
+            local gd = {
+                transactions = {
+                    -- epoch-0 id, invalid timestamp (legacy corrupt record)
+                    { type = "deposit", player = "P1", itemID = 123, count = 1, tab = 1,
+                      id = "deposit|P1|123|1|1|0:0", timestamp = 0,
+                      scannedBy = "sync:PeerX-Realm" },
+                    -- epoch-0 id but repaired (valid) timestamp: the leak case where
+                    -- the timestamp was fixed at intake but the id still says slot 0
+                    { type = "deposit", player = "P1", itemID = 123, count = 1, tab = 1,
+                      id = "deposit|P1|123|1|1|0:1", timestamp = 475100 * 3600,
+                      scannedBy = "sync:PeerX-Realm" },
+                    -- no-pipe id + epoch-0 timestamp: bucket 0 via the timestamp fallback
+                    { type = "deposit", player = "P3", itemID = 7, count = 1, tab = 1,
+                      id = "nopipe:0", timestamp = 0, scannedBy = "sync:PeerY-Realm" },
+                    -- valid record in a real bucket: must be excluded
+                    { type = "deposit", player = "P4", itemID = 9, count = 1, tab = 1,
+                      id = "deposit|P4|9|1|1|475100:0", timestamp = 475100 * 3600,
+                      scannedBy = "Me-Realm" },
+                },
+                moneyTransactions = {
+                    -- epoch-0 id money record
+                    { type = "withdrawal", player = "P2", amount = 500,
+                      id = "withdrawal|P2|500|0:0", timestamp = 0, scannedBy = "Me-Realm" },
+                },
+            }
+
+            local r = GBL:CollectEpochZeroRecords(gd)
+            assert.equals(4, r.count)
+            assert.equals(3, r.items)
+            assert.equals(1, r.money)
+            assert.equals(1, r.validTs)
+            assert.equals(3, r.invalidTs)
+            assert.equals(3, r.sources)
+            assert.equals(2, r.byScannedBy["sync:PeerX-Realm"])
+            assert.equals(1, r.byScannedBy["sync:PeerY-Realm"])
+            assert.equals(1, r.byScannedBy["Me-Realm"])
+            assert.equals(4, #r.samples)
+        end)
+
+        it("CollectEpochZeroRecords returns zeros for clean data", function()
+            local gd = {
+                transactions = {
+                    { type = "deposit", player = "P1", itemID = 123, count = 1, tab = 1,
+                      id = "deposit|P1|123|1|1|475100:0", timestamp = 475100 * 3600,
+                      scannedBy = "Me-Realm" },
+                },
+                moneyTransactions = {},
+            }
+            local r = GBL:CollectEpochZeroRecords(gd)
+            assert.equals(0, r.count)
+            assert.equals(0, r.items)
+            assert.equals(0, r.money)
+            assert.equals(0, r.sources)
+            assert.equals(0, #r.samples)
+        end)
+
+        it("CollectEpochZeroRecords caps samples at 10", function()
+            local txs = {}
+            for i = 1, 15 do
+                txs[i] = { type = "deposit", player = "P1", itemID = 1, count = 1, tab = 1,
+                           id = "deposit|P1|1|1|1|0:" .. i, timestamp = 0,
+                           scannedBy = "sync:PeerX-Realm" }
+            end
+            local r = GBL:CollectEpochZeroRecords({ transactions = txs, moneyTransactions = {} })
+            assert.equals(15, r.count)
+            assert.equals(10, #r.samples)
+        end)
+
+        it("CollectEpochZeroRecords tolerates nil guildData", function()
+            local r = GBL:CollectEpochZeroRecords(nil)
+            assert.equals(0, r.count)
+            assert.equals(0, #r.samples)
+        end)
     end)
 
     ---------------------------------------------------------------------------

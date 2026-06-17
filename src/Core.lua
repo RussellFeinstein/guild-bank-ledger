@@ -2294,6 +2294,8 @@ function GBL:HandleSlashCommand(input)
         else
             self:Print("ChatFilters module not loaded.")
         end
+    elseif command == "epoch0" then
+        self:DumpEpochZeroRecords()
     else
         self:Print("Unknown command: " .. command .. ". Type /gbl help for usage.")
     end
