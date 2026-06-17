@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.33.0] - 2026-06-17
 
 ### Added
 - A diagnostic command, `/gbl epoch0`, that lists stored transactions stuck in the epoch-0 (1969-12-31) time bucket and reports how many there are, whether their timestamps are valid, and which guildmate supplied each one. It is an investigation aid for the long-standing issue where a few stale records keep showing up as differing during sync even when both sides already hold them. Run it, then check `/gbl synclog` for the summary line.
