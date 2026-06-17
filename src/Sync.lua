@@ -1869,6 +1869,23 @@ function GBL:FinishSending()
                 if localCount > remoteTxCount then
                     self:AddAuditEntry("Bidirectional check: skipped — likely superset (local="
                         .. localCount .. " > remote=" .. remoteTxCount .. ")")
+                    -- Symmetric with the HandleHello superset re-nudge (v0.32.12):
+                    -- we are ahead and skipping, so a behind peer past the hash-gate
+                    -- HELLO-reply suppression gets no further signal and can starve
+                    -- (the pure-skip gap the v0.28.x amplifier note flagged at this
+                    -- site). Re-send the HELLO reply, throttled per peer through the
+                    -- same lastSupersetNudge map the HandleHello nudge uses so the two
+                    -- sites cannot double-nudge within one window. SendHelloReply is
+                    -- an isReply HELLO, which drives the peer's shouldSync path, so it
+                    -- is a real pull trigger rather than mere discovery.
+                    local nudgeNow = GetServerTime()
+                    if nudgeNow - (syncState.lastSupersetNudge[cleanTarget] or 0)
+                            >= SUPERSET_NUDGE_THROTTLE then
+                        self:SendHelloReply(cleanTarget)
+                        syncState.lastSupersetNudge[cleanTarget] = nudgeNow
+                        self:AddAuditEntry("Nudged behind peer " .. cleanTarget
+                            .. " to pull (superset, bidirectional hash-gate bypass)")
+                    end
                     self:ProcessPendingPeers()
                 else
                     self:AddAuditEntry("Bidirectional check: hashes still differ with "
@@ -2518,6 +2535,94 @@ function GBL:IsGuildMemberOnline(name)
         end
     end
     return nil  -- not found in roster
+end
+
+--- Scan a guild's records for entries that fall in the epoch-0 window
+-- (BucketKeyForRecord == 0). This is the symptom of the long-standing epoch-0
+-- leak: a record whose id encodes timeSlot 0 stays in bucket 0 even after its
+-- timestamp is repaired, because BucketKeyForRecord reads the id's timeSlot,
+-- not the timestamp, and reconstructSyncRecord (sync intake) repairs only the
+-- timestamp and never rebuilds the id. Read-only. Classifies offenders by
+-- record type, by the peer that supplied them (scannedBy), and by whether the
+-- timestamp itself is still invalid, so an in-game capture can show whether the
+-- bucket-0 population is local or sync-borne before we choose a remediation.
+-- (Rebuilding ids at intake from a clock-derived timeSlot is unsafe: two peers
+-- would mint different ids and move the churn into live buckets, so the fix
+-- shape depends on what these records actually are.)
+-- @param guildData table Guild data (transactions + moneyTransactions)
+-- @return table { count, items, money, validTs, invalidTs, sources, byScannedBy, samples }
+function GBL:CollectEpochZeroRecords(guildData)
+    local out = {
+        count = 0, items = 0, money = 0,
+        validTs = 0, invalidTs = 0,
+        sources = 0, byScannedBy = {}, samples = {},
+    }
+    if not guildData then return out end
+
+    local function scan(records, isMoney)
+        for _, rec in ipairs(records or {}) do
+            if self:BucketKeyForRecord(rec) == 0 then
+                out.count = out.count + 1
+                if isMoney then
+                    out.money = out.money + 1
+                else
+                    out.items = out.items + 1
+                end
+                if self:IsValidTimestamp(rec.timestamp) then
+                    out.validTs = out.validTs + 1
+                else
+                    out.invalidTs = out.invalidTs + 1
+                end
+                local src = rec.scannedBy or "?"
+                if (out.byScannedBy[src] or 0) == 0 then
+                    out.sources = out.sources + 1
+                end
+                out.byScannedBy[src] = (out.byScannedBy[src] or 0) + 1
+                if #out.samples < 10 then
+                    table.insert(out.samples, {
+                        id = rec.id, type = rec.type, player = rec.player,
+                        timestamp = rec.timestamp, scannedBy = rec.scannedBy,
+                    })
+                end
+            end
+        end
+    end
+
+    scan(guildData.transactions, false)
+    scan(guildData.moneyTransactions, true)
+    return out
+end
+
+--- Print a bucket-0 (epoch-0) diagnostic to chat and record a one-line summary
+-- to the sync log. Reached via /gbl epoch0. Investigation aid for the epoch-0
+-- leak; see CollectEpochZeroRecords.
+function GBL:DumpEpochZeroRecords()
+    local guildData = self:GetGuildData()
+    if not guildData then
+        self:Print("Epoch-0 dump: no guild data available.")
+        return
+    end
+    local r = self:CollectEpochZeroRecords(guildData)
+    self:Print(string.format("Epoch-0 (bucket 0) records: %d (%d item, %d money)",
+        r.count, r.items, r.money))
+    if r.count == 0 then
+        self:SyncInfo("Epoch-0 dump: clean (no bucket-0 records)")
+        return
+    end
+    self:Print(string.format("  timestamps: %d valid, %d invalid (< 2004)",
+        r.validTs, r.invalidTs))
+    self:Print(string.format("  sources (scannedBy): %d", r.sources))
+    for src, n in pairs(r.byScannedBy) do
+        self:Print(string.format("    %s: %d", tostring(src), n))
+    end
+    self:Print("  samples:")
+    for _, s in ipairs(r.samples) do
+        self:Print(string.format("    id=%s ts=%s by=%s",
+            tostring(s.id), tostring(s.timestamp), tostring(s.scannedBy)))
+    end
+    self:SyncInfo(
+        "Epoch-0 dump: %d records (%d item / %d money; %d valid-ts / %d invalid-ts; %d sources)",
+        r.count, r.items, r.money, r.validTs, r.invalidTs, r.sources)
 end
 
 ------------------------------------------------------------------------

@@ -29,6 +29,16 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.33.0
+    {"0.33.0", "2026-06-17", {
+        Added = {
+            "A diagnostic command, /gbl epoch0, that lists stored transactions stuck in the epoch-0 (1969-12-31) time bucket and reports how many there are, whether their timestamps are valid, and which guildmate supplied each one. An investigation aid for the issue where a few stale records keep showing up as differing during sync even when both sides already hold them.",
+        },
+        Fixed = {
+            "Closed one more path where a guildmate behind a client whose data had stopped changing could stall. The v0.32.12 fix re-pinged a behind peer when it contacted us; the check that runs right after we finish sending to a peer was still skipping silently in the same situation, so it now sends the same throttled re-ping (at most once a minute per peer).",
+        },
+    }},
+
     -- v0.32.12
     {"0.32.12", "2026-06-09", {
         Added = {

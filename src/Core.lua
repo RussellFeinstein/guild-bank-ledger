@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.32.12"
+local VERSION = "0.33.0"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -2294,6 +2294,8 @@ function GBL:HandleSlashCommand(input)
         else
             self:Print("ChatFilters module not loaded.")
         end
+    elseif command == "epoch0" then
+        self:DumpEpochZeroRecords()
     else
         self:Print("Unknown command: " .. command .. ". Type /gbl help for usage.")
     end
