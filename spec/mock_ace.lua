@@ -425,7 +425,12 @@ function MockAce.install()
         widget.SetFullHeight = function() end
         widget.SetFontObject = function() end
         widget.SetJustifyH = function() end
-        widget.SetFont = function() end
+        widget.SetFont = function(self, font, height, flags)
+            -- Record args so specs can assert the call shape. Real WoW (12.0.7)
+            -- rejects a nil third arg ("bad argument #3 to 'SetFont'"), which
+            -- blanks an AceGUI tab; tests check _setFont[3] is non-nil.
+            self._setFont = { font, height, flags }
+        end
         widget.DisableButton = function() end
         widget.ClearFocus = function() end
         return widget

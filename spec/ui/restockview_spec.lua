@@ -106,6 +106,22 @@ describe("RestockView", function()
             assert.is_true(GBL:GetRestockData().added[88888])
         end)
 
+        it("passes explicit font flags to every label (WoW 12.0 rejects a nil arg #3 to SetFont)", function()
+            local container = build()
+            local checked = 0
+            local function walk(w)
+                for _, c in ipairs(w._children or {}) do
+                    if c._type == "Label" and c._setFont then
+                        assert.is_not_nil(c._setFont[3], "Label SetFont flags must not be nil")
+                        checked = checked + 1
+                    end
+                    walk(c)
+                end
+            end
+            walk(container)
+            assert.is_true(checked > 0)
+        end)
+
         it("exposes the view functions (rename guard)", function()
             assert.is_function(GBL.BuildRestockTab)
             assert.is_function(GBL.RefreshRestockTab)

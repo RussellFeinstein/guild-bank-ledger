@@ -115,7 +115,7 @@ function GBL:BuildRestockTab(container)
     local fontPath, fontSize = self:GetScaledFont()
     local status = AceGUI:Create("Label")
     status:SetFullWidth(true)
-    status:SetFont(fontPath, fontSize)
+    status:SetFont(fontPath, fontSize, "")
     if not auctionatorAvailable() then
         status:SetText("|cffffcc00Restock needs the Auctionator addon to search and buy. "
             .. "Targets still display below.|r")
@@ -285,7 +285,7 @@ function GBL:_RestockView_RenderCatalog(content, focus)
 
             local lbl = AceGUI:Create("Label")
             lbl:SetRelativeWidth(0.7)
-            lbl:SetFont(fontPath, fontSize)
+            lbl:SetFont(fontPath, fontSize, "")
             lbl:SetText(rowText)
             grp:AddChild(lbl)
 
@@ -302,7 +302,7 @@ function GBL:_RestockView_RenderCatalog(content, focus)
         else
             local lbl = AceGUI:Create("Label")
             lbl:SetFullWidth(true)
-            lbl:SetFont(fontPath, fontSize)
+            lbl:SetFont(fontPath, fontSize, "")
             lbl:SetText(rowText)
             content:AddChild(lbl)
         end
