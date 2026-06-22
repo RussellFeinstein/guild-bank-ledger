@@ -2297,6 +2297,12 @@ function GBL:HandleSlashCommand(input)
         end
     elseif command == "epoch0" then
         self:DumpEpochZeroRecords()
+    elseif command == "restock" then
+        if self.OpenRestockTab then
+            self:OpenRestockTab()
+        else
+            self:Print("Restock module not loaded.")
+        end
     else
         self:Print("Unknown command: " .. command .. ". Type /gbl help for usage.")
     end

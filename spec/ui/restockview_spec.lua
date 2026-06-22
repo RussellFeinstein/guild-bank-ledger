@@ -168,4 +168,18 @@ describe("RestockView", function()
             assert.is_false(GBL:_RestockView_NavKey("X", false))
         end)
     end)
+
+    describe("OpenRestockTab", function()
+        it("opens to the Restock tab for a sort-access user", function()
+            GBL:OpenRestockTab()  -- GM (rankIndex 0) has sort access
+            assert.equals("restock", GBL.tabGroup._selectedTab)
+        end)
+
+        it("declines and prints for a user without sort access", function()
+            MockWoW.guild.rankIndex = 5  -- not GM; no sortAccess grant
+            GBL:OpenRestockTab()
+            assert.is_true(Helpers.printContains("sort access"))
+            assert.is_nil(GBL.tabGroup)
+        end)
+    end)
 end)

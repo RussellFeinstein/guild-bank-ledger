@@ -183,6 +183,20 @@ function GBL:RefreshRestockTab()
     self:BuildRestockTab(self.tabGroup)
 end
 
+--- Open the main window and switch to the Restock tab (the /gbl restock entry).
+-- Gated on sort access; the tab only exists in the bar for those users.
+function GBL:OpenRestockTab()
+    if not (self.HasSortAccess and self:HasSortAccess()) then
+        self:Print("Restock requires sort access for this guild.")
+        return
+    end
+    self:CreateMainFrame()
+    self.mainFrame:Show()
+    if self.tabGroup then
+        self.tabGroup:SelectTab("restock")
+    end
+end
+
 ------------------------------------------------------------------------
 -- Keyboard navigation (Option C: focus moves now; the visible focus ring is a
 -- deferred accessibility-branch change to SetFocusIndicator).
