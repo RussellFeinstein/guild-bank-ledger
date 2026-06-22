@@ -112,7 +112,7 @@ local defaults = {
                     tabs = {},
                 },
                 stockReserves = {},
-                restock = { items = {}, added = {}, budget = 0 },
+                restock = { items = {}, budget = 0 },
                 sortAccess = {
                     rankThreshold = nil,  -- nil = GM-only; N = rank index N and above
                     delegates = {},       -- ["Char-Realm"] = true
@@ -213,6 +213,8 @@ end
 function GBL:OnBankLayoutChanged()
     if self.RefreshLayoutTab then self:RefreshLayoutTab() end
     if self.RefreshSortTab then self:RefreshSortTab() end
+    -- The Restock list is layout-driven, so a new layout/reserve must refresh it too.
+    if self.RefreshRestockTab then self:RefreshRestockTab() end
 end
 
 ------------------------------------------------------------------------

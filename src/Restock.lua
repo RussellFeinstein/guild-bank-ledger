@@ -40,9 +40,13 @@ function GBL:_RestockLayoutDemand(layout)
     for _, tab in pairs(layout.tabs) do
         if type(tab) == "table" and tab.mode == "display" then
             for itemID, row in pairs(tab.items or {}) do
-                if type(row) == "table" then
+                -- Coerce the key to a number: a layout received over sync may
+                -- arrive string-keyed (AceSerializer numeric-key survival is
+                -- unverified, per CLAUDE.md), and stock/reserves are number-keyed.
+                local id = tonumber(itemID)
+                if id and type(row) == "table" then
                     local n = (row.slots or 0) * (row.perSlot or 0)
-                    demand[itemID] = (demand[itemID] or 0) + n
+                    demand[id] = (demand[id] or 0) + n
                 end
             end
         end
@@ -110,17 +114,16 @@ local function getStore(self)
     local guild = self:GetGuildData()
     if not guild then return nil end
     if not guild.restock then
-        guild.restock = { items = {}, added = {}, budget = 0 }
+        guild.restock = { items = {}, budget = 0 }
     end
     local r = guild.restock
     if not r.items then r.items = {} end
-    if not r.added then r.added = {} end
     if r.budget == nil then r.budget = 0 end
     return r
 end
 
 --- Return the live per-guild restock store (backfilled), or nil if no guild.
--- @return table|nil { items = {...}, added = {...}, budget = number }
+-- @return table|nil { items = {...}, budget = number }
 function GBL:GetRestockData()
     return getStore(self)
 end
@@ -143,28 +146,6 @@ function GBL:SetRestockItemOverride(itemID, override)
     local data = getStore(self)
     if not data then return false, "no active guild" end
     data.items[itemID] = override
-    return true, nil
-end
-
---- Add an item to the local catalog augmentation (item coverage).
--- @param itemID number
--- @return boolean ok, string|nil err
-function GBL:AddRestockCatalogItem(itemID)
-    if type(itemID) ~= "number" then return false, "itemID must be numeric" end
-    local data = getStore(self)
-    if not data then return false, "no active guild" end
-    data.added[itemID] = true
-    return true, nil
-end
-
---- Remove an item from the local catalog augmentation.
--- @param itemID number
--- @return boolean ok, string|nil err
-function GBL:RemoveRestockCatalogItem(itemID)
-    if type(itemID) ~= "number" then return false, "itemID must be numeric" end
-    local data = getStore(self)
-    if not data then return false, "no active guild" end
-    data.added[itemID] = nil
     return true, nil
 end
 
@@ -193,15 +174,19 @@ end
 ------------------------------------------------------------------------
 
 --- Build the ordered, decorated list of items to show on the Restock tab.
--- Union deduped by itemID of: catalog (group order) -> manually-added items
--- not in the catalog -> GBL-target items (demand or reserve) not otherwise
--- present. Each row is a NEW table (catalog rows stay read-only).
+-- The list is driven by the bank layout: every display-tab item, grouped under
+-- its tab, plus any reserve-only items (target > 0 with no layout demand) under
+-- a Reserves group. Reserves have no producer until v0.35, so today this is
+-- exactly the layout items. Deduped by itemID; each row is a NEW table.
+--
+-- Keys are coerced to numbers throughout because a synced layout may arrive
+-- string-keyed (AceSerializer numeric-key survival is unverified, per CLAUDE.md)
+-- while stock comes back number-keyed via _RestockAggregateStock.
 --
 -- opts (all optional, default to the live getters so tests can inject):
 --   layout, reserves, scanResults, data
--- @return table array of rows:
---   { itemID, source = "catalog"|"added"|"target", group?, rank?, qty?,
---     enabled, maxPrice?, target, stock, toBuy }
+-- @return table array of rows, grouped/ordered:
+--   { itemID, tabIndex?, group, enabled, maxPrice?, target, stock, toBuy }
 function GBL:_RestockBuildItemUniverse(opts)
     opts = opts or {}
     local layout = opts.layout or self:GetBankLayout()
@@ -209,38 +194,36 @@ function GBL:_RestockBuildItemUniverse(opts)
     local scanResults = opts.scanResults or self:GetLastScanResults()
     local data = opts.data or self:GetRestockData() or {}
     local overrides = data.items or {}
-    local added = data.added or {}
 
     local demand = self:_RestockLayoutDemand(layout)
     local stock = self:_RestockAggregateStock(scanResults)
-    local catalog = self:GetRestockCatalog()
-    local catalogIDs = self:GetRestockCatalogItemIDs()
+
+    -- Reserves keyed by number (see the key-coercion note above).
+    local reserveByID = {}
+    if type(reserves) == "table" then
+        for itemID, n in pairs(reserves) do
+            local id = tonumber(itemID)
+            if id then reserveByID[id] = n end
+        end
+    end
 
     local rows = {}
     local seen = {}
 
-    local function addRow(itemID, source, catalogRow, groupName)
+    local function decorate(itemID, group, tabIndex)
         if seen[itemID] then return end
         seen[itemID] = true
         local override = overrides[itemID]
-        local enabled
-        if override and override.enabled ~= nil then
-            enabled = override.enabled
-        elseif catalogRow then
-            enabled = catalogRow.enabled
-        else
-            enabled = true
-        end
-        local target = self:_RestockTarget(itemID, demand, reserves)
+        local enabled = true
+        if override and override.enabled ~= nil then enabled = override.enabled end
+        local target = self:_RestockTarget(itemID, demand, reserveByID)
         local stk = stock[itemID] or 0
         local toBuy = target - stk
         if toBuy < 0 then toBuy = 0 end
         rows[#rows + 1] = {
             itemID = itemID,
-            source = source,
-            group = groupName,
-            rank = catalogRow and catalogRow.rank,
-            qty = catalogRow and catalogRow.qty,
+            tabIndex = tabIndex,
+            group = group,
             enabled = enabled,
             maxPrice = override and override.maxPrice,
             target = target,
@@ -249,44 +232,68 @@ function GBL:_RestockBuildItemUniverse(opts)
         }
     end
 
-    -- 1. Catalog, in group then row order.
-    for _, group in ipairs(catalog) do
-        for _, crow in ipairs(group.items) do
-            if crow.id then
-                addRow(crow.id, "catalog", crow, group.name)
+    -- 1. Layout display tabs, ascending tabIndex. Each item is in at most one
+    -- display tab (BankLayout.Validate), so grouping by tab is unambiguous.
+    local tabIndices = {}
+    for tabIndex, tab in pairs(layout.tabs or {}) do
+        if type(tab) == "table" and tab.mode == "display" then
+            tabIndices[#tabIndices + 1] = tabIndex
+        end
+    end
+    table.sort(tabIndices, function(a, b)
+        return (tonumber(a) or 0) < (tonumber(b) or 0)
+    end)
+
+    for _, tabIndex in ipairs(tabIndices) do
+        local tab = layout.tabs[tabIndex]
+        local groupName = tab.name
+        if groupName == nil or groupName == "" then
+            groupName = "Tab " .. tostring(tabIndex)
+        end
+
+        -- Order items by their first slotOrder position, falling back to itemID,
+        -- so the list reads in the same left-to-right order as the bank tab.
+        local firstSlot = {}
+        if type(tab.slotOrder) == "table" then
+            for slotIndex, itemID in pairs(tab.slotOrder) do
+                local id = tonumber(itemID)
+                local sidx = tonumber(slotIndex)
+                if id and sidx and (firstSlot[id] == nil or sidx < firstSlot[id]) then
+                    firstSlot[id] = sidx
+                end
             end
         end
-    end
-
-    -- 2. Manually-added items not already in the catalog. Sorted by itemID so
-    -- the rows (and the focus order M3 wires from them) are stable across rebuilds.
-    local addedIDs = {}
-    for itemID in pairs(added) do
-        if not catalogIDs[itemID] then
-            addedIDs[#addedIDs + 1] = itemID
+        local ids = {}
+        for itemID in pairs(tab.items or {}) do
+            local id = tonumber(itemID)
+            if id then ids[#ids + 1] = id end
+        end
+        table.sort(ids, function(a, b)
+            local fa, fb = firstSlot[a], firstSlot[b]
+            if fa and fb then
+                if fa ~= fb then return fa < fb end
+                return a < b
+            elseif fa then
+                return true     -- slotted items before unslotted
+            elseif fb then
+                return false
+            end
+            return a < b
+        end)
+        for _, id in ipairs(ids) do
+            decorate(id, groupName, tonumber(tabIndex))
         end
     end
-    table.sort(addedIDs)
-    for _, itemID in ipairs(addedIDs) do
-        addRow(itemID, "added", nil, nil)
-    end
 
-    -- 3. GBL-target items (demand or reserve) not otherwise present, deduped and
-    -- sorted so the coverage group renders in a stable order.
-    local targetSet = {}
-    for itemID in pairs(demand) do
-        if not seen[itemID] then targetSet[itemID] = true end
+    -- 2. Reserve-only items (target > 0, no display-tab demand). Empty until the
+    -- reserve producer ships (v0.35); kept for Option C forward-compat.
+    local reserveIDs = {}
+    for itemID in pairs(reserveByID) do
+        if not seen[itemID] then reserveIDs[#reserveIDs + 1] = itemID end
     end
-    for itemID in pairs(reserves) do
-        if not seen[itemID] then targetSet[itemID] = true end
-    end
-    local targetIDs = {}
-    for itemID in pairs(targetSet) do
-        targetIDs[#targetIDs + 1] = itemID
-    end
-    table.sort(targetIDs)
-    for _, itemID in ipairs(targetIDs) do
-        addRow(itemID, "target", nil, nil)
+    table.sort(reserveIDs)
+    for _, id in ipairs(reserveIDs) do
+        decorate(id, "Reserves (not in a display tab)", nil)
     end
 
     return rows

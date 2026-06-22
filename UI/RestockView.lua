@@ -1,8 +1,8 @@
 ------------------------------------------------------------------------
 -- GuildBankLedger — UI/RestockView.lua
--- Restock tab: render each catalog item's target / in-bank / to-buy with a
--- triple-encoded status, plus a coverage section for bank-target items not in
--- the catalog ("Add to catalog"). Render scaffold + focus-order registration.
+-- Restock tab: render each bank-layout item's target / in-bank / to-buy with a
+-- triple-encoded status, grouped by bank tab. Render scaffold + focus-order
+-- registration.
 --
 -- The Auctionator search/buy flow and the Tab/arrow key capture (the visible
 -- focus ring) land in later restock milestones; this file sets up the view and
@@ -45,12 +45,6 @@ local function colorToHex(c)
         math.floor((c.b or 1) * 255 + 0.5))
 end
 
--- Headings for the non-catalog universe sections.
-local SOURCE_HEADINGS = {
-    added  = "Your added items",
-    target = "Bank targets (not in catalog)",
-}
-
 --- Triple-encoded display for a universe row's restock status.
 -- color + icon + text are three independent channels (WCAG 1.4.1: never rely
 -- on color alone). Pure; depends only on the row's target/stock/toBuy.
@@ -84,7 +78,7 @@ function GBL:GetRestockStatusDisplay(row)
 end
 
 -- Auctionator is an OptionalDep; the search/buy controls (M4) need it, but the
--- catalog still renders read-only without it.
+-- item list still renders read-only without it.
 local function auctionatorAvailable()
     return Auctionator ~= nil and Auctionator.API ~= nil and Auctionator.API.v1 ~= nil
 end
@@ -102,8 +96,8 @@ function GBL:BuildRestockTab(container)
 
     -- Focus order is rebuilt every build. M3a registers the interactive widgets
     -- in reading order; the key capture that walks this order is wired later.
-    -- Only interactive widgets are registered: the catalog is read-only and a
-    -- 123-row tab stop list would make keyboard navigation unusable.
+    -- Only interactive widgets are registered: the item list is read-only, so a
+    -- per-row tab stop would make keyboard navigation unusable.
     self:ClearFocusOrder()
     local focusN = 0
     local function focus(widget)
@@ -150,7 +144,7 @@ function GBL:BuildRestockTab(container)
     content:SetLayout("List")
     self:AddFillChild(container, content)
 
-    self:_RestockView_RenderCatalog(content, focus)
+    self:_RestockView_RenderItems(content)
 
     -- Keyboard navigation capture (in-game only; the mock frame has no
     -- EnableKeyboard, so this branch is skipped under busted). Tab/arrows cycle
@@ -175,7 +169,7 @@ function GBL:BuildRestockTab(container)
     end
 end
 
---- Refresh the Restock tab — called after Add-to-catalog and (M4) state changes.
+--- Refresh the Restock tab. Called from OnBankLayoutChanged and (M4) state changes.
 function GBL:RefreshRestockTab()
     if self.activeTab ~= "restock" then return end
     if not self.tabGroup then return end
@@ -237,37 +231,37 @@ function GBL:_RestockView_NavKey(key, shiftDown)
 end
 
 ------------------------------------------------------------------------
--- Catalog rendering
+-- Item list rendering
 ------------------------------------------------------------------------
 
-function GBL:_RestockView_RenderCatalog(content, focus)
+function GBL:_RestockView_RenderItems(content)
     local AceGUI = LibStub("AceGUI-3.0")
-    focus = focus or function() end
     local fontPath, fontSize = self:GetScaledFont()
 
     local universe = self:_RestockBuildItemUniverse()
     if #universe == 0 then
         local lbl = AceGUI:Create("Label")
         lbl:SetFullWidth(true)
-        lbl:SetText("|cffffcc00No catalog items to show.|r")
+        lbl:SetFont(fontPath, fontSize, "")
+        lbl:SetText("|cffffcc00No items in your bank layout yet. Set up display tabs in the "
+            .. "Layout tab to choose what the guild stocks.|r")
         content:AddChild(lbl)
         return
     end
 
-    local lastHeading = nil
+    -- The universe is emitted tab-by-tab (then reserves), so each group is a
+    -- contiguous run. Break on (tabIndex, name) so two display tabs that happen
+    -- to share a name still get their own heading.
+    local lastKey = nil
     for _, row in ipairs(universe) do
-        local heading
-        if row.source == "catalog" then
-            heading = row.group or "Catalog"
-        else
-            heading = SOURCE_HEADINGS[row.source] or "Other"
-        end
-        if heading ~= lastHeading then
+        local heading = row.group or "Items"
+        local key = tostring(row.tabIndex) .. "|" .. heading
+        if key ~= lastKey then
             local h = AceGUI:Create("Heading")
             h:SetFullWidth(true)
             h:SetText(heading)
             content:AddChild(h)
-            lastHeading = heading
+            lastKey = key
         end
 
         local disp = self:GetRestockStatusDisplay(row)
@@ -276,35 +270,10 @@ function GBL:_RestockView_RenderCatalog(content, focus)
         local rowText = format("%s%s  |cffaaaaaa(target %d, bank %d)|r  %s",
             iconEsc, itemLabel(row.itemID), row.target or 0, row.stock or 0, statusText)
 
-        if row.source == "target" then
-            -- Coverage row: label + an Add-to-catalog button, side by side.
-            local grp = AceGUI:Create("SimpleGroup")
-            grp:SetFullWidth(true)
-            grp:SetLayout("Flow")
-            content:AddChild(grp)
-
-            local lbl = AceGUI:Create("Label")
-            lbl:SetRelativeWidth(0.7)
-            lbl:SetFont(fontPath, fontSize, "")
-            lbl:SetText(rowText)
-            grp:AddChild(lbl)
-
-            local itemID = row.itemID
-            local addBtn = AceGUI:Create("Button")
-            addBtn:SetText("Add to catalog")
-            addBtn:SetWidth(140)
-            addBtn:SetCallback("OnClick", function()
-                self:AddRestockCatalogItem(itemID)
-                self:RefreshRestockTab()
-            end)
-            grp:AddChild(addBtn)
-            focus(addBtn)
-        else
-            local lbl = AceGUI:Create("Label")
-            lbl:SetFullWidth(true)
-            lbl:SetFont(fontPath, fontSize, "")
-            lbl:SetText(rowText)
-            content:AddChild(lbl)
-        end
+        local lbl = AceGUI:Create("Label")
+        lbl:SetFullWidth(true)
+        lbl:SetFont(fontPath, fontSize, "")
+        lbl:SetText(rowText)
+        content:AddChild(lbl)
     end
 end

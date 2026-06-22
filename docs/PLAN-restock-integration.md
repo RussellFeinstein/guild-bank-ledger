@@ -11,9 +11,18 @@ addon to version.
 This document supersedes the earlier integration draft (PR #27). It folds in the decisions locked
 with Katorri on 2026-06-17 and a verification pass against GBL v0.33.0.
 
-Intended outcome: an officer with sort access opens the Restock tab, sees each catalog item's
-target / in-bank / to-buy, and runs an Auctionator search-and-buy that tops the guild bank up to its
-target. Targets come from GBL, not per-user profiles, so the whole guild stocks to the same numbers.
+**Update 2026-06-22 (layout-driven items).** The Restock list is built from the guild's bank layout,
+not a predefined catalog. The ported `src/RestockCategories.lua` preset list has been removed: its
+crafting-quality `rank` field was UI decoration only, and the Auctionator search/buy path needs just
+itemID plus quantity. The tab shows the display-tab items grouped by bank tab name, plus any
+reserve-only items (Option C). There is no "Add to catalog" affordance: everything shown is already a
+layout target. This supersedes the catalog and item-coverage points below, which are kept as the
+original scoping record.
+
+Intended outcome: an officer with sort access opens the Restock tab, sees each item set in the
+guild's bank layout with its target / in-bank / to-buy, and runs an Auctionator search-and-buy that
+tops the guild bank up to its target. Targets come from GBL's layout and reserves, not per-user
+profiles, so the whole guild stocks to the same numbers.
 
 ## Locked decisions
 
@@ -24,14 +33,14 @@ target. Targets come from GBL, not per-user profiles, so the whole guild stocks 
   `slots * perSlot` over display tabs.
 - **Profiles dropped.** GBL's layout plus reserves is the target source, so GBR's per-user profiles
   (positional `catIdx_itemIdx` keys, which break on reorder) are redundant. GBR's Categories are
-  ported as the searchable catalog (per-item id, optional rank, default qty, header grouping).
+  **not** ported (see the 2026-06-22 update): the bank layout is the source of which items to stock.
 - **No data migration.** `GuildBankRestockDB` is not read; users re-enter any per-item settings.
   Personal context is dropped.
 - **Access control.** Running a buy is gated on `GBL:HasSortAccess()`. Setting a target (writing a
   reserve) is gated on `GBL:HasLayoutWrite()`, the same gate the layout already uses. Reserves do not
   affect Sort, so there is no cross-feature surprise.
-- **Item coverage.** Items that have a GBL target but are not in the catalog are shown in a synthetic
-  group with an "Add to catalog" action.
+- **Item coverage.** Not applicable under the layout-driven list (2026-06-22 update): the list is the
+  layout itself, so there is no catalog for an item to fall outside of.
 - **Auctionator** is an optional dependency (the tab shows a notice when it is absent). **TSM** is a
   later, separate optional dependency for price preview.
 - **Accessibility** is wired from the first commit (keyboard navigation plus triple encoding). It is
@@ -53,15 +62,18 @@ CI-verified between PRs).
 
 | Version | Adds | Observable behavior |
 |---|---|---|
-| v0.34.0 Restock core | Tab, catalog, target/stock/toBuy, restock-to-target, Auctionator buy flow, item coverage, accessibility | Buys layout-pinned items up to `slots*perSlot`. With no reserve UI yet, reserves contribute 0, so behavior is layout-demand-only. |
+| v0.34.0 Restock core | Tab, layout-driven item list, target/stock/toBuy, restock-to-target, Auctionator buy flow, accessibility | Buys layout-pinned items up to `slots*perSlot`. With no reserve UI yet, reserves contribute 0, so behavior is layout-demand-only. |
 | v0.35.0 Reserve targets | Inline "set total to store" control (write-gated) calling `SetStockReserve` | Un-pinned items become targetable. Completes Option C. First real producer for the dormant `stockReserves`. |
 | v0.36.0 Bulk mode | Bulk/Restock mode toggle plus a qty column | One-off "buy N of X regardless of stock" alongside restock-to-target. |
 | v0.37.0 TSM price preview | TSM optional dependency plus market-price and est-cost columns, budget estimate | Pre-search cost preview, with a graceful "(no TSM)" fallback. |
 
 ## v0.34.0 milestones
 
-> Naming note: GBL already has `src/Categories.lua` (a classID classifier). The ported lists are a
-> catalog: the file is `src/RestockCategories.lua` and the API is `GBL:GetRestockCatalog()`.
+> Superseded by the 2026-06-22 layout-driven update above. The M1 to M3 detail below is the original
+> scoping record: the catalog (`src/RestockCategories.lua`), the `Add/RemoveRestockCatalogItem` APIs,
+> the `added` data field, and the "Add to catalog" coverage group were removed when the list became
+> layout-driven. `src/Restock.lua` (target/stock/toBuy math plus the item universe) and
+> `UI/RestockView.lua` remain.
 
 ### M1 Catalog data
 - New `src/RestockCategories.lua`: consolidate GBR's seven `Categories/*.lua` files into one GBL

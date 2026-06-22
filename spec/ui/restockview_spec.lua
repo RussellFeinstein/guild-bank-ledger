@@ -3,8 +3,8 @@
 --
 -- Covers the pure status-display helper and the render scaffold. The render
 -- path runs in the mock (per the changelog_spec precedent); these tests assert
--- structure (ScrollFrame + rows), the focus-order registration, the
--- Auctionator-absent notice, and the Add-to-catalog coverage affordance.
+-- structure (ScrollFrame + grouped rows), the focus-order registration, the
+-- Auctionator-absent notice, and the empty-state message.
 ------------------------------------------------------------------------
 
 local Helpers = require("spec.helpers")
@@ -20,11 +20,23 @@ local function findChild(container, widgetType)
     return nil
 end
 
--- Recursive: first Button whose text matches.
-local function findButton(container, text)
+-- Recursive: first Heading whose text matches.
+local function findHeading(container, text)
     for _, c in ipairs(container._children or {}) do
-        if c._type == "Button" and c._text == text then return c end
-        local nested = findButton(c, text)
+        if c._type == "Heading" and c._text == text then return c end
+        local nested = findHeading(c, text)
+        if nested then return nested end
+    end
+    return nil
+end
+
+-- Recursive: first Label whose text contains substr.
+local function findLabelContaining(container, substr)
+    for _, c in ipairs(container._children or {}) do
+        if c._type == "Label" and c._text and c._text:find(substr, 1, true) then
+            return c
+        end
+        local nested = findLabelContaining(c, substr)
         if nested then return nested end
     end
     return nil
@@ -78,11 +90,53 @@ describe("RestockView", function()
             return container
         end
 
-        it("renders a ScrollFrame with catalog rows", function()
+        -- Configure a valid layout (one display tab + the required overflow) so
+        -- the item list has something to render.
+        local function configureLayout()
+            local ok = GBL:SaveBankLayout({
+                tabs = {
+                    [1] = { mode = "display", name = "Consumables",
+                            items = { [55555] = { slots = 2, perSlot = 10 } } },
+                    [2] = { mode = "overflow" },
+                },
+            })
+            assert.is_true(ok)
+        end
+
+        it("renders the layout items grouped by tab name", function()
+            configureLayout()
             local container = build()
             local scroll = findChild(container, "ScrollFrame")
             assert.is_not_nil(scroll)
-            assert.is_true(#scroll._children > 0)
+            assert.is_not_nil(findHeading(scroll, "Consumables"))
+            assert.is_not_nil(findLabelContaining(scroll, "target 20"))
+            -- triple-encoded status is wired into the row (text + icon channels)
+            assert.is_not_nil(findLabelContaining(scroll, "Buy 20"))
+            assert.is_not_nil(findLabelContaining(scroll, "|T"))
+        end)
+
+        it("renders a heading per display tab", function()
+            local ok = GBL:SaveBankLayout({
+                tabs = {
+                    [1] = { mode = "display", name = "Consumables",
+                            items = { [55555] = { slots = 1, perSlot = 10 } } },
+                    [2] = { mode = "display", name = "Gems",
+                            items = { [66666] = { slots = 1, perSlot = 10 } } },
+                    [3] = { mode = "overflow" },
+                },
+            })
+            assert.is_true(ok)
+            local container = build()
+            local scroll = findChild(container, "ScrollFrame")
+            assert.is_not_nil(findHeading(scroll, "Consumables"))
+            assert.is_not_nil(findHeading(scroll, "Gems"))
+        end)
+
+        it("shows the empty-state pointing at the Layout tab when no layout is set", function()
+            local container = build()
+            local scroll = findChild(container, "ScrollFrame")
+            assert.is_not_nil(scroll)
+            assert.is_not_nil(findLabelContaining(scroll, "Layout tab"))
         end)
 
         it("registers interactive widgets in the focus order", function()
@@ -97,16 +151,8 @@ describe("RestockView", function()
             assert.truthy(banner._text:find("Auctionator", 1, true))
         end)
 
-        it("renders Add-to-catalog for a bank-target item and adds it on click", function()
-            GBL:SetStockReserve(88888, 10)  -- reserve-only, not in the catalog
-            local container = build()
-            local addBtn = findButton(container, "Add to catalog")
-            assert.is_not_nil(addBtn)
-            addBtn:Fire("OnClick")
-            assert.is_true(GBL:GetRestockData().added[88888])
-        end)
-
         it("passes explicit font flags to every label (WoW 12.0 rejects a nil arg #3 to SetFont)", function()
+            configureLayout()
             local container = build()
             local checked = 0
             local function walk(w)
@@ -126,6 +172,16 @@ describe("RestockView", function()
             assert.is_function(GBL.BuildRestockTab)
             assert.is_function(GBL.RefreshRestockTab)
             assert.is_function(GBL.GetRestockStatusDisplay)
+        end)
+
+        it("OnBankLayoutChanged refreshes the Restock tab", function()
+            -- The list is layout-driven, so a layout/reserve change must refresh it.
+            local called = false
+            local orig = GBL.RefreshRestockTab
+            GBL.RefreshRestockTab = function() called = true end
+            GBL:OnBankLayoutChanged()
+            GBL.RefreshRestockTab = orig
+            assert.is_true(called)
         end)
     end)
 
