@@ -78,6 +78,9 @@ read_globals = {
     -- Lua extensions (WoW LuaJIT)
     "bit",
 
+    -- Optional dependencies (OptionalDeps in the .toc; nil when the addon is absent)
+    "Auctionator",
+
     -- Ace3 / LibStub
     "LibStub",
 }

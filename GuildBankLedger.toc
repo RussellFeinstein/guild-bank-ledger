@@ -54,4 +54,5 @@ UI\ChangelogView.lua
 UI\AboutView.lua
 UI\LayoutEditor.lua
 UI\SortView.lua
+UI\RestockView.lua
 UI\UI.lua
