@@ -42,6 +42,7 @@ src\BankLayout.lua
 src\SortPlanner.lua
 src\SortExecutor.lua
 src\RestockCategories.lua
+src\Restock.lua
 
 # UI
 UI\Accessibility.lua
