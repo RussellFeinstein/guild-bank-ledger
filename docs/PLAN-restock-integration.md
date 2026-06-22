@@ -74,7 +74,7 @@ CI-verified between PRs).
 - Modified: `GuildBankLedger.toc` (add the file in the Core block); `spec/helpers.lua` (load and
   reset the module).
 - Tests `spec/restock_categories_spec.lua`: group count (7) and names, actual per-group counts
-  (Gems 40, Enchants 34 items plus 8 header rows, Potions 16, Flasks 8, Oils 2, Food 0, Runes 1),
+  (Gems 40, Enchants 56 items plus 7 header rows, Potions 16, Flasks 8, Oils 2, Food 0, Runes 1),
   rank-optional, empty-group tolerance, dedup and header exclusion.
 - Done when busted loads the catalog and returns all seven groups intact.
 
