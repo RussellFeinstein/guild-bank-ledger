@@ -151,6 +151,28 @@ function GBL:BuildRestockTab(container)
     self:AddFillChild(container, content)
 
     self:_RestockView_RenderCatalog(content, focus)
+
+    -- Keyboard navigation capture (in-game only; the mock frame has no
+    -- EnableKeyboard, so this branch is skipped under busted). Tab/arrows cycle
+    -- the registered focusables; Enter/Space activates the focused button. The
+    -- visible focus ring is a deferred accessibility-branch change, so until it
+    -- lands focus moves without a drawn border.
+    local capture = content.frame
+    if capture and capture.EnableKeyboard then
+        capture:EnableKeyboard(true)
+        capture:SetScript("OnKeyDown", function(frame, key)
+            if self.activeTab ~= "restock" then
+                if frame.SetPropagateKeyboardInput then
+                    frame:SetPropagateKeyboardInput(true)
+                end
+                return
+            end
+            local handled = self:_RestockView_NavKey(key, IsShiftKeyDown and IsShiftKeyDown())
+            if frame.SetPropagateKeyboardInput then
+                frame:SetPropagateKeyboardInput(not handled)
+            end
+        end)
+    end
 end
 
 --- Refresh the Restock tab — called after Add-to-catalog and (M4) state changes.
@@ -159,6 +181,45 @@ function GBL:RefreshRestockTab()
     if not self.tabGroup then return end
     self.tabGroup:ReleaseChildren()
     self:BuildRestockTab(self.tabGroup)
+end
+
+------------------------------------------------------------------------
+-- Keyboard navigation (Option C: focus moves now; the visible focus ring is a
+-- deferred accessibility-branch change to SetFocusIndicator).
+------------------------------------------------------------------------
+
+--- Activate the currently focused widget by firing its OnClick callback.
+-- @return boolean true if a widget was fired
+function GBL:_RestockView_ActivateFocused()
+    local order = self.A11Y and self.A11Y.focusOrder
+    local idx = (self.A11Y and self.A11Y.focusIndex) or 0
+    local widget = order and idx > 0 and order[idx]
+    if widget and widget.Fire then
+        widget:Fire("OnClick")
+        return true
+    end
+    return false
+end
+
+--- Map a key press to a focus action. Returns true if handled (the caller then
+-- consumes the key). The frame handler passes the live Shift state.
+-- @param key string OnKeyDown key name
+-- @param shiftDown boolean whether Shift is held (Tab direction)
+-- @return boolean handled
+function GBL:_RestockView_NavKey(key, shiftDown)
+    if key == "TAB" then
+        self:AdvanceFocus(shiftDown and -1 or 1)
+        return true
+    elseif key == "DOWN" then
+        self:AdvanceFocus(1)
+        return true
+    elseif key == "UP" then
+        self:AdvanceFocus(-1)
+        return true
+    elseif key == "ENTER" or key == "NUMPADENTER" or key == "SPACE" then
+        return self:_RestockView_ActivateFocused()
+    end
+    return false
 end
 
 ------------------------------------------------------------------------

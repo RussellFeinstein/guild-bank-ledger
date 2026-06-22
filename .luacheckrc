@@ -22,6 +22,7 @@ read_globals = {
     "GetNumGuildMembers",
     "IsInGuild",
     "IsInRaid",
+    "IsShiftKeyDown",
     "UnitAffectingCombat",
     "Ambiguate",
     "GetFramerate",

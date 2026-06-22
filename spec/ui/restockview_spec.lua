@@ -112,4 +112,60 @@ describe("RestockView", function()
             assert.is_function(GBL.GetRestockStatusDisplay)
         end)
     end)
+
+    describe("keyboard navigation", function()
+        local b1, b2
+
+        before_each(function()
+            local AceGUI = LibStub("AceGUI-3.0")
+            b1 = AceGUI:Create("Button")
+            b2 = AceGUI:Create("Button")
+            GBL:ClearFocusOrder()
+            GBL:RegisterFocusable(b1, 1)
+            GBL:RegisterFocusable(b2, 2)
+            GBL.A11Y.focusIndex = 0
+        end)
+
+        it("TAB advances focus and wraps", function()
+            GBL:_RestockView_NavKey("TAB", false)
+            assert.equals(1, GBL.A11Y.focusIndex)
+            GBL:_RestockView_NavKey("TAB", false)
+            assert.equals(2, GBL.A11Y.focusIndex)
+            GBL:_RestockView_NavKey("TAB", false)  -- wraps to first
+            assert.equals(1, GBL.A11Y.focusIndex)
+        end)
+
+        it("Shift-TAB reverses and wraps", function()
+            GBL.A11Y.focusIndex = 1
+            GBL:_RestockView_NavKey("TAB", true)  -- wraps backward to last
+            assert.equals(2, GBL.A11Y.focusIndex)
+        end)
+
+        it("DOWN and UP move focus", function()
+            GBL:_RestockView_NavKey("DOWN", false)
+            assert.equals(1, GBL.A11Y.focusIndex)
+            GBL:_RestockView_NavKey("DOWN", false)
+            assert.equals(2, GBL.A11Y.focusIndex)
+            GBL:_RestockView_NavKey("UP", false)
+            assert.equals(1, GBL.A11Y.focusIndex)
+        end)
+
+        it("ENTER activates the focused widget's OnClick", function()
+            local clicked = false
+            b1:SetCallback("OnClick", function() clicked = true end)
+            GBL.A11Y.focusIndex = 1
+            local handled = GBL:_RestockView_NavKey("ENTER", false)
+            assert.is_true(handled)
+            assert.is_true(clicked)
+        end)
+
+        it("ENTER with no focus returns false", function()
+            GBL.A11Y.focusIndex = 0
+            assert.is_false(GBL:_RestockView_NavKey("ENTER", false))
+        end)
+
+        it("returns false for an unhandled key", function()
+            assert.is_false(GBL:_RestockView_NavKey("X", false))
+        end)
+    end)
 end)
