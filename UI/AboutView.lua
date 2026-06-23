@@ -32,7 +32,7 @@ function GBL:BuildAboutTab(container)
     local author = AceGUI:Create("Label")
     author:SetFullWidth(true)
     local fontPath, fontSize = self:GetScaledFont()
-    author:SetFont(fontPath, fontSize)
+    author:SetFont(fontPath, fontSize, "")
     author:SetText("by |cff69ccf0RexxyBear|r")
     scroll:AddChild(author)
 
@@ -45,7 +45,7 @@ function GBL:BuildAboutTab(container)
     -- Description
     local desc = AceGUI:Create("Label")
     desc:SetFullWidth(true)
-    desc:SetFont(fontPath, fontSize)
+    desc:SetFont(fontPath, fontSize, "")
     desc:SetText("Persistent guild bank transaction logging for World of Warcraft. " ..
         "Captures every transaction before WoW's 25-entry-per-tab log rolls over.")
     scroll:AddChild(desc)
@@ -65,7 +65,7 @@ function GBL:BuildAboutTab(container)
 
     local supportDesc = AceGUI:Create("Label")
     supportDesc:SetFullWidth(true)
-    supportDesc:SetFont(fontPath, fontSize)
+    supportDesc:SetFont(fontPath, fontSize, "")
     supportDesc:SetText("If you find this addon useful, consider buying me a coffee:")
     scroll:AddChild(supportDesc)
 
@@ -114,13 +114,19 @@ function GBL:BuildAboutTab(container)
 
     local libs = AceGUI:Create("Label")
     libs:SetFullWidth(true)
-    libs:SetFont(fontPath, fontSize)
+    libs:SetFont(fontPath, fontSize, "")
     libs:SetText("Libraries: Ace3, LibDeflate, LibDBIcon, LibDataBroker")
     scroll:AddChild(libs)
 
+    local restockCredit = AceGUI:Create("Label")
+    restockCredit:SetFullWidth(true)
+    restockCredit:SetFont(fontPath, fontSize, "")
+    restockCredit:SetText("Restock feature created by Katorri (Guild Bank Restock)")
+    scroll:AddChild(restockCredit)
+
     local license = AceGUI:Create("Label")
     license:SetFullWidth(true)
-    license:SetFont(fontPath, fontSize)
+    license:SetFont(fontPath, fontSize, "")
     license:SetText("License: MIT")
     scroll:AddChild(license)
 end

@@ -38,6 +38,13 @@ describe("UI window persistence (v0.32.4)", function()
             assert.equals(GBL.db.profile.ui, GBL.mainFrame._statusTable)
         end)
 
+        it("passes explicit SetFont flags to the version label (WoW 12.0.7 rejects a nil arg #3)", function()
+            GBL:CreateMainFrame()
+            assert.is_not_nil(GBL._versionLabel, "version label should exist")
+            assert.is_not_nil(GBL._versionLabel._setFont, "version label should record a SetFont call")
+            assert.is_not_nil(GBL._versionLabel._setFont[3], "version label SetFont flags must not be nil")
+        end)
+
         it("enforces an 810x500 minimum window size", function()
             GBL:CreateMainFrame()
             -- Retail uses SetResizeBounds (10.0+); classic uses SetMinResize.

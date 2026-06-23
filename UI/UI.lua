@@ -64,7 +64,7 @@ function GBL:CreateMainFrame()
     -- Version label (top-right corner, respects font scaling)
     local versionLabel = frame.frame:CreateFontString(nil, "OVERLAY")
     local fontPath, fontSize = self:GetScaledFont()
-    versionLabel:SetFont(fontPath, fontSize)
+    versionLabel:SetFont(fontPath, fontSize, "")
     versionLabel:SetPoint("TOPRIGHT", frame.frame, "TOPRIGHT", -30, -12)
     versionLabel:SetText("|cff888888v" .. self.version .. "|r")
     self._versionLabel = versionLabel

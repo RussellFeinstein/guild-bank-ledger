@@ -478,5 +478,23 @@ describe("ChangelogView", function()
 
             GBL.CHANGELOG_DATA = original
         end)
+
+        it("page label passes explicit SetFont flags (WoW 12.0.7 rejects a nil arg #3)", function()
+            local AceGUI = LibStub("AceGUI-3.0")
+            local container = AceGUI:Create("SimpleGroup")
+
+            local original = GBL.CHANGELOG_DATA
+            GBL.CHANGELOG_DATA = makeEntries(15)
+
+            GBL:BuildChangelogTab(container)
+
+            local scroll = findChild(container, "ScrollFrame")
+            local navGroup = scroll._children[1]
+            local pageLabel = navGroup._children[2]
+            assert.is_not_nil(pageLabel._setFont, "page label should record a SetFont call")
+            assert.is_not_nil(pageLabel._setFont[3], "page label SetFont flags must not be nil")
+
+            GBL.CHANGELOG_DATA = original
+        end)
     end)
 end)

@@ -29,6 +29,16 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.34.1
+    {"0.34.1", "2026-06-23", {
+        Added = {
+            "The About tab now credits Katorri with creating the Restock feature, which is based on the Guild Bank Restock addon.",
+        },
+        Fixed = {
+            "The About tab, the Changelog page controls, and the window version label no longer use a two-argument font call that WoW 12.0.7 rejects (the same issue that blanked the Restock tab before its 0.34.0 fix).",
+        },
+    }},
+
     -- v0.34.0
     {"0.34.0", "2026-06-23", {
         Added = {
@@ -1283,7 +1293,7 @@ function GBL:BuildChangelogTab(container)
         pageLabel:SetText(string.format("  Page %d of %d", page, totalPages))
         pageLabel:SetJustifyH("CENTER")
         local fontPath, fontSize = self:GetScaledFont()
-        pageLabel:SetFont(fontPath, fontSize)
+        pageLabel:SetFont(fontPath, fontSize, "")
         navGroup:AddChild(pageLabel)
 
         -- Next button

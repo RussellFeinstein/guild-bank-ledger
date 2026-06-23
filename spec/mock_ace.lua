@@ -354,7 +354,11 @@ function MockAce.install()
             end,
             CreateFontString = function()
                 local fs = { _text = "" }
-                fs.SetFont = function() end
+                -- Record args like the AceGUI Label mock: WoW 12.0.7 rejects a
+                -- nil third arg to SetFont, so specs assert _setFont[3] is set.
+                fs.SetFont = function(_, font, height, flags)
+                    fs._setFont = { font, height, flags }
+                end
                 fs.SetPoint = function() end
                 fs.SetText = function(_, t) fs._text = t end
                 fs.GetText = function() return fs._text end

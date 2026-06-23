@@ -5,6 +5,14 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.1] - 2026-06-23
+
+### Added
+- The About tab now credits Katorri with creating the Restock feature, which is based on the Guild Bank Restock addon.
+
+### Fixed
+- The About tab, the Changelog page controls, and the window's version label no longer use a two-argument font call that WoW 12.0.7 rejects. It is the same issue that blanked the Restock tab before its 0.34.0 fix; the remaining cases now pass the required third argument.
+
 ## [0.34.0] - 2026-06-23
 
 **Restock**: refill the guild bank to its layout targets, with optional Auction House buying.

@@ -95,6 +95,8 @@ To buy the shortfall from the Auction House, install [Auctionator](https://www.c
 
 Restock spends real gold through WoW's commodity purchase flow. It refuses any purchase you cannot afford, and you can set a per-run gold budget to cap a Buy all sweep. Without Auctionator the tab still shows targets and shortfalls; only the search and buy steps need it.
 
+The Restock feature was created by Katorri, based on the Guild Bank Restock addon.
+
 ## Development
 
 ### Requirements
