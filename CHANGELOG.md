@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.2] - 2026-06-23
+
+### Fixed
+- The main window now closes when you press Escape. Previously Escape only worked when "Open with Guild Bank" had auto-opened the window (it was closing through the bank), so a window opened manually with `/gbl` or the minimap button could only be closed with the Close button (issue #40).
+
 ## [0.34.1] - 2026-06-23
 
 ### Added
