@@ -298,3 +298,238 @@ function GBL:_RestockBuildItemUniverse(opts)
 
     return rows
 end
+
+------------------------------------------------------------------------
+-- Auctionator search flow (M4b: IDLE -> SEARCHING -> READY)
+-- Ported from GuildBankRestock's search phase, adapted to the layout-driven buy
+-- list and GBL's singleton session-state conventions. Buying (the READY ->
+-- CONFIRMING half) lands in M4c. Every Auctionator/Item access is existence-
+-- guarded and verified in-game; the pure helpers below carry the unit coverage.
+--
+-- Session state on self._restock (NOT persisted, NOT synced):
+--   { state, activeItems = { {itemID, needed} }, resultRows = { [i]=row },
+--     searchGen, listenerRegistered, foundCount }
+-- The EventBus listener table lives on self._restockListener (stable across
+-- searches so Unregister matches Register).
+------------------------------------------------------------------------
+
+--- True when Auctionator exposes the search API this flow needs. Gates the
+-- Search button (RestockView) and is the hard guard in StartRestockSearch.
+function GBL:IsAuctionatorReady()
+    return Auctionator ~= nil and Auctionator.API ~= nil and Auctionator.API.v1 ~= nil
+        and Auctionator.API.v1.ConvertToSearchString ~= nil and Auctionator.EventBus ~= nil
+end
+
+-- Auctionator's SearchEnd event constant, or nil if the API moved.
+local function searchEndEvent()
+    return Auctionator and Auctionator.Shopping and Auctionator.Shopping.Tab
+        and Auctionator.Shopping.Tab.Events and Auctionator.Shopping.Tab.Events.SearchEnd
+end
+
+--- Pure: the buy list for a search = enabled rows that are short of target.
+-- @param opts table|nil forwarded to _RestockBuildItemUniverse (tests inject)
+-- @return table array of { itemID, needed = toBuy }
+function GBL:_RestockBuildBuyList(opts)
+    local list = {}
+    for _, row in ipairs(self:_RestockBuildItemUniverse(opts)) do
+        if row.enabled and (row.toBuy or 0) > 0 then
+            list[#list + 1] = { itemID = row.itemID, needed = row.toBuy }
+        end
+    end
+    return list
+end
+
+--- Pure: pair Auctionator result rows back to the active items by itemID.
+-- @param activeItems table array of { itemID, needed }
+-- @param results table|nil Auctionator results, each { itemKey = {itemID}, minPrice }
+-- @return table resultRows ([i] = row for activeItems[i]), number foundCount
+function GBL:_RestockMapResults(activeItems, results)
+    local resultRows = {}
+    local found = 0
+    if type(activeItems) ~= "table" or type(results) ~= "table" then
+        return resultRows, found
+    end
+    for i, ref in ipairs(activeItems) do
+        for _, row in ipairs(results) do
+            if row.itemKey and row.itemKey.itemID == ref.itemID then
+                resultRows[i] = row
+                found = found + 1
+                break
+            end
+        end
+    end
+    return resultRows, found
+end
+
+-- Stable listener object; created once and reused so Unregister matches Register.
+local function getSearchListener(self)
+    if not self._restockListener then
+        local addon = self
+        self._restockListener = {
+            ReceiveEvent = function(_listener, eventName, results)
+                if eventName ~= searchEndEvent() then return end
+                addon:_RestockOnSearchEnd(results)
+            end,
+        }
+    end
+    return self._restockListener
+end
+
+local function unregisterSearchListener(self)
+    local st = self._restock
+    if st and st.listenerRegistered and Auctionator and Auctionator.EventBus then
+        local ev = searchEndEvent()
+        if ev then
+            Auctionator.EventBus:Unregister(getSearchListener(self), { ev })
+        end
+        st.listenerRegistered = false
+    end
+end
+
+--- Start an Auctionator search for everything the bank is short on. Guards:
+-- Auctionator present, its Shopping tab open, a bank scan available, and a
+-- non-empty buy list. Fire-and-forget; verified in-game.
+function GBL:StartRestockSearch()
+    if not self:IsAuctionatorReady() then
+        self:Print("Restock needs the Auctionator addon to search the Auction House.")
+        return
+    end
+    if not (AuctionatorShoppingFrame and AuctionatorShoppingFrame.IsVisible
+            and AuctionatorShoppingFrame:IsVisible()) then
+        self:Print("Open the Auctionator Shopping tab first, then search.")
+        return
+    end
+    if not self:GetLastScanResults() then
+        self:Print("Open the guild bank first so Restock knows current stock.")
+        return
+    end
+    local ev = searchEndEvent()
+    if not ev then
+        self:Print("Auctionator's search API changed; cannot search.")
+        return
+    end
+
+    local buyList = self:_RestockBuildBuyList()
+    if #buyList == 0 then
+        self:Print("Nothing to buy: the bank is at target for every layout item.")
+        return
+    end
+
+    self._restock = self._restock or { state = "IDLE" }
+    local st = self._restock
+    st.activeItems = buyList
+    st.resultRows = {}
+    st.foundCount = 0
+    st.searchGen = (st.searchGen or 0) + 1
+    local thisGen = st.searchGen
+
+    local listener = getSearchListener(self)
+    Auctionator.EventBus:RegisterSource(listener, ADDON_NAME)
+    Auctionator.EventBus:Register(listener, { ev })
+    st.listenerRegistered = true
+
+    st.state = "SEARCHING"
+    self:RefreshRestockTab()
+    self:_RestockResolveNamesAndSearch(thisGen)
+end
+
+--- Resolve item names async (Auctionator searches by name), then fire the
+-- search. The searchGen guard drops callbacks from a cancelled/restarted run.
+function GBL:_RestockResolveNamesAndSearch(thisGen)
+    local st = self._restock
+    if not st then return end
+    local items = st.activeItems or {}
+    local pending = #items
+    local names = {}
+    if pending == 0 then return end
+    for i, ref in ipairs(items) do
+        local itemObj = Item and Item.CreateFromItemID and Item:CreateFromItemID(ref.itemID)
+        if itemObj and itemObj.ContinueOnItemLoad then
+            itemObj:ContinueOnItemLoad(function()
+                if not self._restock or self._restock.searchGen ~= thisGen then return end
+                names[i] = itemObj:GetItemName()
+                pending = pending - 1
+                if pending == 0 then
+                    self:_RestockFireSearch(names, thisGen)
+                end
+            end)
+        else
+            -- No async item API (should not happen in-game); still converge so
+            -- the search can fire with whatever names resolved.
+            pending = pending - 1
+            if pending == 0 then
+                self:_RestockFireSearch(names, thisGen)
+            end
+        end
+    end
+end
+
+--- Build Auctionator search strings from resolved names and fire one batch
+-- search. Failure paths recover to IDLE so the tab cannot get stuck showing
+-- "Searching..." with no SearchEnd ever arriving.
+function GBL:_RestockFireSearch(names, thisGen)
+    local st = self._restock
+    if not st or st.searchGen ~= thisGen then return end
+    if not self:IsAuctionatorReady() then
+        self:Print("Auctionator became unavailable; search cancelled.")
+        self:ResetRestockSearch()
+        self:RefreshRestockTab()
+        return
+    end
+    local terms = {}
+    for _, name in pairs(names or {}) do
+        if type(name) == "string" and name ~= "" then
+            local ok, term = pcall(Auctionator.API.v1.ConvertToSearchString, ADDON_NAME,
+                { searchString = name, isExact = true })
+            if ok and term then
+                terms[#terms + 1] = term
+            end
+        end
+    end
+    if #terms == 0 then
+        self:Print("Could not build a search; item names did not load. Try again.")
+        self:ResetRestockSearch()
+        self:RefreshRestockTab()
+        return
+    end
+    if not (AuctionatorShoppingFrame and AuctionatorShoppingFrame.DoSearch) then
+        self:Print("Auctionator's search frame is unavailable; search cancelled.")
+        self:ResetRestockSearch()
+        self:RefreshRestockTab()
+        return
+    end
+    if not pcall(function() AuctionatorShoppingFrame:DoSearch(terms) end) then
+        self:Print("Auctionator search failed; try again.")
+        self:ResetRestockSearch()
+        self:RefreshRestockTab()
+    end
+end
+
+--- Auctionator finished a search: map results to the active items, go READY.
+function GBL:_RestockOnSearchEnd(results)
+    local st = self._restock
+    if not st or st.state ~= "SEARCHING" then return end
+    unregisterSearchListener(self)
+    local resultRows, found = self:_RestockMapResults(st.activeItems, results)
+    st.resultRows = resultRows
+    st.foundCount = found
+    st.state = "READY"
+    self:RefreshRestockTab()
+end
+
+--- Reset the search back to IDLE: unregister, stop any in-flight Auctionator
+-- search, invalidate stale async callbacks, and clear results.
+function GBL:ResetRestockSearch()
+    self._restock = self._restock or { state = "IDLE" }
+    local st = self._restock
+    unregisterSearchListener(self)
+    if (st.state == "SEARCHING" or st.state == "READY")
+            and AuctionatorShoppingFrame and AuctionatorShoppingFrame.StopSearch then
+        pcall(function() AuctionatorShoppingFrame:StopSearch() end)
+    end
+    st.searchGen = (st.searchGen or 0) + 1
+    st.activeItems = {}
+    st.resultRows = {}
+    st.foundCount = 0
+    st.state = "IDLE"
+end

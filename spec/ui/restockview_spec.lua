@@ -132,6 +132,38 @@ describe("RestockView", function()
             assert.is_not_nil(findHeading(scroll, "Gems"))
         end)
 
+        it("renders a searching message in the SEARCHING state", function()
+            GBL._restock = { state = "SEARCHING", activeItems = { { itemID = 1, needed = 1 } } }
+            local container = build()
+            local scroll = findChild(container, "ScrollFrame")
+            assert.is_not_nil(findLabelContaining(scroll, "Searching the Auction House"))
+        end)
+
+        it("renders search results in READY, formatting price with FormatMoney", function()
+            GBL._restock = {
+                state = "READY",
+                activeItems = { { itemID = 55555, needed = 5 }, { itemID = 66666, needed = 3 } },
+                resultRows = { [1] = { minPrice = 4200 } },  -- 55555 found (42s); 66666 missing
+                foundCount = 1,
+            }
+            local container = build()
+            local scroll = findChild(container, "ScrollFrame")
+            assert.is_not_nil(scroll)
+            assert.is_not_nil(findLabelContaining(scroll, "need 5"))
+            assert.is_not_nil(findLabelContaining(scroll, GBL:FormatMoney(4200)))  -- not "0 g"
+            assert.is_not_nil(findLabelContaining(scroll, "not found"))
+            -- the new result labels must keep explicit SetFont flags (12.0.7 guard)
+            local function walk(w)
+                for _, c in ipairs(w._children or {}) do
+                    if c._type == "Label" and c._setFont then
+                        assert.is_not_nil(c._setFont[3], "result Label SetFont flags must not be nil")
+                    end
+                    walk(c)
+                end
+            end
+            walk(container)
+        end)
+
         it("shows the empty-state pointing at the Layout tab when no layout is set", function()
             local container = build()
             local scroll = findChild(container, "ScrollFrame")

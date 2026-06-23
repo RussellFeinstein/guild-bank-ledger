@@ -62,6 +62,7 @@ read_globals = {
     "C_ChatBubbles",
     "C_Item",
     "C_Timer",
+    "Item",
     "GetAddOnMetadata",
     "GetItemInfo",
     "GetRealmName",
@@ -81,6 +82,7 @@ read_globals = {
 
     -- Optional dependencies (OptionalDeps in the .toc; nil when the addon is absent)
     "Auctionator",
+    "AuctionatorShoppingFrame",
 
     -- Ace3 / LibStub
     "LibStub",

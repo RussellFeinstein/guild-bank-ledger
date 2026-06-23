@@ -4,9 +4,8 @@
 -- triple-encoded status, grouped by bank tab. Render scaffold + focus-order
 -- registration.
 --
--- The Auctionator search/buy flow and the Tab/arrow key capture (the visible
--- focus ring) land in later restock milestones; this file sets up the view and
--- registers the focus order they drive.
+-- The Auctionator search flow (search to READY) lives here; the buy/confirm half
+-- (M4c) and the visible focus ring (accessibility branch) land later.
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
@@ -77,12 +76,6 @@ function GBL:GetRestockStatusDisplay(row)
     }
 end
 
--- Auctionator is an OptionalDep; the search/buy controls (M4) need it, but the
--- item list still renders read-only without it.
-local function auctionatorAvailable()
-    return Auctionator ~= nil and Auctionator.API ~= nil and Auctionator.API.v1 ~= nil
-end
-
 ------------------------------------------------------------------------
 -- Tab builder
 ------------------------------------------------------------------------
@@ -105,12 +98,20 @@ function GBL:BuildRestockTab(container)
         self:RegisterFocusable(widget, focusN)
     end
 
+    local state = self._restock.state or "IDLE"
+
     -- Status banner.
     local fontPath, fontSize = self:GetScaledFont()
     local status = AceGUI:Create("Label")
     status:SetFullWidth(true)
     status:SetFont(fontPath, fontSize, "")
-    if not auctionatorAvailable() then
+    if state == "SEARCHING" then
+        status:SetText("|cffffaa55Searching the Auction House...|r")
+    elseif state == "READY" then
+        status:SetText(format("Search complete: %d of %d found. Review below, then click Done.",
+            self._restock.foundCount or 0,
+            self._restock.activeItems and #self._restock.activeItems or 0))
+    elseif not self:IsAuctionatorReady() then
         status:SetText("|cffffcc00Restock needs the Auctionator addon to search and buy. "
             .. "Targets still display below.|r")
     elseif not self:GetLastScanResults() then
@@ -137,6 +138,40 @@ function GBL:BuildRestockTab(container)
     controls:AddChild(scanBtn)
     focus(scanBtn)
 
+    -- State-specific action button. IDLE offers a search; SEARCHING/READY offer
+    -- a way back to IDLE.
+    if state == "IDLE" then
+        local searchBtn = AceGUI:Create("Button")
+        searchBtn:SetText("Search auctions")
+        searchBtn:SetWidth(140)
+        searchBtn:SetDisabled(not self:IsAuctionatorReady())
+        searchBtn:SetCallback("OnClick", function()
+            self:StartRestockSearch()
+        end)
+        controls:AddChild(searchBtn)
+        focus(searchBtn)
+    elseif state == "SEARCHING" then
+        local cancelBtn = AceGUI:Create("Button")
+        cancelBtn:SetText("Cancel")
+        cancelBtn:SetWidth(120)
+        cancelBtn:SetCallback("OnClick", function()
+            self:ResetRestockSearch()
+            self:RefreshRestockTab()
+        end)
+        controls:AddChild(cancelBtn)
+        focus(cancelBtn)
+    elseif state == "READY" then
+        local doneBtn = AceGUI:Create("Button")
+        doneBtn:SetText("Done")
+        doneBtn:SetWidth(120)
+        doneBtn:SetCallback("OnClick", function()
+            self:ResetRestockSearch()
+            self:RefreshRestockTab()
+        end)
+        controls:AddChild(doneBtn)
+        focus(doneBtn)
+    end
+
     -- Scrollable content.
     local content = AceGUI:Create("ScrollFrame")
     content:SetFullWidth(true)
@@ -144,7 +179,18 @@ function GBL:BuildRestockTab(container)
     content:SetLayout("List")
     self:AddFillChild(container, content)
 
-    self:_RestockView_RenderItems(content)
+    if state == "SEARCHING" then
+        local lbl = AceGUI:Create("Label")
+        lbl:SetFullWidth(true)
+        lbl:SetFont(fontPath, fontSize, "")
+        local n = self._restock.activeItems and #self._restock.activeItems or 0
+        lbl:SetText(format("Searching the Auction House for %d item(s)...", n))
+        content:AddChild(lbl)
+    elseif state == "READY" then
+        self:_RestockView_RenderResults(content)
+    else
+        self:_RestockView_RenderItems(content)
+    end
 
     -- Keyboard navigation capture (in-game only; the mock frame has no
     -- EnableKeyboard, so this branch is skipped under busted). Tab/arrows cycle
@@ -274,6 +320,43 @@ function GBL:_RestockView_RenderItems(content)
         lbl:SetFullWidth(true)
         lbl:SetFont(fontPath, fontSize, "")
         lbl:SetText(rowText)
+        content:AddChild(lbl)
+    end
+end
+
+--- Render the READY-state results: one row per searched item with the lowest
+-- price found, or a clear "not found". Read-only; the Buy controls land in M4c.
+function GBL:_RestockView_RenderResults(content)
+    local AceGUI = LibStub("AceGUI-3.0")
+    local fontPath, fontSize = self:GetScaledFont()
+    local st = self._restock or {}
+    local activeItems = st.activeItems or {}
+    local resultRows = st.resultRows or {}
+
+    if #activeItems == 0 then
+        local lbl = AceGUI:Create("Label")
+        lbl:SetFullWidth(true)
+        lbl:SetFont(fontPath, fontSize, "")
+        lbl:SetText("No items were searched.")
+        content:AddChild(lbl)
+        return
+    end
+
+    for i, ref in ipairs(activeItems) do
+        local row = resultRows[i]
+        local detail
+        if row and row.minPrice then
+            detail = format("|cff88ff88lowest %s|r", self:FormatMoney(row.minPrice))
+        elseif row then
+            detail = "|cff88ff88found|r"
+        else
+            detail = "|cffff8888not found|r"
+        end
+        local lbl = AceGUI:Create("Label")
+        lbl:SetFullWidth(true)
+        lbl:SetFont(fontPath, fontSize, "")
+        lbl:SetText(format("%s  |cffaaaaaa(need %d)|r  %s",
+            itemLabel(ref.itemID), ref.needed or 0, detail))
         content:AddChild(lbl)
     end
 end
