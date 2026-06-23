@@ -621,6 +621,19 @@ local function spentCopper(self)
     return actual
 end
 
+-- Conservative remaining gold for affordability checks: GetMoney can read high
+-- in the lag right after a purchase, so also bound remaining by the lag-free
+-- spend estimate (runStartMoney - spentCopper). Prevents a sweep from attempting
+-- the next buy against a wallet that has not been debited yet.
+local function affordableMoney(self)
+    local wallet = (GetMoney and GetMoney()) or 0
+    local st = self._restock
+    if not st then return wallet end
+    local lagFree = (st.runStartMoney or wallet) - spentCopper(self)
+    if lagFree < wallet then return lagFree end
+    return wallet
+end
+
 local function itemName(self, itemID)
     local name = self.GetCachedItemInfo and itemID and self:GetCachedItemInfo(itemID)
     return name or ("item " .. tostring(itemID))
@@ -665,6 +678,24 @@ function GBL:_RestockBeginPurchase(index)
     if budget > 0 and (spentCopper(self) + estCost) > budget * COPPER_PER_GOLD then
         self:Print(format("Skipping %s: it would exceed your budget of %d g.",
             itemName(self, ref.itemID), budget))
+        if st.buyAll then
+            st.skipped[index] = true
+            self:_RestockAfterStep()
+        else
+            self:RefreshRestockTab()
+        end
+        return
+    end
+
+    -- Affordability: never attempt a purchase the wallet cannot cover. WoW can
+    -- leave the confirm stuck when funds are short, so refuse up front. estCost
+    -- is a lower bound (price climbs as you buy up listings), which catches the
+    -- clear cases; the Cancel button covers any residual stuck confirm. Uses the
+    -- lag-safe remaining estimate so a sweep cannot outrun the wallet update.
+    local money = affordableMoney(self)
+    if estCost > money then
+        self:Print(format("Not enough gold for %s: need about %s, have %s.",
+            itemName(self, ref.itemID), self:FormatMoney(estCost), self:FormatMoney(money)))
         if st.buyAll then
             st.skipped[index] = true
             self:_RestockAfterStep()
@@ -724,14 +755,11 @@ function GBL:StartRestockBuy(index)
     self:_RestockBeginPurchase(index)
 end
 
---- Buy every eligible item in sequence, capped by the (required) budget.
+--- Buy every eligible item in sequence. Spending is bounded by affordability
+-- (the wallet) and, if one is set, the budget cap.
 function GBL:StartRestockBuyAll()
     local st = self._restock
     if not st or st.state ~= "READY" then return end
-    if self:GetRestockBudget() <= 0 then
-        self:Print("Set a budget (gold) before using Buy all.")
-        return
-    end
     local nextIndex = self:_RestockNextBuyable(st)
     if not nextIndex then
         self:Print("Nothing to buy.")

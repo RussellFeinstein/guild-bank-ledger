@@ -119,6 +119,7 @@ function GBL:BuildRestockTab(container)
                 (GetMoney and GetMoney()) or 0)
             line = line .. format("  Spent %s of %d g.", self:FormatMoney(spent), budget)
         end
+        line = line .. format("  Gold: %s.", self:FormatMoney((GetMoney and GetMoney()) or 0))
         status:SetText(line)
     elseif not self:IsAuctionatorReady() then
         status:SetText("|cffffcc00Restock needs the Auctionator addon to search and buy. "
@@ -174,7 +175,7 @@ function GBL:BuildRestockTab(container)
         local buyAllBtn = AceGUI:Create("Button")
         buyAllBtn:SetText("Buy all")
         buyAllBtn:SetWidth(110)
-        buyAllBtn:SetDisabled(budget <= 0 or self:_RestockNextBuyable(self._restock) == nil)
+        buyAllBtn:SetDisabled(self:_RestockNextBuyable(self._restock) == nil)
         buyAllBtn:SetCallback("OnClick", function()
             self:StartRestockBuyAll()
         end)

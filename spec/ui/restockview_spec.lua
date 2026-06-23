@@ -226,6 +226,7 @@ describe("RestockView", function()
             local container = build()
             local banner = findChild(container, "Label")
             assert.truthy(banner._text:find("Spent", 1, true))
+            assert.truthy(banner._text:find("Gold", 1, true))  -- current wallet shown
         end)
 
         it("shows the empty-state pointing at the Layout tab when no layout is set", function()

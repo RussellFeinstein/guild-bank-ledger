@@ -113,18 +113,86 @@ describe("Restock buy", function()
             assert.equals("READY", GBL._restock.state)
             assert.equals(0, #MockWoW.commodityPurchases.start)
         end)
+
+        it("refuses a buy the wallet cannot afford", function()
+            MockWoW.money = 1000  -- 10 silver on hand
+            readyState(
+                { { itemID = 100, needed = 5 } },
+                { [1] = { itemKey = { itemID = 100 }, minPrice = 50000 } },  -- 5g each
+                { runStartMoney = 1000 })
+            GBL:StartRestockBuy(1)
+            assert.equals("READY", GBL._restock.state)
+            assert.equals(0, #MockWoW.commodityPurchases.start)  -- never attempted
+        end)
     end)
 
     describe("Buy-all sweep", function()
-        it("requires a budget to be set", function()
-            readyState(  -- budget defaults to 0
+        it("works without a budget, bounded by affordability", function()
+            MockWoW.money = 1000000  -- enough on hand
+            readyState(  -- no budget set
                 { { itemID = 100, needed = 5 } },
-                { [1] = { itemKey = { itemID = 100 }, minPrice = 4200 } })
+                { [1] = { itemKey = { itemID = 100 }, minPrice = 4200 } },
+                { runStartMoney = 1000000 })
 
             GBL:StartRestockBuyAll()
+            assert.equals("CONFIRMING", GBL._restock.state)  -- sweep started, no budget needed
+            assert.equals(1, #MockWoW.commodityPurchases.start)
+            assert.equals(100, MockWoW.commodityPurchases.start[1].itemID)
+        end)
+
+        it("skips an unaffordable item but continues to an affordable one", function()
+            MockWoW.money = 100000  -- 10 gold on hand
+            readyState(
+                { { itemID = 100, needed = 5 },   -- 5 x 5g = 25g, unaffordable
+                  { itemID = 200, needed = 1 } },  -- 1 x 1g = 1g, affordable
+                { [1] = { itemKey = { itemID = 100 }, minPrice = 50000 },
+                  [2] = { itemKey = { itemID = 200 }, minPrice = 10000 } },
+                { runStartMoney = 100000 })
+
+            GBL:StartRestockBuyAll()
+            assert.is_true(GBL._restock.skipped[1])            -- item 1 unaffordable
+            assert.equals("CONFIRMING", GBL._restock.state)    -- item 2 in flight
+            assert.equals(200, MockWoW.commodityPurchases.start[1].itemID)
+        end)
+
+        it("counts spend so far even if the wallet has not updated (lag-safe)", function()
+            -- Wallet reads full the whole time (simulating GetMoney lag); the
+            -- lag-free estimate must still stop item 2.
+            MockWoW.money = 100000  -- 10g, never decremented
+            readyState(
+                { { itemID = 100, needed = 1 },   -- 6g
+                  { itemID = 200, needed = 1 } },  -- 6g; 6+6 = 12g > 10g on hand
+                { [1] = { itemKey = { itemID = 100 }, minPrice = 60000 },
+                  [2] = { itemKey = { itemID = 200 }, minPrice = 60000 } },
+                { runStartMoney = 100000 })
+
+            GBL:StartRestockBuyAll()
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")  -- item 1 bought
+            assert.is_true(GBL._restock.bought[1])
+            assert.is_true(GBL._restock.skipped[2])            -- 4g left (lag-free) < 6g
             assert.equals("READY", GBL._restock.state)
-            assert.equals(0, #MockWoW.commodityPurchases.start)
-            assert.is_true(Helpers.printContains("Set a budget"))
+            assert.equals(1, #MockWoW.commodityPurchases.start)
+        end)
+
+        it("completes an uncapped sweep over multiple affordable items", function()
+            MockWoW.money = 10000000  -- plenty, no budget
+            readyState(
+                { { itemID = 100, needed = 5 }, { itemID = 200, needed = 3 } },
+                { [1] = { itemKey = { itemID = 100 }, minPrice = 1000 },
+                  [2] = { itemKey = { itemID = 200 }, minPrice = 1000 } },
+                { runStartMoney = 10000000 })
+
+            GBL:StartRestockBuyAll()
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
+            assert.is_true(GBL._restock.bought[1])
+            assert.is_true(GBL._restock.bought[2])
+            assert.equals("READY", GBL._restock.state)  -- terminated cleanly
+            assert.is_false(GBL._restock.buyAll)
+            assert.equals(2, #MockWoW.commodityPurchases.start)
         end)
 
         it("sweeps through every eligible item until none remain", function()
