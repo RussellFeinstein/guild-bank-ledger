@@ -249,6 +249,10 @@ function GBL:BuildLayoutTab(container)
     -- Save and Discard both explicitly reset the draft.
     if not self._layoutDraft then
         self._layoutDraft = freshDraft(self)
+        -- Reserves live in a separate store, so mirror them in a parallel draft
+        -- that Save applies and Discard throws away, keeping "Keep" consistent
+        -- with the Slots / Per slot fields.
+        self._reserveDraft = self:GetStockReserves()
         self._layoutDirty = false
     end
 
@@ -392,10 +396,13 @@ function GBL:_LayoutEditor_RenderSaveBar(parent, writable)
     saveBtn:SetCallback("OnClick", function()
         local ok, err = self:SaveBankLayout(self._layoutDraft)
         if ok then
+            -- Layout is valid (version > 0 now), so reserve writes can advertise.
+            self:_LayoutEditor_ApplyReserveDraft()
             self:Print("Layout saved (v" .. self:GetBankLayout().version .. ").")
             self:SystemInfo("Layout: saved by " ..
                 (UnitName("player") or "?") .. " (v" .. self:GetBankLayout().version .. ")")
             self._layoutDraft = nil   -- re-init from storage on next render
+            self._reserveDraft = nil
             self._layoutDirty = false
             self:RefreshLayoutTab()
         else
@@ -410,6 +417,7 @@ function GBL:_LayoutEditor_RenderSaveBar(parent, writable)
     discardBtn:SetDisabled(not (writable and self._layoutDirty))
     discardBtn:SetCallback("OnClick", function()
         self._layoutDraft = nil   -- re-init from storage on next render
+        self._reserveDraft = nil
         self._layoutDirty = false
         self:RefreshLayoutTab()
     end)
@@ -793,6 +801,25 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
     end
 end
 
+--- Apply the reserve working copy to the live store on Save. Only changed items
+-- are written, so SetStockReserve (which bumps the layout sync cursor and forces
+-- a HELLO) fires once per real change rather than once per layout item.
+function GBL:_LayoutEditor_ApplyReserveDraft()
+    local draft = self._reserveDraft
+    if type(draft) ~= "table" then return end
+    local live = self:GetStockReserves()
+    local seen = {}
+    for id in pairs(live) do seen[id] = true end
+    for id in pairs(draft) do seen[id] = true end
+    for id in pairs(seen) do
+        local want = draft[id] or 0
+        local have = live[id] or 0
+        if want ~= have then
+            self:SetStockReserve(id, want)
+        end
+    end
+end
+
 function GBL:_LayoutEditor_RenderItemRow(parent, tabIndex, itemID, writable)
     local AceGUI = LibStub("AceGUI-3.0")
     local draft = self._layoutDraft
@@ -864,6 +891,26 @@ function GBL:_LayoutEditor_RenderItemRow(parent, tabIndex, itemID, writable)
     totalLabel:SetText(format("= %d", row.slots * row.perSlot))
     totalLabel:SetFontObject(GameFontNormalSmall)
     rowGroup:AddChild(totalLabel)
+
+    -- "Keep" = the total to keep in stock for this item (the reserve floor).
+    -- Restock targets max(layout demand, reserve), so a Keep above the layout
+    -- total raises the buy-to target. Reserves ride the draft (applied on Save).
+    local keepInput = AceGUI:Create("EditBox")
+    keepInput:SetLabel("Keep")
+    keepInput:SetWidth(80)
+    keepInput:SetText(tostring((self._reserveDraft and self._reserveDraft[itemID]) or 0))
+    keepInput:SetDisabled(not writable)
+    keepInput:DisableButton(true)
+    keepInput:SetCallback("OnEnterPressed", function(_w, _e, value)
+        local n = tonumber(value)
+        if n and n >= 0 then
+            self._reserveDraft = self._reserveDraft or {}
+            self._reserveDraft[itemID] = math.floor(n)
+            self._layoutDirty = true
+            self:RefreshLayoutTab()
+        end
+    end)
+    rowGroup:AddChild(keepInput)
 
     -- Count how many slotOrder entries pin this specific item, so the
     -- per-item Unpin button can show the count and be disabled when
