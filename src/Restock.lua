@@ -300,15 +300,17 @@ function GBL:_RestockBuildItemUniverse(opts)
 end
 
 ------------------------------------------------------------------------
--- Auctionator search flow (M4b: IDLE -> SEARCHING -> READY)
--- Ported from GuildBankRestock's search phase, adapted to the layout-driven buy
--- list and GBL's singleton session-state conventions. Buying (the READY ->
--- CONFIRMING half) lands in M4c. Every Auctionator/Item access is existence-
--- guarded and verified in-game; the pure helpers below carry the unit coverage.
+-- Auctionator search + buy flow (IDLE -> SEARCHING -> READY -> CONFIRMING)
+-- Ported from GuildBankRestock, adapted to the layout-driven buy list and GBL's
+-- singleton session-state conventions. Every Auctionator/Item/C_AuctionHouse
+-- access is existence-guarded and verified in-game; the pure helpers below carry
+-- the unit coverage (the buy state machine is also fireEvent-tested).
 --
 -- Session state on self._restock (NOT persisted, NOT synced):
 --   { state, activeItems = { {itemID, needed} }, resultRows = { [i]=row },
---     searchGen, listenerRegistered, foundCount }
+--     searchGen, listenerRegistered, foundCount,                 -- search
+--     bought, skipped, pendingIndex, pendingItemID, pendingQty,  -- buy
+--     buyAll, buyEventsRegistered, confirmIssued, runStartMoney, spentEstimate }
 -- The EventBus listener table lives on self._restockListener (stable across
 -- searches so Unregister matches Register).
 ------------------------------------------------------------------------
@@ -513,17 +515,25 @@ function GBL:_RestockOnSearchEnd(results)
     local resultRows, found = self:_RestockMapResults(st.activeItems, results)
     st.resultRows = resultRows
     st.foundCount = found
+    st.bought = {}
+    st.skipped = {}
+    st.buyAll = false
+    st.confirmIssued = false
+    st.runStartMoney = (GetMoney and GetMoney()) or 0  -- baseline for the budget cap
+    st.spentEstimate = 0  -- lag-free lower bound on spend (GetMoney can trail events)
     st.state = "READY"
     self:RefreshRestockTab()
 end
 
---- Reset the search back to IDLE: unregister, stop any in-flight Auctionator
--- search, invalidate stale async callbacks, and clear results.
+--- Reset the search/buy back to IDLE: unregister listeners and buy events, stop
+-- any in-flight Auctionator search, invalidate stale async callbacks, and clear
+-- results and buy progress.
 function GBL:ResetRestockSearch()
     self._restock = self._restock or { state = "IDLE" }
     local st = self._restock
     unregisterSearchListener(self)
-    if (st.state == "SEARCHING" or st.state == "READY")
+    self:_RestockUnregisterBuyEvents()
+    if (st.state == "SEARCHING" or st.state == "READY" or st.state == "CONFIRMING")
             and AuctionatorShoppingFrame and AuctionatorShoppingFrame.StopSearch then
         pcall(function() AuctionatorShoppingFrame:StopSearch() end)
     end
@@ -531,5 +541,247 @@ function GBL:ResetRestockSearch()
     st.activeItems = {}
     st.resultRows = {}
     st.foundCount = 0
+    st.bought = {}
+    st.skipped = {}
+    st.pendingIndex = nil
+    st.pendingItemID = nil
+    st.pendingQty = nil
+    st.buyAll = false
+    st.confirmIssued = false
+    st.spentEstimate = 0
     st.state = "IDLE"
+end
+
+------------------------------------------------------------------------
+-- Buy / confirm flow (M4c: READY -> CONFIRMING -> READY)
+-- Per-item buys and a budget-capped Buy-all sweep, ported from GBR. Spends real
+-- gold via C_AuctionHouse commodities; the budget cap, per-item review, WoW's
+-- own per-purchase dialog, and in-game verification are the safeguards. The
+-- COMMODITY/THROTTLED handlers are registered lazily on the first buy and
+-- unregistered in ResetRestockSearch; each guards state == "CONFIRMING".
+------------------------------------------------------------------------
+
+local COPPER_PER_GOLD = 10000
+
+--- Gold spent so far this run (copper), clamped at 0.
+function GBL:_RestockSpent(startMoney, curMoney)
+    local spent = (startMoney or 0) - (curMoney or 0)
+    if spent < 0 then return 0 end
+    return spent
+end
+
+--- True when a positive budget (gold) has been reached by the spent copper.
+function GBL:_RestockBudgetExceeded(spentCopper, budgetGold)
+    budgetGold = budgetGold or 0
+    if budgetGold <= 0 then return false end
+    return (spentCopper or 0) >= budgetGold * COPPER_PER_GOLD
+end
+
+--- First index eligible to buy: has a result, not bought, not skipped, needed > 0.
+function GBL:_RestockNextBuyable(st)
+    if not st or type(st.activeItems) ~= "table" then return nil end
+    local bought = st.bought or {}
+    local skipped = st.skipped or {}
+    local resultRows = st.resultRows or {}
+    for i, ref in ipairs(st.activeItems) do
+        if resultRows[i] and not bought[i] and not skipped[i] and (ref.needed or 0) > 0 then
+            return i
+        end
+    end
+    return nil
+end
+
+function GBL:_RestockRegisterBuyEvents()
+    local st = self._restock
+    if st and not st.buyEventsRegistered then
+        self:RegisterEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+        self:RegisterEvent("COMMODITY_PURCHASE_SUCCEEDED")
+        self:RegisterEvent("COMMODITY_PURCHASE_FAILED")
+        st.buyEventsRegistered = true
+    end
+end
+
+function GBL:_RestockUnregisterBuyEvents()
+    if self._restock and self._restock.buyEventsRegistered then
+        self:UnregisterEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+        self:UnregisterEvent("COMMODITY_PURCHASE_SUCCEEDED")
+        self:UnregisterEvent("COMMODITY_PURCHASE_FAILED")
+        self._restock.buyEventsRegistered = false
+    end
+end
+
+-- Spent copper for the active run: the greater of the wallet delta (which can
+-- trail the purchase events) and our own lag-free running estimate.
+local function spentCopper(self)
+    local st = self._restock
+    if not st then return 0 end
+    local actual = self:_RestockSpent(st.runStartMoney, (GetMoney and GetMoney()) or 0)
+    local estimate = st.spentEstimate or 0
+    if estimate > actual then return estimate end
+    return actual
+end
+
+local function itemName(self, itemID)
+    local name = self.GetCachedItemInfo and itemID and self:GetCachedItemInfo(itemID)
+    return name or ("item " .. tostring(itemID))
+end
+
+--- Begin a commodity purchase for activeItems[index]. Handles the maxPrice skip
+-- and the budget cap; on a real buy it goes CONFIRMING and waits for the WoW
+-- events to confirm and report the result.
+function GBL:_RestockBeginPurchase(index)
+    local st = self._restock
+    if not st or st.state ~= "READY" then return end
+    local ref = st.activeItems and st.activeItems[index]
+    local row = st.resultRows and st.resultRows[index]
+    if not ref or not row or (st.bought and st.bought[index]) or (ref.needed or 0) <= 0 then
+        self:_RestockAfterStep()
+        return
+    end
+
+    -- Per-item maxPrice cap (override; no input UI yet, so usually unset).
+    local override = self:GetRestockItemOverride(ref.itemID)
+    local maxPrice = override and override.maxPrice
+    if maxPrice and maxPrice > 0 and row.minPrice and row.minPrice > maxPrice * COPPER_PER_GOLD then
+        st.skipped[index] = true
+        self:Print(format("Skipped %s: lowest price is over your max of %d g.",
+            itemName(self, ref.itemID), maxPrice))
+        self:_RestockAfterStep()
+        return
+    end
+
+    local budget = self:GetRestockBudget()
+    -- Budget cap (already reached): stop the run.
+    if self:_RestockBudgetExceeded(spentCopper(self), budget) then
+        self:Print(format("Budget of %d g reached; stopping.", budget))
+        st.buyAll = false
+        st.state = "READY"
+        self:RefreshRestockTab()
+        return
+    end
+    -- Budget cap (this buy): skip an item whose estimated cost (lowest price x
+    -- quantity, a lower bound) would push spend past the budget.
+    local estCost = (row.minPrice or 0) * (ref.needed or 0)
+    if budget > 0 and (spentCopper(self) + estCost) > budget * COPPER_PER_GOLD then
+        self:Print(format("Skipping %s: it would exceed your budget of %d g.",
+            itemName(self, ref.itemID), budget))
+        if st.buyAll then
+            st.skipped[index] = true
+            self:_RestockAfterStep()
+        else
+            self:RefreshRestockTab()
+        end
+        return
+    end
+
+    if not (C_AuctionHouse and C_AuctionHouse.StartCommoditiesPurchase) then
+        self:Print("Open the Auction House to buy.")
+        return
+    end
+
+    self:_RestockRegisterBuyEvents()
+    st.pendingIndex = index
+    st.pendingItemID = (row.itemKey and row.itemKey.itemID) or ref.itemID
+    st.pendingQty = ref.needed
+    st.confirmIssued = false
+    st.state = "CONFIRMING"
+    self:RefreshRestockTab()
+    C_AuctionHouse.StartCommoditiesPurchase(st.pendingItemID, st.pendingQty)
+end
+
+--- After a buy or skip: continue the sweep, or settle back to READY.
+function GBL:_RestockAfterStep()
+    local st = self._restock
+    if not st then return end
+    -- Settle out of CONFIRMING first so the next _RestockBeginPurchase passes
+    -- its state == "READY" guard.
+    st.state = "READY"
+    if not st.buyAll then
+        self:RefreshRestockTab()
+        return
+    end
+    if self:_RestockBudgetExceeded(spentCopper(self), self:GetRestockBudget()) then
+        st.buyAll = false
+        self:Print("Budget reached; Buy-all stopped.")
+        self:RefreshRestockTab()
+        return
+    end
+    local nextIndex = self:_RestockNextBuyable(st)
+    if not nextIndex then
+        st.buyAll = false
+        self:Print("Buy-all complete.")
+        self:RefreshRestockTab()
+        return
+    end
+    self:_RestockBeginPurchase(nextIndex)
+end
+
+--- Buy a single item (per-item button).
+function GBL:StartRestockBuy(index)
+    local st = self._restock
+    if not st or st.state ~= "READY" then return end
+    st.buyAll = false
+    self:_RestockBeginPurchase(index)
+end
+
+--- Buy every eligible item in sequence, capped by the (required) budget.
+function GBL:StartRestockBuyAll()
+    local st = self._restock
+    if not st or st.state ~= "READY" then return end
+    if self:GetRestockBudget() <= 0 then
+        self:Print("Set a budget (gold) before using Buy all.")
+        return
+    end
+    local nextIndex = self:_RestockNextBuyable(st)
+    if not nextIndex then
+        self:Print("Nothing to buy.")
+        return
+    end
+    st.buyAll = true
+    self:_RestockBeginPurchase(nextIndex)
+end
+
+--- WoW commodity events (registered lazily; each guards state == CONFIRMING).
+function GBL:AUCTION_HOUSE_THROTTLED_SYSTEM_READY()
+    local st = self._restock
+    if not st or st.state ~= "CONFIRMING" then return end
+    if st.confirmIssued then return end  -- throttle-ready can fire repeatedly
+    if st.pendingItemID and st.pendingQty
+            and C_AuctionHouse and C_AuctionHouse.ConfirmCommoditiesPurchase then
+        st.confirmIssued = true
+        C_AuctionHouse.ConfirmCommoditiesPurchase(st.pendingItemID, st.pendingQty)
+    end
+end
+
+function GBL:COMMODITY_PURCHASE_SUCCEEDED()
+    local st = self._restock
+    if not st or st.state ~= "CONFIRMING" then return end
+    if not st.confirmIssued then return end  -- ignore a duplicate or unsolicited success
+    st.confirmIssued = false
+    local index = st.pendingIndex
+    if index then
+        st.bought[index] = true
+        -- Lag-free lower bound on spend: GetMoney can trail the purchase event.
+        local row = st.resultRows and st.resultRows[index]
+        local minPrice = (row and row.minPrice) or 0
+        st.spentEstimate = (st.spentEstimate or 0) + minPrice * (st.pendingQty or 0)
+    end
+    self:Print(format("Bought %dx %s.", st.pendingQty or 0, itemName(self, st.pendingItemID)))
+    st.pendingIndex = nil
+    st.pendingItemID = nil
+    st.pendingQty = nil
+    self:_RestockAfterStep()
+end
+
+function GBL:COMMODITY_PURCHASE_FAILED()
+    local st = self._restock
+    if not st or st.state ~= "CONFIRMING" then return end
+    self:Print("Purchase failed; stopping. Check your gold or try again.")
+    st.confirmIssued = false
+    st.pendingIndex = nil
+    st.pendingItemID = nil
+    st.pendingQty = nil
+    st.buyAll = false
+    st.state = "READY"
+    self:RefreshRestockTab()
 end

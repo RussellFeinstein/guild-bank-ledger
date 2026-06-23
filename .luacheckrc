@@ -10,6 +10,7 @@ read_globals = {
     "GetGuildInfo",
     "GetNumGuildBankTabs",
     "GetServerTime",
+    "GetMoney",
     "QueryGuildBankLog",
     "QueryGuildBankTab",
     "GetGuildBankTransaction",
@@ -59,6 +60,7 @@ read_globals = {
     "SetCVar",
 
     -- WoW utilities
+    "C_AuctionHouse",
     "C_ChatBubbles",
     "C_Item",
     "C_Timer",

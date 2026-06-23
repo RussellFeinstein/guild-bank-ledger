@@ -4,8 +4,8 @@
 -- triple-encoded status, grouped by bank tab. Render scaffold + focus-order
 -- registration.
 --
--- The Auctionator search flow (search to READY) lives here; the buy/confirm half
--- (M4c) and the visible focus ring (accessibility branch) land later.
+-- The Auctionator search and buy flow lives here; the visible focus ring is a
+-- deferred accessibility-branch change.
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
@@ -107,10 +107,19 @@ function GBL:BuildRestockTab(container)
     status:SetFont(fontPath, fontSize, "")
     if state == "SEARCHING" then
         status:SetText("|cffffaa55Searching the Auction House...|r")
+    elseif state == "CONFIRMING" then
+        status:SetText("|cffffaa55Confirming purchase...|r")
     elseif state == "READY" then
-        status:SetText(format("Search complete: %d of %d found. Review below, then click Done.",
+        local budget = self:GetRestockBudget()
+        local line = format("Search complete: %d of %d found.",
             self._restock.foundCount or 0,
-            self._restock.activeItems and #self._restock.activeItems or 0))
+            self._restock.activeItems and #self._restock.activeItems or 0)
+        if budget > 0 then
+            local spent = self:_RestockSpent(self._restock.runStartMoney,
+                (GetMoney and GetMoney()) or 0)
+            line = line .. format("  Spent %s of %d g.", self:FormatMoney(spent), budget)
+        end
+        status:SetText(line)
     elseif not self:IsAuctionatorReady() then
         status:SetText("|cffffcc00Restock needs the Auctionator addon to search and buy. "
             .. "Targets still display below.|r")
@@ -161,6 +170,28 @@ function GBL:BuildRestockTab(container)
         controls:AddChild(cancelBtn)
         focus(cancelBtn)
     elseif state == "READY" then
+        local budget = self:GetRestockBudget()
+        local buyAllBtn = AceGUI:Create("Button")
+        buyAllBtn:SetText("Buy all")
+        buyAllBtn:SetWidth(110)
+        buyAllBtn:SetDisabled(budget <= 0 or self:_RestockNextBuyable(self._restock) == nil)
+        buyAllBtn:SetCallback("OnClick", function()
+            self:StartRestockBuyAll()
+        end)
+        controls:AddChild(buyAllBtn)
+        focus(buyAllBtn)
+
+        local budgetBox = AceGUI:Create("EditBox")
+        budgetBox:SetLabel("Budget (gold, 0 = none)")
+        budgetBox:SetWidth(160)
+        budgetBox:SetText(tostring(budget))
+        budgetBox:SetCallback("OnEnterPressed", function(_w, _e, value)
+            self:SetRestockBudget(tonumber(value) or 0)
+            self:RefreshRestockTab()
+        end)
+        controls:AddChild(budgetBox)
+        focus(budgetBox)
+
         local doneBtn = AceGUI:Create("Button")
         doneBtn:SetText("Done")
         doneBtn:SetWidth(120)
@@ -170,6 +201,18 @@ function GBL:BuildRestockTab(container)
         end)
         controls:AddChild(doneBtn)
         focus(doneBtn)
+    elseif state == "CONFIRMING" then
+        -- A purchase is in flight. Offer an escape so a stuck confirm (AH closed,
+        -- item no longer a commodity) cannot wedge the tab until /reload.
+        local cancelBtn = AceGUI:Create("Button")
+        cancelBtn:SetText("Cancel")
+        cancelBtn:SetWidth(120)
+        cancelBtn:SetCallback("OnClick", function()
+            self:ResetRestockSearch()
+            self:RefreshRestockTab()
+        end)
+        controls:AddChild(cancelBtn)
+        focus(cancelBtn)
     end
 
     -- Scrollable content.
@@ -186,8 +229,14 @@ function GBL:BuildRestockTab(container)
         local n = self._restock.activeItems and #self._restock.activeItems or 0
         lbl:SetText(format("Searching the Auction House for %d item(s)...", n))
         content:AddChild(lbl)
+    elseif state == "CONFIRMING" then
+        local lbl = AceGUI:Create("Label")
+        lbl:SetFullWidth(true)
+        lbl:SetFont(fontPath, fontSize, "")
+        lbl:SetText("|cffffaa55Confirming purchase...|r")
+        content:AddChild(lbl)
     elseif state == "READY" then
-        self:_RestockView_RenderResults(content)
+        self:_RestockView_RenderResults(content, focus)
     else
         self:_RestockView_RenderItems(content)
     end
@@ -324,14 +373,21 @@ function GBL:_RestockView_RenderItems(content)
     end
 end
 
---- Render the READY-state results: one row per searched item with the lowest
--- price found, or a clear "not found". Read-only; the Buy controls land in M4c.
-function GBL:_RestockView_RenderResults(content)
+--- Render the READY-state results: one row per searched item with its lowest
+-- price (or "not found"), a "Bought"/"over max price" marker, and a per-item Buy
+-- button for found items. Buy buttons are disabled once the budget is reached.
+function GBL:_RestockView_RenderResults(content, focus)
     local AceGUI = LibStub("AceGUI-3.0")
+    focus = focus or function() end
     local fontPath, fontSize = self:GetScaledFont()
     local st = self._restock or {}
     local activeItems = st.activeItems or {}
     local resultRows = st.resultRows or {}
+    local bought = st.bought or {}
+    local skipped = st.skipped or {}
+    local budgetBlocked = self:_RestockBudgetExceeded(
+        self:_RestockSpent(st.runStartMoney, (GetMoney and GetMoney()) or 0),
+        self:GetRestockBudget())
 
     if #activeItems == 0 then
         local lbl = AceGUI:Create("Label")
@@ -345,18 +401,52 @@ function GBL:_RestockView_RenderResults(content)
     for i, ref in ipairs(activeItems) do
         local row = resultRows[i]
         local detail
-        if row and row.minPrice then
-            detail = format("|cff88ff88lowest %s|r", self:FormatMoney(row.minPrice))
+        local buyable = false
+        if bought[i] then
+            detail = "|cff88ff88Bought|r"
+        elseif skipped[i] then
+            detail = "|cffffcc00skipped|r"
+        elseif row and row.minPrice then
+            detail = format("|cffaaaaaalowest %s|r", self:FormatMoney(row.minPrice))
+            buyable = (ref.needed or 0) > 0
         elseif row then
             detail = "|cff88ff88found|r"
+            buyable = (ref.needed or 0) > 0
         else
             detail = "|cffff8888not found|r"
         end
-        local lbl = AceGUI:Create("Label")
-        lbl:SetFullWidth(true)
-        lbl:SetFont(fontPath, fontSize, "")
-        lbl:SetText(format("%s  |cffaaaaaa(need %d)|r  %s",
-            itemLabel(ref.itemID), ref.needed or 0, detail))
-        content:AddChild(lbl)
+
+        local rowText = format("%s  |cffaaaaaa(need %d)|r  %s",
+            itemLabel(ref.itemID), ref.needed or 0, detail)
+
+        if buyable then
+            local grp = AceGUI:Create("SimpleGroup")
+            grp:SetFullWidth(true)
+            grp:SetLayout("Flow")
+            content:AddChild(grp)
+
+            local lbl = AceGUI:Create("Label")
+            lbl:SetRelativeWidth(0.7)
+            lbl:SetFont(fontPath, fontSize, "")
+            lbl:SetText(rowText)
+            grp:AddChild(lbl)
+
+            local idx = i
+            local buyBtn = AceGUI:Create("Button")
+            buyBtn:SetText(format("Buy %d", ref.needed or 0))
+            buyBtn:SetWidth(110)
+            buyBtn:SetDisabled(budgetBlocked)
+            buyBtn:SetCallback("OnClick", function()
+                self:StartRestockBuy(idx)
+            end)
+            grp:AddChild(buyBtn)
+            focus(buyBtn)
+        else
+            local lbl = AceGUI:Create("Label")
+            lbl:SetFullWidth(true)
+            lbl:SetFont(fontPath, fontSize, "")
+            lbl:SetText(rowText)
+            content:AddChild(lbl)
+        end
     end
 end

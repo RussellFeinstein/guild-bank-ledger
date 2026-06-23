@@ -42,6 +42,16 @@ local function findLabelContaining(container, substr)
     return nil
 end
 
+-- Recursive: first Button whose text matches.
+local function findButton(container, text)
+    for _, c in ipairs(container._children or {}) do
+        if c._type == "Button" and c._text == text then return c end
+        local nested = findButton(c, text)
+        if nested then return nested end
+    end
+    return nil
+end
+
 describe("RestockView", function()
     local GBL
 
@@ -162,6 +172,60 @@ describe("RestockView", function()
                 end
             end
             walk(container)
+        end)
+
+        it("renders a confirming message and a Cancel button in CONFIRMING", function()
+            GBL._restock = { state = "CONFIRMING", activeItems = {}, resultRows = {} }
+            local container = build()
+            local scroll = findChild(container, "ScrollFrame")
+            assert.is_not_nil(findLabelContaining(scroll, "Confirming purchase"))
+            assert.is_not_nil(findButton(container, "Cancel"))
+        end)
+
+        it("wires each per-row Buy button to that row's item", function()
+            GBL._restock = {
+                state = "READY",
+                activeItems = { { itemID = 111, needed = 5 }, { itemID = 222, needed = 3 } },
+                resultRows = { [1] = { itemKey = { itemID = 111 }, minPrice = 1000 },
+                               [2] = { itemKey = { itemID = 222 }, minPrice = 1000 } },
+                bought = {}, skipped = {}, runStartMoney = 1000000,
+            }
+            MockWoW.money = 1000000
+            local container = build()
+            local btn = findButton(container, "Buy 3")  -- item 222 (needs 3)
+            assert.is_not_nil(btn)
+            btn:Fire("OnClick")
+            assert.equals(1, #MockWoW.commodityPurchases.start)
+            assert.equals(222, MockWoW.commodityPurchases.start[1].itemID)
+        end)
+
+        it("stores the entered value from the budget EditBox", function()
+            GBL._restock = {
+                state = "READY",
+                activeItems = { { itemID = 111, needed = 5 } },
+                resultRows = { [1] = { itemKey = { itemID = 111 }, minPrice = 1000 } },
+                bought = {}, skipped = {}, runStartMoney = 1000000,
+            }
+            MockWoW.money = 1000000
+            local container = build()
+            local box = findChild(container, "EditBox")
+            assert.is_not_nil(box)
+            box:Fire("OnEnterPressed", "250")
+            assert.equals(250, GBL:GetRestockBudget())
+        end)
+
+        it("shows the spent-of-budget line when a budget is set", function()
+            GBL:SetRestockBudget(100)
+            GBL._restock = {
+                state = "READY",
+                activeItems = { { itemID = 111, needed = 5 } },
+                resultRows = { [1] = { itemKey = { itemID = 111 }, minPrice = 1000 } },
+                bought = {}, skipped = {}, runStartMoney = 1000000,
+            }
+            MockWoW.money = 1000000  -- spent 0
+            local container = build()
+            local banner = findChild(container, "Label")
+            assert.truthy(banner._text:find("Spent", 1, true))
         end)
 
         it("shows the empty-state pointing at the Layout tab when no layout is set", function()
