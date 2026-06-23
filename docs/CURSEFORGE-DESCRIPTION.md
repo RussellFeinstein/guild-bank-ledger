@@ -29,12 +29,10 @@ Every guild member running the addon automatically logs and shares data. No setu
 - **Consumption** — Guild-wide overview dashboard: total items and gold in/out/net, top 10 consumers with gold breakdown (click a name to jump to their transactions), top 15 most-used items with 7d/30d/all-time trend columns.
 - **Sort**: Preview the planned moves to reshape the bank against a saved layout, then execute them on a fixed one-second cadence and auto-rerun any remaining moves until the bank matches the layout. Self-heals if the client's frame loop wedges mid-run. Hidden from members without sort access.
 - **Layout**: Per-tab template editor (display, overflow, ignore modes) with per-item slot counts and stack sizes. Capture-from-current-tab shortcut. Hidden from members without layout-write access. Sort access is a two-tier policy (Layout Write and Sort-only, by rank threshold or named delegate) that the GM manages and that syncs guild-wide, so a grant reaches the granted officer automatically. The saved layout itself also syncs to officers with sort access, so a granted officer can sort against the GM's layout without rebuilding it.
-- **Restock**: Restock the guild bank to your layout targets. Lists every layout item grouped by bank tab with its target, current stock, and how many to buy. With the Auctionator addon installed, searches the Auction House and buys the shortfall, per item or as a sweep (optionally capped by a per-run gold budget), spending real gold through WoW's commodity flow with an up-front affordability check. Hidden from members without sort access.
+- **Restock**: Restock the guild bank to your layout targets. Lists every layout item grouped by bank tab with its target, current stock, and how many to buy. With the Auctionator addon installed, searches the Auction House and buys the shortfall, per item or as a sweep (optionally capped by a per-run gold budget), spending real gold through WoW's commodity flow with an up-front affordability check. Hidden from members without sort access. Created by Katorri (Guild Bank Restock).
 - **Sync** — Enable/disable sync, online peers with version and directional status (newer/outdated), GM access control configuration.
 - **Changelog** — Embedded version history, paginated (10 versions per page).
 - **About** — Addon info, author credit, support links.
-
-The window remembers its position and size across reloads. A minimum size is enforced so the tab bar and filters remain usable.
 
 ## Access Control
 
@@ -68,6 +66,6 @@ Settings sync to all guild members automatically.
 
 **Before v1.0**: complete accessibility audit and keyboard-nav wiring across all UI widgets, sync rate limiting, performance audit (SavedVariables size, compaction verification, UI debouncing).
 
-**Planned post-1.0**: analytics dashboard (headline stats, activity timeline, category breakdown, gold flow, engagement distribution, item velocity), raid team management, alt linking, stock tab (passive inventory view), stock alerts (toggleable), Guild Bank Sort integration, CSV/Discord/BBCode export.
+**Planned post-1.0**: analytics dashboard, raid team management, alt linking, stock tab (passive inventory view), stock alerts, Guild Bank Sort integration, CSV/Discord/BBCode export.
 
 **Support development**: [Ko-fi](https://ko-fi.com/RexxyBear) · [GitHub Sponsors](https://github.com/sponsors/RussellFeinstein)

@@ -96,5 +96,20 @@ describe("AboutView", function()
             end
             assert.is_true(foundAuthor, "Expected author label mentioning RexxyBear")
         end)
+
+        it("passes explicit font flags to every label (WoW 12.0.7 rejects a nil arg #3 to SetFont)", function()
+            local AceGUI = LibStub("AceGUI-3.0")
+            local container = AceGUI:Create("SimpleGroup")
+            GBL:BuildAboutTab(container)
+            local scroll = container._children[1]
+            local checked = 0
+            for _, child in ipairs(scroll._children) do
+                if child._type == "Label" and child._setFont then
+                    assert.is_not_nil(child._setFont[3], "Label SetFont flags must not be nil")
+                    checked = checked + 1
+                end
+            end
+            assert.is_true(checked > 0, "expected at least one Label with a recorded SetFont call")
+        end)
     end)
 end)
