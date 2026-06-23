@@ -141,6 +141,60 @@ end
 -- Expose the pure helper for the spec suite.
 GBL._layoutEditorApplyBulkToItems = applyBulkToItems
 
+--- Set the reserve draft entry for every item on a tab to `keepValue` in place.
+--
+-- Pure over `tabItems` + `reserveDraft` (writes the draft). itemID keys are
+-- coerced to numbers, since a synced layout can be string-keyed while the
+-- reserve store (and SetStockReserve) is number-keyed. A keepValue of 0 marks
+-- each item's reserve for removal on Save (draft-only apply clears it).
+--
+-- Returns the number of items written.
+local function applyBulkReserve(tabItems, reserveDraft, keepValue)
+    if type(tabItems) ~= "table" or type(reserveDraft) ~= "table" then return 0 end
+    local n = 0
+    for itemID in pairs(tabItems) do
+        local key = tonumber(itemID)
+        if key then
+            reserveDraft[key] = keepValue
+            n = n + 1
+        end
+    end
+    return n
+end
+
+-- Expose the pure helper for the spec suite.
+GBL._layoutEditorApplyBulkReserve = applyBulkReserve
+
+--- Validate and apply a bulk edit (slots / perSlot / keep) to every item on a
+-- display tab. Orchestrates the working drafts: applyBulkToItems mutates the
+-- layout draft, applyBulkReserve writes the reserve draft. Does no rendering and
+-- no Print, so the button handler stays thin and this stays unit-testable.
+-- newSlots / newPerSlot / newKeep are numbers or nil (nil = leave unchanged);
+-- newKeep may be 0 (clear reserves on Save).
+-- @return ok, (result { applied, parts } on success | errorMessage string)
+function GBL:_LayoutEditor_ApplyBulk(tabIndex, newSlots, newPerSlot, newKeep)
+    local draft = self._layoutDraft
+    local tab = draft and draft.tabs and draft.tabs[tabIndex]
+    if type(tab) ~= "table" then return false, "no layout draft for this tab" end
+    if not newSlots and not newPerSlot and newKeep == nil then
+        return false, "Enter at least one of Slots / Per slot / Keep to apply."
+    end
+    if newSlots and newSlots < 1 then return false, "Slots must be >= 1." end
+    if newPerSlot and newPerSlot < 1 then return false, "Per slot must be >= 1." end
+    if newKeep ~= nil and newKeep < 0 then return false, "Keep must be >= 0." end
+
+    local applied = applyBulkToItems(tab, newSlots, newPerSlot, MAX_SLOTS)
+    local parts = {}
+    if newSlots then parts[#parts + 1] = format("slots=%d", newSlots) end
+    if newPerSlot then parts[#parts + 1] = format("perSlot=%d", newPerSlot) end
+    if newKeep ~= nil then
+        self._reserveDraft = self._reserveDraft or {}
+        applyBulkReserve(tab.items, self._reserveDraft, math.floor(newKeep))
+        parts[#parts + 1] = format("keep=%d", math.floor(newKeep))
+    end
+    return true, { applied = applied, parts = parts }
+end
+
 ------------------------------------------------------------------------
 -- Working-copy state
 --
@@ -739,32 +793,29 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
         perSlotInput:DisableButton(true)
         bulkRow:AddChild(perSlotInput)
 
+        local keepInput = AceGUI:Create("EditBox")
+        keepInput:SetLabel("Keep")
+        keepInput:SetWidth(80)
+        keepInput:DisableButton(true)
+        bulkRow:AddChild(keepInput)
+
         local applyBtn = AceGUI:Create("Button")
         applyBtn:SetText("Apply to all")
         applyBtn:SetWidth(110)
         applyBtn:SetCallback("OnClick", function()
             local newSlots = tonumber(slotsInput:GetText())
             local newPerSlot = tonumber(perSlotInput:GetText())
-            if not newSlots and not newPerSlot then
-                self:Print("Enter at least one of Slots / Per slot to apply.")
+            local keepText = keepInput:GetText()
+            local newKeep = (keepText and keepText ~= "") and tonumber(keepText) or nil
+            local ok, res = self:_LayoutEditor_ApplyBulk(tabIndex, newSlots, newPerSlot, newKeep)
+            if not ok then
+                self:Print(res)
                 return
             end
-            if newSlots and newSlots < 1 then
-                self:Print("Slots must be >= 1.")
-                return
-            end
-            if newPerSlot and newPerSlot < 1 then
-                self:Print("Per slot must be >= 1.")
-                return
-            end
-            local applied = applyBulkToItems(tab, newSlots, newPerSlot, MAX_SLOTS)
-            local parts = {}
-            if newSlots then parts[#parts + 1] = format("slots=%d", newSlots) end
-            if newPerSlot then parts[#parts + 1] = format("perSlot=%d", newPerSlot) end
             self:Print(format(
                 "|cff00ff88Applied %s to %d item(s) on tab %d.|r " ..
                 "Click |cffffffffSave Layout|r to commit.",
-                table.concat(parts, ", "), applied, tabIndex))
+                table.concat(res.parts, ", "), res.applied, tabIndex))
             self._layoutDirty = true
             self:RefreshLayoutTab()
         end)
@@ -774,8 +825,9 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
         hint:SetFullWidth(true)
         hint:SetFontObject(GameFontNormalSmall)
         hint:SetText("|cff888888Leave a field blank to keep its current " ..
-            "value for each item. Shrinking slots trims that item's " ..
-            "pinned positions from the highest slot down.|r")
+            "value for each item. Set Keep to 0 to clear the reserves on this " ..
+            "tab. Shrinking slots trims that item's pinned positions from the " ..
+            "highest slot down.|r")
         parent:AddChild(hint)
     end
 
