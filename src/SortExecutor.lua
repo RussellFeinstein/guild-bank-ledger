@@ -518,29 +518,11 @@ end
 -- Pre-warm (Item:CreateFromItemLink for crafted-quality crash mitigation)
 ------------------------------------------------------------------------
 
--- Atlas marker present in the link of every TWW crafted-quality reagent. A
--- 2026-05-20 in-game crash bottomed out in Blizzard's GetItemReagentQualityInfo
--- when a tab redraw fired after PickupGuildBankItem; pre-warming the item cache
--- is best-effort mitigation, the Sort-tab warning banner is the load-bearing
--- user protection.
-local CRAFTED_QUALITY_ATLAS = "Professions-ChatIcon-Quality-"
-
+-- A 2026-05-20 in-game crash bottomed out in Blizzard's GetItemReagentQualityInfo
+-- when a tab redraw fired after PickupGuildBankItem on TWW crafted-quality
+-- reagents. Pre-warming Blizzard's item-data cache before the first move is
+-- best-effort mitigation for that crash.
 local PREWARM_CAP_SECONDS = 3.0
-
---- True if any op in the plan touches a slot whose LIVE item link contains the
---- TWW crafted-quality atlas marker. Used by the Sort tab to render a warning.
-local function planHasCraftedQualityItems(plan)
-    if not plan or not plan.ops then return false end
-    for _, op in ipairs(plan.ops) do
-        local link = GetGuildBankItemLink(op.srcTab, op.srcSlot)
-        if link and link:find(CRAFTED_QUALITY_ATLAS, 1, true) then
-            return true
-        end
-    end
-    return false
-end
-
-GBL._sortExecutor_PlanHasCraftedQualityItems = planHasCraftedQualityItems
 
 --- Pre-warm Blizzard's item-data cache for every unique item link in the plan,
 --- then invoke `onReady(reason)` exactly once (after all loads or a 3.0s cap).

@@ -269,27 +269,6 @@ function GBL:_SortView_Preview()
     headerParent:AddChild(progress)
     self._sortProgressLabel = progress
 
-    -- Crafted-quality crash warning (v0.32.5). Renders when the plan
-    -- touches a slot whose live item link carries the TWW crafted-
-    -- quality atlas marker. Pre-warm runs before sort to mitigate, but
-    -- the crash is in Blizzard's C code so the mitigation is best-
-    -- effort; the banner manages user expectations honestly. Pinned in
-    -- the header group above the move list so it survives mid-sort
-    -- rebuilds the same way the summary line does.
-    local hasCraftedQuality = GBL._sortExecutor_PlanHasCraftedQualityItems
-    if hasCraftedQuality and hasCraftedQuality(plan) then
-        local banner = AceGUI:Create("Label")
-        banner:SetFullWidth(true)
-        banner:SetFontObject(GameFontNormalSmall)
-        banner:SetText(
-            "|cffffaa55Warning:|r This plan touches TWW crafted-quality "
-            .. "reagents. Pre-warm will run before sort to mitigate a "
-            .. "known WoW client crash. If your session has crashed "
-            .. "before during similar sorts, organize those items "
-            .. "manually first.")
-        headerParent:AddChild(banner)
-    end
-
     if opsN == 0 and defN == 0 and unpN == 0 then
         local lbl = AceGUI:Create("Label")
         lbl:SetFullWidth(true)
