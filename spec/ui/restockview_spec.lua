@@ -65,33 +65,32 @@ describe("RestockView", function()
     end)
 
     describe("GetRestockStatusDisplay", function()
-        it("distinguishes buy / stocked / over by color, icon and text", function()
+        it("distinguishes buy / in stock by color, icon and text", function()
             local buy = GBL:GetRestockStatusDisplay({ target = 60, stock = 20, toBuy = 40 })
-            local stocked = GBL:GetRestockStatusDisplay({ target = 60, stock = 60, toBuy = 0 })
-            local over = GBL:GetRestockStatusDisplay({ target = 60, stock = 80, toBuy = 0 })
+            local atMax = GBL:GetRestockStatusDisplay({ target = 60, stock = 60, toBuy = 0 })
+            local overMax = GBL:GetRestockStatusDisplay({ target = 60, stock = 80, toBuy = 0 })
 
             assert.equals("buy", buy.status)
-            assert.equals("stocked", stocked.status)
-            assert.equals("over", over.status)
+            assert.equals("instock", atMax.status)
 
             assert.equals("Buy 40", buy.text)
-            assert.equals("Stocked", stocked.text)
-            assert.equals("Over 20", over.text)
+            assert.equals("In stock", atMax.text)
 
-            -- shape channel: "buy" has its own icon; "over" shares the check icon
-            -- with "stocked" (both mean no buy needed) but stays distinguishable
-            -- by color and text, so status is never conveyed by color alone.
-            assert.is_true(buy.icon ~= stocked.icon)
-            assert.equals(stocked.icon, over.icon)
-            assert.is_true(stocked.text ~= over.text)
-            -- color channel: distinct palette entries
-            assert.is_true(buy.color ~= stocked.color)
-            assert.is_true(stocked.color ~= over.color)
+            -- At or above the max is one state: over the max reads identically
+            -- to exactly at it (no separate "over" callout).
+            assert.equals(atMax.status, overMax.status)
+            assert.equals(atMax.text, overMax.text)
+
+            -- Triple-encoded: the two states differ on all three channels (icon,
+            -- color, text), so status is never conveyed by color alone.
+            assert.is_true(buy.icon ~= atMax.icon)
+            assert.is_true(buy.color ~= atMax.color)
+            assert.is_true(buy.text ~= atMax.text)
         end)
 
-        it("treats a nil or empty row as stocked", function()
-            assert.equals("stocked", GBL:GetRestockStatusDisplay(nil).status)
-            assert.equals("stocked", GBL:GetRestockStatusDisplay({}).status)
+        it("treats a nil or empty row as in stock", function()
+            assert.equals("instock", GBL:GetRestockStatusDisplay(nil).status)
+            assert.equals("instock", GBL:GetRestockStatusDisplay({}).status)
         end)
     end)
 

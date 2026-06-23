@@ -45,12 +45,10 @@ end
 
 --- Triple-encoded display for a universe row's restock status.
 -- color + icon + text are three independent channels (WCAG 1.4.1: never rely
--- on color alone). Pure; depends only on the row's target/stock/toBuy.
+-- on color alone). Pure; depends only on the row's toBuy (0 = at or above max).
 -- @param row table|nil universe row { target, stock, toBuy }
 -- @return table { status, color = {r,g,b}, icon = texturePath, text }
 function GBL:GetRestockStatusDisplay(row)
-    local target = (row and row.target) or 0
-    local stock = (row and row.stock) or 0
     local toBuy = (row and row.toBuy) or 0
     if toBuy > 0 then
         return {
@@ -59,22 +57,15 @@ function GBL:GetRestockStatusDisplay(row)
             icon = STATUS_ICONS.buy,
             text = "Buy " .. toBuy,
         }
-    elseif stock > target then
-        -- Over target is not a problem, so show the same check mark as stocked.
-        -- The NEUTRAL color and "Over N" text keep it distinguishable without
-        -- relying on color (WCAG 1.4.1).
-        return {
-            status = "over",
-            color = self:GetAccessibleColor("NEUTRAL"),
-            icon = STATUS_ICONS.stocked,
-            text = "Over " .. (stock - target),
-        }
     end
+    -- At or above the max is simply "in stock". Being over the max is not a
+    -- problem, so there is no separate "over" state. Triple-encoded (check
+    -- icon + DEPOSIT color + text), never color alone (WCAG 1.4.1).
     return {
-        status = "stocked",
+        status = "instock",
         color = self:GetAccessibleColor("DEPOSIT"),
         icon = STATUS_ICONS.stocked,
-        text = "Stocked",
+        text = "In stock",
     }
 end
 
