@@ -719,11 +719,9 @@ function MockWoW.install()
         end,
     }
 
-    -- Item mixin. Used by SortExecutor.preWarmForPlan to make sure an item
-    -- link is fully resolved (including bonus IDs) before issuing
-    -- PickupGuildBankItem. Default implementation fires the callback
-    -- synchronously, matching "data already cached." Tests that need to
-    -- exercise deferred-load behavior override _G.Item to capture callbacks.
+    -- Item mixin (Item:CreateFromItemLink). Default implementation fires the
+    -- callback synchronously, matching "data already cached." Tests that need
+    -- to exercise deferred-load behavior override _G.Item to capture callbacks.
     _G.Item = {
         CreateFromItemLink = function(_self, link)
             return {
