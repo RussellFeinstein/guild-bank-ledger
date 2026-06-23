@@ -309,6 +309,15 @@ describe("LayoutEditor._LayoutEditor_ApplyReserveDraft", function()
         GBL._reserveDraft = nil
         assert.has_no.errors(function() GBL:_LayoutEditor_ApplyReserveDraft() end)
     end)
+
+    it("keeps a live reserve absent from the draft (added by sync after open)", function()
+        GBL:SetStockReserve(100, 250)
+        GBL._reserveDraft = { [100] = 250 }   -- draft seeded when the editor opened
+        GBL:SetStockReserve(200, 99)          -- a concurrent sync added 200 afterward
+        GBL:_LayoutEditor_ApplyReserveDraft()
+        assert.equals(250, GBL:GetStockReserves()[100])
+        assert.equals(99, GBL:GetStockReserves()[200])
+    end)
 end)
 
 describe("LayoutEditor Keep field", function()
@@ -374,6 +383,38 @@ describe("LayoutEditor Keep field", function()
         local parent = AceGUI:Create("SimpleGroup")
         GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, false)
         assert.is_true(findKeep(parent)._disabled)
+    end)
+
+    it("coerces a string itemID (synced layout) to the number-keyed reserve", function()
+        GBL._reserveDraft = { [100] = 75 }   -- number-keyed, as GetStockReserves returns
+        GBL._layoutDraft.tabs[1].items = { ["100"] = { slots = 2, perSlot = 20 } }
+        local AceGUI = LibStub("AceGUI-3.0")
+        local parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderItemRow(parent, 1, "100", true)
+        local keep = findKeep(parent)
+        assert.equals("75", keep:GetText())        -- read the number-keyed reserve
+        keep:Fire("OnEnterPressed", "150")
+        assert.equals(150, GBL._reserveDraft[100]) -- wrote a number key
+        assert.is_nil(GBL._reserveDraft["100"])    -- not a string key
+    end)
+
+    it("clears the item's reserve (sets 0) when the row is removed", function()
+        GBL:SetStockReserve(100, 250)
+        GBL._reserveDraft = { [100] = 250 }
+        local AceGUI = LibStub("AceGUI-3.0")
+        local parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, true)
+        local removeBtn
+        for _, child in ipairs(parent._children[1]._children) do
+            if child._type == "Button" and child:GetText() == "Remove" then
+                removeBtn = child
+            end
+        end
+        assert.is_not_nil(removeBtn, "expected a Remove button on the row")
+        removeBtn:Fire("OnClick")
+        assert.equals(0, GBL._reserveDraft[100])     -- explicit removal marker
+        GBL:_LayoutEditor_ApplyReserveDraft()
+        assert.is_nil(GBL:GetStockReserves()[100])   -- Save clears the live reserve
     end)
 end)
 

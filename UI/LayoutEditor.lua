@@ -802,20 +802,24 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
 end
 
 --- Apply the reserve working copy to the live store on Save. Only changed items
--- are written, so SetStockReserve (which bumps the layout sync cursor and forces
--- a HELLO) fires once per real change rather than once per layout item.
+-- are written, so SetStockReserve (which bumps the layout sync cursor) fires once
+-- per real change rather than once per layout item. The Save's own HELLO (fired
+-- by SaveBankLayout just before this runs) advertises the new cursor; peers pull
+-- the live reserves on the next request.
+--
+-- Iterate the DRAFT keys only, never the union with live. The draft is seeded
+-- from live when the editor opens, and a removal is recorded as an explicit 0
+-- (a present key), so draft-only iteration still clears removed reserves while
+-- leaving alone any reserve a concurrent sync added to live after the editor
+-- opened (those are absent from this stale draft). Keys are numeric itemIDs to
+-- match SetStockReserve, which rejects non-number ids.
 function GBL:_LayoutEditor_ApplyReserveDraft()
     local draft = self._reserveDraft
     if type(draft) ~= "table" then return end
     local live = self:GetStockReserves()
-    local seen = {}
-    for id in pairs(live) do seen[id] = true end
-    for id in pairs(draft) do seen[id] = true end
-    for id in pairs(seen) do
-        local want = draft[id] or 0
-        local have = live[id] or 0
-        if want ~= have then
-            self:SetStockReserve(id, want)
+    for id, want in pairs(draft) do
+        if (live[id] or 0) ~= (want or 0) then
+            self:SetStockReserve(id, want or 0)
         end
     end
 end
@@ -895,17 +899,21 @@ function GBL:_LayoutEditor_RenderItemRow(parent, tabIndex, itemID, writable)
     -- "Keep" = the total to keep in stock for this item (the reserve floor).
     -- Restock targets max(layout demand, reserve), so a Keep above the layout
     -- total raises the buy-to target. Reserves ride the draft (applied on Save).
+    -- Reserves are number-keyed (SetStockReserve rejects non-number ids), but a
+    -- synced layout can arrive string-keyed, so coerce the row's itemID before
+    -- using it as a reserve key (the same hazard _RestockBuildItemUniverse guards).
+    local reserveKey = tonumber(itemID)
     local keepInput = AceGUI:Create("EditBox")
     keepInput:SetLabel("Keep")
     keepInput:SetWidth(80)
-    keepInput:SetText(tostring((self._reserveDraft and self._reserveDraft[itemID]) or 0))
+    keepInput:SetText(tostring((reserveKey and self._reserveDraft and self._reserveDraft[reserveKey]) or 0))
     keepInput:SetDisabled(not writable)
     keepInput:DisableButton(true)
     keepInput:SetCallback("OnEnterPressed", function(_w, _e, value)
         local n = tonumber(value)
-        if n and n >= 0 then
+        if n and n >= 0 and reserveKey then
             self._reserveDraft = self._reserveDraft or {}
-            self._reserveDraft[itemID] = math.floor(n)
+            self._reserveDraft[reserveKey] = math.floor(n)
             self._layoutDirty = true
             self:RefreshLayoutTab()
         end
@@ -954,6 +962,15 @@ function GBL:_LayoutEditor_RenderItemRow(parent, tabIndex, itemID, writable)
             -- Remove from slotOrder too.
             for s, id in pairs(tab.slotOrder) do
                 if id == itemID then tab.slotOrder[s] = nil end
+            end
+            -- Drop the item's reserve too, as an explicit 0 so Save clears it
+            -- (draft-only apply skips absent keys). Otherwise removing an item
+            -- would strand a reserve the Keep field can no longer reach (Keep
+            -- renders only for items still in a display tab).
+            local rk = tonumber(itemID)
+            if rk then
+                self._reserveDraft = self._reserveDraft or {}
+                self._reserveDraft[rk] = 0
             end
             self._layoutDirty = true
             self:RefreshLayoutTab()
