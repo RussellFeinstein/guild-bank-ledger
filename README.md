@@ -14,7 +14,7 @@ Persistent guild bank transaction logging for World of Warcraft. WoW's built-in 
 - **Per-player statistics** — Tracks deposit/withdrawal counts, money totals, first/last seen timestamps
 - **Tiered storage** — Full records (0-30d), daily summaries (30-90d), weekly summaries (90d+)
 - **Automatic compaction** — Old data compressed into summaries on bank open
-- **UI window** — Tabbed interface with Transactions, Gold Log, Consumption, Sync, Changelog, and About views, opened via `/gbl` or minimap button
+- **UI window** — Tabbed interface with Transactions, Gold Log, Consumption, Sort, Layout, Restock, Sync, Changelog, and About views, opened via `/gbl` or minimap button
 - **Transaction list** — Scrolling list with sortable columns: Timestamp, Player, Action, Item, Count, Category, Tab
 - **Filter bar** — Search by player/item, filter by date range, category, transaction type, tab, with reset button
 - **Consumption view** — Guild-wide overview dashboard with guild totals (items + gold in/out/net), top 10 consumers (flat ranked table with gold breakdown), and top 15 most used items (withdrawal counts with 7d/30d/all trend columns). Click player to jump to filtered Transactions tab
@@ -28,6 +28,7 @@ Persistent guild bank transaction logging for World of Warcraft. WoW's built-in 
 - **Mute ambient NPC chatter**: Optional client-side filter that suppresses `Silvermoon Citizen` say/yell/emote in chat and hides the matching world speech bubbles. Off by default. Toggle on the personal-preferences row at the top of the ledger window.
 - **Access control** — GM configures a rank threshold for full addon access. Players below the threshold are restricted to Sync Only or Own Transactions Only mode (GM's choice). Settings sync to all guild members via the HELLO protocol
 - **Sort access**: A separate GM-managed, two-tier policy (Layout Write and Sort-only, by rank threshold or named delegate) gates the Sort and Layout tabs. Members without access do not see them. The policy syncs guild-wide via the HELLO protocol, so a grant reaches the granted member without a reload. The saved bank layout itself syncs to members with sort access (advertise-and-pull: HELLO carries only a version cursor, and a member who can sort fetches the full template only when it changes), so a granted officer can sort against the GM's layout without rebuilding it
+- **Restock**: Restock the guild bank to your layout targets. The Restock tab lists every layout item grouped by bank tab with its target, current stock, and how many to buy. With the Auctionator addon installed it searches the Auction House and buys the shortfall, per item or as a sweep (optionally capped by a per-run gold budget). Gated by sort access, like the Sort tab. Buying spends real gold through WoW's commodity purchase flow, with an up-front affordability check
 - **Accessibility**: Colorblind-safe palettes (4 modes, auto-detected from WoW settings), high contrast mode, triple encoding (shape + color + text), keyboard-navigation primitives (partial; Tab/Shift+Tab wiring under audit), font scaling (8-24pt)
 
 ### Before v1.0
@@ -60,6 +61,8 @@ These items block the v1.0 release:
 - Ace3 (AceAddon, AceDB, AceConsole, AceEvent, AceComm, AceSerializer, AceGUI, AceConfig, AceConfigDialog, AceConfigCmd)
 - LibDBIcon-1.0, LibDataBroker-1.1, LibSharedMedia-3.0, LibDeflate
 
+Auctionator is an optional dependency. With it installed, the Restock tab can search the Auction House and buy shortfalls. Restock still shows targets and stock without it; only the search and buy steps need it.
+
 ## Usage
 
 | Command | Description |
@@ -68,6 +71,7 @@ These items block the v1.0 release:
 | `/gbl show` | Toggle the ledger window |
 | `/gbl status` | Show addon version, guild name, transaction count, last scan time |
 | `/gbl scan` | Manually trigger a full guild bank scan |
+| `/gbl restock` | Open the Restock tab |
 | `/gbl synclog` | Show the sync-channel session log in a copy-pastable pop-up |
 | `/gbl sortlog` | Show the sort-channel session log in a copy-pastable pop-up |
 | `/gbl logs` | Show the master log: sync + sort + system, merged in timestamp order |
@@ -77,6 +81,19 @@ These items block the v1.0 release:
 | `/gbl help` | Show available commands |
 
 Scanning happens automatically when you open the guild bank. Results are saved per-guild in `SavedVariables/GuildBankLedgerDB.lua`.
+
+## Restock
+
+The Restock tab shows every item in your guild bank layout, grouped by tab, with its target count (from the layout), current stock, and how many are short. Open it with `/gbl restock` or the Restock tab. Like the Sort tab, it is visible only to members with sort access.
+
+To buy the shortfall from the Auction House, install [Auctionator](https://www.curseforge.com/wow/addons/auctionator). Then:
+
+1. Open the Auction House and Auctionator's Shopping tab.
+2. Open the guild bank at least once in the session so Restock knows the current stock.
+3. On the Restock tab, click Search to price every item the bank is short on.
+4. Buy items individually with each row's Buy button, or click Buy all to sweep the whole list.
+
+Restock spends real gold through WoW's commodity purchase flow. It refuses any purchase you cannot afford, and you can set a per-run gold budget to cap a Buy all sweep. Without Auctionator the tab still shows targets and shortfalls; only the search and buy steps need it.
 
 ## Development
 

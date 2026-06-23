@@ -5,6 +5,14 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.0] - 2026-06-23
+
+**Restock**: refill the guild bank to its layout targets, with optional Auction House buying.
+
+### Added
+- A Restock tab (and `/gbl restock`) that helps officers refill the guild bank to its layout targets. It lists every item in your bank layout, grouped by tab, with its target count, how many are currently in the bank, and how many are short. The tab is visible to members with sort access, the same as the Sort tab.
+- Auction House buying through the optional Auctionator addon. With Auctionator installed and its Shopping tab open, the Restock tab can price every item the bank is short on and buy the shortfall, one item at a time or as a single Buy-all sweep. Buying spends real gold through WoW's commodity purchase flow. Restock refuses any purchase you cannot afford, and you can set a per-run gold budget to cap a sweep.
+
 ## [0.33.0] - 2026-06-17
 
 ### Added

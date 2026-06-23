@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.33.0"
+local VERSION = "0.34.0"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -112,6 +112,7 @@ local defaults = {
                     tabs = {},
                 },
                 stockReserves = {},
+                restock = { items = {}, budget = 0 },
                 sortAccess = {
                     rankThreshold = nil,  -- nil = GM-only; N = rank index N and above
                     delegates = {},       -- ["Char-Realm"] = true
@@ -212,6 +213,8 @@ end
 function GBL:OnBankLayoutChanged()
     if self.RefreshLayoutTab then self:RefreshLayoutTab() end
     if self.RefreshSortTab then self:RefreshSortTab() end
+    -- The Restock list is layout-driven, so a new layout/reserve must refresh it too.
+    if self.RefreshRestockTab then self:RefreshRestockTab() end
 end
 
 ------------------------------------------------------------------------
@@ -2296,6 +2299,12 @@ function GBL:HandleSlashCommand(input)
         end
     elseif command == "epoch0" then
         self:DumpEpochZeroRecords()
+    elseif command == "restock" then
+        if self.OpenRestockTab then
+            self:OpenRestockTab()
+        else
+            self:Print("Restock module not loaded.")
+        end
     else
         self:Print("Unknown command: " .. command .. ". Type /gbl help for usage.")
     end

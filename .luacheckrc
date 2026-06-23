@@ -10,6 +10,7 @@ read_globals = {
     "GetGuildInfo",
     "GetNumGuildBankTabs",
     "GetServerTime",
+    "GetMoney",
     "QueryGuildBankLog",
     "QueryGuildBankTab",
     "GetGuildBankTransaction",
@@ -22,6 +23,7 @@ read_globals = {
     "GetNumGuildMembers",
     "IsInGuild",
     "IsInRaid",
+    "IsShiftKeyDown",
     "UnitAffectingCombat",
     "Ambiguate",
     "GetFramerate",
@@ -58,9 +60,11 @@ read_globals = {
     "SetCVar",
 
     -- WoW utilities
+    "C_AuctionHouse",
     "C_ChatBubbles",
     "C_Item",
     "C_Timer",
+    "Item",
     "GetAddOnMetadata",
     "GetItemInfo",
     "GetRealmName",
@@ -77,6 +81,10 @@ read_globals = {
 
     -- Lua extensions (WoW LuaJIT)
     "bit",
+
+    -- Optional dependencies (OptionalDeps in the .toc; nil when the addon is absent)
+    "Auctionator",
+    "AuctionatorShoppingFrame",
 
     -- Ace3 / LibStub
     "LibStub",

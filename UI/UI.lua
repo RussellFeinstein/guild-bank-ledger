@@ -149,8 +149,10 @@ function GBL:RebuildTabs()
             { value = "consumption", text = "Consumption" },
         }
         -- Sort tab: any sort-access tier (execute-only or layout-write).
+        -- Restock rides the same sort-access gate (it acts on the same layout).
         if self.HasSortAccess and self:HasSortAccess() then
             table.insert(tabs, { value = "sort", text = "Sort" })
+            table.insert(tabs, { value = "restock", text = "Restock" })
         end
         -- Layout tab: only the layout-write tier edits templates, so it stays
         -- hidden from sort-only users (the Sort tab tells them to ask an officer).
@@ -346,6 +348,8 @@ function GBL:SelectTab(tabName)
         self:BuildSortTab(self.tabGroup)
     elseif tabName == "layout" then
         self:BuildLayoutTab(self.tabGroup)
+    elseif tabName == "restock" then
+        self:BuildRestockTab(self.tabGroup)
     end
 end
 

@@ -57,6 +57,7 @@ describe("Access-gated tab visibility", function()
             local v = tabSet()
             assert.is_true(v.transactions, "expected the full (non sync_only) tab set")
             assert.is_nil(v.sort)
+            assert.is_nil(v.restock)
             assert.is_nil(v.layout)
         end)
 
@@ -68,6 +69,7 @@ describe("Access-gated tab visibility", function()
 
             local v = tabSet()
             assert.is_true(v.sort)
+            assert.is_true(v.restock)
             assert.is_nil(v.layout)
         end)
 
@@ -79,6 +81,7 @@ describe("Access-gated tab visibility", function()
 
             local v = tabSet()
             assert.is_true(v.sort)
+            assert.is_true(v.restock)
             assert.is_true(v.layout)
         end)
 
@@ -89,6 +92,7 @@ describe("Access-gated tab visibility", function()
 
             local v = tabSet()
             assert.is_true(v.sort)
+            assert.is_true(v.restock)
             assert.is_true(v.layout)
         end)
     end)
@@ -117,6 +121,7 @@ describe("Access-gated tab visibility", function()
             GBL:RefreshAccessTabsIfChanged()
 
             assert.is_true(tabSet().sort)
+            assert.is_true(tabSet().restock)
         end)
 
         it("no-ops safely when the window was never opened", function()

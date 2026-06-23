@@ -106,6 +106,9 @@ function MockWoW.reset()
     -- per test for the interim-poll cascade integration tests.
     MockWoW.deferredBankEvents = false
     MockWoW.queuedBankEvents = {}
+    -- Restock buy flow: settable wallet + recorder for C_AuctionHouse calls.
+    MockWoW.money = 0
+    MockWoW.commodityPurchases = { start = {}, confirm = {} }
 end
 
 ---------------------------------------------------------------------------
@@ -201,6 +204,21 @@ function MockWoW.install()
     _G.GetServerTime = function()
         return MockWoW.serverTime
     end
+
+    -- Wallet (copper). Settable via MockWoW.money for budget tests.
+    _G.GetMoney = function()
+        return MockWoW.money or 0
+    end
+
+    -- Auction House commodity purchase. Records calls; performs no real purchase.
+    _G.C_AuctionHouse = {
+        StartCommoditiesPurchase = function(itemID, quantity)
+            table.insert(MockWoW.commodityPurchases.start, { itemID = itemID, quantity = quantity })
+        end,
+        ConfirmCommoditiesPurchase = function(itemID, quantity)
+            table.insert(MockWoW.commodityPurchases.confirm, { itemID = itemID, quantity = quantity })
+        end,
+    }
 
     -- Guild info
     _G.GetGuildInfo = function(_unit)
