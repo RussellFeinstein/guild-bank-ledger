@@ -1,6 +1,6 @@
 # GuildBankLedger Roadmap
 
-## Shipped (v0.1.0 -- v0.32.1)
+## Shipped (v0.1.0 -- v0.34.0)
 
 See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 
@@ -38,6 +38,10 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 - Layout tab editor with rank-gated write access
 - Sort tab preview + rank-gated execute
 
+**Restock** (v0.34.0):
+- Restock tab: layout-driven item list grouped by bank tab, showing each item's target, current stock, and shortfall; gated by sort access
+- Auction House buying via the optional Auctionator addon (per-item and Buy-all), spending real gold through the commodity flow with an affordability check and an optional per-run gold budget
+
 **Logging** (v0.32.0):
 - Per-channel session logs (sync cap 2000, sort cap 1000, system cap 500)
 - Severity levels (DEBUG / INFO / WARN / ERROR) with `pcall(string.format)` fallback
@@ -63,12 +67,12 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 
 ---
 
-## Current: Beta (v0.32.x)
+## Current: Beta (v0.34.x)
 
 Per-area status:
 
 - **Mature**: recording, categorization, deduplication, tiered storage, schema migrations.
-- **Active** (in guild use, improvements queued): sync (rate limiting and manifest tuning pending), UI (sort/filter polish, pagination layout, window resize), sort + layout (confirmation-speed tuning, the overflow-pack full-stack-merge edge case, layout editor slot visibility, refresh flicker).
+- **Active** (in guild use, improvements queued): sync (rate limiting and manifest tuning pending), UI (sort/filter polish, pagination layout, window resize), sort + layout (confirmation-speed tuning, the overflow-pack full-stack-merge edge case, layout editor slot visibility, refresh flicker). Restock (new in v0.34.0): layout-driven targets and Auctionator buying are in initial use, with a UI polish pass and the reserve-targets producer queued.
 - **Under audit**: accessibility. Palettes, contrast, triple encoding, and font scaling are wired; keyboard-navigation primitives exist but are not threaded through all UI widgets. An independent audit pass is the next planned milestone and is a v1.0 release gate.
 
 ---

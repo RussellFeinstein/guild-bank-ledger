@@ -29,6 +29,14 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.34.0
+    {"0.34.0", "2026-06-23", {
+        Added = {
+            "A Restock tab (and /gbl restock) that helps officers refill the guild bank to its layout targets. It lists every layout item grouped by bank tab with its target, current stock, and how many are short. Visible to members with sort access.",
+            "Auction House buying through the optional Auctionator addon. With Auctionator installed and its Shopping tab open, Restock prices the shortfall and buys it, one item at a time or as a Buy-all sweep. Buying spends real gold; Restock refuses purchases you cannot afford and supports a per-run gold budget cap.",
+        },
+    }},
+
     -- v0.33.0
     {"0.33.0", "2026-06-17", {
         Added = {
