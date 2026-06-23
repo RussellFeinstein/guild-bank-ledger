@@ -32,9 +32,8 @@ end
 -- Triple-encoding status icons (the shape channel; color + text are the other
 -- two). Texture paths, defined locally so Accessibility.lua stays untouched.
 local STATUS_ICONS = {
-    buy     = "Interface\\BUTTONS\\UI-GroupLoot-Coin-Up",    -- coin: needs buying
-    stocked = "Interface\\RAIDFRAME\\ReadyCheck-Ready",       -- check: target met
-    over    = "Interface\\BUTTONS\\UI-GroupLoot-Pass-Up",     -- down arrow: surplus
+    buy     = "Interface\\BUTTONS\\UI-GroupLoot-Coin-Up",  -- coin: needs buying
+    stocked = "Interface\\RAIDFRAME\\ReadyCheck-Ready",    -- check: target met or exceeded
 }
 
 local function colorToHex(c)
@@ -61,10 +60,13 @@ function GBL:GetRestockStatusDisplay(row)
             text = "Buy " .. toBuy,
         }
     elseif stock > target then
+        -- Over target is not a problem, so show the same check mark as stocked.
+        -- The NEUTRAL color and "Over N" text keep it distinguishable without
+        -- relying on color (WCAG 1.4.1).
         return {
             status = "over",
             color = self:GetAccessibleColor("NEUTRAL"),
-            icon = STATUS_ICONS.over,
+            icon = STATUS_ICONS.stocked,
             text = "Over " .. (stock - target),
         }
     end

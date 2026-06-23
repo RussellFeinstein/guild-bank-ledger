@@ -78,9 +78,12 @@ describe("RestockView", function()
             assert.equals("Stocked", stocked.text)
             assert.equals("Over 20", over.text)
 
-            -- shape channel: distinct icons
+            -- shape channel: "buy" has its own icon; "over" shares the check icon
+            -- with "stocked" (both mean no buy needed) but stays distinguishable
+            -- by color and text, so status is never conveyed by color alone.
             assert.is_true(buy.icon ~= stocked.icon)
-            assert.is_true(stocked.icon ~= over.icon)
+            assert.equals(stocked.icon, over.icon)
+            assert.is_true(stocked.text ~= over.text)
             -- color channel: distinct palette entries
             assert.is_true(buy.color ~= stocked.color)
             assert.is_true(stocked.color ~= over.color)
