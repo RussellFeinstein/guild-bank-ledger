@@ -45,6 +45,18 @@ describe("UI window persistence (v0.32.4)", function()
             assert.is_not_nil(GBL._versionLabel._setFont[3], "version label SetFont flags must not be nil")
         end)
 
+        it("registers the frame in UISpecialFrames so Escape closes it (issue #40)", function()
+            GBL:CreateMainFrame()
+            local registered = false
+            for _, name in ipairs(UISpecialFrames) do
+                if _G[name] == GBL.mainFrame.frame then
+                    registered = true
+                    break
+                end
+            end
+            assert.is_true(registered, "main frame must be in UISpecialFrames for Escape to close it")
+        end)
+
         it("enforces an 810x500 minimum window size", function()
             GBL:CreateMainFrame()
             -- Retail uses SetResizeBounds (10.0+); classic uses SetMinResize.

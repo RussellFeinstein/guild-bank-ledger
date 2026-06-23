@@ -25,6 +25,21 @@ function GBL:CreateMainFrame()
         widget:Hide()
     end)
 
+    -- Let the Escape key close the window. AceGUI frames are anonymous, so WoW's
+    -- CloseSpecialWindows (the Escape handler) cannot find this one on its own.
+    -- Expose the underlying frame under a global name and register it. Without
+    -- this, Escape only closed the window indirectly, via the bank-close cascade
+    -- when "Open with Guild Bank" had auto-opened it (issue #40).
+    local escName = "GuildBankLedgerMainFrame"
+    _G[escName] = frame.frame
+    local escRegistered = false
+    for _, n in ipairs(UISpecialFrames) do
+        if n == escName then escRegistered = true break end
+    end
+    if not escRegistered then
+        table.insert(UISpecialFrames, escName)
+    end
+
     -- Route AceGUI's position/size tracking through the persisted profile so
     -- MoverSizer_OnMouseUp (move and resize) writes top/left/width/height into
     -- AceDB and ApplyStatus restores them on the next session.

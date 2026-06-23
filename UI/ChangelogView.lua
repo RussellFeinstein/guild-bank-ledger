@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.34.2
+    {"0.34.2", "2026-06-23", {
+        Fixed = {
+            "The main window now closes when you press Escape. Previously Escape only worked when 'Open with Guild Bank' had auto-opened it; a window opened manually with /gbl or the minimap could only be closed with the Close button.",
+        },
+    }},
+
     -- v0.34.1
     {"0.34.1", "2026-06-23", {
         Added = {
