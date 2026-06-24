@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A "Keep" field in the Layout editor's "Apply to all" bulk row, so you can set the reserve for every item on a tab in one click (next to the existing bulk Slots and Per slot). Setting it to 0 clears the reserves on that tab.
 
 ### Changed
-- The Restock tab now shows a two-state stock status per item: "Buy N" when the bank is below the item's target, or "In stock" when it is at or above it. The earlier separate "Over N" state is gone, since being above the target is not a problem.
+- The Restock tab now shows a two-state stock status per item: "Buy N" when the bank is below the item's target, or "In stock" when it is at or above it. The earlier separate "Over N" state is gone, since being above the target is not a problem. Each row's target and bank counts now read "target N | bank M" instead of the parenthetical "(target N, bank M)".
 - Simplified the About tab labels: the Ko-fi and CurseForge copy boxes now read just "Ko-fi" and "CurseForge", and the license line reads "MIT License".
 
 ### Removed

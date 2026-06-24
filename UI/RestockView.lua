@@ -356,7 +356,7 @@ function GBL:_RestockView_RenderItems(content)
         local disp = self:GetRestockStatusDisplay(row)
         local iconEsc = disp.icon and ("|T" .. disp.icon .. ":14|t ") or ""
         local statusText = format("|cff%s%s|r", colorToHex(disp.color), disp.text)
-        local rowText = format("%s%s  |cffaaaaaa(target %d, bank %d)|r  %s",
+        local rowText = format("%s%s  |cffaaaaaatarget %d || bank %d|r  %s",
             iconEsc, itemLabel(row.itemID), row.target or 0, row.stock or 0, statusText)
 
         local lbl = AceGUI:Create("Label")
