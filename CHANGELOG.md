@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Simplified the About tab labels: the Ko-fi and CurseForge copy boxes now read just "Ko-fi" and "CurseForge", and the license line reads "MIT License".
 
+### Removed
+- The crafted-quality crash mitigation on the Sort tab: both the warning banner on the preview and the pre-warm step that loaded item data before each sort. The pre-warm added up to a 3-second delay before every sort to guard against a Blizzard-side client crash that recent sorts over crafted-quality reagents (Flawless gems and similar) no longer hit. Sorts now start right away; if the crash resurfaces the mitigation can be restored.
+
 ## [0.34.2] - 2026-06-23
 
 ### Fixed

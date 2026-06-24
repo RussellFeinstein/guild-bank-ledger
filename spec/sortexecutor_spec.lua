@@ -80,7 +80,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             GBL:ExecuteSortPlan({
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
-            }, function() end, { skipPreWarm = true })
+            }, function() end)
             local ok, err = GBL:ExecuteSortPlan({ ops = {} })
             assert.is_false(ok)
             assert.matches("already running", err)
@@ -96,7 +96,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             GBL:ExecuteSortPlan({
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 20 } },
-            }, function(r) result = r end, { skipPreWarm = true })
+            }, function(r) result = r end)
             drainTimers()
             assert.is_not_nil(result)
             assert.is_true(result.ok, result.reason)
@@ -111,7 +111,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             GBL:ExecuteSortPlan({
                 ops = { { op = "split", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 20 } },
-            }, function(r) result = r end, { skipPreWarm = true })
+            }, function(r) result = r end)
             drainTimers()
             assert.is_true(result.ok, result.reason)
             assert.equals(30, countItem(1, 100))
@@ -131,7 +131,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                     { op = "move", srcTab = 1, srcSlot = 2, dstTab = 2, dstSlot = 2, itemID = 101, count = 5 },
                     { op = "move", srcTab = 1, srcSlot = 3, dstTab = 2, dstSlot = 3, itemID = 102, count = 5 },
                 },
-            }, function(r) result = r end, { skipPreWarm = true })
+            }, function(r) result = r end)
             drainTimers()
             assert.is_true(result.ok, result.reason)
             assert.equals(3, result.total)
@@ -153,7 +153,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                     { op = "move", srcTab = 1, srcSlot = 1, dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
                     { op = "move", srcTab = 1, srcSlot = 2, dstTab = 2, dstSlot = 2, itemID = 101, count = 5 },
                 },
-            }, function(r) result = r end, { skipPreWarm = true })
+            }, function(r) result = r end)
             -- Op 1 issued synchronously inside startPass; cancel before tick 2 fires.
             GBL:CancelSortExecution()
             drainTimers()
@@ -173,7 +173,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                     { op = "move", srcTab = 1, srcSlot = 1, dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
                     { op = "move", srcTab = 1, srcSlot = 2, dstTab = 2, dstSlot = 2, itemID = 101, count = 5 },
                 },
-            }, function(r) result = r end, { skipPreWarm = true })
+            }, function(r) result = r end)
             GBL.bankOpen = false
             GBL:_SortExecutorOnBankClosed()
             drainTimers()
@@ -187,7 +187,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             GBL:ExecuteSortPlan({
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
-            }, function(r) result = r end, { skipPreWarm = true })
+            }, function(r) result = r end)
             drainTimers()
             assert.is_true(result.ok, result.reason)
             assert.matches("no layout", result.reason)
@@ -201,7 +201,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             GBL:ExecuteSortPlan({
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
-            }, function() end, { skipPreWarm = true })
+            }, function() end)
             local frame = GBL:_sortExecutorGetHitchFrame()
             assert.is_not_nil(frame)
             local onUpdate = frame:GetScript("OnUpdate")
@@ -236,7 +236,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                     { op = "move", srcTab = 1, srcSlot = 1, dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
                     { op = "move", srcTab = 1, srcSlot = 2, dstTab = 2, dstSlot = 2, itemID = 101, count = 5 },
                 },
-            }, function(r) result = r end, { skipPreWarm = true })
+            }, function(r) result = r end)
             GBL:_sortNoteRescanTick()
             GBL:_sortNoteRescanTick()
             drainTimers()
@@ -253,7 +253,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                     { op = "move", srcTab = 1, srcSlot = 1, dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
                     { op = "move", srcTab = 1, srcSlot = 2, dstTab = 2, dstSlot = 2, itemID = 101, count = 5 },
                 },
-            }, function() end, { skipPreWarm = true })
+            }, function() end)
             local before = GBL:_sortExecutorGetPumpInfo()
             assert.is_truthy(before and before.pumping)
             -- Simulate a wedged pump timer: advance the clock past CADENCE+SLACK
@@ -272,7 +272,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             GBL:ExecuteSortPlan({
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
-            }, function() end, { skipPreWarm = true })
+            }, function() end)
             drainTimers()
             local sawOp = false
             for _, e in ipairs(GBL:GetLog("sort") or {}) do
@@ -322,7 +322,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             GBL:ExecuteSortPlan({
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
-            }, function(r) result = r end, { skipPreWarm = true })
+            }, function(r) result = r end)
             assert.equals(1, s.stopCalls, "StopPeriodicRescan fired at sort start")
             assert.is_false(GBL._rescanActive, "rescan paused during sort")
             drainTimers()
@@ -340,7 +340,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             GBL:ExecuteSortPlan({
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
-            }, function() end, { skipPreWarm = true })
+            }, function() end)
             drainTimers()
             assert.equals(0, s.startCalls,
                 "StartPeriodicRescan should not fire when rescan was not active at start")
@@ -360,7 +360,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             end
             Helpers.populateTab(1, slots)
             local result
-            GBL:ExecuteSortPlan({ ops = ops }, function(r) result = r end, { skipPreWarm = true })
+            GBL:ExecuteSortPlan({ ops = ops }, function(r) result = r end)
             drainTimers(120)
             assert.is_true(result.ok, result.reason)
             assert.equals(2, s.rescanCalls,
@@ -379,7 +379,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 slots[i] = { itemID = 100, name = "Flask", count = 5 }
             end
             Helpers.populateTab(1, slots)
-            GBL:ExecuteSortPlan({ ops = ops }, function() end, { skipPreWarm = true })
+            GBL:ExecuteSortPlan({ ops = ops }, function() end)
             drainTimers(120)
             assert.equals(0, s.rescanCalls,
                 "should not flush when rescanWasActive=false")
@@ -394,7 +394,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             GBL:ExecuteSortPlan({
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
-            }, function(r) result = r end, { skipPreWarm = true })
+            }, function(r) result = r end)
             drainTimers()
             assert.is_not_nil(result)
             assert.is_boolean(result.ok)
