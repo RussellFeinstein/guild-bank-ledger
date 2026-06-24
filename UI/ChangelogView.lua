@@ -29,6 +29,21 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.35.0
+    {"0.35.0", "2026-06-24", {
+        Added = {
+            "A per-item 'Keep' field on each Layout editor row. It sets the total to keep in stock, and Restock buys up to whichever is larger: the layout total or the Keep amount. Use it to keep a deeper reserve than the tab layout alone needs (a key flask, say). Keep at 0 leaves the layout total as the target.",
+            "A 'Keep' field in the Layout editor's 'Apply to all' bulk row, so you can set the reserve for every item on a tab in one click (next to bulk Slots and Per slot). Setting it to 0 clears the reserves on that tab.",
+        },
+        Changed = {
+            "The Restock tab now shows a two-state stock status per item: 'Buy N' below the target, 'In stock' at or above it (the separate 'Over N' state is gone). Each row's counts read 'target N | bank M' instead of '(target N, bank M)'.",
+            "Simplified the About tab labels: the Ko-fi and CurseForge copy boxes now read just 'Ko-fi' and 'CurseForge', and the license line reads 'MIT License'.",
+        },
+        Removed = {
+            "The crafted-quality crash mitigation on the Sort tab: both the warning banner and the pre-warm step that added up to a 3-second delay before every sort. Recent sorts over crafted-quality reagents no longer hit the crash, so sorts now start right away.",
+        },
+    }},
+
     -- v0.34.2
     {"0.34.2", "2026-06-23", {
         Fixed = {

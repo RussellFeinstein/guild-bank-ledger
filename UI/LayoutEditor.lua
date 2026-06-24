@@ -141,6 +141,60 @@ end
 -- Expose the pure helper for the spec suite.
 GBL._layoutEditorApplyBulkToItems = applyBulkToItems
 
+--- Set the reserve draft entry for every item on a tab to `keepValue` in place.
+--
+-- Pure over `tabItems` + `reserveDraft` (writes the draft). itemID keys are
+-- coerced to numbers, since a synced layout can be string-keyed while the
+-- reserve store (and SetStockReserve) is number-keyed. A keepValue of 0 marks
+-- each item's reserve for removal on Save (draft-only apply clears it).
+--
+-- Returns the number of items written.
+local function applyBulkReserve(tabItems, reserveDraft, keepValue)
+    if type(tabItems) ~= "table" or type(reserveDraft) ~= "table" then return 0 end
+    local n = 0
+    for itemID in pairs(tabItems) do
+        local key = tonumber(itemID)
+        if key then
+            reserveDraft[key] = keepValue
+            n = n + 1
+        end
+    end
+    return n
+end
+
+-- Expose the pure helper for the spec suite.
+GBL._layoutEditorApplyBulkReserve = applyBulkReserve
+
+--- Validate and apply a bulk edit (slots / perSlot / keep) to every item on a
+-- display tab. Orchestrates the working drafts: applyBulkToItems mutates the
+-- layout draft, applyBulkReserve writes the reserve draft. Does no rendering and
+-- no Print, so the button handler stays thin and this stays unit-testable.
+-- newSlots / newPerSlot / newKeep are numbers or nil (nil = leave unchanged);
+-- newKeep may be 0 (clear reserves on Save).
+-- @return ok, (result { applied, parts } on success | errorMessage string)
+function GBL:_LayoutEditor_ApplyBulk(tabIndex, newSlots, newPerSlot, newKeep)
+    local draft = self._layoutDraft
+    local tab = draft and draft.tabs and draft.tabs[tabIndex]
+    if type(tab) ~= "table" then return false, "no layout draft for this tab" end
+    if not newSlots and not newPerSlot and newKeep == nil then
+        return false, "Enter at least one of Slots / Per slot / Keep to apply."
+    end
+    if newSlots and newSlots < 1 then return false, "Slots must be >= 1." end
+    if newPerSlot and newPerSlot < 1 then return false, "Per slot must be >= 1." end
+    if newKeep ~= nil and newKeep < 0 then return false, "Keep must be >= 0." end
+
+    local applied = applyBulkToItems(tab, newSlots, newPerSlot, MAX_SLOTS)
+    local parts = {}
+    if newSlots then parts[#parts + 1] = format("slots=%d", newSlots) end
+    if newPerSlot then parts[#parts + 1] = format("perSlot=%d", newPerSlot) end
+    if newKeep ~= nil then
+        self._reserveDraft = self._reserveDraft or {}
+        applyBulkReserve(tab.items, self._reserveDraft, math.floor(newKeep))
+        parts[#parts + 1] = format("keep=%d", math.floor(newKeep))
+    end
+    return true, { applied = applied, parts = parts }
+end
+
 ------------------------------------------------------------------------
 -- Working-copy state
 --
@@ -249,6 +303,10 @@ function GBL:BuildLayoutTab(container)
     -- Save and Discard both explicitly reset the draft.
     if not self._layoutDraft then
         self._layoutDraft = freshDraft(self)
+        -- Reserves live in a separate store, so mirror them in a parallel draft
+        -- that Save applies and Discard throws away, keeping "Keep" consistent
+        -- with the Slots / Per slot fields.
+        self._reserveDraft = self:GetStockReserves()
         self._layoutDirty = false
     end
 
@@ -392,10 +450,13 @@ function GBL:_LayoutEditor_RenderSaveBar(parent, writable)
     saveBtn:SetCallback("OnClick", function()
         local ok, err = self:SaveBankLayout(self._layoutDraft)
         if ok then
+            -- Layout is valid (version > 0 now), so reserve writes can advertise.
+            self:_LayoutEditor_ApplyReserveDraft()
             self:Print("Layout saved (v" .. self:GetBankLayout().version .. ").")
             self:SystemInfo("Layout: saved by " ..
                 (UnitName("player") or "?") .. " (v" .. self:GetBankLayout().version .. ")")
             self._layoutDraft = nil   -- re-init from storage on next render
+            self._reserveDraft = nil
             self._layoutDirty = false
             self:RefreshLayoutTab()
         else
@@ -410,6 +471,7 @@ function GBL:_LayoutEditor_RenderSaveBar(parent, writable)
     discardBtn:SetDisabled(not (writable and self._layoutDirty))
     discardBtn:SetCallback("OnClick", function()
         self._layoutDraft = nil   -- re-init from storage on next render
+        self._reserveDraft = nil
         self._layoutDirty = false
         self:RefreshLayoutTab()
     end)
@@ -731,32 +793,29 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
         perSlotInput:DisableButton(true)
         bulkRow:AddChild(perSlotInput)
 
+        local keepInput = AceGUI:Create("EditBox")
+        keepInput:SetLabel("Keep")
+        keepInput:SetWidth(80)
+        keepInput:DisableButton(true)
+        bulkRow:AddChild(keepInput)
+
         local applyBtn = AceGUI:Create("Button")
         applyBtn:SetText("Apply to all")
         applyBtn:SetWidth(110)
         applyBtn:SetCallback("OnClick", function()
             local newSlots = tonumber(slotsInput:GetText())
             local newPerSlot = tonumber(perSlotInput:GetText())
-            if not newSlots and not newPerSlot then
-                self:Print("Enter at least one of Slots / Per slot to apply.")
+            local keepText = keepInput:GetText()
+            local newKeep = (keepText and keepText ~= "") and tonumber(keepText) or nil
+            local ok, res = self:_LayoutEditor_ApplyBulk(tabIndex, newSlots, newPerSlot, newKeep)
+            if not ok then
+                self:Print(res)
                 return
             end
-            if newSlots and newSlots < 1 then
-                self:Print("Slots must be >= 1.")
-                return
-            end
-            if newPerSlot and newPerSlot < 1 then
-                self:Print("Per slot must be >= 1.")
-                return
-            end
-            local applied = applyBulkToItems(tab, newSlots, newPerSlot, MAX_SLOTS)
-            local parts = {}
-            if newSlots then parts[#parts + 1] = format("slots=%d", newSlots) end
-            if newPerSlot then parts[#parts + 1] = format("perSlot=%d", newPerSlot) end
             self:Print(format(
                 "|cff00ff88Applied %s to %d item(s) on tab %d.|r " ..
                 "Click |cffffffffSave Layout|r to commit.",
-                table.concat(parts, ", "), applied, tabIndex))
+                table.concat(res.parts, ", "), res.applied, tabIndex))
             self._layoutDirty = true
             self:RefreshLayoutTab()
         end)
@@ -766,8 +825,9 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
         hint:SetFullWidth(true)
         hint:SetFontObject(GameFontNormalSmall)
         hint:SetText("|cff888888Leave a field blank to keep its current " ..
-            "value for each item. Shrinking slots trims that item's " ..
-            "pinned positions from the highest slot down.|r")
+            "value for each item. Set Keep to 0 to clear the reserves on this " ..
+            "tab. Shrinking slots trims that item's pinned positions from the " ..
+            "highest slot down.|r")
         parent:AddChild(hint)
     end
 
@@ -790,6 +850,29 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
     -- having S24 and S50 swapped.
     if #itemIDs > 0 then
         self:_LayoutEditor_RenderSlotMap(parent, tabIndex)
+    end
+end
+
+--- Apply the reserve working copy to the live store on Save. Only changed items
+-- are written, so SetStockReserve (which bumps the layout sync cursor) fires once
+-- per real change rather than once per layout item. The Save's own HELLO (fired
+-- by SaveBankLayout just before this runs) advertises the new cursor; peers pull
+-- the live reserves on the next request.
+--
+-- Iterate the DRAFT keys only, never the union with live. The draft is seeded
+-- from live when the editor opens, and a removal is recorded as an explicit 0
+-- (a present key), so draft-only iteration still clears removed reserves while
+-- leaving alone any reserve a concurrent sync added to live after the editor
+-- opened (those are absent from this stale draft). Keys are numeric itemIDs to
+-- match SetStockReserve, which rejects non-number ids.
+function GBL:_LayoutEditor_ApplyReserveDraft()
+    local draft = self._reserveDraft
+    if type(draft) ~= "table" then return end
+    local live = self:GetStockReserves()
+    for id, want in pairs(draft) do
+        if (live[id] or 0) ~= (want or 0) then
+            self:SetStockReserve(id, want or 0)
+        end
     end
 end
 
@@ -865,6 +948,30 @@ function GBL:_LayoutEditor_RenderItemRow(parent, tabIndex, itemID, writable)
     totalLabel:SetFontObject(GameFontNormalSmall)
     rowGroup:AddChild(totalLabel)
 
+    -- "Keep" = the total to keep in stock for this item (the reserve floor).
+    -- Restock targets max(layout demand, reserve), so a Keep above the layout
+    -- total raises the buy-to target. Reserves ride the draft (applied on Save).
+    -- Reserves are number-keyed (SetStockReserve rejects non-number ids), but a
+    -- synced layout can arrive string-keyed, so coerce the row's itemID before
+    -- using it as a reserve key (the same hazard _RestockBuildItemUniverse guards).
+    local reserveKey = tonumber(itemID)
+    local keepInput = AceGUI:Create("EditBox")
+    keepInput:SetLabel("Keep")
+    keepInput:SetWidth(80)
+    keepInput:SetText(tostring((reserveKey and self._reserveDraft and self._reserveDraft[reserveKey]) or 0))
+    keepInput:SetDisabled(not writable)
+    keepInput:DisableButton(true)
+    keepInput:SetCallback("OnEnterPressed", function(_w, _e, value)
+        local n = tonumber(value)
+        if n and n >= 0 and reserveKey then
+            self._reserveDraft = self._reserveDraft or {}
+            self._reserveDraft[reserveKey] = math.floor(n)
+            self._layoutDirty = true
+            self:RefreshLayoutTab()
+        end
+    end)
+    rowGroup:AddChild(keepInput)
+
     -- Count how many slotOrder entries pin this specific item, so the
     -- per-item Unpin button can show the count and be disabled when
     -- there's nothing to unpin.
@@ -907,6 +1014,15 @@ function GBL:_LayoutEditor_RenderItemRow(parent, tabIndex, itemID, writable)
             -- Remove from slotOrder too.
             for s, id in pairs(tab.slotOrder) do
                 if id == itemID then tab.slotOrder[s] = nil end
+            end
+            -- Drop the item's reserve too, as an explicit 0 so Save clears it
+            -- (draft-only apply skips absent keys). Otherwise removing an item
+            -- would strand a reserve the Keep field can no longer reach (Keep
+            -- renders only for items still in a display tab).
+            local rk = tonumber(itemID)
+            if rk then
+                self._reserveDraft = self._reserveDraft or {}
+                self._reserveDraft[rk] = 0
             end
             self._layoutDirty = true
             self:RefreshLayoutTab()

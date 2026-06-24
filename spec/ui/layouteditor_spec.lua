@@ -270,6 +270,297 @@ describe("LayoutEditor.applyBulkToItems", function()
     end)
 end)
 
+describe("LayoutEditor.applyBulkReserve", function()
+    local applyBulkReserve
+
+    before_each(function()
+        Helpers.setupMocks()
+        local GBL = Helpers.loadAddon()
+        GBL:OnInitialize()
+        applyBulkReserve = GBL._layoutEditorApplyBulkReserve
+        assert.is_function(applyBulkReserve,
+            "expected GBL._layoutEditorApplyBulkReserve test hook")
+    end)
+
+    it("writes the keep value to every item's draft entry, returns the count", function()
+        local draft = {}
+        local n = applyBulkReserve({ [100] = {}, [200] = {} }, draft, 150)
+        assert.equals(2, n)
+        assert.equals(150, draft[100])
+        assert.equals(150, draft[200])
+    end)
+
+    it("coerces string item keys to numbers (synced layout)", function()
+        local draft = {}
+        applyBulkReserve({ ["100"] = {}, ["200"] = {} }, draft, 75)
+        assert.equals(75, draft[100])
+        assert.equals(75, draft[200])
+        assert.is_nil(draft["100"])
+    end)
+
+    it("writes 0 to mark every reserve for removal", function()
+        local draft = { [100] = 250 }
+        applyBulkReserve({ [100] = {} }, draft, 0)
+        assert.equals(0, draft[100])
+    end)
+
+    it("is defensive against nil items or nil draft", function()
+        assert.equals(0, applyBulkReserve(nil, {}, 5))
+        assert.equals(0, applyBulkReserve({ [100] = {} }, nil, 5))
+    end)
+end)
+
+describe("LayoutEditor._LayoutEditor_ApplyBulk", function()
+    local MockWoW = Helpers.MockWoW
+    local GBL
+
+    before_each(function()
+        Helpers.setupMocks()
+        GBL = Helpers.loadAddon()
+        GBL:OnInitialize()
+        MockWoW.guild.name = "Test Guild"
+        MockWoW.guild.rankIndex = 0
+        GBL:OnEnable()
+        GBL._layoutDraft = {
+            tabs = {
+                [1] = {
+                    mode = "display",
+                    items = {
+                        [100] = { slots = 1, perSlot = 10 },
+                        [200] = { slots = 2, perSlot = 5 },
+                    },
+                    slotOrder = {},
+                },
+            },
+        }
+        GBL._reserveDraft = {}
+    end)
+
+    it("applies a bulk Keep to every item on the tab", function()
+        local ok, res = GBL:_LayoutEditor_ApplyBulk(1, nil, nil, 300)
+        assert.is_true(ok)
+        assert.equals(300, GBL._reserveDraft[100])
+        assert.equals(300, GBL._reserveDraft[200])
+        assert.equals(2, res.applied)
+    end)
+
+    it("applies slots, perSlot and Keep together", function()
+        local ok = GBL:_LayoutEditor_ApplyBulk(1, 4, 12, 50)
+        assert.is_true(ok)
+        assert.equals(4, GBL._layoutDraft.tabs[1].items[100].slots)
+        assert.equals(12, GBL._layoutDraft.tabs[1].items[100].perSlot)
+        assert.equals(50, GBL._reserveDraft[100])
+        assert.equals(50, GBL._reserveDraft[200])
+    end)
+
+    it("a Keep of 0 marks every reserve for removal", function()
+        GBL._reserveDraft = { [100] = 250, [200] = 99 }
+        local ok = GBL:_LayoutEditor_ApplyBulk(1, nil, nil, 0)
+        assert.is_true(ok)
+        assert.equals(0, GBL._reserveDraft[100])
+        assert.equals(0, GBL._reserveDraft[200])
+    end)
+
+    it("coerces a string-keyed (synced) tab to number reserve keys", function()
+        GBL._layoutDraft.tabs[1].items = { ["100"] = { slots = 1, perSlot = 10 } }
+        local ok = GBL:_LayoutEditor_ApplyBulk(1, nil, nil, 40)
+        assert.is_true(ok)
+        assert.equals(40, GBL._reserveDraft[100])
+        assert.is_nil(GBL._reserveDraft["100"])
+    end)
+
+    it("rejects when no field is provided", function()
+        local ok, err = GBL:_LayoutEditor_ApplyBulk(1, nil, nil, nil)
+        assert.is_false(ok)
+        assert.matches("at least one", err)
+    end)
+
+    it("rejects a negative Keep", function()
+        local ok, err = GBL:_LayoutEditor_ApplyBulk(1, nil, nil, -5)
+        assert.is_false(ok)
+        assert.matches("Keep", err)
+    end)
+
+    it("leaves reserves untouched on a slots/perSlot-only apply", function()
+        local ok, res = GBL:_LayoutEditor_ApplyBulk(1, 3, nil, nil)
+        assert.is_true(ok)
+        assert.is_nil(next(GBL._reserveDraft), "no reserve should be written")
+        assert.is_nil(table.concat(res.parts, ","):find("keep"), "no keep= in summary")
+    end)
+
+    it("rejects slots below 1", function()
+        local ok, err = GBL:_LayoutEditor_ApplyBulk(1, 0, nil, nil)
+        assert.is_false(ok)
+        assert.matches("Slots", err)
+    end)
+
+    it("rejects perSlot below 1", function()
+        local ok, err = GBL:_LayoutEditor_ApplyBulk(1, nil, 0, nil)
+        assert.is_false(ok)
+        assert.matches("Per slot", err)
+    end)
+
+    it("floors a fractional Keep", function()
+        local ok = GBL:_LayoutEditor_ApplyBulk(1, nil, nil, 5.7)
+        assert.is_true(ok)
+        assert.equals(5, GBL._reserveDraft[100])
+    end)
+
+    it("rejects when there is no draft for the tab", function()
+        local ok, err = GBL:_LayoutEditor_ApplyBulk(8, nil, nil, 10)
+        assert.is_false(ok)
+        assert.matches("draft", err)
+    end)
+end)
+
+describe("LayoutEditor._LayoutEditor_ApplyReserveDraft", function()
+    local MockWoW = Helpers.MockWoW
+    local GBL
+
+    before_each(function()
+        Helpers.setupMocks()
+        GBL = Helpers.loadAddon()
+        GBL:OnInitialize()
+        MockWoW.guild.name = "Test Guild"
+        MockWoW.guild.rankIndex = 0   -- GM: SetStockReserve needs layout-write
+        GBL:OnEnable()
+    end)
+
+    it("writes new reserves from the draft to the live store", function()
+        GBL._reserveDraft = { [100] = 250, [200] = 40 }
+        GBL:_LayoutEditor_ApplyReserveDraft()
+        local live = GBL:GetStockReserves()
+        assert.equals(250, live[100])
+        assert.equals(40, live[200])
+    end)
+
+    it("removes a reserve when the draft drops it to 0", function()
+        GBL:SetStockReserve(100, 250)
+        GBL._reserveDraft = { [100] = 0 }
+        GBL:_LayoutEditor_ApplyReserveDraft()
+        assert.is_nil(GBL:GetStockReserves()[100])
+    end)
+
+    it("leaves an unchanged reserve intact", function()
+        GBL:SetStockReserve(100, 250)
+        GBL._reserveDraft = { [100] = 250 }
+        GBL:_LayoutEditor_ApplyReserveDraft()
+        assert.equals(250, GBL:GetStockReserves()[100])
+    end)
+
+    it("is a no-op when there is no reserve draft", function()
+        GBL._reserveDraft = nil
+        assert.has_no.errors(function() GBL:_LayoutEditor_ApplyReserveDraft() end)
+    end)
+
+    it("keeps a live reserve absent from the draft (added by sync after open)", function()
+        GBL:SetStockReserve(100, 250)
+        GBL._reserveDraft = { [100] = 250 }   -- draft seeded when the editor opened
+        GBL:SetStockReserve(200, 99)          -- a concurrent sync added 200 afterward
+        GBL:_LayoutEditor_ApplyReserveDraft()
+        assert.equals(250, GBL:GetStockReserves()[100])
+        assert.equals(99, GBL:GetStockReserves()[200])
+    end)
+end)
+
+describe("LayoutEditor Keep field", function()
+    local MockWoW = Helpers.MockWoW
+    local GBL
+
+    before_each(function()
+        Helpers.setupMocks()
+        GBL = Helpers.loadAddon()
+        GBL:OnInitialize()
+        MockWoW.guild.name = "Test Guild"
+        MockWoW.guild.rankIndex = 0
+        GBL:OnEnable()
+        GBL.RefreshLayoutTab = function() end  -- isolate the row callback from the rebuild
+        GBL._layoutDraft = {
+            tabs = {
+                [1] = {
+                    mode = "display",
+                    items = { [100] = { slots = 2, perSlot = 20 } },
+                    slotOrder = {},
+                },
+            },
+        }
+        GBL._reserveDraft = {}
+        GBL._layoutDirty = false
+    end)
+
+    local function findKeep(parent)
+        local rowGroup = parent._children[1]
+        for _, child in ipairs(rowGroup._children) do
+            if child._type == "EditBox" and child._label == "Keep" then
+                return child
+            end
+        end
+    end
+
+    it("renders a Keep EditBox on the item row", function()
+        local AceGUI = LibStub("AceGUI-3.0")
+        local parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, true)
+        assert.is_not_nil(findKeep(parent), "expected a 'Keep' EditBox on the item row")
+    end)
+
+    it("writes the entered value into the reserve draft and marks dirty", function()
+        local AceGUI = LibStub("AceGUI-3.0")
+        local parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, true)
+        findKeep(parent):Fire("OnEnterPressed", "150")
+        assert.equals(150, GBL._reserveDraft[100])
+        assert.is_true(GBL._layoutDirty)
+    end)
+
+    it("shows the existing draft reserve as the field value", function()
+        GBL._reserveDraft = { [100] = 75 }
+        local AceGUI = LibStub("AceGUI-3.0")
+        local parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, true)
+        assert.equals("75", findKeep(parent):GetText())
+    end)
+
+    it("disables the Keep field for non-writable viewers", function()
+        local AceGUI = LibStub("AceGUI-3.0")
+        local parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, false)
+        assert.is_true(findKeep(parent)._disabled)
+    end)
+
+    it("coerces a string itemID (synced layout) to the number-keyed reserve", function()
+        GBL._reserveDraft = { [100] = 75 }   -- number-keyed, as GetStockReserves returns
+        GBL._layoutDraft.tabs[1].items = { ["100"] = { slots = 2, perSlot = 20 } }
+        local AceGUI = LibStub("AceGUI-3.0")
+        local parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderItemRow(parent, 1, "100", true)
+        local keep = findKeep(parent)
+        assert.equals("75", keep:GetText())        -- read the number-keyed reserve
+        keep:Fire("OnEnterPressed", "150")
+        assert.equals(150, GBL._reserveDraft[100]) -- wrote a number key
+        assert.is_nil(GBL._reserveDraft["100"])    -- not a string key
+    end)
+
+    it("clears the item's reserve (sets 0) when the row is removed", function()
+        GBL:SetStockReserve(100, 250)
+        GBL._reserveDraft = { [100] = 250 }
+        local AceGUI = LibStub("AceGUI-3.0")
+        local parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, true)
+        local removeBtn
+        for _, child in ipairs(parent._children[1]._children) do
+            if child._type == "Button" and child:GetText() == "Remove" then
+                removeBtn = child
+            end
+        end
+        assert.is_not_nil(removeBtn, "expected a Remove button on the row")
+        removeBtn:Fire("OnClick")
+        assert.equals(0, GBL._reserveDraft[100])     -- explicit removal marker
+        GBL:_LayoutEditor_ApplyReserveDraft()
+        assert.is_nil(GBL:GetStockReserves()[100])   -- Save clears the live reserve
+    end)
+end)
+
 describe("LayoutEditor._LayoutGrantSummary", function()
     local MockWoW = Helpers.MockWoW
     local GBL

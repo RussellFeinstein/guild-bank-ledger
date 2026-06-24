@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-06-24
+
+### Added
+- A per-item "Keep" field on each Layout editor row. It sets the total to keep in stock for that item, and Restock now buys up to whichever is larger: the layout total or the Keep amount. This lets you raise the buy-to target above what the tab layout alone needs, for example keeping a deep reserve of a key flask. Leaving Keep at 0 keeps the layout total as the target, exactly as before.
+- A "Keep" field in the Layout editor's "Apply to all" bulk row, so you can set the reserve for every item on a tab in one click (next to the existing bulk Slots and Per slot). Setting it to 0 clears the reserves on that tab.
+
 ### Changed
+- The Restock tab now shows a two-state stock status per item: "Buy N" when the bank is below the item's target, or "In stock" when it is at or above it. The earlier separate "Over N" state is gone, since being above the target is not a problem. Each row's target and bank counts now read "target N | bank M" instead of the parenthetical "(target N, bank M)".
 - Simplified the About tab labels: the Ko-fi and CurseForge copy boxes now read just "Ko-fi" and "CurseForge", and the license line reads "MIT License".
 
 ### Removed
