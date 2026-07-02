@@ -5,7 +5,11 @@
 -- copying chat. Phase 1 of docs/PLAN-audit-log-upload.md: local capture
 -- plus manual collection; the companion uploader is a later phase.
 --
--- Opt-in via db.profile.sync.auditCapture (default false). When on,
+-- Capture is ON by default: the data never leaves the player's machine,
+-- so recording locally is not a privacy event. The opt-in moment is
+-- SENDING captures to the maintainer, which is the uploader phase (not
+-- built yet) and will be opt-in and off by default there. A kill switch
+-- remains at db.profile.sync.auditCapture (/gbl audit off). When on,
 -- INFO/WARN/ERROR entries from all three Logger channels are copied into
 -- the current session. DEBUG is never captured.
 --
@@ -170,4 +174,52 @@ function GBL:ClearAuditCapture()
         GuildBankLedgerAuditDB.sessions = {}
     end
     self._auditSession = nil
+end
+
+------------------------------------------------------------------------
+-- Slash command: /gbl audit on|off|status|clear
+------------------------------------------------------------------------
+
+function GBL:HandleAuditCommand(rest)
+    local sub = (rest and rest:match("^(%S*)") or ""):lower()
+
+    if sub == "on" then
+        self.db.profile.sync.auditCapture = true
+        self:Print("Log capture on (the default). Diagnostics persist to"
+            .. " SavedVariables; nothing is sent anywhere. /gbl audit status"
+            .. " to inspect.")
+        return
+    end
+
+    if sub == "off" then
+        self.db.profile.sync.auditCapture = false
+        self:Print("Log capture off. Diagnostics will no longer persist"
+            .. " across reloads on this character's profile.")
+        return
+    end
+
+    if sub == "status" then
+        local st = self:GetAuditCaptureStatus()
+        self:Print(string.format("Log capture %s. %d of %d saved sessions.",
+            st.enabled and "ON" or "off", st.sessionCount, st.maxSessions))
+        if st.enabled then
+            self:Print(string.format(
+                "This session: sync %d/%d, sort %d/%d, system %d/%d"
+                    .. " (evicted: %d, %d, %d).",
+                st.currentEntries.sync, st.caps.sync,
+                st.currentEntries.sort, st.caps.sort,
+                st.currentEntries.system, st.caps.system,
+                st.dropped.sync, st.dropped.sort, st.dropped.system))
+        end
+        return
+    end
+
+    if sub == "clear" then
+        self:ClearAuditCapture()
+        self:Print("Cleared ALL captured sessions on this account"
+            .. " (the store is shared across your characters).")
+        return
+    end
+
+    self:Print("Usage: /gbl audit on|off|status|clear")
 end

@@ -30,7 +30,7 @@ Every guild member running the addon automatically logs and shares data. No setu
 - **Sort**: Preview the planned moves to reshape the bank against a saved layout, then execute them on a fixed one-second cadence and auto-rerun any remaining moves until the bank matches the layout. Self-heals if the client's frame loop wedges mid-run. Hidden from members without sort access.
 - **Layout**: Per-tab template editor (display, overflow, ignore modes) with per-item slot counts and stack sizes. Capture-from-current-tab shortcut. Hidden from members without layout-write access. Sort access is a two-tier policy (Layout Write and Sort-only, by rank threshold or named delegate) that the GM manages and that syncs guild-wide, so a grant reaches the granted officer automatically. The saved layout itself also syncs to officers with sort access, so a granted officer can sort against the GM's layout without rebuilding it.
 - **Restock**: Restock the guild bank to your layout targets. Lists every layout item grouped by bank tab with its target, current stock, and how many to buy. With the Auctionator addon installed, searches the Auction House and buys the shortfall, per item or as a sweep (optionally capped by a per-run gold budget), spending real gold through WoW's commodity flow with an up-front affordability check. Hidden from members without sort access. Created by Katorri (Guild Bank Restock).
-- **Sync** — Enable/disable sync, online peers with version and directional status (newer/outdated), GM access control configuration.
+- **Sync** — Enable/disable sync, online peers with version and directional status (newer/outdated), GM access control configuration. Diagnostic logs persist across reloads (capped, never bank contents) so you can share them with the developer when something misbehaves; nothing is ever sent anywhere automatically. Manage with `/gbl audit`.
 - **Changelog** — Embedded version history, paginated (10 versions per page).
 - **About** — Addon info, author credit, support links.
 
@@ -60,6 +60,7 @@ Settings sync to all guild members automatically.
 - `/gbl synclog` — Pop up the sync session log
 - `/gbl sortlog` — Pop up the sort session log
 - `/gbl logs` — Pop up the master log (sync + sort + system, interleaved by timestamp)
+- `/gbl audit on|off|status|clear` — Manage persistent log capture for troubleshooting (on by default; nothing is sent anywhere)
 - `/gbl help` — Show all commands
 
 **Status**: Beta. Recording and dedup are mature. Sync, sort, and UI are in active guild use with known improvements queued. Accessibility ships with palettes, contrast, triple encoding, and font scaling, but keyboard navigation is partial pending a v1.0 audit pass.

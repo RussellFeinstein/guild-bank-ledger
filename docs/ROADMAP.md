@@ -47,6 +47,7 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 - Severity levels (DEBUG / INFO / WARN / ERROR) with `pcall(string.format)` fallback
 - Surfaced on demand via `/gbl synclog`, `/gbl sortlog`, `/gbl logs` (master, interleaved by timestamp)
 - Audit panel removed from the Sync tab; logs are diagnostic artifacts, not always-visible UI
+- Persistent capture (v0.36.0): all three channels persist to `GuildBankLedgerAuditDB` per session (version-stamped headers, per-channel caps, 10-session rotation), managed via `/gbl audit`. On by default; nothing is transmitted. The opt-in uploader is phases 2-3 of docs/PLAN-audit-log-upload.md and stays unbuilt
 
 **Access control** (v0.15.0):
 - GM-configurable rank threshold with 3 restriction modes (full / sync-only / own-transactions-only)

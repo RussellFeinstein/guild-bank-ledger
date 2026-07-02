@@ -14,6 +14,8 @@ describe("AuditCapture", function()
         GBL:ClearLog(nil)
     end)
 
+    -- Capture defaults ON; kept as an explicit marker in tests that depend
+    -- on the enabled state, and a guard if the default ever flips.
     local function enable()
         GBL.db.profile.sync.auditCapture = true
     end
@@ -51,7 +53,14 @@ describe("AuditCapture", function()
     end)
 
     describe("toggle gating", function()
-        it("captures nothing when the toggle is off (default)", function()
+        it("captures by default, with no opt-in step", function()
+            assert.is_true(GBL.db.profile.sync.auditCapture)
+            GBL:SyncInfo("captured without any setup")
+            assert.equals(1, #sessions())
+        end)
+
+        it("the kill switch stops capture", function()
+            GBL.db.profile.sync.auditCapture = false
             GBL:SyncInfo("not captured")
             assert.equals(0, #sessions())
         end)
@@ -163,8 +172,12 @@ describe("AuditCapture", function()
     describe("status and clear", function()
         it("reports enabled state, session count, and current entry counts", function()
             local st = GBL:GetAuditCaptureStatus()
-            assert.is_false(st.enabled)
+            assert.is_true(st.enabled)  -- capture is on by default
             assert.equals(0, st.sessionCount)
+
+            GBL.db.profile.sync.auditCapture = false
+            st = GBL:GetAuditCaptureStatus()
+            assert.is_false(st.enabled)
 
             enable()
             GBL:SyncInfo("one")
@@ -185,6 +198,49 @@ describe("AuditCapture", function()
             GBL:SyncInfo("new")
             assert.equals(1, #sessions())
             assert.equals("new", sessions()[1].entries.sync[1].message)
+        end)
+    end)
+
+    describe("/gbl audit slash command", function()
+        before_each(function()
+            Helpers.clearPrints()
+        end)
+
+        it("on re-enables capture after the kill switch", function()
+            GBL.db.profile.sync.auditCapture = false
+            GBL:HandleSlashCommand("audit on")
+            assert.is_true(GBL.db.profile.sync.auditCapture)
+            assert.is_true(Helpers.printContains("Log capture on"))
+            assert.is_true(Helpers.printContains("nothing is sent anywhere"))
+        end)
+
+        it("off disables capture", function()
+            GBL:HandleSlashCommand("audit off")
+            assert.is_false(GBL.db.profile.sync.auditCapture)
+            assert.is_true(Helpers.printContains("Log capture off"))
+        end)
+
+        it("status reports state and session counts", function()
+            enable()
+            GBL:SyncInfo("x")
+            GBL:HandleSlashCommand("audit status")
+            assert.is_true(Helpers.printContains("Log capture ON"))
+            assert.is_true(Helpers.printContains("1 of "
+                .. GBL.AUDIT_MAX_SESSIONS .. " saved sessions"))
+            assert.is_true(Helpers.printContains("This session: sync 1/"))
+        end)
+
+        it("clear wipes sessions and says the scope is the whole account", function()
+            enable()
+            GBL:SyncInfo("x")
+            GBL:HandleSlashCommand("audit clear")
+            assert.equals(0, #sessions())
+            assert.is_true(Helpers.printContains("account"))
+        end)
+
+        it("unknown subcommand prints usage", function()
+            GBL:HandleSlashCommand("audit bogus")
+            assert.is_true(Helpers.printContains("Usage: /gbl audit"))
         end)
     end)
 end)
