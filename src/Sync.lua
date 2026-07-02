@@ -658,7 +658,10 @@ function GBL:HandleLayoutRequest(sender, _data)
         self:SyncWarn("Layout payload for %s is %d B (> %d safe); transfer may drop, chunking needed",
             key, #msg, WHISPER_SAFE_BYTES)
     else
-        self:SyncDebug("Serving bank layout to %s (%d B)", key, #msg)
+        -- INFO, not DEBUG: the serve size is the only signal for how close a
+        -- real layout sits to the whisper ceiling, so it must land in the log
+        -- without debug mode on.
+        self:SyncInfo("Serving bank layout to %s (%d B)", key, #msg)
     end
     self:SendSyncWhisper(PREFIX, msg, key)
 end

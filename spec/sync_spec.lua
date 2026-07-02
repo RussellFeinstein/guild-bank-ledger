@@ -6595,6 +6595,24 @@ describe("Sync", function()
             assert.equals(0, #sentOfType("LAYOUT_DATA"))
         end)
 
+        it("records the serve size in the sync log without debug mode", function()
+            -- Regression: the serve line was SyncDebug, which drops entirely
+            -- when debugChat is off, so captures never saw the payload size.
+            guildData.bankLayout = layoutStore(5000)
+            GBL.db.profile.sync.debugChat = false
+            GBL:ClearLog("sync")
+            MockAce.sentCommMessages = {}
+            GBL:HandleLayoutRequest("Requester", {})
+            local found = false
+            for _, entry in ipairs(GBL:GetLog("sync")) do
+                if entry.message:find("Serving bank layout", 1, true) then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found, "expected the layout serve size line at INFO")
+        end)
+
         it("forces a HELLO advertising the new cursor when a layout is saved", function()
             MockWoW.guild.rankIndex = 0  -- GM ⇒ HasLayoutWrite
             MockAce.sentCommMessages = {}

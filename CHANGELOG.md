@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The bank layout serve line in the sync log now records at INFO instead of DEBUG, so the payload size shows up in normal diagnostics without turning debug mode on. The size is the early warning for a layout growing past the whisper ceiling.
+
+### Fixed
+- README described sync chunking as 15 records per chunk; the shipped values since 0.28.7 are 4 records within a 900-byte budget, sized to fit a single wire fragment.
+
 ## [0.35.0] - 2026-06-24
 
 ### Added
