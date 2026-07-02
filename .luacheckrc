@@ -94,6 +94,7 @@ read_globals = {
 globals = {
     "GuildBankLedger",
     "GuildBankLedgerDB",
+    "GuildBankLedgerAuditDB",
     "C_PlayerInteractionManager",
     "CloseGuildBankFrame",
 }

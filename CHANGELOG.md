@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Groundwork for opt-in diagnostic log capture: a new saved variable (GuildBankLedgerAuditDB) that can persist sync, sort, and system log entries across sessions for troubleshooting. Capture is off by default and nothing is recorded until the toggle ships with its slash command and Sync tab checkbox in this release. Each captured session is stamped with the addon and sync protocol version, capped per channel, and rotates out oldest-first.
+
 ### Changed
 - The bank layout serve line in the sync log now records at INFO instead of DEBUG, so the payload size shows up in normal diagnostics without turning debug mode on. The size is the early warning for a layout growing past the whisper ceiling.
 

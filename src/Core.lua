@@ -139,7 +139,8 @@ local defaults = {
         },
         alerts = { enabled = true, chatNotify = true, soundNotify = true },
         export = { delimiter = ",", includeHeaders = true, dateFormat = "%Y-%m-%d %H:%M" },
-        sync = { enabled = true, autoSync = true, chatLog = false, debugChat = false },
+        sync = { enabled = true, autoSync = true, chatLog = false, debugChat = false,
+                 auditCapture = false },
         sort = { chatLog = false, debugChat = false },
         system = { chatLog = false, debugChat = false },
         filters = { defaultDays = 7, defaultCategory = "ALL" },
@@ -157,6 +158,11 @@ function GBL:OnInitialize()
     self.scanInProgress = false
     self.lastScanTime = 0
     self.version = self:GetSyncVersion()
+
+    -- Persistent diagnostic capture (AuditCapture.lua); needs self.db.
+    if self.InitAuditCapture then
+        self:InitAuditCapture()
+    end
 
     self:RegisterChatCommand("gbl", "HandleSlashCommand")
     self:RegisterChatCommand("guildbankledger", "HandleSlashCommand")

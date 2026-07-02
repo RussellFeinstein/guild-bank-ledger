@@ -71,7 +71,7 @@ luacheck .                 # lint production code
 - Timestamps: always `GetServerTime()`, never `time()`
 - Item IDs: use `C_Item.GetItemInfoInstant()` for classID/subclassID
 - Guard `Enum.PlayerInteractionType.GuildBanker` existence for Classic compat
-- Saved variables: `GuildBankLedgerDB` (AceDB), data keyed per guild name
+- Saved variables: `GuildBankLedgerDB` (AceDB), data keyed per guild name. Deliberate exception: `GuildBankLedgerAuditDB` (src/AuditCapture.lua) is a raw account-wide global, NOT AceDB and NOT guild-keyed — it is an append-only diagnostic capture store whose collection unit is the account's SavedVariables file; sessions carry player/realm/guild in their headers. Do not migrate it into AceDB (a second `AceDB:New` also breaks the `MockAce.dbInstance` single-instance assumption in specs).
 - **Sync is guild-wide** — all members participate in HELLO/sync, not just officers. Officer rank only gates UI visibility (settings, admin features). Never add rank checks to the sync protocol.
 - **Public description sync**: `docs/CURSEFORGE-DESCRIPTION.md` is the source of truth for the CurseForge project page. When user-facing surface changes (slash commands, UI tabs, access control, sync features, planned-feature framing), update it in the same PR. CI emits a `::warning::` annotation on PRs that change feature-surface files (`README.md`, `docs/ROADMAP.md`, `src/**/*.lua`, `UI/**/*.lua`, `GuildBankLedger.toc`) without updating the description; treat it as a checklist prompt, not a blocking gate. Pasting the updated content into the CurseForge web UI is a manual release step until BigWigsMods/packager#187 lands.
 

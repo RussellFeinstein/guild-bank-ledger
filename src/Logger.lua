@@ -93,7 +93,13 @@ local function emit(self, channel, level, fmt, ...)
     end
 
     local message = formatMessage(fmt, ...)
-    record(self, channel, level, message)
+    local entry = record(self, channel, level, message)
+
+    -- Persistent capture tap (AuditCapture.lua). Existence-guarded so partial
+    -- test loads and load order stay safe; all capture gating lives there.
+    if self.CaptureAuditEntry then
+        self:CaptureAuditEntry(channel, entry)
+    end
 
     if shouldChat(self, channel, level) then
         local prefix = CHAT_PREFIXES[channel] or ""
