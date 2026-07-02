@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-07-02
+
 ### Added
 - Diagnostic logs now persist across reloads. Sync, sort, and system log entries are saved to a new saved variable (GuildBankLedgerAuditDB) so you can hand troubleshooting data to the developer after the fact instead of copying chat mid-session. Each session is stamped with the addon and sync protocol version, capped per channel, and rotates out oldest-first (10 sessions kept). Nothing is ever sent anywhere: sharing a capture stays a manual step, and a future opt-in uploader will ask first. Manage with the new `/gbl audit on|off|status|clear` command (`off` is the kill switch, `clear` wipes all captures on the account).
 
