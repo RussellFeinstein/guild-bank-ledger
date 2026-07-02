@@ -1415,7 +1415,9 @@ function GBL:HandleSyncRequest(sender, data)
     ctlDeferTotal = 0
     -- Per-session drain instrumentation reset. timersPending is deliberately
     -- NOT reset: it tracks real scheduled timers, and a stale timer from a
-    -- prior session still decrements it in its callback.
+    -- prior session still decrements it in its callback. A stale chain that
+    -- lives into this session counts toward overlaps on purpose: it IS a
+    -- concurrent chain issuing sends here, whichever session spawned it.
     ctlDrain.overlapTotal = 0
     ctlDrain.maxStall = 0
     ctlDrain.episodeStart = nil
@@ -1423,6 +1425,14 @@ function GBL:HandleSyncRequest(sender, data)
     ctlDrain.overlapCount = 0
     ctlDrain.minAvail = nil
     ctlDrain.minAvailAt = nil
+    ctlDrain.episodePaused = nil
+    -- Session boundary marker: the samples ring accumulates across sessions
+    -- (only the test reset clears it), so /run inspection needs a separator.
+    ctlDrain.samples[#ctlDrain.samples + 1] =
+        { t = GetTime(), marker = "session", target = syncState.sendTarget }
+    while #ctlDrain.samples > ctlDrain.sampleCap do
+        table.remove(ctlDrain.samples, 1)
+    end
     syncState.helloRepliesDuringSync = 0
     syncState.nacksReceivedDuringSync = 0
     syncState.lastSendIssuedAt = 0
@@ -1550,6 +1560,12 @@ function GBL:SendNextChunk()
 
     -- Zone/combat protection — defer until safe
     if isSyncPaused() then
+        -- An open drain episode spans this pause: its stall figure will
+        -- include zone/combat dead time, not just CTL starvation. Flag it so
+        -- the summary line says so and the capture reader can discount it.
+        if ctlDrain.episodeStart then
+            ctlDrain.episodePaused = true
+        end
         self:AddAuditEntry("SendNextChunk deferred — zone/combat transition in progress")
         return
     end
@@ -1626,10 +1642,11 @@ function GBL:SendNextChunk()
             end
         end
         self:SyncInfo("CTL recovered: %d deferrals, %d overlapped, stall %.1fs,"
-                .. " min avail %s, recovery %s B/s",
+                .. " min avail %s, recovery %s B/s%s",
             ctlDrain.episodeDefers, ctlDrain.overlapCount, stall,
             ctlDrain.minAvail and string.format("%.0f", ctlDrain.minAvail) or "?",
-            rateStr)
+            rateStr,
+            ctlDrain.episodePaused and " (zone/combat pause overlapped; stall includes dead time)" or "")
         if stall > ctlDrain.maxStall then
             ctlDrain.maxStall = stall
         end
@@ -1638,6 +1655,7 @@ function GBL:SendNextChunk()
         ctlDrain.overlapCount = 0
         ctlDrain.minAvail = nil
         ctlDrain.minAvailAt = nil
+        ctlDrain.episodePaused = nil
     end
 
     -- v0.28.5: inter-chunk gap floor. WoW's chat server applies a per-recipient
@@ -2906,6 +2924,7 @@ function GBL:ResetSyncState()
     ctlDrain.overlapCount = 0
     ctlDrain.minAvail = nil
     ctlDrain.minAvailAt = nil
+    ctlDrain.episodePaused = nil
     for k in pairs(recentWhisperTargets) do
         recentWhisperTargets[k] = nil
     end

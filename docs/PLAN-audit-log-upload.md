@@ -10,7 +10,7 @@ Goal: opt-in auto-upload of sync audit logs from each consenting guildie to a ma
 
 ## Hard constraints
 
-- **Opt-in only, off by default — for UPLOADING.** The opt-in boundary is transmission to the maintainer, not local recording. Local capture into SavedVariables is on by default (shipped in phase 1, decision 2026-07-01): the data never leaves the player's machine, so recording locally is not a privacy event, and default-on is what makes captures exist when a problem is reported after the fact. The uploader (phase 2) gets the privacy-first toggle, a clear one-line description of what gets uploaded and where it goes, and off-by-default; toggling off must immediately stop new uploads. A local kill switch (`/gbl audit off`) exists for players who want no persistence at all.
+- **Opt-in only, off by default (for UPLOADING).** The opt-in boundary is transmission to the maintainer, not local recording. Local capture into SavedVariables is on by default (shipped in phase 1, decision 2026-07-01): the data never leaves the player's machine, so recording locally is not a privacy event, and default-on is what makes captures exist when a problem is reported after the fact. The uploader (phase 2) gets the privacy-first toggle, a clear one-line description of what gets uploaded and where it goes, and off-by-default; toggling off must immediately stop new uploads. A local kill switch (`/gbl audit off`) exists for players who want no persistence at all.
 - **Every log entry tags its source version.** Both addon `VERSION` and sync protocol version (`PROTOCOL_VERSION` at src/Sync.lua:11, exposed as `GBL.SYNC_PROTOCOL_VERSION`) on every record so cross-version corpora are partitionable. Without this tag, mixed-version corpora are unanalyzable.
 - **No PII beyond character/realm names** (already in audit lines today). Do not start uploading bank contents or item lists. Scope is the audit trail, not the ledger.
 - **Bounded volume.** Cap per-day upload size and rotate. A guildie should never see the addon balloon their disk usage or upload bandwidth.
@@ -53,8 +53,7 @@ Recommended starting point: simple HTTP endpoint with a maintainer-issued opt-in
 ## Critical files (phase 1 only)
 
 - `src/Sync.lua` — every `GBL:AddAuditEntry` call site (defined at line 2184) is the source of records; entries already have `peer`, `outcome`, etc. Stamp `addonVersion` + `protocolVersion` at write time.
-- `src/Core.lua` — register `GuildBankLedgerAuditDB` AceDB, wire the opt-in toggle, register the slash command.
-- `UI/SyncStatus.lua` or `UI/AboutView.lua` — add the opt-in checkbox with the one-line disclosure.
+- `src/Core.lua` — init `GuildBankLedgerAuditDB` (raw global, NOT AceDB; see project CLAUDE.md Conventions), register the slash command. Capture is on by default; the only toggle is the `/gbl audit off` kill switch. No UI checkbox: a checkbox would re-frame local recording as opt-in, and the opt-in belongs to the uploader.
 - `VERSION` / `src/Sync.lua` `PROTOCOL_VERSION` constant — read at runtime for stamping.
 
 ## Testing (phase 1)
@@ -62,4 +61,4 @@ Recommended starting point: simple HTTP endpoint with a maintainer-issued opt-in
 - Unit test that audit entries written with the toggle off do not appear in `GuildBankLedgerAuditDB`.
 - Unit test that every entry written with the toggle on has both `addonVersion` and `protocolVersion` populated.
 - Unit test that the dump rotation/cap behaves correctly at the boundary.
-- Manual: enable opt-in, run a sync session, verify the SavedVariables file contains a structured audit DB with version tags on every entry.
+- Manual: with no setup (capture defaults on), run a sync session, reload, verify the SavedVariables file contains a structured audit DB with version tags on the session headers.

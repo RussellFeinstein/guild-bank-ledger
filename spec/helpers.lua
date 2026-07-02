@@ -61,6 +61,10 @@ function Helpers.resetAll()
     -- Production-code global SavedVariable; mock reinstall does not clear it.
     _G.GuildBankLedgerAuditDB = nil
 
+    -- Tests that fail mid-body skip their trailing cleanup, so a leaked CTL
+    -- stub would silently flip HasSyncBandwidth for every later test.
+    _G.ChatThrottleLib = nil
+
     -- Clear any previously loaded addon modules
     package.loaded["Core"] = nil
     package.loaded["Logger"] = nil

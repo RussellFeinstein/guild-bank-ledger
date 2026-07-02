@@ -242,5 +242,13 @@ describe("AuditCapture", function()
             GBL:HandleSlashCommand("audit bogus")
             assert.is_true(Helpers.printContains("Usage: /gbl audit"))
         end)
+
+        it("dispatch falls back cleanly when the module is absent", function()
+            local saved = GBL.HandleAuditCommand
+            GBL.HandleAuditCommand = nil
+            GBL:HandleSlashCommand("audit on")
+            assert.is_true(Helpers.printContains("AuditCapture module not loaded"))
+            GBL.HandleAuditCommand = saved
+        end)
     end)
 end)

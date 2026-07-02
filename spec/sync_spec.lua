@@ -4420,7 +4420,10 @@ describe("Sync", function()
 
             -- A second caller invokes SendNextChunk while the first deferral
             -- timer is still pending: the overlap is COUNTED and the second
-            -- timer is STILL scheduled (measurement only, no dedup).
+            -- timer is STILL scheduled (measurement only, no dedup). Exactly
+            -- one new timer is expected because the CTL defer path returns
+            -- before any other C_Timer.After site (StartFpsMonitor is an
+            -- OnUpdate frame, not a timer).
             GBL:SendNextChunk()
             assert.equals(pendingAfterFirst + 1, drain.timersPending)
             assert.is_true(drain.overlapCount >= 1)
@@ -4444,6 +4447,9 @@ describe("Sync", function()
 
             -- Bandwidth returns; the pending deferral timer re-enters
             -- SendNextChunk, which should summarize and close the episode.
+            -- Relies on MockAce dispatching send callbacks synchronously, so
+            -- the episode-close code runs inside this single fireTimers()
+            -- (which snapshots pendingTimers and cannot cascade).
             _G.ChatThrottleLib.avail = 4000
             MockWoW.fireTimers()
 
@@ -4473,9 +4479,11 @@ describe("Sync", function()
 
             local found = false
             for _, entry in ipairs(GBL:GetLog("sync")) do
+                -- Assert the VALUES for the no-CTL case, not just the field
+                -- names, so a misplaced counter reset cannot pass unnoticed.
                 if entry.message:find("Sync stats: ", 1, true)
-                    and entry.message:find("overlapped timers", 1, true)
-                    and entry.message:find("longest stall", 1, true) then
+                    and entry.message:find("0 overlapped timers", 1, true)
+                    and entry.message:find("longest stall 0.0", 1, true) then
                     found = true
                     break
                 end
@@ -4495,7 +4503,9 @@ describe("Sync", function()
             GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
 
             assert.is_nil(GBL._ctlDrain.episodeStart)
-            assert.equals(0, #GBL._ctlDrain.samples)
+            -- Only the session boundary marker lands; no deferral samples.
+            assert.equals(1, #GBL._ctlDrain.samples)
+            assert.equals("session", GBL._ctlDrain.samples[1].marker)
         end)
 
         it("Sending chunk entry includes CTLq= when CTL.Prio is present", function()
