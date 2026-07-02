@@ -80,6 +80,26 @@ GBL.SYNC_INTER_CHUNK_GAP_FLOOR = INTER_CHUNK_GAP_FLOOR
 -- Diagnostic: CTL deferral tracking (module-level, survives state resets)
 local ctlDeferTotal = 0  -- monotonic count per sync session
 
+-- CTL drain instrumentation (measurement only, no behavior change). Samples
+-- the meter at every deferral, counts overlapping deferral timer chains
+-- WITHOUT dedup'ing them, and times drain episodes. The capture campaign uses
+-- these to attribute a Mode A stall to timer-chain multiplication (several of
+-- SendNextChunk's callers can each start a self-rearming deferral chain) vs
+-- external bandwidth contention, BEFORE any adaptive-backoff fix is built.
+local ctlDrain = {
+    samples = {},        -- chronological ring of { t, avail, threshold }
+    sampleCap = 200,
+    timersPending = 0,   -- CTL deferral timers currently scheduled
+    overlapCount = 0,    -- schedules that saw >= 1 timer already pending (episode)
+    overlapTotal = 0,    -- same, whole send session
+    episodeStart = nil,  -- GetTime() of the open episode's first deferral
+    episodeDefers = 0,
+    minAvail = nil,      -- lowest observed CTL.avail this episode
+    minAvailAt = nil,
+    maxStall = 0,        -- longest completed episode this send session (s)
+}
+GBL._ctlDrain = ctlDrain  -- exposed for tests and /run inspection
+
 ------------------------------------------------------------------------
 -- Compression (LibDeflate)
 ------------------------------------------------------------------------
@@ -1393,6 +1413,16 @@ function GBL:HandleSyncRequest(sender, data)
         .. " tx to " .. sender .. " in " .. #chunks .. " chunk(s)")
 
     ctlDeferTotal = 0
+    -- Per-session drain instrumentation reset. timersPending is deliberately
+    -- NOT reset: it tracks real scheduled timers, and a stale timer from a
+    -- prior session still decrements it in its callback.
+    ctlDrain.overlapTotal = 0
+    ctlDrain.maxStall = 0
+    ctlDrain.episodeStart = nil
+    ctlDrain.episodeDefers = 0
+    ctlDrain.overlapCount = 0
+    ctlDrain.minAvail = nil
+    ctlDrain.minAvailAt = nil
     syncState.helloRepliesDuringSync = 0
     syncState.nacksReceivedDuringSync = 0
     syncState.lastSendIssuedAt = 0
@@ -1527,11 +1557,39 @@ function GBL:SendNextChunk()
     -- ChatThrottleLib awareness — defer if other addons are using bandwidth
     if not self:HasSyncBandwidth() then
         ctlDeferTotal = ctlDeferTotal + 1
+
+        -- Drain instrumentation (measurement only; the deferral behavior
+        -- below is unchanged).
+        local CTL = _G.ChatThrottleLib
+        local availNow = (CTL and CTL.avail) or -1
+        local threshold = math.max(CTL_BANDWIDTH_MIN, syncState.lastChunkBytes or 0)
+        local nowT = GetTime()
+        local samples = ctlDrain.samples
+        samples[#samples + 1] = { t = nowT, avail = availNow, threshold = threshold }
+        while #samples > ctlDrain.sampleCap do
+            table.remove(samples, 1)
+        end
+        if not ctlDrain.episodeStart then
+            ctlDrain.episodeStart = nowT
+            ctlDrain.episodeDefers = 0
+            ctlDrain.overlapCount = 0
+            ctlDrain.minAvail = nil
+            ctlDrain.minAvailAt = nil
+        end
+        ctlDrain.episodeDefers = ctlDrain.episodeDefers + 1
+        if availNow >= 0 and (not ctlDrain.minAvail or availNow < ctlDrain.minAvail) then
+            ctlDrain.minAvail = availNow
+            ctlDrain.minAvailAt = nowT
+        end
+        if ctlDrain.timersPending > 0 then
+            ctlDrain.overlapCount = ctlDrain.overlapCount + 1
+            ctlDrain.overlapTotal = ctlDrain.overlapTotal + 1
+        end
+        ctlDrain.timersPending = ctlDrain.timersPending + 1
+
         -- Rate limit: first 10 verbose, then every 20th
         if ctlDeferTotal <= 10 or ctlDeferTotal % 20 == 0 then
-            local CTL = _G.ChatThrottleLib
-            local availStr = CTL and CTL.avail and string.format("%.0f", CTL.avail) or "?"
-            local threshold = math.max(CTL_BANDWIDTH_MIN, syncState.lastChunkBytes or 0)
+            local availStr = availNow >= 0 and string.format("%.0f", availNow) or "?"
             local suffix = ""
             if ctlDeferTotal > 10 then
                 suffix = ", " .. ctlDeferTotal .. " total"
@@ -1539,14 +1597,47 @@ function GBL:SendNextChunk()
             self:AddAuditEntry("CTL low (avail=" .. availStr
                 .. ", need=" .. threshold
                 .. ", #" .. ctlDeferTotal
-                .. ", t=" .. string.format("%.3f", GetTime())
+                .. ", t=" .. string.format("%.3f", nowT)
                 .. suffix
                 .. ") — deferring " .. CTL_BACKOFF_DELAY .. "s")
         end
         C_Timer.After(CTL_BACKOFF_DELAY, function()
+            ctlDrain.timersPending = math.max(0, ctlDrain.timersPending - 1)
             self:SendNextChunk()
         end)
         return
+    end
+
+    -- CTL drain episode ended: bandwidth is back. Summarize so a capture can
+    -- attribute the stall (overlaps => timer-chain multiplication; pinned
+    -- min-avail with slow recovery => external contention). An episode still
+    -- open when the send session ends is not summarized; the next session's
+    -- init resets it.
+    if ctlDrain.episodeStart then
+        local nowT = GetTime()
+        local stall = nowT - ctlDrain.episodeStart
+        local CTL = _G.ChatThrottleLib
+        local availNow = (CTL and CTL.avail) or -1
+        local rateStr = "?"
+        if ctlDrain.minAvail and ctlDrain.minAvailAt and availNow >= 0 then
+            local dt = nowT - ctlDrain.minAvailAt
+            if dt > 0.001 then
+                rateStr = string.format("%.0f", (availNow - ctlDrain.minAvail) / dt)
+            end
+        end
+        self:SyncInfo("CTL recovered: %d deferrals, %d overlapped, stall %.1fs,"
+                .. " min avail %s, recovery %s B/s",
+            ctlDrain.episodeDefers, ctlDrain.overlapCount, stall,
+            ctlDrain.minAvail and string.format("%.0f", ctlDrain.minAvail) or "?",
+            rateStr)
+        if stall > ctlDrain.maxStall then
+            ctlDrain.maxStall = stall
+        end
+        ctlDrain.episodeStart = nil
+        ctlDrain.episodeDefers = 0
+        ctlDrain.overlapCount = 0
+        ctlDrain.minAvail = nil
+        ctlDrain.minAvailAt = nil
     end
 
     -- v0.28.5: inter-chunk gap floor. WoW's chat server applies a per-recipient
@@ -1742,7 +1833,11 @@ function GBL:FinishSending()
     self:AddAuditEntry("Send complete to " .. target
         .. " — " .. sent .. "/" .. total .. " chunks"
         .. ", " .. syncState.sendTotalRecords .. " records, " .. elapsed .. "s")
+    -- Keep the "Sync stats: " and " CTL deferrals" tokens verbatim; captures
+    -- and downstream parsing key on them.
     self:AddAuditEntry("Sync stats: " .. ctlDeferTotal .. " CTL deferrals"
+        .. ", " .. ctlDrain.overlapTotal .. " overlapped timers"
+        .. ", longest stall " .. string.format("%.1f", ctlDrain.maxStall) .. "s"
         .. ", " .. (syncState.helloRepliesDuringSync or 0) .. " HELLO replies suppressed"
         .. ", " .. (syncState.nacksReceivedDuringSync or 0) .. " NACKs received")
 
@@ -2802,6 +2897,15 @@ function GBL:ResetSyncState()
     syncState.nacksForCurrentChunk = 0
     syncState.chunkOutcomes = {}
     ctlDeferTotal = 0
+    ctlDrain.samples = {}
+    ctlDrain.timersPending = 0
+    ctlDrain.overlapTotal = 0
+    ctlDrain.maxStall = 0
+    ctlDrain.episodeStart = nil
+    ctlDrain.episodeDefers = 0
+    ctlDrain.overlapCount = 0
+    ctlDrain.minAvail = nil
+    ctlDrain.minAvailAt = nil
     for k in pairs(recentWhisperTargets) do
         recentWhisperTargets[k] = nil
     end

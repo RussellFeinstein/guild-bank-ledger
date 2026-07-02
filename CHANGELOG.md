@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - The bank layout serve line in the sync log now records at INFO instead of DEBUG, so the payload size shows up in normal diagnostics without turning debug mode on. The size is the early warning for a layout growing past the whisper ceiling.
+- Sync bandwidth stalls are now measured in detail. Each stall episode logs a "CTL recovered" summary (deferral count, overlapping retry timers, stall length, lowest bandwidth seen, recovery rate) and the end-of-send stats line adds overlapped-timer and longest-stall counts. Measurement only, no behavior change: these numbers decide whether the long-standing stall fix should target duplicate retry timers or slower retries.
 
 ### Fixed
 - README described sync chunking as 15 records per chunk; the shipped values since 0.28.7 are 4 records within a 900-byte budget, sized to fit a single wire fragment.
