@@ -1851,6 +1851,35 @@ function GBL:FinishSending()
     self:AddAuditEntry("Send complete to " .. target
         .. " — " .. sent .. "/" .. total .. " chunks"
         .. ", " .. syncState.sendTotalRecords .. " records, " .. elapsed .. "s")
+
+    -- Close a drain episode that is still open, BEFORE the stats line reads
+    -- maxStall. SendNextChunk's recovery block only fires when bandwidth
+    -- returns, so a send that aborts mid-stall (in production the 120s
+    -- sendHardTimer at ScheduleSendTimeout) leaves the episode open and its
+    -- stall unrecorded. That episode is the longest of the session by
+    -- definition, because it is the one that ended it, so dropping it made
+    -- "longest stall" read 0.0s on exactly the sessions that stalled to death.
+    -- Tagged distinctly from "CTL recovered" so a capture can tell a truncated
+    -- episode (still starved, duration is a lower bound) from a recovered one.
+    if ctlDrain.episodeStart then
+        local openStall = GetTime() - ctlDrain.episodeStart
+        if openStall > ctlDrain.maxStall then
+            ctlDrain.maxStall = openStall
+        end
+        self:SyncInfo("CTL still starved at send end: %d deferrals, %d overlapped,"
+                .. " stall %.1fs and counting, min avail %s%s",
+            ctlDrain.episodeDefers, ctlDrain.overlapCount, openStall,
+            ctlDrain.minAvail and string.format("%.0f", ctlDrain.minAvail) or "?",
+            ctlDrain.episodePaused
+                and " (zone/combat pause overlapped; stall includes dead time)" or "")
+        ctlDrain.episodeStart = nil
+        ctlDrain.episodeDefers = 0
+        ctlDrain.overlapCount = 0
+        ctlDrain.minAvail = nil
+        ctlDrain.minAvailAt = nil
+        ctlDrain.episodePaused = nil
+    end
+
     -- Keep the "Sync stats: " and " CTL deferrals" tokens verbatim; captures
     -- and downstream parsing key on them.
     self:AddAuditEntry("Sync stats: " .. ctlDeferTotal .. " CTL deferrals"

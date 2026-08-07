@@ -4492,6 +4492,48 @@ describe("Sync", function()
                 "expected the extended Sync stats line in FinishSending")
         end)
 
+        it("folds a still-open drain episode into the longest stall", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            _G.ChatThrottleLib = { avail = 100 }
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "ctl_truncated:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            assert.is_not_nil(GBL._ctlDrain.episodeStart, "expected an open episode")
+
+            -- Mode A shape: the send aborts while CTL is still starved (in
+            -- production the 120s sendHardTimer), so SendNextChunk's recovery
+            -- block never runs and the episode is open at FinishSending. That
+            -- episode is the longest of the session by definition, because it
+            -- is the one that ended it.
+            MockWoW.serverTime = MockWoW.serverTime + 12
+            GBL:FinishSending()
+
+            local stats, truncated
+            for _, entry in ipairs(GBL:GetLog("sync")) do
+                if entry.message:find("Sync stats: ", 1, true) then
+                    stats = entry.message
+                end
+                if entry.message:find("CTL still starved at send end", 1, true) then
+                    truncated = entry.message
+                end
+            end
+
+            assert.is_not_nil(stats, "expected a Sync stats line")
+            assert.is_nil(stats:find("longest stall 0.0", 1, true),
+                "a truncated episode must not report a 0.0s longest stall")
+            assert.is_not_nil(truncated,
+                "expected a truncated-episode line naming the open stall")
+            assert.is_not_nil(truncated:find("1 deferrals", 1, true),
+                "truncated line should carry the episode deferral count")
+            assert.is_nil(GBL._ctlDrain.episodeStart,
+                "episode should be closed after FinishSending")
+
+            _G.ChatThrottleLib = nil
+        end)
+
         it("no drain episode when ChatThrottleLib is absent", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
             _G.ChatThrottleLib = nil
