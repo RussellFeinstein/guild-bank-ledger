@@ -78,39 +78,31 @@ luacheck .                 # lint production code
 
 ## Branch Workflow
 
-`main` is the integration target and is GitHub-protected (PR + `test-and-lint` CI required, merge commits only, force-push and deletion blocked). Auto branch deletion on merge is **off**, so topic branches survive their PRs and can be reused.
+`main` is the integration target and is GitHub-protected (PR + `test-and-lint` CI required, merge commits only, force-push and deletion blocked). Auto branch deletion on merge is **on**: `main` is the only permanent branch in this repo, and every other branch is deleted when its PR merges.
 
-### Topic branches (long-lived, per area)
+### Branches
 
-Recurring areas of work live on long-lived branches that accumulate multiple commits and PR to `main` as periodic checkpoints, similar to how an area-owning team would batch updates. Initial set:
+Every branch is single-purpose: cut from the latest `main`, scoped to one PR, deleted when that PR merges. Follow-up work gets a fresh branch. Branch names are never reused.
 
-- `ui` for UI/*.lua (except UI/Accessibility.lua)
-- `sync` for src/Sync.lua, src/Fingerprint.lua, sync diagnostics, audit plumbing
-- `accessibility` for UI/Accessibility.lua and palette / font / keyboard work
-- `layout-sort` for src/BankLayout.lua, src/SortPlanner.lua, src/SortExecutor.lua, UI/LayoutEditor.lua, UI/SortView.lua
-- `restock` for src/Restock.lua, UI/RestockView.lua
-
-Create a topic branch the first time work in that area appears, not preemptively. Add new topic branches when a sixth recurring area emerges.
-
-### Single-purpose branches (frozen after PR closes)
-
-Cross-cutting work, infra changes, and one-off refactors use single-purpose branches off `main`:
-
+- `feat/<thing>` for new features
+- `fix/<thing>` for bug fixes that are not urgent
 - `chore/<thing>` for maintainer chores, repo-config changes, doc-only updates
 - `infra/<thing>` for CI / build / tooling changes
 - `hotfix/<thing>` for urgent production-impact fixes (see Hotfix rule below)
 
-These branches are **frozen** once their PR closes (merged, closed without merge, or declared done by the user). Frozen means no new commits land on the branch; follow-up work goes on a new branch off `main`. Nothing is deleted: the branch and its history are retained both locally and on the remote, and auto-delete-on-merge stays disabled. The user can unfreeze a branch at any point by explicit decision (typically by rebasing onto the current `main` and resuming work). Agents do not unfreeze on their own initiative.
+`feature/` is retired in favour of `feat/`.
 
-See **Branch lifecycle: frozen vs long-lived** in `~/.claude/CLAUDE.md` for the full taxonomy and the agent-side decision rule.
+**No long-lived branches.** From 2026-04-27 to 2026-08-07 this repo ran long-lived per-area topic branches: `ui`, `sync`, `layout-sort`, `restock`, plus an `accessibility` lane that was declared but never created. They worked. They are retired because the global rule now allows a long-lived branch only for release maintenance in a project shipping several versions in parallel, and GBL ships one version at a time to CurseForge. All of them were merged and deleted on 2026-08-07. Do not recreate them, and do not read their absence as an accident.
+
+See **Branch lifecycle: trunk-based, delete after merge** in `~/.claude/CLAUDE.md` for the full rule and the agent-side decision rule.
 
 ### Rules
 
-- **Hotfix rule**: an urgent production-impact fix never goes on a topic branch. Open `hotfix/<thing>` off `main`, PR it, merge, then rebase any affected topic branches onto the new `main`.
-- **Cross-area rule**: when one feature spans two topic branches (e.g. a sync change that needs a UI tab), merge the upstream-of-the-dependency branch first, rebase the dependent branch onto the new `main`, then commit the dependent piece. Never PR both branches simultaneously hoping git resolves the order.
-- **Two-PR-from-same-topic rule**: a topic branch can only have one open PR at a time. If `ui` has a ready batch and unrelated WIP, checkpoint-PR the ready batch first, then continue WIP after the merge + rebase. Splitting WIP off to a temporary `ui-<thing>` is a fallback when the WIP must continue in parallel.
-- **Rebase cadence**: rebase each touched topic branch onto `origin/main` at the start of every working session in that area, and immediately after every merge. `git rebase origin/main` if conflicts are tame; fall back to `git merge origin/main` if not. Push back with `git push --force-with-lease` (allowed on topic branches since they are unprotected).
-- **Version-stamp cadence (covers CHANGELOG and every other version artifact)**: a topic branch stamps every version artifact only when opening the PR, in a dedicated stamp commit. Stacked work on the topic branch leaves all of these untouched and lets `[Unreleased]` accumulate:
+- **Scope check before the first commit of every session**: the checked-out branch is not authorization to commit to it. If the intended work does not match the branch's type and slug, cut a fresh branch from the latest `main`.
+- **Hotfix rule**: an urgent production-impact fix gets its own `hotfix/<thing>` branch off `main` and ships on its own. Never hold one back to bundle it with unrelated work.
+- **Cross-branch rule**: when one feature spans two branches (e.g. a sync change that needs a UI tab), merge the upstream-of-the-dependency branch first, rebase the dependent branch onto the new `main`, then commit the dependent piece. Never PR both simultaneously hoping git resolves the order.
+- **Rebase cadence**: cut from the latest `main`, and rebase an open branch onto `origin/main` after any intervening merge. `git rebase origin/main` if conflicts are tame; fall back to `git merge origin/main` if not. `git push --force-with-lease` is fine on your own unmerged branch.
+- **Version-stamp cadence (covers CHANGELOG and every other version artifact)**: a branch stamps every version artifact only when opening the PR, in a dedicated stamp commit. Work on the branch leaves all of these untouched and lets `[Unreleased]` accumulate:
     - `VERSION` file
     - `GuildBankLedger.toc` `## Version:` field
     - `src/Core.lua` `local VERSION = "..."` constant
@@ -119,11 +111,32 @@ See **Branch lifecycle: frozen vs long-lived** in `~/.claude/CLAUDE.md` for the 
     - This `CLAUDE.md`'s "Current: X.Y.Z" line at the bottom
     - `src/Core.lua` `local DEV_BUILD = ...` constant must be reset to `nil` in the stamp commit. CI rejects any other value via the `Verify DEV_BUILD is nil` workflow step.
 
-  If two branches PR with the same target version, the second to merge rebases onto post-merge `main` and the stamp commit bumps to the next patch. The principle is: one version per PR, one stamp commit per PR, never per-commit churn on these artifacts during stacked work. (This is the project-level instance of the global `~/.claude/CLAUDE.md` "Commit Versioning" carve-out for bundle-and-PR repos.)
-- **Dev-build isolation**: at the start of any topic-branch or single-purpose-branch session that ships protocol-affecting or schema-affecting changes, set `local DEV_BUILD = "<branch>"` in `src/Core.lua`. The runtime `self.version` becomes `X.Y.Z-dev.<branch>` and the existing exact-version-match rejection at `src/Sync.lua` HandleHello refuses to sync with production peers in both directions, including the user's own production-version characters on the same account. The flag is reset to `nil` in the stamp commit (see Version-stamp cadence above). Local `bash run_tests.sh` is intentionally not gated on the flag so dev iteration keeps working; CI is the enforcement boundary, and `scripts/hooks/pre-push` is the local-clone fast-fail (activate once per clone with `git config core.hooksPath scripts/hooks`).
-- **CI cadence**: `.github/workflows/ci.yml` runs on `pull_request` and `push: main` only. Intermediate commits on a topic branch are unverified by CI. Run `bash run_tests.sh` and `bash run_tests.sh --lint` locally before each commit so topic branches stay green.
-- **Stale-branch policy**: if a topic branch has had no commits for 3 months, delete it and recreate fresh from `main` when work resumes. Long-lived does not mean immortal.
-- **Carve-out from the global "small, focused PRs" rule**: the user's global `~/.claude/CLAUDE.md` "Open Source / Public Repo Workflow" section says "Keep PRs small and focused, one concern per PR." That rule is for external-contributor PRs. For the maintainer's own topic-branch PRs in this repo, multiple related commits per PR is the intended pattern. External contributor PRs still follow the small-and-focused rule.
+  `spec/ui/changelog_spec.lua` asserts that `CHANGELOG_DATA[1]`'s version matches the addon version, so a half-landed stamp fails the suite instead of shipping. If two branches PR with the same target version, the second to merge rebases onto post-merge `main` and its stamp commit bumps to the next patch. The principle is: one version per PR, one stamp commit per PR, never per-commit churn on these artifacts. (This matches the global `~/.claude/CLAUDE.md` "Commit Versioning" standard, which stamps once at PR-open.)
+- **Doc-only PRs take no version and no tag.** The objective test is `.pkgmeta`'s `ignore:` list, which strips `spec`, `docs`, `.busted`, `.luacheckrc`, `.gitignore`, `.claude`, `CLAUDE.md`, `*.md`, `*.sh`, `*.bat`, and `VERSION` from the package. If every file a PR touches appears there, the packaged addon is byte-identical apart from the stamp itself, and there is nothing to release. Stamping one anyway ships a version whose only user-visible content is the announcement of its own existence, and it costs a forced guild-wide sync break (see Release cost below). This narrows the global "every merged PR gets a bump and a tag" rule rather than overturning it: that rule's origin (PR #7) was addon-relevant work shipping untagged, which this test still catches. A PR that touches even one packaged file is a normal release.
+- **Dev-build isolation**: at the start of any branch session that ships protocol-affecting or schema-affecting changes, set `local DEV_BUILD = "<branch>"` in `src/Core.lua`. The runtime `self.version` becomes `X.Y.Z-dev.<branch>` and the existing exact-version-match rejection at `src/Sync.lua` HandleHello refuses to sync with production peers in both directions, including the user's own production-version characters on the same account. The flag is reset to `nil` in the stamp commit (see Version-stamp cadence above). Local `bash run_tests.sh` is intentionally not gated on the flag so dev iteration keeps working; CI is the enforcement boundary, and `scripts/hooks/pre-push` is the local-clone fast-fail (activate once per clone with `git config core.hooksPath scripts/hooks`).
+- **CI cadence**: `.github/workflows/ci.yml` runs on `pull_request` and `push: main` only. Intermediate commits on a branch are unverified by CI. Run `bash run_tests.sh` and `bash run_tests.sh --lint` locally before each commit so the branch stays green.
+- **Carve-out from the global "small, focused PRs" rule**: the user's global `~/.claude/CLAUDE.md` "Open Source / Public Repo Workflow" section says "Keep PRs small and focused, one concern per PR." That rule is for external-contributor PRs. For the maintainer's own PRs in this repo, multiple related commits covering one concern is the intended pattern. External contributor PRs still follow the small-and-focused rule.
+
+### Release cost: why version count matters more here than in most repos
+
+`src/Sync.lua` HandleHello refuses to sync on **any** version difference, patch included:
+
+```lua
+-- Exact version match — refuse sync on any version difference
+if data.version and data.version ~= self.version then
+```
+
+So every release is a forced lockstep guild update, and until every member updates the guild is split into non-communicating islands. That cost is per account rather than per character (SavedVariables here are account-wide, so a player's alts share one install and one version), but it is real and it is paid by other people. Read this before deciding a change is worth a patch bump. The planned `MIN_SYNC_VERSION` range in v0.37.0 is what ends it; until then, prefer bundling over a fast sequence of small releases. For scale, the repo cut 103 tags between 2026-04-07 and 2026-06-24, and the version spread across the guild is the accumulated bill.
+
+### What reaches the public CurseForge channel
+
+`.github/workflows/release.yml` fires only on `push:` of a `v*` tag. `BigWigsMods/packager` derives the release type from the tag name: a tag containing `alpha` or `beta` (case-insensitive) uploads as that channel, anything else uploads as a full release, and an untagged run packages as alpha. Three levers follow, in increasing order of machinery:
+
+1. **Do not tag.** No tag, no workflow run, no CurseForge upload, no GitHub release.
+2. **Tag with `-alpha` or `-beta` in the name.** Still matches the `v*` trigger and still uploads, but CurseForge files it off the default channel so users are not offered it.
+3. **`-d` on the packager.** Skips uploading entirely. More machinery than either of the above and not currently needed.
+
+Recorded as available options, not current practice. The caveat that matters: none of these reduce the lockstep cost above. That is paid by whatever is actually deployed, and this repo is symlinked into AddOns, so the maintainer runs whatever `main` holds regardless of what CurseForge is serving. Channel choice controls guild churn; only version count controls sync fragmentation.
 
 ## Sync subsystem notes
 

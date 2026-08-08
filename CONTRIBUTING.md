@@ -41,7 +41,7 @@ GuildBankLedger is a Lua 5.1 WoW addon tested with [busted](https://lunarmodules
 
 `main` is protected: direct pushes are blocked, merge is gated on CI, and the only merge style is a merge commit (so your commits are preserved on `main` with your authorship).
 
-**Maintainer note**: the repo uses long-lived per-area topic branches (`ui`, `sync`, `accessibility`, `layout-sort`) for recurring work, alongside single-purpose `chore/*`, `infra/*`, and `hotfix/*` branches that are frozen once their PR closes (no new commits land on them; follow-up work goes on a new branch off `main`). See the **Branch Workflow** section in [CLAUDE.md](CLAUDE.md) for the full set of rules (rebase cadence, hotfix path, cross-area sequencing, CHANGELOG conflict policy, freeze contract). External contributors don't need to think about this; just branch from `main` and open a PR as described above.
+**Maintainer note**: `main` is the only permanent branch. Maintainer work goes on single-purpose, type-prefixed branches (`feat/`, `fix/`, `chore/`, `infra/`, `hotfix/`), one PR each, deleted automatically when the PR merges. See the **Branch Workflow** section in [CLAUDE.md](CLAUDE.md) for the full set of rules (rebase cadence, hotfix path, cross-branch sequencing, version-stamp cadence). External contributors don't need to think about this; just branch from `main` and open a PR as described above.
 
 ## Commit message format
 
@@ -121,7 +121,7 @@ These come up in ~every sync / bank interaction PR:
 2. CI runs (`busted` + `luacheck`). Iterate until green.
 3. The maintainer will review. For most PRs this is a day or two, faster for small fixes.
 4. On approval, the maintainer merges with a merge commit (your commits stay intact on `main` with your authorship). If you're not bumping versions / CHANGELOG, a follow-up bookkeeping commit handles that.
-5. External contributor branches (forks) are untouched on merge. Short-lived maintainer branches (`chore/*`, `infra/*`, `hotfix/*`) can be deleted manually after merge. The long-lived topic branches (`ui`, `sync`, `accessibility`, `layout-sort`) are kept on the remote and reused across sessions, so they are not deleted on merge.
+5. External contributor branches (forks) are untouched on merge. Maintainer branches are deleted automatically when the PR merges; the commits live on `main` and the PR record keeps the history.
 
 Maintainer note: if CI is flaky in a way that cannot be fixed inside the PR (e.g., GitHub Actions outage), the `main-protection` ruleset can be temporarily disabled from **Settings → Rules → Rulesets**. Re-enable immediately after.
 
