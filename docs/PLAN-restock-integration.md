@@ -26,8 +26,10 @@ profiles, so the whole guild stocks to the same numbers.
 
 ## Locked decisions
 
-- **Merge, not tandem.** Work lives on a long-lived topic branch `restock` off `main` (a fifth area
-  alongside `ui`, `sync`, `accessibility`, `layout-sort`).
+- **Merge, not tandem.** Restock ships inside GBL rather than as a separate addon. Work originally
+  lived on a long-lived topic branch `restock`; that model was retired on 2026-08-07, so the
+  remaining milestones ship on single-purpose branches cut fresh from `main`. See **Branch
+  Workflow** in `CLAUDE.md`.
 - **Target formula (Option C):** per-item guild target = `max(layoutDemand(itemID), reserve(itemID))`,
   keyed by itemID, guild-wide. `toBuy = max(0, target - stock)`. Layout demand is the sum of
   `slots * perSlot` over display tabs.
@@ -48,15 +50,19 @@ profiles, so the whole guild stocks to the same numbers.
 
 ## Branch and versioning model
 
-`restock` is a long-lived topic branch. Each version below is one checkpoint PR from `restock` to
-`main` with a single stamp commit at PR-open (the bundle-and-PR rule): bump `VERSION`, the `.toc`
-`## Version` field, the `src/Core.lua` `VERSION` constant, move `CHANGELOG.md` `[Unreleased]` into a
-versioned block, add a `UI/ChangelogView.lua` `CHANGELOG_DATA` entry, and update the `CLAUDE.md`
-`Current:` line. `src/Core.lua` `DEV_BUILD` is set to `"restock"` during development and reset to
-`nil` in the stamp commit (CI enforces nil on merge to main; a local `scripts/hooks/pre-push` hook
-mirrors the check). Rebase onto `origin/main` at the start of each session and after each merge. Run
-`bash run_tests.sh` and `bash run_tests.sh --lint` before every commit (topic branches are not
-CI-verified between PRs).
+Each milestone below ships on its own single-purpose branch cut fresh from `main`, as one PR with a
+single stamp commit at PR-open: bump `VERSION`, the `.toc` `## Version` field, the `src/Core.lua`
+`VERSION` constant, move `CHANGELOG.md` `[Unreleased]` into a versioned block, add a
+`UI/ChangelogView.lua` `CHANGELOG_DATA` entry, and update the `CLAUDE.md` `Current:` line.
+`src/Core.lua` `DEV_BUILD` is set during development and reset to `nil` in the stamp commit (CI
+enforces nil on merge to main; a local `scripts/hooks/pre-push` hook mirrors the check). Run
+`bash run_tests.sh` and `bash run_tests.sh --lint` before every commit, since CI does not verify
+intermediate commits on a branch.
+
+The version numbers in the roadmap table below are stale. v0.36.0 shipped on 2026-08-07 as the
+diagnostic-capture release, and v0.37.0 is reserved for cross-version sync, so Bulk mode and TSM
+price preview both need renumbering when they are picked up. Treat the table's ordering as
+authoritative and its version column as historical.
 
 ## Ordered roadmap
 
