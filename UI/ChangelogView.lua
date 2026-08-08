@@ -29,6 +29,20 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.36.0
+    {"0.36.0", "2026-07-02", {
+        Added = {
+            "Diagnostic logs now persist across reloads, saved to a separate saved variable so you can hand troubleshooting data to the developer after the fact instead of copying chat mid-session. Capped per channel and rotated (10 sessions kept). Nothing is ever sent anywhere; sharing a capture stays a manual step. Manage with /gbl audit on|off|status|clear.",
+            "Sync bandwidth stalls are measured in detail: each stall logs a 'CTL recovered' summary and the end-of-send stats line adds overlapped-timer and longest-stall counts. A sync that gives up while bandwidth is still starved records that last stall too, on its own 'CTL still starved at send end' line, so the longest-stall figure counts the stall that ended the sync rather than reporting zero for it. Measurement only; these numbers decide the shape of the stall fix.",
+        },
+        Changed = {
+            "The bank layout serve line in the sync log records at INFO instead of DEBUG, so the payload size shows up in normal diagnostics.",
+        },
+        Fixed = {
+            "README described sync chunking as 15 records per chunk; the shipped values since 0.28.7 are 4 records in a 900-byte budget.",
+        },
+    }},
+
     -- v0.35.0
     {"0.35.0", "2026-06-24", {
         Added = {

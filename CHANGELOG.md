@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-07-02
+
+### Added
+- Diagnostic logs now persist across reloads. Sync, sort, and system log entries are saved to a new saved variable (GuildBankLedgerAuditDB) so you can hand troubleshooting data to the developer after the fact instead of copying chat mid-session. Each session is stamped with the addon and sync protocol version, capped per channel, and rotates out oldest-first (10 sessions kept). Nothing is ever sent anywhere: sharing a capture stays a manual step, and a future opt-in uploader will ask first. Manage with the new `/gbl audit on|off|status|clear` command (`off` is the kill switch, `clear` wipes all captures on the account).
+
+### Changed
+- The bank layout serve line in the sync log now records at INFO instead of DEBUG, so the payload size shows up in normal diagnostics without turning debug mode on. The size is the early warning for a layout growing past the whisper ceiling.
+- Sync bandwidth stalls are now measured in detail. Each stall episode logs a "CTL recovered" summary (deferral count, overlapping retry timers, stall length, lowest bandwidth seen, recovery rate) and the end-of-send stats line adds overlapped-timer and longest-stall counts. A sync that gives up while bandwidth is still starved records that last stall too, on its own "CTL still starved at send end" line, so the longest-stall figure counts the stall that ended the sync instead of reporting zero for it. Measurement only, no behavior change: these numbers decide whether the long-standing stall fix should target duplicate retry timers or slower retries.
+
+### Fixed
+- README described sync chunking as 15 records per chunk; the shipped values since 0.28.7 are 4 records within a 900-byte budget, sized to fit a single wire fragment.
+
 ## [0.35.0] - 2026-06-24
 
 ### Added

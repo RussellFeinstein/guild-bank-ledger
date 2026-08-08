@@ -18,8 +18,8 @@ Persistent guild bank transaction logging for World of Warcraft. WoW's built-in 
 - **Transaction list** — Scrolling list with sortable columns: Timestamp, Player, Action, Item, Count, Category, Tab
 - **Filter bar** — Search by player/item, filter by date range, category, transaction type, tab, with reset button
 - **Consumption view** — Guild-wide overview dashboard with guild totals (items + gold in/out/net), top 10 consumers (flat ranked table with gold breakdown), and top 15 most used items (withdrawal counts with 7d/30d/all trend columns). Click player to jump to filtered Transactions tab
-- **Guild-wide sync**: AceComm-based sync. Guild members running the addon have their data merged automatically with no duplicates. Fingerprint-based delta sync, LibDeflate compression, chunked transfer (15 records/chunk), retry logic with NACK, FPS-adaptive throttling, zone change protection, peer tracking, per-channel session logs (sync, sort, system) with severity levels, surfaced via `/gbl synclog`, `/gbl sortlog`, and `/gbl logs`
-- **Sync tab**: Enable/disable sync, view online peers with version and directional status (newer/outdated), GM access control configuration. Sync diagnostics surface on demand via `/gbl synclog` or the master log via `/gbl logs`
+- **Guild-wide sync**: AceComm-based sync. Guild members running the addon have their data merged automatically with no duplicates. Fingerprint-based delta sync, LibDeflate compression, chunked transfer (4 records / 900-byte chunks, sized to fit a single wire fragment), retry logic with NACK, FPS-adaptive throttling, zone change protection, peer tracking, per-channel session logs (sync, sort, system) with severity levels, surfaced via `/gbl synclog`, `/gbl sortlog`, and `/gbl logs`
+- **Sync tab**: Enable/disable sync, view online peers with version and directional status (newer/outdated), GM access control configuration. Sync diagnostics surface on demand via `/gbl synclog` or the master log via `/gbl logs`. Diagnostic logs also persist to SavedVariables across reloads (capped and rotated, 10 sessions, never bank contents), so members can hand over troubleshooting data instead of copying chat; manage with `/gbl audit`. Nothing is ever sent anywhere automatically; sharing a capture stays a manual, deliberate step
 - **Changelog tab** — Embedded version history with paginated display (10 versions per page), color-coded sections
 - **About tab** — Addon info, author credit, copyable Ko-fi and CurseForge links, library credits
 - **Version label** — Addon version displayed in the top-right corner; turns orange with "update available" when a peer has a newer version
@@ -78,6 +78,7 @@ Auctionator is an optional dependency. With it installed, the Restock tab can se
 | `/gbl logs dump [N]` | Dump the last N master entries to chat (default 50) |
 | `/gbl logs clear sync\|sort\|system\|all` | Truncate a channel |
 | `/gbl logs debug sync\|sort\|system on\|off` | Toggle per-channel DEBUG-to-chat mirroring |
+| `/gbl audit on\|off\|status\|clear` | Manage persistent log capture (on by default; off is the kill switch; clear wipes the whole account's captures) |
 | `/gbl help` | Show available commands |
 
 Scanning happens automatically when you open the guild bank. Results are saved per-guild in `SavedVariables/GuildBankLedgerDB.lua`.

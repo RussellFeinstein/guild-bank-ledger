@@ -4381,6 +4381,175 @@ describe("Sync", function()
             _G.ChatThrottleLib = nil
         end)
 
+        it("records a drain sample and opens an episode on deferral", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            _G.ChatThrottleLib = { avail = 100 }
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "ctl_sample:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            local drain = GBL._ctlDrain
+            assert.is_true(#drain.samples >= 1, "expected a drain sample")
+            local s = drain.samples[#drain.samples]
+            assert.equals(100, s.avail)
+            assert.is_true(s.threshold >= 400)
+            assert.is_not_nil(drain.episodeStart, "expected an open episode")
+            assert.equals(1, drain.episodeDefers)
+            assert.equals(100, drain.minAvail)
+
+            _G.ChatThrottleLib = nil
+        end)
+
+        it("counts overlapping deferral timers without dedup'ing them", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            _G.ChatThrottleLib = { avail = 100 }
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "ctl_overlap:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            local drain = GBL._ctlDrain
+            local pendingAfterFirst = drain.timersPending
+            assert.is_true(pendingAfterFirst >= 1)
+            local timersBefore = #MockWoW.pendingTimers
+
+            -- A second caller invokes SendNextChunk while the first deferral
+            -- timer is still pending: the overlap is COUNTED and the second
+            -- timer is STILL scheduled (measurement only, no dedup). Exactly
+            -- one new timer is expected because the CTL defer path returns
+            -- before any other C_Timer.After site (StartFpsMonitor is an
+            -- OnUpdate frame, not a timer).
+            GBL:SendNextChunk()
+            assert.equals(pendingAfterFirst + 1, drain.timersPending)
+            assert.is_true(drain.overlapCount >= 1)
+            assert.is_true(drain.overlapTotal >= 1)
+            assert.equals(timersBefore + 1, #MockWoW.pendingTimers,
+                "second deferral timer must still be scheduled")
+
+            _G.ChatThrottleLib = nil
+        end)
+
+        it("emits a CTL recovered summary when bandwidth returns", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            _G.ChatThrottleLib = { avail = 100 }
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "ctl_recover:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            assert.is_not_nil(GBL._ctlDrain.episodeStart)
+
+            -- Bandwidth returns; the pending deferral timer re-enters
+            -- SendNextChunk, which should summarize and close the episode.
+            -- Relies on MockAce dispatching send callbacks synchronously, so
+            -- the episode-close code runs inside this single fireTimers()
+            -- (which snapshots pendingTimers and cannot cascade).
+            _G.ChatThrottleLib.avail = 4000
+            MockWoW.fireTimers()
+
+            local found = false
+            for _, entry in ipairs(GBL:GetLog("sync")) do
+                if entry.message:find("CTL recovered", 1, true) then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found, "expected a CTL recovered summary line")
+            assert.is_nil(GBL._ctlDrain.episodeStart, "episode should be closed")
+
+            _G.ChatThrottleLib = nil
+        end)
+
+        it("Sync stats line carries overlapped timers and longest stall", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "ctl_stats:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleAck("OfficerB", { chunk = 1 })
+            MockWoW.fireTimers()
+
+            local found = false
+            for _, entry in ipairs(GBL:GetLog("sync")) do
+                -- Assert the VALUES for the no-CTL case, not just the field
+                -- names, so a misplaced counter reset cannot pass unnoticed.
+                if entry.message:find("Sync stats: ", 1, true)
+                    and entry.message:find("0 overlapped timers", 1, true)
+                    and entry.message:find("longest stall 0.0", 1, true) then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found,
+                "expected the extended Sync stats line in FinishSending")
+        end)
+
+        it("folds a still-open drain episode into the longest stall", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            _G.ChatThrottleLib = { avail = 100 }
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "ctl_truncated:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            assert.is_not_nil(GBL._ctlDrain.episodeStart, "expected an open episode")
+
+            -- Mode A shape: the send aborts while CTL is still starved (in
+            -- production the 120s sendHardTimer), so SendNextChunk's recovery
+            -- block never runs and the episode is open at FinishSending. That
+            -- episode is the longest of the session by definition, because it
+            -- is the one that ended it.
+            MockWoW.serverTime = MockWoW.serverTime + 12
+            GBL:FinishSending()
+
+            local stats, truncated
+            for _, entry in ipairs(GBL:GetLog("sync")) do
+                if entry.message:find("Sync stats: ", 1, true) then
+                    stats = entry.message
+                end
+                if entry.message:find("CTL still starved at send end", 1, true) then
+                    truncated = entry.message
+                end
+            end
+
+            assert.is_not_nil(stats, "expected a Sync stats line")
+            assert.is_nil(stats:find("longest stall 0.0", 1, true),
+                "a truncated episode must not report a 0.0s longest stall")
+            assert.is_not_nil(truncated,
+                "expected a truncated-episode line naming the open stall")
+            assert.is_not_nil(truncated:find("1 deferrals", 1, true),
+                "truncated line should carry the episode deferral count")
+            assert.is_nil(GBL._ctlDrain.episodeStart,
+                "episode should be closed after FinishSending")
+
+            _G.ChatThrottleLib = nil
+        end)
+
+        it("no drain episode when ChatThrottleLib is absent", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            _G.ChatThrottleLib = nil
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "ctl_absent:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+            assert.is_nil(GBL._ctlDrain.episodeStart)
+            -- Only the session boundary marker lands; no deferral samples.
+            assert.equals(1, #GBL._ctlDrain.samples)
+            assert.equals("session", GBL._ctlDrain.samples[1].marker)
+        end)
+
         it("Sending chunk entry includes CTLq= when CTL.Prio is present", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
             _G.ChatThrottleLib = {
@@ -6593,6 +6762,24 @@ describe("Sync", function()
             MockAce.sentCommMessages = {}
             GBL:HandleLayoutRequest("Requester", {})
             assert.equals(0, #sentOfType("LAYOUT_DATA"))
+        end)
+
+        it("records the serve size in the sync log without debug mode", function()
+            -- Regression: the serve line was SyncDebug, which drops entirely
+            -- when debugChat is off, so captures never saw the payload size.
+            guildData.bankLayout = layoutStore(5000)
+            GBL.db.profile.sync.debugChat = false
+            GBL:ClearLog("sync")
+            MockAce.sentCommMessages = {}
+            GBL:HandleLayoutRequest("Requester", {})
+            local found = false
+            for _, entry in ipairs(GBL:GetLog("sync")) do
+                if entry.message:find("Serving bank layout", 1, true) then
+                    found = true
+                    break
+                end
+            end
+            assert.is_true(found, "expected the layout serve size line at INFO")
         end)
 
         it("forces a HELLO advertising the new cursor when a layout is saved", function()

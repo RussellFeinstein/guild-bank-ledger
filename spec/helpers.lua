@@ -58,6 +58,13 @@ function Helpers.resetAll()
     MockWoW.reset()
     MockAce.reset()
 
+    -- Production-code global SavedVariable; mock reinstall does not clear it.
+    _G.GuildBankLedgerAuditDB = nil
+
+    -- Tests that fail mid-body skip their trailing cleanup, so a leaked CTL
+    -- stub would silently flip HasSyncBandwidth for every later test.
+    _G.ChatThrottleLib = nil
+
     -- Clear any previously loaded addon modules
     package.loaded["Core"] = nil
     package.loaded["Logger"] = nil
@@ -105,6 +112,7 @@ function Helpers.loadAddon()
     package.loaded["Sync"] = nil
     dofile("src/Core.lua")
     dofile("src/Logger.lua")
+    safeDofile("src/AuditCapture.lua")
     dofile("src/Scanner.lua")
     safeDofile("src/Categories.lua")
     safeDofile("src/ChatFilters.lua")

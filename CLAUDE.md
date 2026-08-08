@@ -14,6 +14,7 @@ The May 2026 honest-status sweep discovered that `UI/Accessibility.lua` had defi
 
 - **src/Core.lua** — AceAddon bootstrap, lifecycle, slash commands, bank open/close detection
 - **src/Logger.lua**: Per-channel session log. Sync cap 2000, sort cap 3000, system cap 500. Severity levels DEBUG/INFO/WARN/ERROR; printf format with `pcall(string.format)` fallback so a bad format string never crashes. INFO/WARN/ERROR always record; DEBUG drops unless `db.profile.<channel>.debugChat` is on. Public API: `GBL:LogSync/LogSort/LogSystem(level, fmt, ...)` plus convenience wrappers (`SyncInfo`, `SortWarn`, etc.), `GetLog(channel)`, `GetMasterLog(opts)`, `ClearLog(channel)`. Surfaced on demand via `/gbl synclog`, `/gbl sortlog`, `/gbl logs` (master, interleaved by timestamp).
+- **src/AuditCapture.lua** — Persistent capture of Logger entries into the `GuildBankLedgerAuditDB` SavedVariable (raw account-wide global, deliberately NOT AceDB; see Conventions). Taps Logger's `emit()` via `GBL:CaptureAuditEntry(channel, entry)`; captures INFO/WARN/ERROR from all three channels (never DEBUG) into lazily-created per-login sessions with version-stamped headers (`addonVersion` incl. dev suffix, `protocolVersion`, player/realm/guild), per-channel caps (sync 1000 / sort 1500 / system 300, oldest-out with `dropped` counters), 10-session rotation. ON by default (`db.profile.sync.auditCapture`; recording locally is not a privacy event, the opt-in boundary is the unbuilt uploader, see docs/PLAN-audit-log-upload.md); `/gbl audit on|off|status|clear` manages it (`off` = kill switch, `clear` wipes the whole account's captures). The capture path self-heals a malformed SavedVariable shape rather than throwing, because an error would unwind Logger's `emit()` and break the caller being observed.
 - **src/Scanner.lua** — Guild bank slot scanning (inventory snapshots)
 - **src/Categories.lua** — Item classification via WoW classID/subclassID
 - **src/Dedup.lua** — Deduplication engine (occurrence-based hashing, fuzzy matching, event count metadata, count-based cleanup)
@@ -71,7 +72,7 @@ luacheck .                 # lint production code
 - Timestamps: always `GetServerTime()`, never `time()`
 - Item IDs: use `C_Item.GetItemInfoInstant()` for classID/subclassID
 - Guard `Enum.PlayerInteractionType.GuildBanker` existence for Classic compat
-- Saved variables: `GuildBankLedgerDB` (AceDB), data keyed per guild name
+- Saved variables: `GuildBankLedgerDB` (AceDB), data keyed per guild name. Deliberate exception: `GuildBankLedgerAuditDB` (src/AuditCapture.lua) is a raw account-wide global, NOT AceDB and NOT guild-keyed — it is an append-only diagnostic capture store whose collection unit is the account's SavedVariables file; sessions carry player/realm/guild in their headers. Do not migrate it into AceDB (a second `AceDB:New` also breaks the `MockAce.dbInstance` single-instance assumption in specs).
 - **Sync is guild-wide** — all members participate in HELLO/sync, not just officers. Officer rank only gates UI visibility (settings, admin features). Never add rank checks to the sync protocol.
 - **Public description sync**: `docs/CURSEFORGE-DESCRIPTION.md` is the source of truth for the CurseForge project page. When user-facing surface changes (slash commands, UI tabs, access control, sync features, planned-feature framing), update it in the same PR. CI emits a `::warning::` annotation on PRs that change feature-surface files (`README.md`, `docs/ROADMAP.md`, `src/**/*.lua`, `UI/**/*.lua`, `GuildBankLedger.toc`) without updating the description; treat it as a checklist prompt, not a blocking gate. Pasting the updated content into the CurseForge web UI is a manual release step until BigWigsMods/packager#187 lands.
 
@@ -193,4 +194,4 @@ Helpers:
 
 ## Version
 
-Current: 0.35.0 (see `VERSION` file)
+Current: 0.36.0 (see `VERSION` file)

@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.35.0"
+local VERSION = "0.36.0"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -139,7 +139,8 @@ local defaults = {
         },
         alerts = { enabled = true, chatNotify = true, soundNotify = true },
         export = { delimiter = ",", includeHeaders = true, dateFormat = "%Y-%m-%d %H:%M" },
-        sync = { enabled = true, autoSync = true, chatLog = false, debugChat = false },
+        sync = { enabled = true, autoSync = true, chatLog = false, debugChat = false,
+                 auditCapture = true },
         sort = { chatLog = false, debugChat = false },
         system = { chatLog = false, debugChat = false },
         filters = { defaultDays = 7, defaultCategory = "ALL" },
@@ -157,6 +158,11 @@ function GBL:OnInitialize()
     self.scanInProgress = false
     self.lastScanTime = 0
     self.version = self:GetSyncVersion()
+
+    -- Persistent diagnostic capture (AuditCapture.lua); needs self.db.
+    if self.InitAuditCapture then
+        self:InitAuditCapture()
+    end
 
     self:RegisterChatCommand("gbl", "HandleSlashCommand")
     self:RegisterChatCommand("guildbankledger", "HandleSlashCommand")
@@ -2299,6 +2305,12 @@ function GBL:HandleSlashCommand(input)
         end
     elseif command == "epoch0" then
         self:DumpEpochZeroRecords()
+    elseif command == "audit" then
+        if self.HandleAuditCommand then
+            self:HandleAuditCommand(rest)
+        else
+            self:Print("AuditCapture module not loaded.")
+        end
     elseif command == "restock" then
         if self.OpenRestockTab then
             self:OpenRestockTab()
@@ -2651,6 +2663,7 @@ function GBL:PrintHelp()
     self:Print("  /gbl logs dump [N]                       - Dump last N master entries to chat")
     self:Print("  /gbl logs clear sync|sort|system|all     - Truncate channel(s)")
     self:Print("  /gbl logs debug sync|sort|system on|off  - Toggle DEBUG-to-chat for a channel")
+    self:Print("  /gbl audit on|off|status|clear           - Persistent log capture (on by default)")
     self:Print("  /gbl help    - Show this help message")
 end
 

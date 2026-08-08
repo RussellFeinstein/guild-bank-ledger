@@ -10,7 +10,7 @@ Goal: opt-in auto-upload of sync audit logs from each consenting guildie to a ma
 
 ## Hard constraints
 
-- **Opt-in only, off by default.** A privacy-first toggle in the addon's About/Sync settings, with a clear one-line description of what gets uploaded and where it goes. Toggling off must immediately stop new uploads.
+- **Opt-in only, off by default (for UPLOADING).** The opt-in boundary is transmission to the maintainer, not local recording. Local capture into SavedVariables is on by default (shipped in phase 1, decision 2026-07-01): the data never leaves the player's machine, so recording locally is not a privacy event, and default-on is what makes captures exist when a problem is reported after the fact. The uploader (phase 2) gets the privacy-first toggle, a clear one-line description of what gets uploaded and where it goes, and off-by-default; toggling off must immediately stop new uploads. A local kill switch (`/gbl audit off`) exists for players who want no persistence at all.
 - **Every log entry tags its source version.** Both addon `VERSION` and sync protocol version (`PROTOCOL_VERSION` at src/Sync.lua:11, exposed as `GBL.SYNC_PROTOCOL_VERSION`) on every record so cross-version corpora are partitionable. Without this tag, mixed-version corpora are unanalyzable.
 - **No PII beyond character/realm names** (already in audit lines today). Do not start uploading bank contents or item lists. Scope is the audit trail, not the ledger.
 - **Bounded volume.** Cap per-day upload size and rotate. A guildie should never see the addon balloon their disk usage or upload bandwidth.
@@ -40,7 +40,7 @@ Recommended starting point: simple HTTP endpoint with a maintainer-issued opt-in
 
 ## Phasing
 
-1. **Addon-side dump only** (no uploader yet). Add `GuildBankLedgerAuditDB` with version-tagged structured entries, `/gbl audit-dump` slash command to flush to file, opt-in toggle wired to whether dumps accumulate at all. Ship this first; it's already useful for manual collection (one structured file instead of chat-frame scraping).
+1. **Addon-side dump only** (no uploader yet). **SHIPPED (v0.36.0, sync branch):** `GuildBankLedgerAuditDB` persists all three Logger channels per session with `addonVersion` + `protocolVersion` stamped on each session header, per-channel caps and 10-session rotation, managed via `/gbl audit on|off|status|clear`. Two deltas from this note's original sketch: capture is on by default (see Hard constraints; the opt-in applies to uploading), and version tags live on the session header rather than every entry (entries within one session cannot differ in version; headers keep the corpus partitionable at a fraction of the bytes).
 2. **Companion uploader prototype** in Python, single-binary via PyInstaller, watching the SavedVariables file and POSTing to a maintainer endpoint. Distribute via the GitHub releases page alongside the addon zip.
 3. **Endpoint + warehouse** — small Cloudflare Worker writing to R2 / a SQLite over HTTP, partitioned by addon version.
 
@@ -53,8 +53,7 @@ Recommended starting point: simple HTTP endpoint with a maintainer-issued opt-in
 ## Critical files (phase 1 only)
 
 - `src/Sync.lua` — every `GBL:AddAuditEntry` call site (defined at line 2184) is the source of records; entries already have `peer`, `outcome`, etc. Stamp `addonVersion` + `protocolVersion` at write time.
-- `src/Core.lua` — register `GuildBankLedgerAuditDB` AceDB, wire the opt-in toggle, register the slash command.
-- `UI/SyncStatus.lua` or `UI/AboutView.lua` — add the opt-in checkbox with the one-line disclosure.
+- `src/Core.lua` — init `GuildBankLedgerAuditDB` (raw global, NOT AceDB; see project CLAUDE.md Conventions), register the slash command. Capture is on by default; the only toggle is the `/gbl audit off` kill switch. No UI checkbox: a checkbox would re-frame local recording as opt-in, and the opt-in belongs to the uploader.
 - `VERSION` / `src/Sync.lua` `PROTOCOL_VERSION` constant — read at runtime for stamping.
 
 ## Testing (phase 1)
@@ -62,4 +61,4 @@ Recommended starting point: simple HTTP endpoint with a maintainer-issued opt-in
 - Unit test that audit entries written with the toggle off do not appear in `GuildBankLedgerAuditDB`.
 - Unit test that every entry written with the toggle on has both `addonVersion` and `protocolVersion` populated.
 - Unit test that the dump rotation/cap behaves correctly at the boundary.
-- Manual: enable opt-in, run a sync session, verify the SavedVariables file contains a structured audit DB with version tags on every entry.
+- Manual: with no setup (capture defaults on), run a sync session, reload, verify the SavedVariables file contains a structured audit DB with version tags on the session headers.
