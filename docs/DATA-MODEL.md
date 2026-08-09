@@ -222,6 +222,79 @@ Two consequences of the current prefix that are worth knowing:
   cannot grow through sync. And #75 repairs the sync-received records that lost `itemID` as part of its
   own sweep. Neither touches these 108, which were all scanned locally.
 
+### One identity namespace, two arrays
+
+Records live in two arrays but identity is pooled. `seenTxHashes` (`src/Dedup.lua:127-130`),
+`eventCounts` (`src/Dedup.lua:405`), the fingerprint accumulator and its buckets
+(`src/Fingerprint.lua:70-76`, `:129-145`) and the `idIndex` that `HandleSyncData` builds
+(`src/Sync.lua:2129-2135`) all walk `transactions` and `moneyTransactions` into one flat structure
+with no namespace tag. `BuildStoredRecordIndex` (`src/Dedup.lua:219-228`) is the only one that
+takes a `storageKey`, so it is the exception rather than the rule.
+
+Nothing about that pooling is wrong on its own, because `buildPrefix` gives items five pipe fields
+and money three, and a player name cannot contain a pipe. Well-formed item and money ids cannot
+collide. It matters only in combination with the `itemID` fallthrough above: a record that reaches
+the money branch by accident lands in a shared namespace rather than an item-only one.
+
+The reachable consequence is in `NormalizeRecordId` (`src/Sync.lua:2071-2095`), which adopts the
+sender's id for a local record it looks up as `idIndex[matchedKey]` and never checks which array
+that record came from. An incoming item record with no `itemID` that prefix-matches a stored money
+record would overwrite that money record's `id`, `_occurrence` and `timestamp`, and then be counted
+as a duplicate and dropped. One event silently loses its identity and another is discarded.
+**Verdict: closed by #68 rather than here.** Its shape check requires exactly one of `itemID` or
+`amount`, and a record that lost its `itemID` has neither, so it is rejected at intake and never
+reaches this path. Recorded because the hazard is in the receive path, not in #68's stated subject,
+and its test list should cover it.
+
+### The type string is identity, and normalized only on the local path
+
+`type` is the first field of both prefixes. The money log is the one place where the API disagrees
+with itself: `GetGuildBankMoneyTransaction` returns `"withdrawal"` where `GetGuildBankTransaction`
+returns `"withdraw"` for the same user action. `CreateMoneyTxRecord` rewrites it
+(`src/Ledger.lua:133`), before `ComputeTxHash` runs, so `"withdraw"` is what goes into every money
+id ever stored.
+
+**Verdict: correct as it stands, and not cosmetic.** The differing record shapes do not make the
+string cosmetic, because nothing downstream reads the shape before reading the type. Every consumer
+matches the stored string exactly and not one of them accepts both spellings: player stats
+(`src/Ledger.lua:229`, `:238`), daily summaries (`src/Storage.lua:101`, `:111`), six sites in
+`UI/ConsumptionView.lua` (`:92`, `:101`, `:118`, `:192`, `:356`, `:420`), both type dropdowns
+(`UI/UI.lua:623`, `:1441`), and the filter equality test (`UI/FilterBar.lua:105`). An
+un-normalized record therefore contributes 0 to every money total, matches no filter, and is
+deleted at day 30 by compaction with nothing folded into the summary first. That silent zeroing is
+the v0.4.1 bug the normalization fixed, and it is why a spec pins the builder as well as the read
+path (`spec/ledger_spec.lua`).
+
+It also fails accessibility in all three channels at once, which is worth stating separately given
+that triple encoding is a v1.0 gate. `GetTxTypeDisplay` (`UI/Accessibility.lua:218-233`) resolves
+color by comparison, icon by `A11Y.ICONS[txType]` and label by `A11Y.TX_LABELS[txType]`, so an
+unrecognized type falls to `NEUTRAL`, a nil icon and the raw string as its own label. Color, shape
+and text degrade together, which is exactly the failure triple encoding exists to prevent.
+
+Changing any of this is identity affecting. `"withdraw"` is already in every stored money id, so
+un-normalizing would need a migration, a wire-fixture update and a floor raise, and would leave a
+permanent bucket-hash mismatch against un-migrated peers in the meantime: the bucket key is parsed
+from the id's `|<hourSlot>:<occurrence>` suffix (`src/Fingerprint.lua:106-116`), so a type-only
+change moves no record between buckets while changing its hash contribution, and the affected
+bucket re-syncs forever without converging.
+
+Two smaller points follow from the same normalization:
+
+- **It widens the degenerate collision above, but does not cause it.** Before normalization an
+  itemID-less item `withdraw` and a money `withdrawal` differed in their first prefix field.
+  Afterwards they do not. `deposit` was already shared, since both APIs emit it verbatim, so the
+  root cause is the `itemID` fallthrough and not the rewrite.
+- **Sync intake does not normalize.** `reconstructSyncRecord` (`src/Sync.lua:1146-1192`) never
+  inspects the value, and intake checks only that `type` is non-empty (section 8), so a
+  `"withdrawal"` record from a peer would be stored verbatim. No such record exists or can arrive:
+  the census found zero across all 12,310 stored records, no tagged release ever shipped the
+  un-normalized code (the money feature landed in v0.2.0 and the fix in v0.4.1 with no tag between
+  them, the earliest tag in the repo being v0.5.0-alpha), the concurrent money-tab-index bug in the
+  same commit meant money never loaded at all for a guild with fewer than eight tabs, and the exact
+  version match in `HandleHello` rules out a mixed-version peer today. **Verdict: closed by #68's
+  enum check**, which rejects it. Rejection is the right treatment rather than normalizing on
+  intake, because no legitimate sender of that string can exist.
+
 ## 6. Timestamps
 
 `timestamp` is the event time, computed from the relative offsets `GetGuildBankTransaction` returns.
@@ -426,6 +499,8 @@ All under the **Data model integrity** milestone.
 | 3 | Two structures named `peers`, the persisted one write-only | #72 |
 | 4 | No deposit or withdraw record knows its tab | #67 |
 | 5 | Item records with no `itemID` collide in the money branch | #69 (locally scanned, unscheduled), #75 (sync-received) |
+| 5 | `NormalizeRecordId` can rewrite a money record from an item record | #68 |
+| 5 | Sync intake does not normalize the money `type` | #68 |
 | 7 | Nothing stops the `schemaVersion` default being raised | #76 |
 | 8 | Intake accepts corrupted records | #68 |
 | 8 | 223 corrupted records already stored | #75 |

@@ -197,7 +197,10 @@ function Helpers.makeTransaction(txType, name, itemLink, count, tab, destTab, ho
 end
 
 --- Create a mock money transaction log entry.
--- @param txType string "deposit"|"withdraw"|"repair"|"buyTab"|"depositSummary"
+-- These values are what the WoW API hands back, not what gets stored. The API
+-- returns "withdrawal" for money where items say "withdraw"; CreateMoneyTxRecord
+-- normalizes it. Pass "withdrawal" here when a test needs the real API string.
+-- @param txType string "deposit"|"withdrawal"|"repair"|"buyTab"|"depositSummary"
 -- @param name string Player name
 -- @param amount number Copper amount
 -- @param hoursAgo number Hours ago the transaction occurred

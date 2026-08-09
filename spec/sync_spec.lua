@@ -997,7 +997,7 @@ describe("Sync", function()
             -- Each record ~180 bytes estimated (long strings push size)
             for i = 1, 35 do
                 txList[i] = {
-                    type = "withdrawal",
+                    type = "withdraw",
                     player = "Verylongnamecharacter",
                     itemID = 200000 + i,
                     count = 20,
@@ -1005,7 +1005,7 @@ describe("Sync", function()
                     classID = 0,
                     subclassID = 5,
                     timestamp = 1700000000 + i,
-                    id = "withdrawal|Verylongnamecharacter|" .. (200000 + i)
+                    id = "withdraw|Verylongnamecharacter|" .. (200000 + i)
                         .. "|20|3|472222:" .. i,
                 }
             end
@@ -2605,11 +2605,11 @@ describe("Sync", function()
             -- Fill one full chunk with realistic transaction records
             for i = 1, GBL.SYNC_CHUNK_SIZE do
                 table.insert(guildData.transactions, {
-                    type = "withdrawal", player = "Longnamechar",
+                    type = "withdraw", player = "Longnamechar",
                     itemID = 200000 + i, count = 20, tab = 3,
                     timestamp = 1700000000 + i, scanTime = 1700000000 + i,
-                    scannedBy = "Anotherlongname", id = "withdrawal|Longnamechar|" .. (200000 + i) .. "|20|3|472222:" .. i,
-                    classID = 0, subClassID = 5,
+                    scannedBy = "Anotherlongname", id = "withdraw|Longnamechar|" .. (200000 + i) .. "|20|3|472222:" .. i,
+                    classID = 0, subclassID = 5,
                     category = "Trade Goods: Cloth",
                 })
             end
@@ -8313,8 +8313,8 @@ describe("Sync", function()
                 },
                 moneyTransactions = {
                     -- epoch-0 id money record
-                    { type = "withdrawal", player = "P2", amount = 500,
-                      id = "withdrawal|P2|500|0:0", timestamp = 0, scannedBy = "Me-Realm" },
+                    { type = "withdraw", player = "P2", amount = 500,
+                      id = "withdraw|P2|500|0:0", timestamp = 0, scannedBy = "Me-Realm" },
                 },
             }
 
