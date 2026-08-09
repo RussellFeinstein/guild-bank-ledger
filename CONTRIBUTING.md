@@ -11,6 +11,7 @@ Thanks for your interest in contributing! This doc covers how to get set up, wha
 - [Changelog format](#changelog-format)
 - [Tests](#tests)
 - [Code style](#code-style)
+- [Data model](#data-model)
 - [WoW-specific gotchas](#wow-specific-gotchas)
 - [Pull request review process](#pull-request-review-process)
 - [License](#license)
@@ -102,6 +103,15 @@ If you're touching a module that has no existing spec, adding coverage as part o
 - **Item identification**: numeric `classID` / `subclassID` via `C_Item.GetItemInfoInstant()`, never localized strings.
 
 For AI-assisted development (Claude Code, Copilot, etc.), see `CLAUDE.md`. It has more detailed project-specific conventions than this contributor guide.
+
+## Data model
+
+Before changing anything that touches stored records, dedup, or the sync payload, read
+[docs/DATA-MODEL.md](docs/DATA-MODEL.md). It documents what the SavedVariables file actually holds
+rather than what the AceDB defaults declare, and the two differ in ways that read as bugs until you
+have traced them. It covers record identity and why the dedup prefix is hard to change, the
+`schemaVersion` migration ladder, the `peers` name collision between the persisted and runtime
+tables, and what sync intake validation does and does not guarantee.
 
 ## WoW-specific gotchas
 
