@@ -212,9 +212,15 @@ Two consequences of the current prefix that are worth knowing:
   affecting and therefore floor-bound.
 - An item record with no `itemID` falls through to the **money** branch, so its prefix is
   `type|player|0|` and it collides with every other such record from the same player, type and hour.
-  108 records on the live file are in this state. Issue #69 traces the cause on the scan side; #75
-  handles the records already stored. The same shape arriving over the wire is rejected by #68's shape
-  discriminator, which requires exactly one of `itemID` or `amount`.
+  108 records on the live file are in this state. **Issue #69 owns both halves**, the scan-side cause
+  and the 108 already stored, and it is deliberately unscheduled: the remedy depends on the cause, and
+  if a cold item cache turns out to be it then a deferred re-read is right and deleting them would be
+  wrong. Not in the Data model integrity milestone, so it does not block v1.0.
+
+  Two things limit the damage while it waits. The same shape arriving over the wire is rejected by
+  #68's shape discriminator, which requires exactly one of `itemID` or `amount`, so the population
+  cannot grow through sync. And #75 repairs the sync-received records that lost `itemID` as part of its
+  own sweep. Neither touches these 108, which were all scanned locally.
 
 ## 6. Timestamps
 
@@ -390,9 +396,12 @@ section 7, and the suite cannot check any of it. Issue #77.
 One is left. The other two are answered, recorded here with their answers so they are not reopened
 from scratch.
 
-**Still open: why 105 locally scanned records carry an empty `itemLink`.** A cold item-info cache at
-scan time is the leading candidate, which would make a deferred re-read the right remedy rather than
-skipping what are real transactions. Untraced, and worth tracing before choosing. Issue #69.
+**Still open, and deliberately unscheduled: why 105 locally scanned records carry an empty
+`itemLink`.** A cold item-info cache at scan time is the leading candidate, which would make a deferred
+re-read the right remedy rather than skipping what are real transactions. Untraced, and worth tracing
+before choosing, so it wants a capture rather than a fix. Issue #69, outside the milestone. The
+population cannot grow through sync (#68 rejects the shape at intake), which is what makes leaving it
+safe.
 
 **Answered: the tab on deposits and withdrawals.** Recorded going forward by #67, riding the floor
 release because it is identity affecting. Old records cannot be back-filled: their true tab was never
@@ -416,7 +425,7 @@ All under the **Data model integrity** milestone.
 | 2 | `eventCounts` written, never declared | #71 |
 | 3 | Two structures named `peers`, the persisted one write-only | #72 |
 | 4 | No deposit or withdraw record knows its tab | #67 |
-| 5 | Item records with no `itemID` collide in the money branch | #69, #75 |
+| 5 | Item records with no `itemID` collide in the money branch | #69 (locally scanned, unscheduled), #75 (sync-received) |
 | 7 | Nothing stops the `schemaVersion` default being raised | #76 |
 | 8 | Intake accepts corrupted records | #68 |
 | 8 | 223 corrupted records already stored | #75 |
