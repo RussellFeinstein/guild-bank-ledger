@@ -111,7 +111,14 @@ Before changing anything that touches stored records, dedup, or the sync payload
 rather than what the AceDB defaults declare, and the two differ in ways that read as bugs until you
 have traced them. It covers record identity and why the dedup prefix is hard to change, the
 `schemaVersion` migration ladder, the `peers` name collision between the persisted and runtime
-tables, and what sync intake validation does and does not guarantee.
+tables, and what sync intake validation does and does not guarantee. Each disagreement it records
+carries a verdict and an issue number; those are collected under the **Data model integrity**
+milestone.
+
+One rule from it is easy to break by accident and worth stating here. **A record arriving over sync
+keeps any field the receiver does not recognize.** That tolerance is the reason adding a field to a
+record costs nothing today. Validating intake against a list of known keys would look like a cleanup
+and would quietly make every future field a breaking change, because older clients would strip it.
 
 ## WoW-specific gotchas
 

@@ -4,13 +4,18 @@ What GuildBankLedger actually stores, as opposed to what the AceDB defaults bloc
 
 The two are not the same, and neither one is readable on its own. The defaults declare keys that
 never reach disk, the record builders assign fields that are nil in practice, and several structures
-are created lazily by code far from the declaration. This document is the reconciliation, written so
-the next person does not have to derive it from the defaults, the builders, eleven migrations and a
-7 MB SavedVariables file at the same time.
+are created lazily by code far from the declaration. This document reconciles them, written so the next
+person does not have to derive it from the defaults, the builders, eleven migrations and a 7 MB
+SavedVariables file at the same time.
 
 Everything below was checked against a live SavedVariables file (12,310 transaction records, 2026-04-07
 to 2026-08-07) as well as against the code. Where the two disagree, the stored data is treated as
-authoritative and the disagreement is written down rather than resolved.
+authoritative.
+
+The first pass wrote the disagreements down without resolving any of them. Each one now carries a
+verdict instead: the issue that closes it, or the reason it is being left alone. They are collected
+under the **Data model integrity** milestone. A disagreement in this document with no verdict is a gap
+in the document, not a gap in the tracker.
 
 ## 1. The two SavedVariables
 
@@ -49,7 +54,7 @@ Thirteen keys reach disk:
 | `playerStats` | `[player] = {withdrawals, deposits, totalWithdrawCount, totalDepositCount, moneyWithdrawn, moneyDeposited, firstSeen, lastSeen}` |
 | `playerRealms` | `[bareName] = realm`, or `false` when the bare name is ambiguous in the roster |
 | `knownPeers` | `[canonical peer key] = {version, txCount, lastSeen}`. Written by `UpdatePeer`, `src/Sync.lua:2472` |
-| `syncState` | `{lastSyncTimestamp, syncVersion, peers}`. See the name collision in section 6 |
+| `syncState` | `{lastSyncTimestamp, syncVersion, peers}`. See the name collision in section 3 |
 | `accessControl` | `{rankThreshold, restrictedMode, configuredBy, configuredAt}` |
 | `sortAccess` | `{rankThreshold, delegates, updatedBy, updatedAt}`. Two-tier sort policy |
 | `bankLayout` | `{version, updatedBy, updatedAt, tabs}`. Tabs keyed by index, items keyed by itemID |
@@ -68,11 +73,17 @@ Seven declared keys are absent from the live file for that reason:
 | Key | Status |
 |---|---|
 | `dailySummaries`, `weeklySummaries` | Tiered-storage compaction never ran. Being retired, issue #62 |
-| `snapshots` | Never written |
-| `teams` | Never written |
+| `snapshots` | Never written by any code path. Remove or annotate as reserved, issue #71 |
+| `teams` | Never written by any code path. Remove or annotate as reserved, issue #71 |
 | `altLinks` | Alt linking is designed but unbuilt, issue #52 |
-| `stockAlerts` | Reserved for planned v1.3.0 low-stock alerts. Comment at `src/Core.lua:94-96`. Do not repurpose |
+| `stockAlerts` | Reserved for the planned low-stock alerts feature. Comment at `src/Core.lua:94-96`. Do not repurpose |
 | `restock` | Guild-local restock settings. Appears on first use |
+
+`stockAlerts` is the model for the other two: a reserved key with a comment naming what reserves it is
+fine, and a reserved key without one is indistinguishable from an oversight. Its own comment does need
+a small correction, which belongs with #71 since that issue is already editing this block: it dates the
+alerts feature to v1.3.0, while `docs/ROADMAP.md` has stock alerts at v1.5.0 and v1.3.0 is alt linking.
+Drop the version from the comment rather than chase it, since the reservation is what matters.
 
 ### `eventCounts` is the reverse case
 
@@ -81,6 +92,13 @@ It is stored on disk but **not** declared in the defaults. It is created lazily 
 `src/Dedup.lua:427`, `:443`), so nothing breaks. The asymmetry worth knowing is that an undeclared
 key is never subject to default-stripping, so `eventCounts` is always written out verbatim while a
 declared-and-empty key never is.
+
+**Verdict: being declared, issue #71.** This is dedup ground truth rather than an incidental cache, so
+the tidy move is the right one. Declaring it changes one observable thing: an empty `eventCounts` stops
+reaching disk, because it starts being default-stripped like every other declared key. Harmless given
+the nil-guards, and recorded here so the next person does not read that absence as a regression. The
+nil-guards stay regardless. Three specs set the key to nil deliberately, and `src/Core.lua:2701-2702`
+guards `next()` rather than nil, which stays load-bearing whatever the defaults say.
 
 ## 3. Two structures share the name `peers`
 
@@ -92,6 +110,17 @@ This is the single easiest thing to get wrong when reading the sync code.
   (`src/Sync.lua:2460`). It is not saved.
 
 The persisted record of what version a peer runs is **`knownPeers`**, not either of the above.
+
+**Verdict: being resolved, issue #72.** The inventory done for that issue turned up something the first
+pass missed: **the persisted table is write-only.** It is written at exactly one site
+(`src/Sync.lua:2335`, in `FinishReceiving`) and its values are read nowhere in `src/`, `UI/` or
+`spec/`. The only other code that touches it is two migrations rewriting its keys
+(`src/Core.lua:1345`, `:1548`), so those migrations canonicalize a table nobody consults. Its sibling
+`syncState.lastSyncTimestamp` is genuinely live by contrast (written `:2333`, read `:1032`, `:2038`,
+`:2644`). So the resolution may be a retirement rather than a rename, which would remove the collision
+outright instead of moving it. The runtime table, for what it is worth, is 25 occurrences across 23
+lines of one file with no persisted state, so renaming that side needs no migration at all. Direction
+is #72's call.
 
 ## 4. Record shapes
 
@@ -117,15 +146,27 @@ the shapes on disk are narrower than the builders suggest.
 | 621 | Item, synced move. 16 keys, no `itemLink` |
 | 614 | Item, synced deposit or withdraw. 12 keys, no `itemLink`, no tab fields |
 | 223 | Item, corrupted on arrival. See section 8 |
-| 108 | Item with no `itemID`, 105 of them with an empty `itemLink`. See section 8 |
+| 108 | Item with no `itemID`, 105 of them with an empty `itemLink`. See sections 5 and 8 |
 
 Three fields behave differently from the rest and account for most of the variation:
 
-- **`tab` is only ever set on `move` records.** `ReadTabTransactions` (`src/Ledger.lua:255`) passes
-  the API's `tab1` return value through to the builder (`:266-269`), and WoW only populates
-  `tab1`/`tab2` for moves. The loop's own `tab` argument, which is the tab actually being read, is
-  never recorded. So no deposit or withdraw record knows which tab it happened in. `destTab` and
-  `destTabName` follow the same rule.
+- **`tab` is only ever set on `move` records.** `GetGuildBankTransaction(tab, i)` takes the tab whose
+  log is being read as its first argument, and returns `tab1`/`tab2` as the move pair, source and
+  destination. A move is the only transaction that spans two tabs, so it is the only one that needs
+  them; a deposit or withdraw happened in the tab already being read, and WoW returns nil for both.
+  `ReadTabTransactions` (`src/Ledger.lua:255`) passes `tab1` through to the builder (`:266-269`), so
+  `record.tab` means "source tab of a move" and is nil on everything else. The tab actually being read
+  is the function's own `tab` parameter, in scope at the call site and never recorded. So no deposit or
+  withdraw record knows which tab it happened in. `destTab` and `destTabName` follow the same rule, and
+  so does **`tabName`**, which `src/Ledger.lua:95` derives from the same nil. `BackfillTabNames` cannot
+  repair it, because there is no tab number to derive a name from.
+
+  **Verdict: being fixed forward, issue #67.** The true tab goes into `record.tab`, which puts it in
+  the identity prefix, so it rides the MIN_SYNC_VERSION floor release (#74) where the compatibility
+  break is already being paid. Two seams come with it and are accepted rather than fixed: old records
+  stay tabless forever, since their true tab was never written anywhere and cannot be recovered, so
+  historical deposits never match a tab filter while new ones do; and one event can briefly appear
+  twice while old-form and new-form ids coexist, bounded by WoW's roughly 25-entry per-tab log window.
 - **`itemLink` and `category` do not cross the wire.** `stripForSync` removes them, and only
   `category` is recomputed on arrival, and only when `itemID` and `classID` are both present
   (`src/Sync.lua:1173`). Money records never get it back. `tabName` and `destTabName` are also
@@ -167,10 +208,13 @@ Two consequences of the current prefix that are worth knowing:
 
 - Because `tab` is nil on deposits and withdrawals, `buildPrefix` coerces it to `0`. Two deposits of
   the same item and count by the same player in the same hour into two different tabs share a prefix
-  and are separated only by occurrence.
+  and are separated only by occurrence. Closed by #67, which is what makes that change identity
+  affecting and therefore floor-bound.
 - An item record with no `itemID` falls through to the **money** branch, so its prefix is
   `type|player|0|` and it collides with every other such record from the same player, type and hour.
-  108 records on the live file are in this state.
+  108 records on the live file are in this state. Issue #69 traces the cause on the scan side; #75
+  handles the records already stored. The same shape arriving over the wire is rejected by #68's shape
+  discriminator, which requires exactly one of `itemID` or `amount`.
 
 ## 6. Timestamps
 
@@ -190,7 +234,16 @@ timestamp as `hourSlot * 3600`, which is the start of the hour rather than the o
 `schemaVersion` defaults to **8** (`src/Core.lua:122`) even though migrations exist through 11. This
 reads as a stale value and it is not one. Do not raise it.
 
-The 9 to 10 and 10 to 11 migrations gate on **strict equality**, not `>=`:
+The reason is AceDB before it is anything about the migration chain. `removeDefaults` strips any scalar
+equal to its default before writing (`Libs/AceDB-3.0/AceDB-3.0.lua:173`), and `copyDefaults` puts
+**the current default** back on load (`:126-127`). So every guild sitting at exactly 8 has no
+`schemaVersion` in its file at all, and takes whatever the defaults block says next login. **The
+default value is the stored value of every guild at that version.** Raising it to 11 does not skip a
+warning, it silently advances all of those guilds to 11 without running migrations 9, 10 or 11, and
+there is no later pass that notices. All three are realm canonicalization, and the loss is permanent.
+
+The migration chain is the second half of the story. The 9 to 10 and 10 to 11 migrations gate on
+**strict equality**, not `>=`:
 
 ```lua
 if not guildData or (guildData.schemaVersion or 0) ~= 9  then return 0 end   -- src/Core.lua:1371
@@ -203,6 +256,15 @@ would let a guild sitting at 8 jump straight to 11 on a session where a later mi
 run first, permanently skipping the intermediate work. Strict equality forces the chain to be walked
 in order, and 8 is its entry point. `GUILD_ROSTER_UPDATE` retriggers `MigrateAllGuilds` once per
 session so a cold-roster short-circuit gets a warm retry without waiting for the next login.
+
+**Verdict: correct as it stands, and being pinned by a test, issue #76.** This is the one disagreement
+in this document that must not be resolved by making the two sides agree. Nothing in the suite fails
+today if someone raises the default in good faith, so the fix is a regression test that asserts the
+value and asserts the gates behaviourally, not a change to either.
+
+Third place the version is written, outside the ladder and worth knowing: `GBL:DeduplicateRecords`
+temporarily sets it to 5 to force the legacy cross-slot pass and restores it afterwards
+(`src/Core.lua:2678-2685`).
 
 ## 8. What validation guarantees, and what it does not
 
@@ -253,25 +315,116 @@ All 223 are item-shaped. No money record is affected, though a corrupted money r
 detected" rather than "none occurred".
 
 The 105 records with an empty `itemLink` (section 4) are a separate and untraced issue: all 105 were
-scanned locally rather than received, so they are not part of the above.
+scanned locally rather than received, so they are not part of the above. Issue #69.
+
+### How much of this is a live problem, and how much is cosmetic
+
+The first pass did not separate the two, and the split matters because it decides what has to be fixed
+and what merely could be. The line is `buildPrefix`, which reads `type`, `player`, `itemID`, `count`
+and `tab` on item records and nothing else (`src/Dedup.lua:39-51`).
+
+**The 195 that lost only `subclassID` still have ids that agree with their fields.** `subclassID` is
+not in the prefix. Same for the 19 that gained a `stamp` key and lost nothing, and the 22 that lost
+nothing at all. These cost a few bytes on re-send and are otherwise inert.
+
+**The roughly 17 with a corrupt or missing `type` are live inconsistency.** Their `buildPrefix` output
+disagrees with the id they carry, so `BuildStoredRecordIndex` (`src/Dedup.lua:219-228`) files them
+under a prefix matching no id, `CountFromRecordIndex` undercounts, and `CleanupWithEventCounts` reasons
+about a group of one. Anything that lost `itemID` is in the same class by a different route: it flips
+to the money branch and collides.
+
+### There is a recovery channel
+
+`record.id` begins with `type` and `player` as its first two pipe-delimited fields, and it was computed
+by a healthy sender before transmission. So a record that lost its `type` can usually get it back from
+its own id. That holds only if `CleanupWithEventCounts` has not already rebuilt the id from the corrupt
+fields (`src/Core.lua:2795-2833` runs whenever it removes anything), which is the first thing to check
+before relying on it.
+
+### The reject counter counts rejections as duplicates
+
+`HandleSyncData` increments `itemDuped` when `reconstructSyncRecord` returns false (`src/Sync.lua:2143`,
+money at `:2169`). No log, no counter, no warning. So total rejection is indistinguishable from perfect
+convergence: the `Redundancy from <peer>` line would read 100% duped, which the decision rule in
+`CLAUDE.md` reads as "the bucket filter is doing most of the work, skip." Every redundancy reading
+taken so far has been inflated by the rejection rate.
+
+**Verdict: split across two issues.** #68 hardens intake going forward: repair before rejection
+(recompute `classID` and `subclassID` from `itemID`, which is where `CreateTxRecord` gets them anyway),
+then reject on three checks (`type` in the enum, exactly one of `itemID` or `amount`, known fields hold
+the right type), plus a real reject counter. #75 repairs what is already stored, using the same repair
+helper and the id recovery channel above, deleting only records whose id is also unusable and taking
+their `seenTxHashes` entries with them.
+
+**Rejected: validating against a key whitelist.** The first pass listed this as the obvious fix and it
+is the wrong one. Unknown keys passing through untouched is what makes the record schema
+forward-extensible: `stripForSync` shallow-copies through `pairs()` and `buildPrefix` reads only fields
+it names, so adding a field is free today. A whitelist would convert every future additive field into a
+compatibility break requiring a floor raise. The garbage keys stay on the record, where nothing reads
+them. Removing the twelve specific observed key names is a different and safe thing, and #75 treats it
+as optional.
 
 ## 9. Numeric keys cross the wire untested
 
 `stockReserves` is `[itemID] = count` and `bankLayout.tabs[].items` is keyed by itemID. Both are sent
-between clients. The spec mock serializer is pass-through (`spec/mock_ace.lua:162` returns
-`"SER:<n>"` and stashes the table), so **no test proves numeric keys survive a real AceSerializer
-round trip**, and no test measures real payload size. Both are verified in-game only.
+between clients. The spec mock serializer is pass-through (`spec/mock_ace.lua:161-176`: `Serialize`
+stashes the table and returns `"SER:<n>"`, `Deserialize` hands the same table object back), so **no
+test proves numeric keys survive a real AceSerializer round trip**, and no test measures real payload
+size. Both are verified in-game only.
 
 `_RestockBuildItemUniverse` and the layout editor already number-coerce their keys, which is a
 symptom of this: a synced layout that arrived string-keyed would otherwise fail to match number-keyed
 stock.
 
+**Verdict: golden wire-contract fixtures, scheduled ahead of the floor release.** They go first
+deliberately, because a characterization test written in the same PR as the change it guards pins the
+post-change shape and guards nothing.
+
+There is a second untested boundary of the same kind, and it is the larger one. `spec/mock_ace.lua`
+models AceDB's read path (`applyDefaults`, `:52-79`) and has no `removeDefaults` at all. Default
+stripping is the mechanism behind every claim in section 2 and behind the schemaVersion result in
+section 7, and the suite cannot check any of it. Issue #77.
+
 ## Open questions
 
-Recorded here so they are not rediscovered from scratch:
+One is left. The other two are answered, recorded here with their answers so they are not reopened
+from scratch.
 
-- Why deposits and withdrawals do not record the tab being read, and what fixing it would cost, given
-  that it moves every affected record id.
-- Whether the key-splicing corruption is a lost AceComm fragment, and whether intake should validate
-  against a key whitelist rather than two non-empty fields.
-- Why 105 locally scanned records carry an empty `itemLink`.
+**Still open: why 105 locally scanned records carry an empty `itemLink`.** A cold item-info cache at
+scan time is the leading candidate, which would make a deferred re-read the right remedy rather than
+skipping what are real transactions. Untraced, and worth tracing before choosing. Issue #69.
+
+**Answered: the tab on deposits and withdrawals.** Recorded going forward by #67, riding the floor
+release because it is identity affecting. Old records cannot be back-filled: their true tab was never
+written anywhere. See section 4 for the two seams that come with it.
+
+**Answered: whether intake should validate against a key whitelist.** No. See section 8. The mechanism
+behind the splicing is still a hypothesis, and deliberately so: the validation in #68 checks the
+outcome rather than the hypothesis, so it is correct whether or not a lost AceComm fragment turns out
+to be the cause. Rejections get logged with the offending key names, so when sync traffic resumes there
+is evidence rather than another archaeology pass.
+
+## Where the disagreements are tracked
+
+All under the **Data model integrity** milestone.
+
+| Section | Disagreement | Issue |
+|---|---|---|
+| 2 | `dailySummaries`, `weeklySummaries` declared, never written | #62 |
+| 2 | `snapshots`, `teams` declared, never written | #71 |
+| 2 | `altLinks` declared, never written | #52 |
+| 2 | `eventCounts` written, never declared | #71 |
+| 3 | Two structures named `peers`, the persisted one write-only | #72 |
+| 4 | No deposit or withdraw record knows its tab | #67 |
+| 5 | Item records with no `itemID` collide in the money branch | #69, #75 |
+| 7 | Nothing stops the `schemaVersion` default being raised | #76 |
+| 8 | Intake accepts corrupted records | #68 |
+| 8 | 223 corrupted records already stored | #75 |
+| 8 | Rejections counted as duplicates | #68 |
+| 9 | Numeric keys and payload size untested across the wire | fixtures release |
+| 9 | AceDB's write path unmodelled in the suite | #77 |
+| - | Per-player category totals declared, never accumulated | #64 |
+
+The compatibility break that several of these ride is #74, and it is the last cheap one: after the
+version floor lands, two peers on different releases will sync, so any later change to `buildPrefix`
+would silently duplicate the guild's dataset unless the floor is raised again.
