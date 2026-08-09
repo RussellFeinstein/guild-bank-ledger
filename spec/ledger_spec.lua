@@ -89,6 +89,26 @@ describe("Ledger", function()
             assert.equals("TestOfficer-TestRealm", rec.scannedBy)
             assert.is_string(rec.id)
         end)
+
+        -- The API returns "withdrawal" for money where items say "withdraw".
+        -- Normalizing at the builder is what lets every downstream consumer
+        -- match one string, and it runs before ComputeTxHash, so the normalized
+        -- form is baked into the record id. Changing either half is identity
+        -- affecting: it rewrites every money id ever stored.
+        it("normalizes 'withdrawal' to 'withdraw' in both type and id", function()
+            local rec = GBL:CreateMoneyTxRecord("withdrawal", "Thrall", 500000, 0, 0, 0, 2)
+
+            assert.equals("withdraw", rec.type)
+            assert.equals("withdraw|Thrall-TestRealm|500000|"
+                .. math.floor((MockWoW.serverTime - 7200) / 3600), rec.id)
+        end)
+
+        it("leaves the other API money types untouched", function()
+            for _, txType in ipairs({ "deposit", "repair", "buyTab", "depositSummary" }) do
+                local rec = GBL:CreateMoneyTxRecord(txType, "Thrall", 1000, 0, 0, 0, 0)
+                assert.equals(txType, rec.type)
+            end
+        end)
     end)
 
     describe("StoreTx", function()
