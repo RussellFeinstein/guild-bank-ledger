@@ -8,7 +8,7 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 - Automatic scanning, transaction recording, item categorization
 - Occurrence-based deduplication with event count metadata
 - Money tracking (deposits, withdrawals, repairs, tab purchases)
-- Per-player statistics, tiered storage with compaction
+- Per-player statistics, tiered storage with compaction (shipped, but compaction has never actually run: issue #62)
 - Periodic re-scan every 5 seconds while the bank is open
 
 **Guild-wide sync** (v0.11.0--v0.30.x):
@@ -68,13 +68,14 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 
 ---
 
-## Current: Beta (v0.34.x)
+## Current: Beta (v0.36.x)
 
 Per-area status:
 
-- **Mature**: recording, categorization, deduplication, tiered storage, schema migrations.
+- **Mature**: recording, categorization, deduplication.
 - **Active** (in guild use, improvements queued): sync (rate limiting and manifest tuning pending), UI (sort/filter polish, pagination layout, window resize), sort + layout (confirmation-speed tuning, the overflow-pack full-stack-merge edge case, layout editor slot visibility, refresh flicker). Restock (new in v0.34.0): layout-driven targets and Auctionator buying are in initial use, with a UI polish pass and the reserve-targets producer queued.
 - **Under audit**: accessibility. Palettes, contrast, triple encoding, and font scaling are wired; keyboard-navigation primitives exist but are not threaded through all UI widgets. An independent audit pass is the next planned milestone and is a v1.0 release gate.
+- **Under audit**: the storage layer. `docs/DATA-MODEL.md` measured the declared schema against a live 12,310-record file and found the defaults block, the record builders and the stored data all disagreeing. Tiered storage is being retired rather than repaired, because compaction has never once run (issue #62). Schema migrations work but nothing pins the entry point of the ladder, and roughly 12% of everything ever received via sync arrived with mangled field names. Tracked under the Data model integrity milestone and a v1.0 release gate.
 
 ---
 
@@ -83,8 +84,9 @@ Per-area status:
 Items below block the v1.0 release.
 
 - **Accessibility audit and keyboard-nav completion**: wire `RegisterFocusable` into every AceGUI widget, hook Tab/Shift+Tab via a key handler, verify focus indicators advance correctly across all tabs and modal dialogs, screen-reader audit, palette validation against WCAG AAA contrast targets. The v0.3.0-v0.32.x infrastructure-without-wiring miss surfaced during the May 2026 doc sweep is the reason this is a release gate, not a Post-1.0 polish item.
+- **Data model integrity** (milestone): converge the declared schema, the record builders and the stored data. Covers sync intake validation and the corrupted records already on disk, the defaults block, the `peers` collision, the tab that deposits and withdrawals never recorded, retiring tiered storage, and the test net that would have caught any of it. Most of it rides the MIN_SYNC_VERSION floor release, which is the last compatibility break this project gets cheaply.
 - **Sync rate limiting**: per-peer bandwidth budgeting layered on top of the current adaptive CTL backoff work.
-- **Performance audit**: SavedVariables size profile, compaction verification, UI debouncing pass on the heavy tabs.
+- **Performance audit**: SavedVariables size profile and a UI debouncing pass on the heavy tabs. Compaction verification came off this list when compaction itself was retired.
 - **Community feedback iteration**: address reports from active guild testers before the production-readiness signal.
 
 ---
@@ -105,7 +107,7 @@ v1.0.0 signals production readiness, not a feature gate. It means:
 
 | Version | Feature | Scope |
 |---------|---------|-------|
-| v1.1.0 | **Analytics dashboard** | Six-section dashboard: headline stats, activity timeline (Tuesday-based WoW weeks via `C_DateAndTime.GetSecondsUntilWeeklyReset()`), category breakdown, gold flow, engagement distribution, item velocity. Consumption tab refocuses to per-player view, renamed "Players." Summary schema bump v8 to v9 with `playerCounts` |
+| v1.1.0 | **Analytics dashboard** | Six-section dashboard: headline stats, activity timeline (Tuesday-based WoW weeks via `C_DateAndTime.GetSecondsUntilWeeklyReset()`), category breakdown, gold flow, engagement distribution, item velocity. Consumption tab refocuses to per-player view, renamed "Players." The planned summary schema bump to v9 with `playerCounts` needs rethinking: it was designed against the daily/weekly summary tables that #62 retires |
 | v1.2.0 | **Teams** | Raid team assignment (up to 4 teams), per-team consumption reports, team settings sync |
 | v1.3.0 | **Alt linking** | Manual alt-main linking + guild note auto-detect, aggregated consumption, team auto-assignment |
 | v1.4.0 | **Stock tab** | Passive view of current bank inventory; per-item quantities and categories; composes with existing BankLayout templates without new sync messages |
