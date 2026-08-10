@@ -1,88 +1,85 @@
---- wire_helpers.lua — loads the REAL AceSerializer and LibDeflate for wire-contract tests.
+--- wire_helpers.lua — loads a REAL AceSerializer for the wire-contract tests.
 --
 -- Every other spec in this suite talks to the pass-through serializer mock in
 -- spec/mock_ace.lua, which stashes a table and returns "SER:<n>", handing the
 -- same table object back on Deserialize. That mock is correct for testing sync
 -- logic and useless for testing the wire: it never encodes anything, so numeric
--- key survival, escaping and payload size have never been exercised
+-- key survival, escaping and payload size had never been exercised
 -- (docs/DATA-MODEL.md section 9).
 --
--- This module loads the vendored Libs/ copies into locals so those properties
--- can be pinned. It deliberately does NOT touch the addon's mixed-in
--- Serialize/Deserialize, and it restores every global it disturbs.
+-- The libraries come from spec/vendor/, not from Libs/. Libs/ is gitignored and
+-- fetched by the packager from .pkgmeta externals, so it exists on a developer
+-- machine and nowhere else; CI has no Libs/ tree. See spec/vendor/README.md.
+--
+-- This module does NOT touch the addon's mixed-in Serialize/Deserialize, and it
+-- restores every global it disturbs.
 --
 -- Loading notes, each one learned the hard way:
---   * require() cannot be used. The module names contain a dot ("AceSerializer-3.0"),
---     which require turns into a path separator. dofile works.
---   * Real LibStub reads _G.LibStub and evaluates `LibStub.minor < 2`. The suite's
---     mock LibStub has no `minor`, so loading the real one on top of it either
---     throws on nil comparison or silently replaces the registry every other spec
---     resolves through. Busted isolates between files, not within one, so the
---     mock has to be stashed and put back.
+--   * require() cannot be used. The module names contain a dot
+--     ("AceSerializer-3.0"), which require turns into a path separator. dofile
+--     works.
+--   * Real LibStub reads _G.LibStub and evaluates `LibStub.minor < 2`. The
+--     suite's mock LibStub has no `minor`, so loading the real one on top of it
+--     either throws on a nil comparison or silently replaces the registry every
+--     other spec resolves through. Busted isolates between files, not within
+--     one, so the mock has to be stashed and put back.
 --   * Real LibStub calls the WoW global strmatch, which no production file in
 --     this addon uses. It gets a temporary shim here rather than a permanent
 --     entry in mock_wow.lua.
---   * LibDeflate ends with a command-line entry point guarded on _G.arg. Blanking
---     arg for the duration keeps it from ever being considered.
 
 local M = {}
 
-local LIB_PATHS = {
-    libstub      = "Libs/LibStub/LibStub.lua",
-    serializer   = "Libs/AceSerializer-3.0/AceSerializer-3.0.lua",
-    deflate      = "Libs/LibDeflate/LibDeflate.lua",
+M.VENDOR_DIR = "spec/vendor/"
+M.LIB_FILES = {
+    libstub = "LibStub.lua",
+    serializer = "AceSerializer-3.0.lua",
 }
 
-local function assertReadable(what, path)
+local function assertReadable(path)
     local fh = io.open(path, "r")
     if not fh then
-        error(("wire_helpers: cannot read %s at %q. Tests must run from the repo root "
-            .. "so the vendored Libs/ tree resolves."):format(what, path), 0)
+        error(("wire_helpers: cannot read %q. Tests must run from the repo root."):format(path), 0)
     end
     fh:close()
 end
 
---- Load the real libraries, leaving the global environment exactly as found.
--- @return table,table AceSerializer instance, LibDeflate instance
-local function loadRealLibs()
-    for what, path in pairs(LIB_PATHS) do
-        assertReadable(what, path)
-    end
+--- Load a real AceSerializer, leaving the global environment exactly as found.
+-- @return table AceSerializer instance
+local function loadSerializer()
+    local libstub = M.VENDOR_DIR .. M.LIB_FILES.libstub
+    local serializer = M.VENDOR_DIR .. M.LIB_FILES.serializer
+    assertReadable(libstub)
+    assertReadable(serializer)
 
     local savedLibStub = _G.LibStub
     local savedStrmatch = _G.strmatch
-    local savedArg = _G.arg
 
-    _G.LibStub = nil                    -- force a fresh registry, do not upgrade the mock
-    _G.strmatch = string.match          -- real LibStub needs it
-    _G.arg = nil                        -- keep LibDeflate's CLI block unreachable
+    _G.LibStub = nil              -- force a fresh registry, do not upgrade the mock
+    _G.strmatch = string.match    -- real LibStub needs it
 
-    local ok, serializer, deflate = pcall(function()
-        dofile(LIB_PATHS.libstub)
-        dofile(LIB_PATHS.serializer)
-        local returned = dofile(LIB_PATHS.deflate)
-        local stub = _G.LibStub
-        return stub("AceSerializer-3.0"), returned or stub("LibDeflate")
+    local ok, lib = pcall(function()
+        dofile(libstub)
+        dofile(serializer)
+        return _G.LibStub("AceSerializer-3.0")
     end)
 
     _G.LibStub = savedLibStub
     _G.strmatch = savedStrmatch
-    _G.arg = savedArg
 
     if not ok then
-        error("wire_helpers: failed to load the vendored libraries: " .. tostring(serializer), 0)
+        error("wire_helpers: failed to load the vendored serializer: " .. tostring(lib), 0)
     end
-    if not serializer or not deflate then
-        error("wire_helpers: libraries loaded but did not register", 0)
+    if not lib then
+        error("wire_helpers: serializer loaded but did not register", 0)
     end
-    return serializer, deflate
+    return lib
 end
 
-local AceSerializer, LibDeflate = loadRealLibs()
+local AceSerializer = loadSerializer()
 
 --- Serialize with the real AceSerializer.
 -- @param value any
--- @return string AceSerializer output (uncompressed, unencoded)
+-- @return string AceSerializer output
 function M.serialize(value)
     return AceSerializer:Serialize(value)
 end
@@ -94,32 +91,23 @@ function M.deserialize(str)
     return AceSerializer:Deserialize(str)
 end
 
---- Full outbound path: serialize, compress, encode for the addon channel.
--- Mirrors compressMessage() in src/Sync.lua.
+--- Serialize then deserialize, raising on failure.
 -- @param value any
--- @return string Bytes as they would be handed to AceComm
-function M.toWire(value)
-    return LibDeflate:EncodeForWoWAddonChannel(
-        LibDeflate:CompressDeflate(AceSerializer:Serialize(value)))
-end
-
---- Full inbound path: decode, decompress, deserialize.
--- @param encoded string Bytes as they would arrive from AceComm
--- @return boolean,any success flag then value (or error string)
-function M.fromWire(encoded)
-    local compressed = LibDeflate:DecodeForWoWAddonChannel(encoded)
-    if not compressed then return false, "decode failed" end
-    local serialized = LibDeflate:DecompressDeflate(compressed)
-    if not serialized then return false, "decompress failed" end
-    return AceSerializer:Deserialize(serialized)
-end
-
---- Deserialize or raise. Fixtures are committed data; a soft failure there is a
--- corrupt fixture, not a case under test.
--- @param encoded string
 -- @return any
-function M.fromWireOrDie(encoded)
-    local ok, value = M.fromWire(encoded)
+function M.roundTrip(value)
+    local ok, back = M.deserialize(M.serialize(value))
+    if not ok then
+        error("wire_helpers: round trip failed: " .. tostring(back), 2)
+    end
+    return back
+end
+
+--- Deserialize or raise. Fixtures are committed data, so a soft failure there is
+-- a corrupt fixture rather than a case under test.
+-- @param serialized string
+-- @return any
+function M.deserializeOrDie(serialized)
+    local ok, value = M.deserialize(serialized)
     if not ok then
         error("wire_helpers: fixture failed to decode: " .. tostring(value), 2)
     end

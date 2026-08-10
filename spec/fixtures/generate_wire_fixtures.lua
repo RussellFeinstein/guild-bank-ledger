@@ -75,19 +75,42 @@ for _, path in ipairs(FIXTURE_FILES) do
                     print(("        serialized = %q,"):format(fresh))
                     problems = problems + 1
                 else
-                    -- Also confirm the full compress + encode path survives.
-                    local wire = Wire.toWire(sourceTable(case))
-                    local rok, rback = Wire.fromWire(wire)
-                    if not rok or not deepEqual(rback, sourceTable(case)) then
-                        print(("!! %s: full wire round trip failed"):format(case.name))
-                        problems = problems + 1
-                    else
-                        print(("ok  %s (%d B serialized, %d B on the wire)")
-                            :format(case.name, #committed, #wire))
-                    end
+                    print(("ok  %s (%d B serialized)"):format(case.name, #committed))
                 end
             end
         end
+    end
+end
+
+-- The tests always run against spec/vendor/, so they are deterministic on any
+-- machine. That leaves one question open: has upstream moved since those copies
+-- were taken? Libs/ is gitignored and only exists where the packager has run, so
+-- when it is present, compare. This is the only place that check can live.
+local function readFile(path)
+    local fh = io.open(path, "rb")
+    if not fh then return nil end
+    local content = fh:read("*a")
+    fh:close()
+    return content
+end
+
+local UPSTREAM = {
+    ["LibStub.lua"] = "Libs/LibStub/LibStub.lua",
+    ["AceSerializer-3.0.lua"] = "Libs/AceSerializer-3.0/AceSerializer-3.0.lua",
+}
+
+print("\n=== vendored libraries vs Libs/ ===")
+for vendored, upstream in pairs(UPSTREAM) do
+    local theirs = readFile(upstream)
+    if not theirs then
+        print(("--  %s: no Libs/ tree here, nothing to compare"):format(vendored))
+    elseif readFile(Wire.VENDOR_DIR .. vendored) == theirs then
+        print(("ok  %s matches %s"):format(vendored, upstream))
+    else
+        print(("!! %s differs from %s. Upstream has moved. Copy it over and run the "
+            .. "full suite: a real behavior change shows up as fixtures that stop decoding.")
+            :format(vendored, upstream))
+        problems = problems + 1
     end
 end
 

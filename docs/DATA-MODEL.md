@@ -449,12 +449,18 @@ The spec mock serializer is pass-through (`spec/mock_ace.lua:161-176`: `Serializ
 and returns `"SER:<n>"`, `Deserialize` hands the same table object back), so for the project's whole
 life no test encoded a byte. Numeric key survival and payload size were in-game claims only.
 
-**Closed in v0.36.1 by golden wire-contract fixtures.** `spec/wire_contract_spec.lua` runs the
-vendored AceSerializer and LibDeflate for real (`spec/wire_helpers.lua` loads them, stashing and
-restoring the mock LibStub registry around the load). `src/Sync.lua` exposes the record codec through
-`_StripForSync`, `_ReconstructSyncRecord` and `_EstimateRecordBytes`, which have no production
-callers and exist only so the format can be pinned. Numeric keys do survive, as numbers, with no
-string-keyed twin.
+**Closed in v0.36.1 by golden wire-contract fixtures.** `spec/wire_contract_spec.lua` runs a real
+AceSerializer (`spec/wire_helpers.lua` loads it, stashing and restoring the mock LibStub registry
+around the load). `src/Sync.lua` exposes the record codec through `_StripForSync`,
+`_ReconstructSyncRecord` and `_EstimateRecordBytes`, which have no production callers and exist only
+so the format can be pinned. Numeric keys do survive, as numbers, with no string-keyed twin.
+
+The library is a committed copy under `spec/vendor/`, not the `Libs/` tree: `Libs/` is gitignored and
+fetched by the packager from `.pkgmeta` externals, so it exists only where the packager has run and
+CI has none. Compression is deliberately out of the harness, since LibDeflate is a byte-exact codec
+this addon neither configures nor extends. Payload size is therefore pinned as serialized bytes,
+which is the figure `estimateRecordBytes` is documented against; the compressed size that governs
+fragment count is measured live as `syncState.lastChunkBytes`.
 
 **The scope named here was too narrow.** This section used to name `stockReserves` and
 `bankLayout.tabs[].items`, both of which ride LAYOUT_DATA, a rare pull. The larger exposure is the
@@ -478,9 +484,10 @@ Two facts the fixtures established that were not previously written down:
   the characters AceSerializer doubles, while pipes and colons, which ids are full of, pass through
   unescaped.
 
-**Scope limit worth knowing.** The fixtures pin the copies in `Libs/`. The packaged zip pulls those
-libraries from upstream at package time per `.pkgmeta` `externals`, so an upstream AceSerializer or
-LibDeflate change is outside what these tests can guarantee.
+**Scope limit worth knowing.** The fixtures pin the copy in `spec/vendor/`. The packaged zip pulls
+its libraries from upstream at package time per `.pkgmeta` `externals`, so an upstream AceSerializer
+change is outside what these tests can guarantee. `spec/fixtures/generate_wire_fixtures.lua` narrows
+that gap by diffing the vendored copy against `Libs/` whenever a developer has one.
 
 ### One dead key found while pinning the builders
 

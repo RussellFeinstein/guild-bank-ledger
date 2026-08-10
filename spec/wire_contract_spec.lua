@@ -1,6 +1,6 @@
 ------------------------------------------------------------------------
 -- spec/wire_contract_spec.lua — pins the sync wire format against the REAL
--- AceSerializer and LibDeflate, not the pass-through mock every other spec uses.
+-- AceSerializer, not the pass-through mock every other spec uses.
 --
 -- Background: docs/DATA-MODEL.md section 9. spec/mock_ace.lua stubs Serialize to
 -- stash a table and hand the same object back, so nothing in this suite has ever
@@ -11,7 +11,14 @@
 -- result rather than a smell. What keeps them honest is that every expectation
 -- in spec/fixtures/wire/ is hand-written from DATA-MODEL.md instead of pasted
 -- from program output, and that each family has a documented mutation that must
--- turn it red (see the plan's mutation table).
+-- turn it red.
+--
+-- Serialization only, no compression. LibDeflate is a pure byte-exact codec this
+-- addon neither configures nor extends, so testing it would test LibDeflate
+-- rather than GuildBankLedger, and it would mean vendoring 3,600 more lines for
+-- the privilege. estimateRecordBytes is documented against AceSerializer output,
+-- and the compressed size that matters at runtime is measured live as
+-- syncState.lastChunkBytes. See spec/vendor/README.md.
 ------------------------------------------------------------------------
 
 local Helpers = require("spec.helpers")
@@ -109,14 +116,14 @@ describe("Wire contract", function()
                 assert.same(case.stripped, decoded)
             end)
 
-            it("survives the full compress and encode path: " .. case.name, function()
-                local ok, decoded = Wire.fromWire(Wire.toWire(case.stripped))
+            it("re-serializes to the same shape: " .. case.name, function()
+                local ok, decoded = Wire.deserialize(Wire.serialize(case.stripped))
                 assert.is_true(ok)
                 assert.same(case.stripped, decoded)
             end)
 
             it("reconstructs: " .. case.name, function()
-                local record = copy(Wire.fromWireOrDie(Wire.toWire(case.stripped)))
+                local record = copy(Wire.roundTrip(case.stripped))
                 local accepted = GBL:_ReconstructSyncRecord(record, "Peer")
 
                 assert.equals(case.accepted, accepted)
@@ -227,8 +234,8 @@ describe("Wire contract", function()
                 assert.same(case.decoded, decoded)
             end)
 
-            it("survives the full compress and encode path: " .. case.name, function()
-                local ok, decoded = Wire.fromWire(Wire.toWire(case.decoded))
+            it("re-serializes to the same shape: " .. case.name, function()
+                local ok, decoded = Wire.deserialize(Wire.serialize(case.decoded))
                 assert.is_true(ok)
                 assert.same(case.decoded, decoded)
             end)
@@ -247,21 +254,21 @@ describe("Wire contract", function()
     --------------------------------------------------------------------
     describe("string escaping", function()
         it("round-trips a guild name containing a space", function()
-            local ok, decoded = Wire.fromWire(Wire.toWire({ guild = "Test Guild" }))
+            local ok, decoded = Wire.deserialize(Wire.serialize({ guild = "Test Guild" }))
             assert.is_true(ok)
             assert.equals("Test Guild", decoded.guild)
         end)
 
         it("round-trips the characters AceSerializer escapes", function()
             local hostile = { s = "a b^c~d\1e" }
-            local ok, decoded = Wire.fromWire(Wire.toWire(hostile))
+            local ok, decoded = Wire.deserialize(Wire.serialize(hostile))
             assert.is_true(ok)
             assert.same(hostile, decoded)
         end)
 
         it("round-trips the pipes and colons record ids are built from", function()
             local id = "withdraw|Speaknglide-Area52|10000000|493216:0"
-            local ok, decoded = Wire.fromWire(Wire.toWire({ id = id }))
+            local ok, decoded = Wire.deserialize(Wire.serialize({ id = id }))
             assert.is_true(ok)
             assert.equals(id, decoded.id)
         end)
@@ -282,7 +289,7 @@ describe("Wire contract", function()
         for _, case in ipairs(ENVELOPE_CASES) do
             if case.numericKeyPaths then
                 it("keeps numeric keys numeric: " .. case.name, function()
-                    local decoded = Wire.fromWireOrDie(Wire.toWire(case.decoded))
+                    local decoded = Wire.roundTrip(case.decoded)
                     for _, path in ipairs(case.numericKeyPaths) do
                         local node = descend(decoded, path)
                         assert.is_table(node, ("path %s missing"):format(table.concat(path, ".")))
@@ -301,7 +308,7 @@ describe("Wire contract", function()
 
             if case.validatesAsLayout then
                 it("still passes BankLayout.Validate after a round trip: " .. case.name, function()
-                    local decoded = Wire.fromWireOrDie(Wire.toWire(case.decoded))
+                    local decoded = Wire.roundTrip(case.decoded)
                     local ok, err = GBL.BankLayout.Validate(decoded.bankLayout)
                     assert.is_true(ok, tostring(err))
                 end)
@@ -332,7 +339,7 @@ describe("Wire contract", function()
             end
             assert.is_true(bucketCount > 0, "fixture records produced no buckets")
 
-            local decoded = Wire.fromWireOrDie(Wire.toWire({ bucketHashes = buckets }))
+            local decoded = Wire.roundTrip({ bucketHashes = buckets })
             assert.same(buckets, decoded.bucketHashes)
 
             -- The property that actually matters: a lookup still lands.
