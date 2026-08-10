@@ -17,8 +17,10 @@
 local Helpers = require("spec.helpers")
 local Wire = require("spec.wire_helpers")
 local MockWoW = Helpers.MockWoW
+local MockAce = Helpers.MockAce
 
 local RECORD_CASES = dofile("spec/fixtures/wire/records.lua")
+local ENVELOPE_CASES = dofile("spec/fixtures/wire/envelopes.lua")
 
 -- The seven fields stripForSync removes, per src/Sync.lua and DATA-MODEL.md
 -- section 4. Hand-written: if the production list changes, this must disagree.
@@ -42,6 +44,43 @@ local function copy(t)
     local out = {}
     for k, v in pairs(t) do out[k] = v end
     return out
+end
+
+local function keySet(t)
+    local keys = {}
+    for k in pairs(t) do keys[#keys + 1] = k end
+    table.sort(keys)
+    return keys
+end
+
+--- Walk a path of keys into a table, e.g. {"bankLayout", "tabs", 1, "items"}.
+local function descend(t, path)
+    local node = t
+    for _, key in ipairs(path) do
+        node = node[key]
+        if node == nil then return nil end
+    end
+    return node
+end
+
+--- Collect every table handed to Serialize while fn runs.
+-- The serializer mock already records them, so nothing needs stubbing.
+local function capturePayloads(fn)
+    local first = MockAce._serializedCounter + 1
+    fn()
+    local out = {}
+    for i = first, MockAce._serializedCounter do
+        local args = MockAce._serialized[i]
+        if args and type(args[1]) == "table" then out[#out + 1] = args[1] end
+    end
+    return out
+end
+
+local function firstOfType(payloads, messageType)
+    for _, payload in ipairs(payloads) do
+        if payload.type == messageType then return payload end
+    end
+    return nil
 end
 
 describe("Wire contract", function()
@@ -175,5 +214,355 @@ describe("Wire contract", function()
                     ("estimate %d is below the real %d bytes"):format(estimated, actual))
             end)
         end
+    end)
+
+    --------------------------------------------------------------------
+    -- Message envelopes, golden decode.
+    --------------------------------------------------------------------
+    describe("decoding frozen envelopes", function()
+        for _, case in ipairs(ENVELOPE_CASES) do
+            it("deserializes: " .. case.name, function()
+                local ok, decoded = Wire.deserialize(case.serialized)
+                assert.is_true(ok)
+                assert.same(case.decoded, decoded)
+            end)
+
+            it("survives the full compress and encode path: " .. case.name, function()
+                local ok, decoded = Wire.fromWire(Wire.toWire(case.decoded))
+                assert.is_true(ok)
+                assert.same(case.decoded, decoded)
+            end)
+        end
+    end)
+
+    --------------------------------------------------------------------
+    -- String escaping.
+    --
+    -- AceSerializer doubles space, control codes, ^ and ~. Guild names contain
+    -- spaces and ride every envelope, so this path runs constantly in the field.
+    -- Writing an envelope string by hand with a raw space is silently lossy:
+    -- "Test Guild" comes back "TestGuild", the space simply gone. Nothing in
+    -- production does that, because production always serializes properly, but
+    -- the fixtures would have if this were not pinned.
+    --------------------------------------------------------------------
+    describe("string escaping", function()
+        it("round-trips a guild name containing a space", function()
+            local ok, decoded = Wire.fromWire(Wire.toWire({ guild = "Test Guild" }))
+            assert.is_true(ok)
+            assert.equals("Test Guild", decoded.guild)
+        end)
+
+        it("round-trips the characters AceSerializer escapes", function()
+            local hostile = { s = "a b^c~d\1e" }
+            local ok, decoded = Wire.fromWire(Wire.toWire(hostile))
+            assert.is_true(ok)
+            assert.same(hostile, decoded)
+        end)
+
+        it("round-trips the pipes and colons record ids are built from", function()
+            local id = "withdraw|Speaknglide-Area52|10000000|493216:0"
+            local ok, decoded = Wire.fromWire(Wire.toWire({ id = id }))
+            assert.is_true(ok)
+            assert.equals(id, decoded.id)
+        end)
+    end)
+
+    --------------------------------------------------------------------
+    -- Numeric keys.
+    --
+    -- docs/DATA-MODEL.md section 9 flagged this as untested and named only
+    -- stockReserves and bankLayout.tabs[].items. The bucket tables are the
+    -- larger exposure: bucketKeyForRecord returns math.floor(), so bucketHashes
+    -- and buckets are numeric-keyed and ride SYNC_REQUEST and MANIFEST on every
+    -- sync. String-keyed arrival would make every bucket comparison miss, so
+    -- every sync would resend everything while reporting a high duplicate rate,
+    -- which is the one number project notes already warn cannot be trusted.
+    --------------------------------------------------------------------
+    describe("numeric keys", function()
+        for _, case in ipairs(ENVELOPE_CASES) do
+            if case.numericKeyPaths then
+                it("keeps numeric keys numeric: " .. case.name, function()
+                    local decoded = Wire.fromWireOrDie(Wire.toWire(case.decoded))
+                    for _, path in ipairs(case.numericKeyPaths) do
+                        local node = descend(decoded, path)
+                        assert.is_table(node, ("path %s missing"):format(table.concat(path, ".")))
+                        local count = 0
+                        for key in pairs(node) do
+                            assert.equals("number", type(key),
+                                ("key %s arrived as %s"):format(tostring(key), type(key)))
+                            assert.is_nil(rawget(node, tostring(key)),
+                                "a string-keyed twin arrived alongside the numeric key")
+                            count = count + 1
+                        end
+                        assert.is_true(count > 0)
+                    end
+                end)
+            end
+
+            if case.validatesAsLayout then
+                it("still passes BankLayout.Validate after a round trip: " .. case.name, function()
+                    local decoded = Wire.fromWireOrDie(Wire.toWire(case.decoded))
+                    local ok, err = GBL.BankLayout.Validate(decoded.bankLayout)
+                    assert.is_true(ok, tostring(err))
+                end)
+            end
+        end
+
+        -- The literal fixtures above prove the codec preserves numeric keys. This
+        -- proves the keys production actually generates are numeric in the first
+        -- place, so the family is coupled to bucketKeyForRecord rather than to a
+        -- hand-written table that happens to agree with it.
+        it("preserves bucket hashes built by ComputeBucketHashes", function()
+            local guildData = GBL:GetGuildData()
+            for _, case in ipairs(RECORD_CASES) do
+                if case.accepted and case.stripped.id and case.stripped.timestamp then
+                    local record = copy(case.stripped)
+                    record._occurrence = 0
+                    local target = record.amount and guildData.moneyTransactions
+                        or guildData.transactions
+                    table.insert(target, record)
+                end
+            end
+
+            local buckets = GBL:ComputeBucketHashes(guildData)
+            local bucketCount = 0
+            for key in pairs(buckets) do
+                assert.equals("number", type(key))
+                bucketCount = bucketCount + 1
+            end
+            assert.is_true(bucketCount > 0, "fixture records produced no buckets")
+
+            local decoded = Wire.fromWireOrDie(Wire.toWire({ bucketHashes = buckets }))
+            assert.same(buckets, decoded.bucketHashes)
+
+            -- The property that actually matters: a lookup still lands.
+            for key, hash in pairs(buckets) do
+                assert.equals(hash, decoded.bucketHashes[key],
+                    "bucket lookup missed after a round trip")
+            end
+        end)
+    end)
+
+    --------------------------------------------------------------------
+    -- Duplicated builder parity.
+    --
+    -- HELLO, SYNC_DATA and BUSY are each built in two places (#70 names the
+    -- latter two; HELLO is a third pair the issue misses). The floor release
+    -- adds minSyncVersion to the HELLO payload, and adding it to only one
+    -- builder fails silently: a peer that only ever receives the reply would
+    -- fall back to exact-version matching and refuse to sync.
+    --
+    -- Strict key-set equality would be wrong even today, because sortAccess,
+    -- layoutUpdatedAt and eventCounts use the `X and Y or nil` idiom and vanish
+    -- rather than arriving nil. So the assertion is parity under identical
+    -- state, with the one documented difference named.
+    --
+    -- Written against the emitted message rather than the builder site, so it
+    -- survives #70: a single builder taking an isReply argument still has to
+    -- produce exactly this difference.
+    --------------------------------------------------------------------
+    describe("duplicated builders agree", function()
+        local function configureGuild()
+            local gd = GBL:GetGuildData()
+            gd.sortAccess = {
+                write = { rankThreshold = 1, delegates = {} },
+                sort = { rankThreshold = 4, delegates = {} },
+                updatedBy = "GuildMaster-Stormrage",
+                updatedAt = 1775100000,
+            }
+            gd.bankLayout = {
+                version = 3,
+                updatedBy = "GuildMaster-Stormrage",
+                updatedAt = 1775200000,
+                tabs = { [1] = { mode = "overflow" } },
+            }
+            return gd
+        end
+
+        it("both HELLO builders differ only by isReply", function()
+            configureGuild()
+            GBL.db.profile.sync.enabled = true
+
+            local broadcast = firstOfType(capturePayloads(function()
+                GBL:BroadcastHello(true)
+            end), "HELLO")
+            local reply = firstOfType(capturePayloads(function()
+                GBL:SendHelloReply("PeerA")
+            end), "HELLO")
+
+            assert.is_table(broadcast)
+            assert.is_table(reply)
+
+            local replyOnly = {}
+            for key in pairs(reply) do
+                if broadcast[key] == nil then replyOnly[#replyOnly + 1] = key end
+            end
+            local broadcastOnly = {}
+            for key in pairs(broadcast) do
+                if reply[key] == nil then broadcastOnly[#broadcastOnly + 1] = key end
+            end
+
+            assert.same({ "isReply" }, replyOnly)
+            assert.same({}, broadcastOnly)
+        end)
+
+        --- Seed a record and an eventCounts entry so the populated send path runs.
+        local function seedSendableRecord(gd)
+            local record = copy(RECORD_CASES[1].stripped)
+            record._occurrence = 0
+            record.scanTime = record.timestamp
+            record.scannedBy = "OfficerA-TestRealm"
+            table.insert(gd.transactions, record)
+            gd.seenTxHashes[record.id] = record.timestamp
+            gd.eventCounts = gd.eventCounts or {}
+            gd.eventCounts[record.id:gsub(":%d+$", "")] = { count = 1, asOf = record.timestamp }
+            return record
+        end
+
+        it("both SYNC_DATA builders agree on keys, apart from eventCounts", function()
+            local gd = configureGuild()
+            GBL.db.profile.sync.enabled = true
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- The empty-chunk builder: a peer asks and we hold nothing.
+            local empty = firstOfType(capturePayloads(function()
+                GBL:HandleSyncRequest("PeerA", {
+                    sinceTimestamp = 0,
+                    protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                    guild = "Test Guild",
+                })
+            end), "SYNC_DATA")
+            assert.is_table(empty, "no empty SYNC_DATA was built")
+
+            seedSendableRecord(gd)
+
+            local real = firstOfType(capturePayloads(function()
+                GBL:HandleSyncRequest("PeerB", {
+                    sinceTimestamp = 0,
+                    protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                    guild = "Test Guild",
+                })
+            end), "SYNC_DATA")
+            assert.is_table(real, "no populated SYNC_DATA was built")
+
+            -- eventCounts is the documented delta. It is optional on the wire and
+            -- cannot appear on the empty branch at all (see the test below), so
+            -- comparing it directly would assert a difference rather than parity.
+            local function keysExceptEventCounts(payload)
+                local trimmed = copy(payload)
+                trimmed.eventCounts = nil
+                return keySet(trimmed)
+            end
+
+            assert.same(keysExceptEventCounts(empty), keysExceptEventCounts(real))
+        end)
+
+        it("the populated SYNC_DATA builder carries eventCounts", function()
+            local gd = configureGuild()
+            GBL.db.profile.sync.enabled = true
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            seedSendableRecord(gd)
+
+            local real = firstOfType(capturePayloads(function()
+                GBL:HandleSyncRequest("PeerA", {
+                    sinceTimestamp = 0,
+                    protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                    guild = "Test Guild",
+                })
+            end), "SYNC_DATA")
+
+            assert.is_table(real)
+            assert.is_table(real.eventCounts)
+        end)
+
+        -- The empty-chunk builder reads `eventCounts = batches[1]`, and that
+        -- expression can never be non-nil at that site. The loop above it extends
+        -- the chunk list until #chunks >= #batches, so reaching the
+        -- `#chunks == 0` branch already implies #batches == 0. Anything with
+        -- event counts to send routes to the other builder instead, emitting an
+        -- empty chunk from there. So the key is dead where it is written, and the
+        -- parity assertion above has to allow for it rather than read it as drift
+        -- between the two builders.
+        it("routes an eventCounts-only send through the populated builder", function()
+            local gd = configureGuild()
+            GBL.db.profile.sync.enabled = true
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- No records, but event counts to share. If the empty branch were
+            -- reachable here it would be taken, and eventCounts would come back nil.
+            gd.eventCounts = {
+                ["deposit|Alice-Stormrage|191318|20|0|493216"] = { count = 1, asOf = 1775580307 },
+            }
+
+            local sent = firstOfType(capturePayloads(function()
+                GBL:HandleSyncRequest("PeerA", {
+                    sinceTimestamp = 0,
+                    protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                    guild = "Test Guild",
+                })
+            end), "SYNC_DATA")
+
+            assert.is_table(sent)
+            assert.equals(0, #sent.transactions)
+            assert.is_table(sent.eventCounts)
+        end)
+
+        it("takes the empty branch, with no eventCounts, when there is nothing at all", function()
+            configureGuild()
+            GBL.db.profile.sync.enabled = true
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local sent = firstOfType(capturePayloads(function()
+                GBL:HandleSyncRequest("PeerA", {
+                    sinceTimestamp = 0,
+                    protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                    guild = "Test Guild",
+                })
+            end), "SYNC_DATA")
+
+            assert.is_table(sent)
+            assert.equals(0, #sent.transactions)
+            assert.equals(1, sent.totalChunks)
+            assert.is_nil(sent.eventCounts)
+        end)
+
+        it("both BUSY builders agree on keys", function()
+            local gd = configureGuild()
+            GBL.db.profile.sync.enabled = true
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local record = copy(RECORD_CASES[1].stripped)
+            record._occurrence = 0
+            record.scanTime = record.timestamp
+            record.scannedBy = "OfficerA-TestRealm"
+            table.insert(gd.transactions, record)
+            gd.seenTxHashes[record.id] = record.timestamp
+
+            -- First request puts us into sending state.
+            GBL:HandleSyncRequest("PeerA", {
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            assert.is_true(GBL:GetSyncStatus().sending)
+
+            -- Second request is declined with BUSY.
+            local declined = firstOfType(capturePayloads(function()
+                GBL:HandleSyncRequest("PeerB", {
+                    sinceTimestamp = 0,
+                    protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                    guild = "Test Guild",
+                })
+            end), "BUSY")
+            assert.is_table(declined, "HandleSyncRequest built no BUSY")
+
+            -- Combat aborts the same send and notifies the partner.
+            local aborted = firstOfType(capturePayloads(function()
+                GBL:OnCombatStart()
+            end), "BUSY")
+            assert.is_table(aborted, "OnCombatStart built no BUSY")
+
+            assert.same(keySet(declined), keySet(aborted))
+        end)
     end)
 end)
