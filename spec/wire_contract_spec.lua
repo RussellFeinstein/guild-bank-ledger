@@ -435,6 +435,7 @@ describe("Wire contract", function()
             local empty = firstOfType(capturePayloads(function()
                 GBL:HandleSyncRequest("PeerA", {
                     sinceTimestamp = 0,
+                    version = GBL.version,
                     protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                     guild = "Test Guild",
                 })
@@ -446,6 +447,7 @@ describe("Wire contract", function()
             local real = firstOfType(capturePayloads(function()
                 GBL:HandleSyncRequest("PeerB", {
                     sinceTimestamp = 0,
+                    version = GBL.version,
                     protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                     guild = "Test Guild",
                 })
@@ -473,6 +475,7 @@ describe("Wire contract", function()
             local real = firstOfType(capturePayloads(function()
                 GBL:HandleSyncRequest("PeerA", {
                     sinceTimestamp = 0,
+                    version = GBL.version,
                     protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                     guild = "Test Guild",
                 })
@@ -504,6 +507,7 @@ describe("Wire contract", function()
             local sent = firstOfType(capturePayloads(function()
                 GBL:HandleSyncRequest("PeerA", {
                     sinceTimestamp = 0,
+                    version = GBL.version,
                     protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                     guild = "Test Guild",
                 })
@@ -522,6 +526,7 @@ describe("Wire contract", function()
             local sent = firstOfType(capturePayloads(function()
                 GBL:HandleSyncRequest("PeerA", {
                     sinceTimestamp = 0,
+                    version = GBL.version,
                     protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                     guild = "Test Guild",
                 })
@@ -548,6 +553,7 @@ describe("Wire contract", function()
             -- First request puts us into sending state.
             GBL:HandleSyncRequest("PeerA", {
                 sinceTimestamp = 0,
+                version = GBL.version,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
             })
@@ -557,6 +563,7 @@ describe("Wire contract", function()
             local declined = firstOfType(capturePayloads(function()
                 GBL:HandleSyncRequest("PeerB", {
                     sinceTimestamp = 0,
+                    version = GBL.version,
                     protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                     guild = "Test Guild",
                 })

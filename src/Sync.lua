@@ -9,6 +9,17 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 -- Protocol constants
 local PREFIX = "GBLSync"
 local PROTOCOL_VERSION = 4
+-- Oldest addon version this build will exchange records with.
+--
+-- Until v0.37.0 the gate was exact-match, so every release, patch included,
+-- split the guild into non-communicating islands until every member updated.
+-- This replaces that with a range: we sync with a peer at or above our floor
+-- whose own floor we also meet. v0.37.0 spends one last lockstep update to
+-- establish the baseline, and normal releases after it cost nothing.
+--
+-- Raise this ONLY for a wire, record-identity or fingerprint break, never for
+-- an ordinary release. Raising it re-imposes the split it exists to remove.
+local MIN_SYNC_VERSION = "0.36.1"
 -- Chunk size tuning (v0.28.7 — true 1-fragment target)
 -- Compressed payload targets ≤255 bytes so each chunk is 1 AceComm wire
 -- fragment. v0.28.6 aimed for 2 fragments but actual compression ratio is
@@ -56,6 +67,7 @@ local MAX_RECEIVE_DURATION = 1800  -- 30 minutes absolute maximum receive time
 
 -- Expose constants for testing and UI
 GBL.SYNC_PROTOCOL_VERSION = PROTOCOL_VERSION
+GBL.MIN_SYNC_VERSION = MIN_SYNC_VERSION
 GBL.SYNC_CHUNK_SIZE = MAX_RECORDS_PER_CHUNK
 GBL.SYNC_PREFIX = PREFIX
 GBL.SYNC_MAX_RETRIES = MAX_RETRIES
@@ -76,6 +88,74 @@ GBL.SYNC_MANIFEST_MAX_BUCKETS = MANIFEST_MAX_BUCKETS
 GBL.SYNC_LAYOUT_REQUEST_THROTTLE = LAYOUT_REQUEST_THROTTLE
 GBL.SYNC_COMBAT_COOLDOWN = COMBAT_COOLDOWN
 GBL.SYNC_INTER_CHUNK_GAP_FLOOR = INTER_CHUNK_GAP_FLOOR
+
+------------------------------------------------------------------------
+-- Version compatibility (v0.37.0)
+------------------------------------------------------------------------
+
+--- True when a version string is a bare release number with no pre-release
+-- suffix. A dev build carries "-dev.<id>".
+local function isPlainSemver(v)
+    return type(v) == "string" and v:match("^%d+%.%d+%.%d+$") ~= nil
+end
+
+--- Decide whether we may exchange records with a peer.
+--
+-- The dev-build check has to come before any CompareSemver call, because
+-- CompareSemver deliberately strips "-dev.<id>" to compare release lines. A
+-- range test that reached it would read a dev build and its base release as
+-- compatible and undo the isolation DEV_BUILD exists to provide.
+--
+-- A peer that advertises no floor is running a pre-v0.37.0 build, and the old
+-- exact-match rule is the right reading of it: nothing below the floor release
+-- carries the guarantees the range rests on.
+--
+-- @param remoteVersion string|nil Peer's addon version
+-- @param remoteMin string|nil Peer's advertised MIN_SYNC_VERSION
+-- @return boolean ok
+-- @return string reason One of exact|range|no-version|dev-isolated|
+--                       pre-floor-peer|below-floor|local-below-their-floor
+function GBL:IsVersionCompatible(remoteVersion, remoteMin)
+    if remoteVersion == self.version then return true, "exact" end
+    if not remoteVersion then return false, "no-version" end
+    if not isPlainSemver(self.version) or not isPlainSemver(remoteVersion) then
+        return false, "dev-isolated"
+    end
+    if not isPlainSemver(remoteMin) then return false, "pre-floor-peer" end
+    if self:CompareSemver(remoteVersion, MIN_SYNC_VERSION) < 0 then
+        return false, "below-floor"
+    end
+    if self:CompareSemver(self.version, remoteMin) < 0 then
+        return false, "local-below-their-floor"
+    end
+    return true, "range"
+end
+
+--- One line explaining a refusal, naming both versions so a log read months
+-- later says which side needed to move. Used by all three gate sites.
+-- @param who string Canonical peer key
+-- @param reason string A reason code from IsVersionCompatible
+-- @param remoteVersion string|nil
+-- @param remoteMin string|nil
+-- @return string
+function GBL:DescribeVersionRefusal(who, reason, remoteVersion, remoteMin)
+    local why
+    if reason == "no-version" then
+        why = "advertised no version"
+    elseif reason == "dev-isolated" then
+        why = "dev build isolation"
+    elseif reason == "pre-floor-peer" then
+        why = "predates the sync floor, so an exact match is required"
+    elseif reason == "below-floor" then
+        why = "below our v" .. MIN_SYNC_VERSION .. " sync floor"
+    elseif reason == "local-below-their-floor" then
+        why = "we are below their v" .. tostring(remoteMin) .. " sync floor"
+    else
+        why = "incompatible"
+    end
+    return string.format("%s on v%s refused: %s (this build is v%s)",
+        tostring(who), tostring(remoteVersion or "?"), why, tostring(self.version))
+end
 
 -- Diagnostic: CTL deferral tracking (module-level, survives state resets)
 local ctlDeferTotal = 0  -- monotonic count per sync session
@@ -185,6 +265,7 @@ local syncState = {
     lastForcedHelloTime = 0,
     lastHelloReplyHash = {},  -- name → hash we last communicated to this peer
     lastSupersetNudge = {},   -- peerKey → GetServerTime() of our last superset re-nudge
+    incompatibleReplied = {}, -- peerKey → true once we have told them we refuse
 
     -- Bank layout advertise-and-pull (v0.32.11): timestamp of our last
     -- LAYOUT_REQUEST. Single in-flight guard so a newer-layout cursor seen on
@@ -433,6 +514,7 @@ function GBL:DisableSync()
     syncState.lastForcedHelloTime = 0
     syncState.lastHelloReplyHash = {}
     syncState.lastSupersetNudge = {}
+    syncState.incompatibleReplied = {}
     syncState.peerManifests = {}
     syncState.lastManifestHash = 0
     syncState.lastManifestTime = 0
@@ -480,6 +562,7 @@ function GBL:BroadcastHello(force)
     local msg = self:Serialize({
         type = "HELLO",
         version = self.version,
+        minSyncVersion = MIN_SYNC_VERSION,
         protocolVersion = PROTOCOL_VERSION,
         guild = self:GetGuildName(),
         txCount = txCount,
@@ -608,6 +691,7 @@ function GBL:SendHelloReply(target)
     local msg = self:Serialize({
         type = "HELLO",
         version = self.version,
+        minSyncVersion = MIN_SYNC_VERSION,
         protocolVersion = PROTOCOL_VERSION,
         guild = self:GetGuildName(),
         txCount = txCount,
@@ -884,6 +968,46 @@ function GBL:HandleHello(sender, data)
         end
     end
 
+    -- Version gate (v0.37.0). Everything above this line runs for every peer on
+    -- purpose: access control, the sort policy and the layout cursor are guild
+    -- settings, and a GM's change has to reach members through a mixed-version
+    -- window. Only record exchange is gated.
+    --
+    -- Placed above the reply block so an incompatible peer is answered once per
+    -- session rather than on every heartbeat. They still need one reply to
+    -- discover us and log their own refusal; after that the silence is the
+    -- point.
+    local compatible, refusal = self:IsVersionCompatible(data.version, data.minSyncVersion)
+    if not compatible then
+        local cleanSender = self:CanonicalPeerKey(sender)
+        local explanation = self:DescribeVersionRefusal(
+            cleanSender, refusal, data.version, data.minSyncVersion)
+        if syncState.peers[cleanSender] then
+            syncState.peers[cleanSender].outdated = true
+            -- Which side needs to update. Their floor being above our version
+            -- settles it directly; otherwise compare the two versions.
+            local weAreBehind = (refusal == "local-below-their-floor")
+                or (data.version ~= nil
+                    and self:CompareSemver(self.version, data.version) < 0)
+            syncState.peers[cleanSender].versionRelation =
+                weAreBehind and "local_behind" or "peer_behind"
+        end
+
+        local told = syncState.incompatibleReplied[cleanSender]
+        if not told then
+            -- Marked before the send, not after: a whisper that fails is not
+            -- worth retrying every heartbeat for the life of the mismatch.
+            syncState.incompatibleReplied[cleanSender] = true
+            self:SyncWarn(explanation)
+            if not data.isReply then
+                self:SendHelloReply(sender)
+            end
+        else
+            self:SyncDebug("Still refusing: %s", explanation)
+        end
+        return
+    end
+
     -- Reply to broadcast HELLOs so the sender discovers us.
     -- Hash-gated: only reply when our data changed since we last told this peer,
     -- or on first contact. Suppresses O(N²) reply traffic in large guilds.
@@ -921,20 +1045,6 @@ function GBL:HandleHello(sender, data)
                 cleanSenderReply, data.txCount or 0,
                 gd and (#gd.transactions + #gd.moneyTransactions) or 0)
         end
-    end
-
-    -- Exact version match — refuse sync on any version difference
-    if data.version and data.version ~= self.version then
-        local cleanSender = self:CanonicalPeerKey(sender)
-        if syncState.peers[cleanSender] then
-            syncState.peers[cleanSender].outdated = true
-            local cmp = self:CompareSemver(self.version, data.version)
-            syncState.peers[cleanSender].versionRelation =
-                (cmp < 0) and "local_behind" or "peer_behind"
-        end
-        self:SyncWarn(sender .. " on v" .. tostring(data.version)
-            .. " (version mismatch; this build is v" .. self.version .. ")")
-        return
     end
 
     local guildData = self:GetGuildData()
@@ -1226,6 +1336,22 @@ end
 function GBL:RequestSync(target, sinceTimestamp)
     if syncState.receiving then return end
 
+    -- ProcessPendingPeers reaches here without re-checking the version, so a
+    -- peer queued before a mismatch was known would otherwise be pulled from.
+    -- Only refuse on a peer we actually know: an entry with no version yet
+    -- (created by non-HELLO traffic) is left to the HELLO path to resolve.
+    local peerInfo = syncState.peers[self:CanonicalPeerKey(target)]
+    if peerInfo and peerInfo.version then
+        local compatible, reason =
+            self:IsVersionCompatible(peerInfo.version, peerInfo.minSyncVersion)
+        if not compatible then
+            self:SyncWarn("Not requesting. " .. self:DescribeVersionRefusal(
+                self:CanonicalPeerKey(target), reason,
+                peerInfo.version, peerInfo.minSyncVersion))
+            return
+        end
+    end
+
     syncState.receiving = true
     syncState.receiveSource = self:CanonicalPeerKey(target)
     syncState.receiveGot = 0
@@ -1248,6 +1374,11 @@ function GBL:RequestSync(target, sinceTimestamp)
         type = "SYNC_REQUEST",
         sinceTimestamp = sinceTimestamp,
         bucketHashes = bucketHashes,
+        -- The serving side gates on these: a request reaching HandleSyncRequest
+        -- never passed through HandleHello, so this is the only version signal
+        -- the holder gets before handing over records.
+        version = self.version,
+        minSyncVersion = MIN_SYNC_VERSION,
         protocolVersion = PROTOCOL_VERSION,
         guild = self:GetGuildName(),
     })
@@ -1279,6 +1410,18 @@ end
 -- @param sender string Requester name
 -- @param data table Deserialized request payload
 function GBL:HandleSyncRequest(sender, data)
+    -- The serving half of the version gate. A request can arrive without ever
+    -- passing through HandleHello (RequestSync whispers directly), so refusing
+    -- only there would let an incompatible peer help itself to our records.
+    -- Silence rather than BUSY: BUSY means "try again shortly", which would
+    -- keep them retrying for as long as they stay on the old version.
+    local compatible, reason = self:IsVersionCompatible(data.version, data.minSyncVersion)
+    if not compatible then
+        self:SyncWarn("Ignoring SYNC_REQUEST. " .. self:DescribeVersionRefusal(
+            self:CanonicalPeerKey(sender), reason, data.version, data.minSyncVersion))
+        return
+    end
+
     if syncState.sending then
         self:AddAuditEntry("Declined sync from " .. sender
             .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
@@ -2486,16 +2629,20 @@ function GBL:UpdatePeer(sender, data)
     local clean = self:CanonicalPeerKey(sender)
     syncState.peers[clean] = {
         version = data.version,
+        minSyncVersion = data.minSyncVersion,
         txCount = data.txCount or 0,
         dataHash = data.dataHash,
         lastScanTime = data.lastScanTime or 0,
         lastSeen = GetServerTime(),
     }
-    -- Persist for cross-session discovery (survives relog)
+    -- Persist for cross-session discovery (survives relog). The floor rides
+    -- along because InitSync seeds the session peer list from here and
+    -- RequestSync's gate reads it off the seeded entry.
     local guildData = self:GetGuildData()
     if guildData then
         guildData.knownPeers[clean] = {
             version = data.version,
+            minSyncVersion = data.minSyncVersion,
             txCount = data.txCount or 0,
             lastSeen = GetServerTime(),
         }
@@ -2953,6 +3100,7 @@ function GBL:ResetSyncState()
     syncState.lastForcedHelloTime = 0
     syncState.lastHelloReplyHash = {}
     syncState.lastSupersetNudge = {}
+    syncState.incompatibleReplied = {}
     syncState.peerManifests = {}
     syncState.lastManifestHash = 0
     syncState.lastManifestTime = 0
