@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.36.1
+    {"0.36.1", "2026-08-10", {
+        Changed = {
+            "Nothing in this release changes how the addon behaves. It adds tests that check the sync message format against the real compression and serialization libraries instead of a test stand-in, so the next release can change that format without silently breaking older clients. Worth updating only so your version matches the rest of your guild.",
+        },
+    }},
+
     -- v0.36.0
     {"0.36.0", "2026-07-02", {
         Added = {

@@ -125,6 +125,8 @@ See **Branch lifecycle: trunk-based, delete after merge** in `~/.claude/CLAUDE.m
     - This `CLAUDE.md`'s "Current: X.Y.Z" line at the bottom
     - `src/Core.lua` `local DEV_BUILD = ...` constant must be reset to `nil` in the stamp commit. CI rejects any other value via the `Verify DEV_BUILD is nil` workflow step.
 
+  **Do NOT sweep the version string through `spec/fixtures/wire/`.** The HELLO fixtures carry `version = "0.36.0"` on purpose: they are frozen recordings of what a v0.36.0 peer sent, and the whole point is that they keep saying so forever. A grep-and-replace stamp across the repo will try to bump them and quietly destroy the cross-version contract the fixtures exist to hold. Same rule for any later fixture pinned to a specific release.
+
   `spec/ui/changelog_spec.lua` asserts that `CHANGELOG_DATA[1]`'s version matches the addon version, so a half-landed stamp fails the suite instead of shipping. If two branches PR with the same target version, the second to merge rebases onto post-merge `main` and its stamp commit bumps to the next patch. The principle is: one version per PR, one stamp commit per PR, never per-commit churn on these artifacts. (This matches the global `~/.claude/CLAUDE.md` "Commit Versioning" standard, which stamps once at PR-open.)
 - **Doc-only PRs take no version and no tag.** The objective test is whether the PR changes any file that ends up in the packaged zip. `.pkgmeta`'s `ignore:` list strips `spec`, `docs`, `.busted`, `.luacheckrc`, `.gitignore`, `.claude`, `CLAUDE.md`, `*.md`, `*.sh`, `*.bat`, and `VERSION`. If every file a PR touches is stripped, the packaged addon is byte-identical apart from the stamp itself, and there is nothing to release. Stamping one anyway ships a version whose only user-visible content is the announcement of its own existence, and it costs a forced guild-wide sync break (see Release cost below). This narrows the global "every merged PR gets a bump and a tag" rule rather than overturning it: that rule's origin (PR #7) was addon-relevant work shipping untagged, which this test still catches. A PR that touches even one packaged file is a normal release.
 
@@ -223,4 +225,4 @@ Helpers:
 
 ## Version
 
-Current: 0.36.0 (see `VERSION` file)
+Current: 0.36.1 (see `VERSION` file)
