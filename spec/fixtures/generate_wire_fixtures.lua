@@ -99,12 +99,25 @@ local UPSTREAM = {
     ["AceSerializer-3.0.lua"] = "Libs/AceSerializer-3.0/AceSerializer-3.0.lua",
 }
 
+--- Collapse SVN keyword expansion and line endings before comparing.
+--
+-- Whether `$Id$` arrives expanded depends on how the checkout was made, not on
+-- the library's contents: the release workflow's fetch expands it to
+-- `$Id: AceSerializer-3.0.lua 1284 ... $` while the copies here carry the bare
+-- `$Id$`. Comparing raw bytes would report that as upstream drift on any machine
+-- whose Libs/ came from the packager, which is a false alarm about the one thing
+-- this check exists to catch. Same for CRLF, since Libs/ is fetched on whatever
+-- platform the developer is on.
+local function normalize(content)
+    return (content:gsub("%$Id[^%$]*%$", "$Id$"):gsub("\r\n", "\n"))
+end
+
 print("\n=== vendored libraries vs Libs/ ===")
 for vendored, upstream in pairs(UPSTREAM) do
     local theirs = readFile(upstream)
     if not theirs then
         print(("--  %s: no Libs/ tree here, nothing to compare"):format(vendored))
-    elseif readFile(Wire.VENDOR_DIR .. vendored) == theirs then
+    elseif normalize(readFile(Wire.VENDOR_DIR .. vendored)) == normalize(theirs) then
         print(("ok  %s matches %s"):format(vendored, upstream))
     else
         print(("!! %s differs from %s. Upstream has moved. Copy it over and run the "
