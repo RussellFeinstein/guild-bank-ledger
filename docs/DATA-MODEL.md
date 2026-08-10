@@ -443,21 +443,56 @@ compatibility break requiring a floor raise. The garbage keys stay on the record
 them. Removing the twelve specific observed key names is a different and safe thing, and #75 treats it
 as optional.
 
-## 9. Numeric keys cross the wire untested
+## 9. Numeric keys cross the wire, and now they are tested
 
-`stockReserves` is `[itemID] = count` and `bankLayout.tabs[].items` is keyed by itemID. Both are sent
-between clients. The spec mock serializer is pass-through (`spec/mock_ace.lua:161-176`: `Serialize`
-stashes the table and returns `"SER:<n>"`, `Deserialize` hands the same table object back), so **no
-test proves numeric keys survive a real AceSerializer round trip**, and no test measures real payload
-size. Both are verified in-game only.
+The spec mock serializer is pass-through (`spec/mock_ace.lua:161-176`: `Serialize` stashes the table
+and returns `"SER:<n>"`, `Deserialize` hands the same table object back), so for the project's whole
+life no test encoded a byte. Numeric key survival and payload size were in-game claims only.
 
-`_RestockBuildItemUniverse` and the layout editor already number-coerce their keys, which is a
-symptom of this: a synced layout that arrived string-keyed would otherwise fail to match number-keyed
-stock.
+**Closed in v0.36.1 by golden wire-contract fixtures.** `spec/wire_contract_spec.lua` runs the
+vendored AceSerializer and LibDeflate for real (`spec/wire_helpers.lua` loads them, stashing and
+restoring the mock LibStub registry around the load). `src/Sync.lua` exposes the record codec through
+`_StripForSync`, `_ReconstructSyncRecord` and `_EstimateRecordBytes`, which have no production
+callers and exist only so the format can be pinned. Numeric keys do survive, as numbers, with no
+string-keyed twin.
 
-**Verdict: golden wire-contract fixtures, scheduled ahead of the floor release.** They go first
-deliberately, because a characterization test written in the same PR as the change it guards pins the
-post-change shape and guards nothing.
+**The scope named here was too narrow.** This section used to name `stockReserves` and
+`bankLayout.tabs[].items`, both of which ride LAYOUT_DATA, a rare pull. The larger exposure is the
+fingerprint bucket tables: `bucketKeyForRecord` (`src/Fingerprint.lua:106-116`) returns
+`math.floor(...)`, a number, so `bucketHashes` on SYNC_REQUEST and `buckets` on MANIFEST are
+numeric-keyed and cross the wire on **every sync**. Had those degraded to strings, every bucket
+comparison would miss, every sync would resend everything, and the symptom would be a high duplicate
+rate, which is the one reading the redundancy line already cannot be trusted to explain.
+
+`_RestockBuildItemUniverse` and the layout editor number-coerce their keys, which was a symptom of
+the untested boundary rather than a fix for it.
+
+Two facts the fixtures established that were not previously written down:
+
+- **AceSerializer escapes a space to a two-byte sequence, and an unescaped space is dropped on
+  decode.** Guild names contain spaces and ride every envelope, so the escape path runs constantly.
+  Production is always correct here because it always serializes properly; the hazard is hand-built or
+  externally-produced payloads, which is why the fixtures are generated rather than typed.
+- **`estimateRecordBytes` really is an upper bound on real serialized size**, for every record shape
+  in the fixture set. That claim had never been checked. It holds because record fields cannot contain
+  the characters AceSerializer doubles, while pipes and colons, which ids are full of, pass through
+  unescaped.
+
+**Scope limit worth knowing.** The fixtures pin the copies in `Libs/`. The packaged zip pulls those
+libraries from upstream at package time per `.pkgmeta` `externals`, so an upstream AceSerializer or
+LibDeflate change is outside what these tests can guarantee.
+
+### One dead key found while pinning the builders
+
+HELLO, SYNC_DATA and BUSY are each built in two places, and the fixtures assert the pairs agree under
+identical state. Doing that turned up a key that can never be set. The empty-chunk SYNC_DATA builder
+writes `eventCounts = batches[1]`, but the loop just above it extends the chunk list until
+`#chunks >= #batches`, so reaching the `#chunks == 0` branch already implies `#batches == 0`. A send
+that has event counts and no records routes through the other builder instead and emits an empty chunk
+from there. Harmless, since the key simply never appears, but it means the two builders' key sets
+legitimately differ by `eventCounts` and the parity assertion has to allow for it. Folded into #70,
+which owns the duplicated builders. Note that #70's title names SYNC_DATA and BUSY only: HELLO is a
+third pair, and the floor release edits both of its builders.
 
 There is a second untested boundary of the same kind, and it is the larger one. `spec/mock_ace.lua`
 models AceDB's read path (`applyDefaults`, `:52-79`) and has no `removeDefaults` at all. Default
@@ -505,8 +540,9 @@ All under the **Data model integrity** milestone.
 | 8 | Intake accepts corrupted records | #68 |
 | 8 | 223 corrupted records already stored | #75 |
 | 8 | Rejections counted as duplicates | #68 |
-| 9 | Numeric keys and payload size untested across the wire | fixtures release |
+| 9 | Numeric keys and payload size untested across the wire | closed in v0.36.1 |
 | 9 | AceDB's write path unmodelled in the suite | #77 |
+| 9 | `eventCounts` is unreachable where the empty-chunk SYNC_DATA builder writes it | #70 |
 | - | Per-player category totals declared, never accumulated | #64 |
 
 The compatibility break that several of these ride is #74, and it is the last cheap one: after the
