@@ -114,9 +114,17 @@ return {
 
     -- The 108-record population (#69). No itemID, so buildPrefix falls through
     -- to the money branch and the prefix reads type|player|0|.
+    --
+    -- The frozen string is unchanged; the verdict on it flipped in v0.37.0.
+    -- Until then this decoded and was stored, which is the bug: it collides
+    -- with every other itemID-less record from the same player, type and hour,
+    -- and via NormalizeRecordId it could overwrite a real money record's
+    -- identity (DATA-MODEL.md section 5). #68's shape check refuses it at
+    -- intake instead. This expectation change IS the reviewable record of that,
+    -- which is why the case stays here rather than being deleted.
     {
         name = "item record with no itemID",
-        accepted = true,
+        accepted = false,
         serialized = "^1^T^Stype^Sdeposit^Splayer^SCarol-Stormrage^Scount^N4^SclassID^N0^SsubclassID^N3^Stimestamp^N1775580307^Sid^Sdeposit|Carol-Stormrage|0|493216:0^t^^",
         stripped = {
             type = "deposit",

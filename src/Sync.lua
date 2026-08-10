@@ -1245,6 +1245,84 @@ local function estimateRecordBytes(record)
     return bytes
 end
 
+-- Every transaction type the addon records. A type outside this set is
+-- transit damage, not a record from a newer version: adding a type would be a
+-- compatibility break needing a floor raise, so it cannot arrive unannounced.
+local VALID_RECORD_TYPES = {
+    deposit = true, withdraw = true, move = true,
+    repair = true, buyTab = true, depositSummary = true,
+}
+
+-- Fields whose type is known. Anything not named here passes through untouched:
+-- that forward tolerance is what makes adding a field free, and a whitelist here
+-- would turn every future field into a break. See #68.
+local NUMERIC_RECORD_FIELDS = {
+    "itemID", "count", "tab", "destTab", "classID", "subclassID",
+    "amount", "timestamp",
+}
+local STRING_RECORD_FIELDS = { "type", "player", "id" }
+
+--- Recompute an item record's classID and subclassID from its itemID.
+--
+-- 195 of the 223 corrupted records measured in DATA-MODEL.md section 8 lost
+-- only subclassID, which is derivable from itemID through the same call
+-- CreateTxRecord uses (src/Ledger.lua). Rejecting them would discard
+-- recoverable data, so repair runs before validation rather than after.
+--
+-- @param record table Record being taken in, mutated in place
+-- @return boolean true if anything was repaired
+function GBL:RepairSyncRecordItemFields(record)
+    if type(record.itemID) ~= "number" then return false end
+    if type(record.classID) == "number" and type(record.subclassID) == "number" then
+        return false
+    end
+    if not (C_Item and C_Item.GetItemInfoInstant) then return false end
+
+    local _, _, _, _, _, classID, subclassID = C_Item.GetItemInfoInstant(record.itemID)
+    record.classID = classID or 0
+    record.subclassID = subclassID or 0
+    -- The category was derived from the fields we just replaced.
+    record.category = self:CategorizeItem(record.classID, record.subclassID)
+    return true
+end
+
+--- Check an incoming record's shape before anything reads its fields.
+--
+-- Runs first, not last. Two of these checks are unreachable from the bottom of
+-- reconstructSyncRecord: a non-number timestamp is silently replaced by receipt
+-- time (IsValidTimestamp tests the type), which files the record in the wrong
+-- bucket forever, and a non-string id crashes the id:match calls outright.
+--
+-- @param record table Record received via sync
+-- @return boolean ok
+-- @return string|nil field The field that failed, for the reject counter
+local function validateSyncRecord(record)
+    for _, field in ipairs(STRING_RECORD_FIELDS) do
+        if record[field] ~= nil and type(record[field]) ~= "string" then
+            return false, field
+        end
+    end
+    for _, field in ipairs(NUMERIC_RECORD_FIELDS) do
+        if record[field] ~= nil and type(record[field]) ~= "number" then
+            return false, field
+        end
+    end
+
+    if not record.type or record.type == "" then return false, "type" end
+    if not VALID_RECORD_TYPES[record.type] then return false, "type" end
+    if not record.player or record.player == "" then return false, "player" end
+
+    -- Exactly one of itemID / amount, the discriminator buildPrefix already
+    -- uses. A record with neither takes the money branch and collides with
+    -- every other such record from the same player, type and hour; a record
+    -- with both is not a shape this addon produces.
+    local hasItem = record.itemID ~= nil
+    local hasAmount = record.amount ~= nil
+    if hasItem == hasAmount then return false, "itemID/amount" end
+
+    return true
+end
+
 --- Restore fields stripped by stripForSync on received records.
 -- Called on each record before StoreTx/StoreMoneyTx during sync receive.
 -- Must be resilient to any combination of missing fields — the sender
@@ -1253,7 +1331,14 @@ end
 -- record.scannedBy are always non-nil.
 -- @param record table Transaction record received via sync
 -- @param sender string Name of the peer who sent this record
+-- @return boolean accepted
+-- @return string|nil field The field that failed validation, when rejected
 local function reconstructSyncRecord(record, sender)
+    -- 0. Repair, then validate, before anything below reads a field.
+    GBL:RepairSyncRecordItemFields(record)
+    local valid, badField = validateSyncRecord(record)
+    if not valid then return false, badField end
+
     -- 1. Ensure timestamp exists (needed for id computation below)
     --    Priority: explicit timestamp → recover from id → fallback to now
     if not record.timestamp and record.id then
@@ -1289,14 +1374,7 @@ local function reconstructSyncRecord(record, sender)
     record.scannedBy = "sync:" .. GBL:ResolvePlayerName(sender or "unknown")
     -- tabName/destTabName intentionally left nil — BackfillTabNames fills them
 
-    -- 6. Validate required fields — reject corrupted records
-    --    AceSerializer can mangle field boundaries during transit, producing
-    --    garbage keys like "typyer" (type+player merged). Reject anything
-    --    missing the two fields every record must have.
-    if not record.type or record.type == "" then return false end
-    if not record.player or record.player == "" then return false end
-
-    -- 7. Ensure player name is realm-qualified
+    -- 6. Ensure player name is realm-qualified
     record.player = GBL:ResolvePlayerName(record.player)
     return true
 end
@@ -1361,7 +1439,13 @@ function GBL:RequestSync(target, sinceTimestamp)
     syncState.receiveItemDuped = 0
     syncState.receiveMoneyStored = 0
     syncState.receiveMoneyDuped = 0
+    syncState.receiveItemRejected = 0
+    syncState.receiveMoneyRejected = 0
+    syncState.receiveRejectFields = {}
     syncState.receiveNormalized = 0
+    syncState.receiveItemRejected = 0
+    syncState.receiveMoneyRejected = 0
+    syncState.receiveRejectFields = {}
     syncState.receiveExpected = 0
     syncState.receiveStartTime = GetServerTime()
 
@@ -2304,12 +2388,27 @@ function GBL:HandleSyncData(sender, data)
 
     local itemStored, itemDuped = 0, 0
     local moneyStored, moneyDuped = 0, 0
+    local itemRejected, moneyRejected = 0, 0
     local normalized = 0
     local chunkTotal = #(data.transactions or {}) + #(data.moneyTransactions or {})
 
+    -- Which field failed, counted per chunk so the summary can name the damage
+    -- shape without a log line per record.
+    syncState.receiveRejectFields = syncState.receiveRejectFields or {}
+    local rejectFields = syncState.receiveRejectFields
+
     for _, tx in ipairs(data.transactions or {}) do
-        if not reconstructSyncRecord(tx, sender) then
-            itemDuped = itemDuped + 1
+        local accepted, badField = reconstructSyncRecord(tx, sender)
+        if not accepted then
+            -- Counted apart from duplicates on purpose. Folding rejects into
+            -- the dupe count made total rejection look like perfect
+            -- convergence: the redundancy line would read 100% duped, which the
+            -- decision rule in CLAUDE.md reads as "the bucket filter is working".
+            itemRejected = itemRejected + 1
+            rejectFields[badField or "unknown"] =
+                (rejectFields[badField or "unknown"] or 0) + 1
+            self:SyncDebug("Rejected item record from %s: bad %s",
+                tostring(sender), tostring(badField))
         else
             local isDup, matchedKey = self:IsDuplicate(tx, guildData)
             if isDup then
@@ -2334,8 +2433,13 @@ function GBL:HandleSyncData(sender, data)
     end
 
     for _, tx in ipairs(data.moneyTransactions or {}) do
-        if not reconstructSyncRecord(tx, sender) then
-            moneyDuped = moneyDuped + 1
+        local accepted, badField = reconstructSyncRecord(tx, sender)
+        if not accepted then
+            moneyRejected = moneyRejected + 1
+            rejectFields[badField or "unknown"] =
+                (rejectFields[badField or "unknown"] or 0) + 1
+            self:SyncDebug("Rejected money record from %s: bad %s",
+                tostring(sender), tostring(badField))
         else
             local isDup, matchedKey = self:IsDuplicate(tx, guildData)
             if isDup then
@@ -2376,6 +2480,10 @@ function GBL:HandleSyncData(sender, data)
     end
 
     syncState.receiveNormalized = (syncState.receiveNormalized or 0) + normalized
+    syncState.receiveItemRejected =
+        (syncState.receiveItemRejected or 0) + itemRejected
+    syncState.receiveMoneyRejected =
+        (syncState.receiveMoneyRejected or 0) + moneyRejected
 
     local stored = itemStored + moneyStored
     -- Invalidate rescan session caches so the next periodic rescan uses
@@ -2568,6 +2676,21 @@ function GBL:FinishReceiving(sender)
         self:AddAuditEntry(line)
     end
 
+    -- Rejects get their own line and their own vocabulary. Folded into the dupe
+    -- count they were invisible, and worse than invisible: a peer sending
+    -- nothing but corrupt records read as a peer we had fully converged with.
+    local rejected = (syncState.receiveItemRejected or 0)
+        + (syncState.receiveMoneyRejected or 0)
+    if rejected > 0 then
+        local fields = {}
+        for field, count in pairs(syncState.receiveRejectFields or {}) do
+            fields[#fields + 1] = field .. " x" .. count
+        end
+        table.sort(fields)
+        self:SyncWarn("Rejected %d record(s) from %s: %s",
+            rejected, tostring(sender or "unknown"), table.concat(fields, ", "))
+    end
+
     if syncState.receiveTimer then
         syncState.receiveTimer:Cancel()
         syncState.receiveTimer = nil
@@ -2583,6 +2706,9 @@ function GBL:FinishReceiving(sender)
     syncState.receiveItemDuped = 0
     syncState.receiveMoneyStored = 0
     syncState.receiveMoneyDuped = 0
+    syncState.receiveItemRejected = 0
+    syncState.receiveMoneyRejected = 0
+    syncState.receiveRejectFields = {}
     syncState.receiveNormalized = 0
     syncState.receiveStartTime = 0
     syncState.receiveNackCount = 0
@@ -2961,6 +3087,10 @@ function GBL:GetSyncStatus()
         combatPaused = syncState.combatPaused,
         pendingPeersCount = syncState.pendingPeersCount,
         receiveNackCount = syncState.receiveNackCount,
+        receiveItemDuped = syncState.receiveItemDuped,
+        receiveMoneyDuped = syncState.receiveMoneyDuped,
+        receiveItemRejected = syncState.receiveItemRejected,
+        receiveMoneyRejected = syncState.receiveMoneyRejected,
     }
 end
 

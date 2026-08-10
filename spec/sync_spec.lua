@@ -6662,6 +6662,180 @@ describe("Sync", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Sync intake validation (#68)
+    --
+    -- DATA-MODEL.md section 8 measured what got through: 223 of 1,912 records
+    -- received via sync carried at least one mangled key name, against zero of
+    -- 10,398 locally scanned ones. Intake checked only that type and player were
+    -- non-empty, so a type reading "wN260370" was stored happily.
+    ---------------------------------------------------------------------------
+    describe("sync intake validation", function()
+        local BASE_TS = 3600 * 475100
+
+        --- A well-formed item record, for tests to damage one field of.
+        local function itemRecord(overrides)
+            local rec = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                classID = 0, subclassID = 5, count = 5, tab = 1,
+                timestamp = BASE_TS,
+                id = "deposit|Thrall|12345|5|1|475100:0",
+            }
+            for k, v in pairs(overrides or {}) do
+                if v == "\0nil" then rec[k] = nil else rec[k] = v end
+            end
+            return rec
+        end
+
+        local function receive(records)
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 1,
+                transactions = records, moneyTransactions = {},
+            })
+        end
+
+        describe("rejects", function()
+            it("a type outside the enum", function()
+                -- The exact damage shape from the measured population.
+                receive({ itemRecord{ type = "wN260370" } })
+                assert.equals(0, #guildData.transactions)
+            end)
+
+            it("a record that is neither an item nor a money record", function()
+                -- buildPrefix branches on itemID, so a record with neither field
+                -- takes the money path and collides with every other such record
+                -- from the same player, type and hour.
+                receive({ itemRecord{ itemID = "\0nil" } })
+                assert.equals(0, #guildData.transactions)
+            end)
+
+            it("a record claiming to be both", function()
+                receive({ itemRecord{ amount = 50000 } })
+                assert.equals(0, #guildData.transactions)
+            end)
+
+            it("a non-numeric count", function()
+                receive({ itemRecord{ count = "5" } })
+                assert.equals(0, #guildData.transactions)
+            end)
+
+            it("a non-numeric timestamp", function()
+                -- This one was invisible before: IsValidTimestamp checks the
+                -- type first, so a string timestamp was silently replaced with
+                -- receipt time and the record was filed in the wrong 6-hour
+                -- bucket, where it differed from every peer forever.
+                receive({ itemRecord{ timestamp = "1775580307" } })
+                assert.equals(0, #guildData.transactions)
+            end)
+
+            it("a non-string id", function()
+                -- reconstructSyncRecord calls record.id:match before any of the
+                -- old checks ran, so this crashed intake rather than failing it.
+                receive({ itemRecord{ id = 12345 } })
+                assert.equals(0, #guildData.transactions)
+            end)
+
+            it("a non-string player", function()
+                receive({ itemRecord{ player = 99 } })
+                assert.equals(0, #guildData.transactions)
+            end)
+        end)
+
+        describe("repairs rather than rejects", function()
+            it("an item record that lost subclassID in transit", function()
+                -- 195 of the 223 damaged records lost only this. It is derivable
+                -- from itemID through the same call CreateTxRecord uses, so
+                -- rejecting them would throw away recoverable data.
+                MockWoW.itemInfo[12345] = {
+                    name = "Test Flask", classID = 0, subclassID = 3,
+                }
+                receive({ itemRecord{ subclassID = "\0nil", timessID = 3 } })
+
+                assert.equals(1, #guildData.transactions)
+                assert.equals(3, guildData.transactions[1].subclassID)
+            end)
+
+            it("and recomputes the category from the repaired fields", function()
+                MockWoW.itemInfo[12345] = {
+                    name = "Test Flask", classID = 0, subclassID = 3,
+                }
+                receive({ itemRecord{ subclassID = "\0nil", category = "unknown" } })
+
+                assert.equals(1, #guildData.transactions)
+                assert.equals("flask", guildData.transactions[1].category)
+            end)
+
+            it("a non-numeric classID, before the type check can reject it", function()
+                -- Ordering guard: repair has to run first or the type check
+                -- rejects exactly the records repair exists to save.
+                MockWoW.itemInfo[12345] = {
+                    name = "Test Flask", classID = 0, subclassID = 3,
+                }
+                receive({ itemRecord{ classID = "0" } })
+
+                assert.equals(1, #guildData.transactions)
+                assert.equals(0, guildData.transactions[1].classID)
+            end)
+        end)
+
+        it("leaves an unknown key untouched", function()
+            -- The forward-tolerance guard, and the most important test here.
+            -- A whitelist at intake would turn every future additive field into
+            -- a compatibility break needing a floor raise.
+            receive({ itemRecord{ someFutureField = "hello" } })
+
+            assert.equals(1, #guildData.transactions)
+            assert.equals("hello", guildData.transactions[1].someFutureField)
+        end)
+
+        describe("accounting", function()
+            it("counts a reject as a reject, not as a duplicate", function()
+                -- Before this, a rejected record incremented the dupe counter,
+                -- so total rejection was indistinguishable from perfect
+                -- convergence: the redundancy line read 100% duped, which the
+                -- decision rule in CLAUDE.md reads as "the bucket filter is
+                -- doing the work, skip". Asserted through the emitted summary
+                -- rather than the counters, because FinishReceiving clears
+                -- those before anything outside the sync can read them.
+                receive({
+                    itemRecord{ type = "wN260370" },
+                    itemRecord{ id = "deposit|Thrall|12345|5|1|475101:0",
+                                timestamp = BASE_TS + 3600 },
+                })
+
+                local rejectLine, redundancyLine
+                for _, e in ipairs(GBL:GetLog("sync")) do
+                    if e.message:find("Rejected 1 record", 1, true) then
+                        rejectLine = e.message
+                    elseif e.message:find("Redundancy from", 1, true) then
+                        redundancyLine = e.message
+                    end
+                end
+
+                assert.is_string(rejectLine)
+                assert.is_string(redundancyLine)
+                -- One good record in, none duplicated. The rejected one is not
+                -- in this line's denominator at all.
+                assert.truthy(redundancyLine:find("0% duped (0/1 received)", 1, true),
+                    "redundancy line should not count the reject: " .. redundancyLine)
+            end)
+
+            it("names the failing field in the sync log", function()
+                receive({ itemRecord{ count = "5" } })
+
+                local found = false
+                for _, e in ipairs(GBL:GetLog("sync")) do
+                    if e.message:find("count", 1, true)
+                        and e.message:lower():find("reject", 1, true) then
+                        found = true
+                    end
+                end
+                assert.is_true(found, "expected a reject entry naming count")
+            end)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Access control propagation via HELLO
     ---------------------------------------------------------------------------
 
