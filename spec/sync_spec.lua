@@ -35,6 +35,16 @@ describe("Sync", function()
     local GBL
     local guildData
 
+    --- A SYNC_REQUEST payload from a peer running our own version.
+    -- Since v0.37.0 the serving side gates on the request's version fields, so
+    -- a payload without them is read as a pre-floor peer and refused. Tests
+    -- that are not about the gate say "same version as us" through this.
+    local function request(fields)
+        fields = fields or {}
+        if fields.version == nil then fields.version = GBL.version end
+        return fields
+    end
+
     before_each(function()
         Helpers.setupMocks()
         MockWoW.guild.name = "Test Guild"
@@ -149,7 +159,7 @@ describe("Sync", function()
             end
             GBL:ResetHashCache()
             MockAce.sentCommMessages = {}
-            GBL:HandleSyncRequest("PeerA", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
             -- Advance time past cooldown but before keepalive threshold (280s)
@@ -182,7 +192,7 @@ describe("Sync", function()
             end
             GBL:ResetHashCache()
             MockAce.sentCommMessages = {}
-            GBL:HandleSyncRequest("PeerA", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
             -- Advance time past keepalive threshold (280s)
@@ -215,7 +225,7 @@ describe("Sync", function()
             end
             GBL:ResetHashCache()
             MockAce.sentCommMessages = {}
-            GBL:HandleSyncRequest("PeerA", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
             -- Advance time past cooldown but before keepalive
@@ -435,6 +445,29 @@ describe("Sync", function()
             assert.is_true(found, "expected hash-unchanged suppression DEBUG line")
         end)
 
+        it("advertises the sync floor on broadcast HELLO", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:BroadcastHello()
+
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok)
+            assert.is_string(GBL.MIN_SYNC_VERSION)
+            assert.equals(GBL.MIN_SYNC_VERSION, data.minSyncVersion)
+        end)
+
+        it("advertises the sync floor on HELLO reply", function()
+            -- Both builders, because a peer that only ever sees our reply must
+            -- still learn our floor. The wire-contract parity test guards the
+            -- pair from drifting apart.
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:SendHelloReply("OfficerB")
+
+            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok)
+            assert.is_string(GBL.MIN_SYNC_VERSION)
+            assert.equals(GBL.MIN_SYNC_VERSION, data.minSyncVersion)
+        end)
+
         it("SendHelloReply payload includes isReply=true", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
             GBL:SendHelloReply("OfficerB")
@@ -467,12 +500,14 @@ describe("Sync", function()
                     assert.not_equals("SYNC_REQUEST", data.type)
                 end
             end
-            -- Should have an audit entry about the mismatch (either wording).
-            -- "version mismatch" is the production wording; "sync isolated" is
-            -- the dev-build wording (when this branch dogfoods DEV_BUILD).
-            local trail = GBL:GetAuditTrail()
-            assert.is_true(#trail > 0)
-            assert.truthy(trail[1].message:find("version mismatch", 1, true))
+            -- Refusals say "refused" plus the reason. Before v0.37.0 the only
+            -- reason was "version mismatch"; the floor gave refusals a reason
+            -- vocabulary, and this peer advertises no floor of its own.
+            local found = false
+            for _, e in ipairs(GBL:GetAuditTrail()) do
+                if e.message:find("refused", 1, true) then found = true end
+            end
+            assert.is_true(found, "expected a refusal entry in the sync log")
         end)
 
         it("refuses sync even on same major but different minor version", function()
@@ -491,9 +526,11 @@ describe("Sync", function()
                     assert.not_equals("SYNC_REQUEST", data.type)
                 end
             end
-            local trail = GBL:GetAuditTrail()
-            assert.is_true(#trail > 0)
-            assert.truthy(trail[1].message:find("version mismatch", 1, true))
+            local found = false
+            for _, e in ipairs(GBL:GetAuditTrail()) do
+                if e.message:find("refused", 1, true) then found = true end
+            end
+            assert.is_true(found, "expected a refusal entry in the sync log")
         end)
 
         it("dev build refuses HELLO from production peer", function()
@@ -524,7 +561,7 @@ describe("Sync", function()
             local trail = GBL:GetAuditTrail()
             local found = false
             for _, e in ipairs(trail) do
-                if e.message:find("version mismatch", 1, true)
+                if e.message:find("refused", 1, true)
                     and e.message:find("-dev.sync", 1, true) then
                     found = true
                     break
@@ -558,13 +595,43 @@ describe("Sync", function()
             local trail = GBL:GetAuditTrail()
             local found = false
             for _, e in ipairs(trail) do
-                if e.message:find("version mismatch", 1, true)
+                if e.message:find("refused", 1, true)
                     and e.message:find("-dev.production-test-sentinel-xyz", 1, true) then
                     found = true
                     break
                 end
             end
             assert.is_true(found, "expected version-mismatch audit entry naming the foreign dev suffix")
+        end)
+
+        it("accepts a peer above the floor that advertises one", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL.version = "0.40.0"
+
+            for i = 1, 5 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000 + i, id = "floorok" .. i .. ":0",
+                })
+            end
+
+            GBL:HandleHello("OfficerB", {
+                version = "0.38.0",
+                minSyncVersion = GBL.MIN_SYNC_VERSION,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 5,
+                dataHash = GBL:GetDataHash(guildData) + 1,
+                lastScanTime = 2000,
+            })
+            fireJitterTimers()
+
+            local foundRequest = false
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "SYNC_REQUEST" then foundRequest = true end
+            end
+            assert.is_true(foundRequest,
+                "a peer inside the compatible range should be synced with")
         end)
 
         it("triggers sync when hash differs and counts are equal", function()
@@ -901,7 +968,7 @@ describe("Sync", function()
             end
 
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- Should have sent at least one SYNC_DATA message
             assert.is_true(#MockAce.sentCommMessages > 0)
@@ -928,7 +995,7 @@ describe("Sync", function()
             })
 
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 1000 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 1000 })
 
             local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
             assert.is_true(ok)
@@ -938,7 +1005,7 @@ describe("Sync", function()
 
         it("sends empty sync when no matching transactions", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
             assert.is_true(ok)
@@ -1577,7 +1644,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "h1",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             local status = GBL:GetSyncStatus()
             assert.is_true(status.sending)
@@ -1608,7 +1675,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "h1",
             })
-            GBL:HandleSyncRequest("OfficerC", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerC", request{ sinceTimestamp = 0 })
 
             local status = GBL:GetSyncStatus()
             assert.is_true(status.sending)
@@ -1748,7 +1815,7 @@ describe("Sync", function()
 
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
             -- Request since time 5000 (like a receiver who last synced at 5000)
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 5000 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 5000 })
 
             local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
             assert.is_true(ok)
@@ -1825,7 +1892,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "h1",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             MockAce.sentCommMessages = {}
 
             -- OfficerC sends an ACK (not our target)
@@ -1845,7 +1912,7 @@ describe("Sync", function()
                     scanTime = 1000 + i, id = "h" .. i,
                 })
             end
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
             -- sendChunkIndex should be 1 after first SendNextChunk
@@ -1874,7 +1941,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "h1",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- Should be sending
             local status = GBL:GetSyncStatus()
@@ -2094,7 +2161,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "h1",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- Count ACK timers — hard timer exists but ACK timer should NOT yet
             local ackTimerCount = 0
@@ -2138,7 +2205,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "h1",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- Invoke callback with partial progress
             storedCallback(storedArg, 50, 1000)
@@ -2183,7 +2250,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "wireack1:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- Complete the send so sendChunkTransmittedAt is stamped
             assert.is_not_nil(storedCallback)
@@ -2223,7 +2290,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "h1",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- Should be sending
             assert.is_true(GBL:GetSyncStatus().sending)
@@ -2259,7 +2326,7 @@ describe("Sync", function()
                     scanTime = 1000 + i, id = "h" .. i,
                 })
             end
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- Should be sending chunk 1
             assert.is_true(GBL:GetSyncStatus().sending)
@@ -2300,7 +2367,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "h1",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
             -- Fire ACK timeout MAX_RETRIES times (should keep retrying).
@@ -2342,7 +2409,7 @@ describe("Sync", function()
                     scanTime = 1000 + i, id = "h" .. i,
                 })
             end
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
             -- Advance past gap floor so each retry fires (production 8s gap).
@@ -2419,7 +2486,7 @@ describe("Sync", function()
                     scanTime = 1000 + i, id = "h" .. i,
                 })
             end
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
         end
 
@@ -2476,7 +2543,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "gapfloor_first:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- First chunk should have gone out immediately (no prior
             -- lastSendIssuedAt means gap check short-circuits on the > 0 guard).
@@ -2504,7 +2571,7 @@ describe("Sync", function()
                     id = "gapfloor_second_" .. i .. ":0",
                 })
             end
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             local function countSyncData()
                 local c = 0
@@ -2570,7 +2637,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "gapfloor_acktimeout:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- Complete the send so the ACK timer is scheduled.
             assert.is_not_nil(savedCb)
@@ -2614,7 +2681,7 @@ describe("Sync", function()
                 })
             end
 
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- The first sent message should be the SYNC_DATA chunk
             assert.is_true(#MockAce.sentCommMessages >= 1)
@@ -2635,7 +2702,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "h1",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             local trail = GBL:GetAuditTrail()
             local hasWarning = false
@@ -2664,7 +2731,7 @@ describe("Sync", function()
                 id = "deposit|Jaina|50000|0:0",
             })
 
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
             assert.is_true(ok)
@@ -2690,7 +2757,7 @@ describe("Sync", function()
                 id = "m1",
             })
 
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- Original record must still have scanTime and scannedBy
             assert.equals(3000, guildData.moneyTransactions[1].scanTime)
@@ -2716,7 +2783,7 @@ describe("Sync", function()
                 scannedBy = "OfficerA", id = "h1:0",
             })
 
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
             assert.is_true(ok)
@@ -2749,7 +2816,7 @@ describe("Sync", function()
                 scannedBy = "OfficerA", id = "h2",
             })
 
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- Original record should still have itemLink
             assert.equals(originalLink, guildData.transactions[1].itemLink)
@@ -2897,6 +2964,296 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
     -- Exact version matching
     ---------------------------------------------------------------------------
+
+    ---------------------------------------------------------------------------
+    -- MIN_SYNC_VERSION floor (#74)
+    --
+    -- Before v0.37.0 any version difference refused sync, so every release split
+    -- the guild until everyone updated. These pin the range gate that replaces
+    -- it. GBL.version is assigned directly rather than driven through
+    -- OnInitialize so each test states the pair of versions it is about.
+    ---------------------------------------------------------------------------
+    describe("MIN_SYNC_VERSION floor", function()
+        --- A HELLO from a peer that speaks the floor protocol.
+        local function floorHello(version, minVersion)
+            return {
+                version = version,
+                minSyncVersion = minVersion or GBL.MIN_SYNC_VERSION,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 999,
+                dataHash = 4242,
+                lastScanTime = 1000,
+            }
+        end
+
+        local function sentTypes()
+            local types = {}
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok then types[data.type] = (types[data.type] or 0) + 1 end
+            end
+            return types
+        end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "floorbase:0",
+            })
+        end)
+
+        it("declares a floor at or below its own version", function()
+            -- A forward-dated placeholder would ship a build that refuses every
+            -- peer including itself, so this fails on every stacked commit
+            -- rather than at release time.
+            local plainVersion = GBL:GetSyncVersion():match("^([^-]+)")
+            assert.is_truthy(GBL.MIN_SYNC_VERSION)
+            assert.is_true(GBL:CompareSemver(GBL.MIN_SYNC_VERSION, plainVersion) <= 0,
+                "MIN_SYNC_VERSION must not exceed VERSION")
+        end)
+
+        it("refuses a peer below the floor", function()
+            GBL.version = "0.40.0"
+            GBL:HandleHello("OfficerB", floorHello("0.20.0", "0.20.0"))
+            fireJitterTimers()
+
+            assert.is_nil(sentTypes()["SYNC_REQUEST"])
+            assert.is_true(GBL:GetSyncPeers()["OfficerB"].outdated)
+        end)
+
+        it("refuses a peer whose own floor is above us", function()
+            GBL.version = "0.37.0"
+            -- They shipped a later break and will not accept us either.
+            GBL:HandleHello("OfficerB", floorHello("0.50.0", "0.45.0"))
+            fireJitterTimers()
+
+            assert.is_nil(sentTypes()["SYNC_REQUEST"])
+            assert.equals("local_behind", GBL:GetSyncPeers()["OfficerB"].versionRelation)
+        end)
+
+        it("falls back to exact match for a peer advertising no floor", function()
+            -- A pre-v0.37.0 peer. Its records may predate any of the guarantees
+            -- the floor rests on, so the old rule still applies to it.
+            GBL.version = "0.40.0"
+            GBL:HandleHello("OfficerB", {
+                version = "0.39.0",
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 999,
+                dataHash = 4242,
+            })
+            fireJitterTimers()
+
+            assert.is_nil(sentTypes()["SYNC_REQUEST"])
+        end)
+
+        it("accepts an identical pre-floor peer under the exact-match fallback", function()
+            GBL.version = "0.40.0"
+            GBL:HandleHello("OfficerB", {
+                version = "0.40.0",
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 999,
+                dataHash = 4242,
+            })
+            fireJitterTimers()
+
+            assert.equals(1, sentTypes()["SYNC_REQUEST"] or 0)
+        end)
+
+        it("refuses a peer that sends no version at all", function()
+            GBL.version = "0.40.0"
+            GBL:HandleHello("OfficerB", {
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 999,
+                dataHash = 4242,
+            })
+            fireJitterTimers()
+
+            assert.is_nil(sentTypes()["SYNC_REQUEST"])
+        end)
+
+        it("keeps a dev build isolated from an in-range production peer", function()
+            -- The trap: CompareSemver strips -dev.<id>, so a range check that
+            -- reached it would read this pair as compatible and break the
+            -- isolation DEV_BUILD exists to enforce.
+            GBL.version = "0.40.0-dev.cross-version-sync"
+            GBL:HandleHello("OfficerB", floorHello("0.40.0"))
+            fireJitterTimers()
+
+            assert.is_nil(sentTypes()["SYNC_REQUEST"])
+        end)
+
+        it("keeps a production build isolated from an in-range dev peer", function()
+            GBL.version = "0.40.0"
+            GBL:HandleHello("OfficerB", floorHello("0.40.0-dev.someone-else"))
+            fireJitterTimers()
+
+            assert.is_nil(sentTypes()["SYNC_REQUEST"])
+        end)
+
+        it("syncs with a matching dev build", function()
+            GBL.version = "0.40.0-dev.cross-version-sync"
+            GBL:HandleHello("OfficerB", floorHello("0.40.0-dev.cross-version-sync"))
+            fireJitterTimers()
+
+            assert.equals(1, sentTypes()["SYNC_REQUEST"] or 0)
+        end)
+
+        it("replies to an incompatible peer once per session, not once per HELLO", function()
+            -- Without this the refusal is silent and the peer never learns why,
+            -- but replying on every heartbeat would whisper them forever.
+            GBL.version = "0.40.0"
+            for _ = 1, 4 do
+                GBL:HandleHello("OfficerB", floorHello("0.20.0", "0.20.0"))
+            end
+
+            local replies = 0
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "HELLO" and data.isReply then
+                    replies = replies + 1
+                end
+            end
+            assert.equals(1, replies)
+        end)
+
+        it("does not reply to an incompatible peer's reply", function()
+            GBL.version = "0.40.0"
+            local hello = floorHello("0.20.0", "0.20.0")
+            hello.isReply = true
+            GBL:HandleHello("OfficerB", hello)
+
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                assert.is_false(ok and data.type == "HELLO" and data.isReply == true)
+            end
+        end)
+
+        it("still adopts access control from an incompatible peer", function()
+            -- The settings merges sit above the gate on purpose: a GM's policy
+            -- has to reach members through a mixed-version window.
+            GBL.version = "0.40.0"
+            local hello = floorHello("0.20.0", "0.20.0")
+            hello.accessControl = {
+                rankThreshold = 3,
+                restrictedMode = true,
+                configuredBy = "GuildMaster",
+                configuredAt = 5000,
+            }
+            GBL:HandleHello("OfficerB", hello)
+
+            assert.equals(3, guildData.accessControl.rankThreshold)
+        end)
+
+        describe("serving side", function()
+            it("refuses a SYNC_REQUEST from a peer below the floor", function()
+                GBL.version = "0.40.0"
+                GBL:HandleSyncRequest("OfficerB", request{
+                    sinceTimestamp = 0,
+                    version = "0.20.0",
+                    minSyncVersion = "0.20.0",
+                })
+
+                assert.is_nil(sentTypes()["SYNC_DATA"])
+            end)
+
+            it("refuses a SYNC_REQUEST carrying no version", function()
+                -- The pre-floor request shape, written out rather than through
+                -- request() precisely because the missing version is the point.
+                -- HandleHello alone cannot stop this: RequestSync skips HELLO.
+                GBL.version = "0.40.0"
+                GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+
+                assert.is_nil(sentTypes()["SYNC_DATA"])
+            end)
+
+            it("does not answer an incompatible requester with BUSY", function()
+                -- BUSY reads as "try again shortly" and would drive their retry
+                -- loop for as long as they stay on the old version.
+                GBL.version = "0.40.0"
+                GBL:HandleSyncRequest("OfficerB", request{
+                    sinceTimestamp = 0,
+                    version = "0.20.0",
+                    minSyncVersion = "0.20.0",
+                })
+
+                assert.is_nil(sentTypes()["BUSY"])
+            end)
+
+            it("serves a compatible requester", function()
+                GBL.version = "0.40.0"
+                GBL:HandleSyncRequest("OfficerB", request{
+                    sinceTimestamp = 0,
+                    version = "0.38.0",
+                    minSyncVersion = GBL.MIN_SYNC_VERSION,
+                })
+
+                assert.equals(1, sentTypes()["SYNC_DATA"] or 0)
+            end)
+
+            it("keeps a dev build from serving a production requester", function()
+                GBL.version = "0.40.0-dev.cross-version-sync"
+                GBL:HandleSyncRequest("OfficerB", request{
+                    sinceTimestamp = 0,
+                    version = "0.40.0",
+                    minSyncVersion = GBL.MIN_SYNC_VERSION,
+                })
+
+                assert.is_nil(sentTypes()["SYNC_DATA"])
+            end)
+        end)
+
+        describe("pull side", function()
+            it("declines to request from a known-incompatible peer", function()
+                -- ProcessPendingPeers reaches RequestSync without passing the
+                -- HELLO gate, so the check has to exist here too.
+                GBL.version = "0.40.0"
+                GBL:HandleHello("OfficerB", floorHello("0.20.0", "0.20.0"))
+                MockAce.sentCommMessages = {}
+
+                GBL:RequestSync("OfficerB", 0)
+
+                assert.is_nil(sentTypes()["SYNC_REQUEST"])
+                assert.is_false(GBL:GetSyncStatus().receiving)
+            end)
+
+            it("requests from a known-compatible peer", function()
+                GBL.version = "0.40.0"
+                GBL:HandleHello("OfficerB", floorHello("0.38.0"))
+                fireJitterTimers()
+                MockAce.sentCommMessages = {}
+                GBL:ResetSyncState()
+
+                GBL:RequestSync("OfficerB", 0)
+
+                assert.equals(1, sentTypes()["SYNC_REQUEST"] or 0)
+            end)
+        end)
+
+        describe("payload", function()
+            it("puts the version and floor on SYNC_REQUEST", function()
+                GBL:RequestSync("OfficerB", 0)
+
+                local found
+                for _, msg in ipairs(MockAce.sentCommMessages) do
+                    local ok, data = GBL:Deserialize(msg.text)
+                    if ok and data.type == "SYNC_REQUEST" then found = data end
+                end
+                assert.is_not_nil(found)
+                assert.equals(GBL.version, found.version)
+                assert.equals(GBL.MIN_SYNC_VERSION, found.minSyncVersion)
+            end)
+
+            it("remembers a peer's floor across sessions", function()
+                -- InitSync seeds the session peer list from knownPeers, and the
+                -- pull-side gate reads the floor from that seeded entry.
+                GBL:HandleHello("OfficerB", floorHello("0.38.0", "0.37.0"))
+
+                assert.equals("0.37.0", GBL:GetSyncPeers()["OfficerB"].minSyncVersion)
+                assert.equals("0.37.0", guildData.knownPeers["OfficerB"].minSyncVersion)
+            end)
+        end)
+    end)
 
     describe("exact version matching", function()
         it("allows sync when versions match exactly", function()
@@ -3054,7 +3411,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "h1",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
             -- ACK comes from same-realm-qualified name; canonicalizes to "OfficerB"
@@ -3079,7 +3436,7 @@ describe("Sync", function()
                 scanTime = 1000, id = "h1",
             })
             -- SYNC_REQUEST came from realm-qualified name on local realm
-            GBL:HandleSyncRequest("OfficerB-TestRealm", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB-TestRealm", request{ sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
             -- ACK comes without realm
@@ -3128,7 +3485,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "h1",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
             -- ACK from wrong person entirely
@@ -3273,7 +3630,7 @@ describe("Sync", function()
             -- Requester already has bucket1 (matching hash) but not bucket2
             local localBuckets = GBL:ComputeBucketHashes(guildData)
 
-            GBL:HandleSyncRequest("OfficerB", {
+            GBL:HandleSyncRequest("OfficerB", request{
                 sinceTimestamp = 0,
                 bucketHashes = { [bucket1] = localBuckets[bucket1] },  -- bucket1 matches, bucket2 absent
             })
@@ -3299,7 +3656,7 @@ describe("Sync", function()
 
             local localBuckets = GBL:ComputeBucketHashes(guildData)
 
-            GBL:HandleSyncRequest("OfficerB", {
+            GBL:HandleSyncRequest("OfficerB", request{
                 sinceTimestamp = 0,
                 bucketHashes = localBuckets,  -- all match
             })
@@ -3327,7 +3684,7 @@ describe("Sync", function()
             })
 
             -- No bucketHashes — old-style request
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 1000 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 1000 })
 
             assert.is_true(#MockAce.sentCommMessages >= 1)
             local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
@@ -3395,7 +3752,7 @@ describe("Sync", function()
             end
 
             -- Empty bucketHashes => every local bucket differs => all sent.
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0, bucketHashes = {} })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0, bucketHashes = {} })
 
             -- The first chunk sends synchronously; inspect it without firing timers.
             local ok, data = GBL:Deserialize(MockAce.sentCommMessages[1].text)
@@ -3530,7 +3887,7 @@ describe("Sync", function()
                     scanTime = 1000 + i, id = "nk" .. i .. ":0",
                 })
             end
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
             local sentBefore = #MockAce.sentCommMessages
@@ -3636,7 +3993,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "nkign:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             local sentBefore = #MockAce.sentCommMessages
 
@@ -3663,7 +4020,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "nkoor:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             local sentBefore = #MockAce.sentCommMessages
 
@@ -3765,7 +4122,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "zone1:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
             GBL:OnLoadingScreenStart()
@@ -3779,7 +4136,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "zone2:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             GBL:OnLoadingScreenStart()
             assert.is_true(GBL:GetSyncStatus().zonePaused)
@@ -3806,7 +4163,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "zone3:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             local sentBefore = #MockAce.sentCommMessages
 
             -- Pause and try to send
@@ -3860,7 +4217,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "zone5:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             GBL:OnLoadingScreenStart()
             assert.is_true(GBL:GetSyncStatus().zonePaused)
 
@@ -3875,7 +4232,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "zone6:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- First zone change
             GBL:OnLoadingScreenStart()
@@ -3948,7 +4305,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "fps1:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- FPS frame should have been created
             assert.is_true(#MockWoW.frames > framesBefore,
@@ -3970,7 +4327,7 @@ describe("Sync", function()
                     scanTime = 1000 + i, id = "fps2_" .. i .. ":0",
                 })
             end
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- Simulate low FPS — manually set delay
             MockWoW.framerate = 10
@@ -4019,7 +4376,7 @@ describe("Sync", function()
                 })
             end
 
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- Capture the audit trail
             local trail = GBL:GetAuditTrail()
@@ -4053,7 +4410,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "hist_basic:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             GBL:HandleAck("OfficerB", { chunk = 1 })
             MockWoW.fireTimers()
 
@@ -4092,7 +4449,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "hist_nacount:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             GBL:HandleAck("OfficerB", { chunk = 1 })
             MockWoW.fireTimers()
 
@@ -4125,7 +4482,7 @@ describe("Sync", function()
                     scanTime = 1000, id = "ack_tag_" .. i .. ":0",
                 })
             end
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             local syncState = GBL:GetSyncStateForTests()
             assert.is_not_nil(syncState.chunkOutcomes[1], "chunk 1 outcome should exist")
@@ -4160,7 +4517,7 @@ describe("Sync", function()
                     scanTime = 1000, id = "nack_tag_" .. i .. ":0",
                 })
             end
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             GBL:HandleNack("OfficerB", { chunk = 1 })
 
             local syncState = GBL:GetSyncStateForTests()
@@ -4181,7 +4538,7 @@ describe("Sync", function()
                     scanTime = 1000, id = "combat_abort_" .. i .. ":0",
                 })
             end
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             local syncState = GBL:GetSyncStateForTests()
             local activeIdx = syncState.sendChunkIndex
@@ -4204,7 +4561,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "compression_capture:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             local syncState = GBL:GetSyncStateForTests()
             assert.is_not_nil(syncState.chunkOutcomes[1])
@@ -4227,7 +4584,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "ctl1:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             -- HandleSyncRequest calls SendNextChunk which should defer
             -- No SYNC_DATA sent immediately because CTL bandwidth is low
             local foundSyncData = false
@@ -4252,7 +4609,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "ctl2:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- Should have sent normally (no CTL deferral)
             local trail = GBL:GetAuditTrail()
@@ -4279,7 +4636,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "ctl3:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             assert.is_true(#MockAce.sentCommMessages >= 1)
         end)
 
@@ -4298,7 +4655,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "ctl_thresh:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- avail=300 < CTL_BANDWIDTH_MIN=400 floor → should defer
             local foundSyncData = false
@@ -4342,7 +4699,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "ctl_counter:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             assert.is_true(GBL:GetCtlDeferTotal() >= 1,
                 "ctlDeferTotal should increment on CTL deferral")
@@ -4358,7 +4715,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "ctl_ratelimit:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- Fire timers repeatedly to simulate multiple deferrals
             for _ = 1, 25 do
@@ -4389,7 +4746,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "ctl_sample:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             local drain = GBL._ctlDrain
             assert.is_true(#drain.samples >= 1, "expected a drain sample")
@@ -4411,7 +4768,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "ctl_overlap:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             local drain = GBL._ctlDrain
             local pendingAfterFirst = drain.timersPending
@@ -4442,7 +4799,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "ctl_recover:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             assert.is_not_nil(GBL._ctlDrain.episodeStart)
 
             -- Bandwidth returns; the pending deferral timer re-enters
@@ -4473,7 +4830,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "ctl_stats:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             GBL:HandleAck("OfficerB", { chunk = 1 })
             MockWoW.fireTimers()
 
@@ -4500,7 +4857,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "ctl_truncated:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             assert.is_not_nil(GBL._ctlDrain.episodeStart, "expected an open episode")
 
             -- Mode A shape: the send aborts while CTL is still starved (in
@@ -4542,7 +4899,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "ctl_absent:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             assert.is_nil(GBL._ctlDrain.episodeStart)
             -- Only the session boundary marker lands; no deferral samples.
@@ -4565,7 +4922,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "ctlq1:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             local trail = GBL:GetAuditTrail()
             local foundCtlq = false
@@ -4589,7 +4946,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "ctl_hellotag:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             local msgsBefore = #MockAce.sentCommMessages
 
@@ -6305,6 +6662,180 @@ describe("Sync", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Sync intake validation (#68)
+    --
+    -- DATA-MODEL.md section 8 measured what got through: 223 of 1,912 records
+    -- received via sync carried at least one mangled key name, against zero of
+    -- 10,398 locally scanned ones. Intake checked only that type and player were
+    -- non-empty, so a type reading "wN260370" was stored happily.
+    ---------------------------------------------------------------------------
+    describe("sync intake validation", function()
+        local BASE_TS = 3600 * 475100
+
+        --- A well-formed item record, for tests to damage one field of.
+        local function itemRecord(overrides)
+            local rec = {
+                type = "deposit", player = "Thrall", itemID = 12345,
+                classID = 0, subclassID = 5, count = 5, tab = 1,
+                timestamp = BASE_TS,
+                id = "deposit|Thrall|12345|5|1|475100:0",
+            }
+            for k, v in pairs(overrides or {}) do
+                if v == "\0nil" then rec[k] = nil else rec[k] = v end
+            end
+            return rec
+        end
+
+        local function receive(records)
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 1,
+                transactions = records, moneyTransactions = {},
+            })
+        end
+
+        describe("rejects", function()
+            it("a type outside the enum", function()
+                -- The exact damage shape from the measured population.
+                receive({ itemRecord{ type = "wN260370" } })
+                assert.equals(0, #guildData.transactions)
+            end)
+
+            it("a record that is neither an item nor a money record", function()
+                -- buildPrefix branches on itemID, so a record with neither field
+                -- takes the money path and collides with every other such record
+                -- from the same player, type and hour.
+                receive({ itemRecord{ itemID = "\0nil" } })
+                assert.equals(0, #guildData.transactions)
+            end)
+
+            it("a record claiming to be both", function()
+                receive({ itemRecord{ amount = 50000 } })
+                assert.equals(0, #guildData.transactions)
+            end)
+
+            it("a non-numeric count", function()
+                receive({ itemRecord{ count = "5" } })
+                assert.equals(0, #guildData.transactions)
+            end)
+
+            it("a non-numeric timestamp", function()
+                -- This one was invisible before: IsValidTimestamp checks the
+                -- type first, so a string timestamp was silently replaced with
+                -- receipt time and the record was filed in the wrong 6-hour
+                -- bucket, where it differed from every peer forever.
+                receive({ itemRecord{ timestamp = "1775580307" } })
+                assert.equals(0, #guildData.transactions)
+            end)
+
+            it("a non-string id", function()
+                -- reconstructSyncRecord calls record.id:match before any of the
+                -- old checks ran, so this crashed intake rather than failing it.
+                receive({ itemRecord{ id = 12345 } })
+                assert.equals(0, #guildData.transactions)
+            end)
+
+            it("a non-string player", function()
+                receive({ itemRecord{ player = 99 } })
+                assert.equals(0, #guildData.transactions)
+            end)
+        end)
+
+        describe("repairs rather than rejects", function()
+            it("an item record that lost subclassID in transit", function()
+                -- 195 of the 223 damaged records lost only this. It is derivable
+                -- from itemID through the same call CreateTxRecord uses, so
+                -- rejecting them would throw away recoverable data.
+                MockWoW.itemInfo[12345] = {
+                    name = "Test Flask", classID = 0, subclassID = 3,
+                }
+                receive({ itemRecord{ subclassID = "\0nil", timessID = 3 } })
+
+                assert.equals(1, #guildData.transactions)
+                assert.equals(3, guildData.transactions[1].subclassID)
+            end)
+
+            it("and recomputes the category from the repaired fields", function()
+                MockWoW.itemInfo[12345] = {
+                    name = "Test Flask", classID = 0, subclassID = 3,
+                }
+                receive({ itemRecord{ subclassID = "\0nil", category = "unknown" } })
+
+                assert.equals(1, #guildData.transactions)
+                assert.equals("flask", guildData.transactions[1].category)
+            end)
+
+            it("a non-numeric classID, before the type check can reject it", function()
+                -- Ordering guard: repair has to run first or the type check
+                -- rejects exactly the records repair exists to save.
+                MockWoW.itemInfo[12345] = {
+                    name = "Test Flask", classID = 0, subclassID = 3,
+                }
+                receive({ itemRecord{ classID = "0" } })
+
+                assert.equals(1, #guildData.transactions)
+                assert.equals(0, guildData.transactions[1].classID)
+            end)
+        end)
+
+        it("leaves an unknown key untouched", function()
+            -- The forward-tolerance guard, and the most important test here.
+            -- A whitelist at intake would turn every future additive field into
+            -- a compatibility break needing a floor raise.
+            receive({ itemRecord{ someFutureField = "hello" } })
+
+            assert.equals(1, #guildData.transactions)
+            assert.equals("hello", guildData.transactions[1].someFutureField)
+        end)
+
+        describe("accounting", function()
+            it("counts a reject as a reject, not as a duplicate", function()
+                -- Before this, a rejected record incremented the dupe counter,
+                -- so total rejection was indistinguishable from perfect
+                -- convergence: the redundancy line read 100% duped, which the
+                -- decision rule in CLAUDE.md reads as "the bucket filter is
+                -- doing the work, skip". Asserted through the emitted summary
+                -- rather than the counters, because FinishReceiving clears
+                -- those before anything outside the sync can read them.
+                receive({
+                    itemRecord{ type = "wN260370" },
+                    itemRecord{ id = "deposit|Thrall|12345|5|1|475101:0",
+                                timestamp = BASE_TS + 3600 },
+                })
+
+                local rejectLine, redundancyLine
+                for _, e in ipairs(GBL:GetLog("sync")) do
+                    if e.message:find("Rejected 1 record", 1, true) then
+                        rejectLine = e.message
+                    elseif e.message:find("Redundancy from", 1, true) then
+                        redundancyLine = e.message
+                    end
+                end
+
+                assert.is_string(rejectLine)
+                assert.is_string(redundancyLine)
+                -- One good record in, none duplicated. The rejected one is not
+                -- in this line's denominator at all.
+                assert.truthy(redundancyLine:find("0% duped (0/1 received)", 1, true),
+                    "redundancy line should not count the reject: " .. redundancyLine)
+            end)
+
+            it("names the failing field in the sync log", function()
+                receive({ itemRecord{ count = "5" } })
+
+                local found = false
+                for _, e in ipairs(GBL:GetLog("sync")) do
+                    if e.message:find("count", 1, true)
+                        and e.message:lower():find("reject", 1, true) then
+                        found = true
+                    end
+                end
+                assert.is_true(found, "expected a reject entry naming count")
+            end)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Access control propagation via HELLO
     ---------------------------------------------------------------------------
 
@@ -7337,7 +7868,7 @@ describe("Sync", function()
             gd.seenTxHashes["abc:277:0"] = 1000 * 3600
 
             -- First request succeeds (enters sending state)
-            GBL:HandleSyncRequest("PeerA", {
+            GBL:HandleSyncRequest("PeerA", request{
                 sinceTimestamp = 0,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
@@ -7346,7 +7877,7 @@ describe("Sync", function()
             MockAce.sentCommMessages = {}
 
             -- Second request should be declined with BUSY
-            GBL:HandleSyncRequest("PeerB", {
+            GBL:HandleSyncRequest("PeerB", request{
                 sinceTimestamp = 0,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
@@ -7495,7 +8026,7 @@ describe("Sync", function()
                 scanTime = 1000 * 3600, scannedBy = "OfficerA",
             })
             guildData.seenTxHashes["x:277:0"] = 1000 * 3600
-            GBL:HandleSyncRequest("Other", {
+            GBL:HandleSyncRequest("Other", request{
                 sinceTimestamp = 0,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
@@ -7737,7 +8268,7 @@ describe("Sync", function()
                 scanTime = 1000 * 3600, scannedBy = "Me",
             })
             guildData.seenTxHashes["combat:277:0"] = 1000 * 3600
-            GBL:HandleSyncRequest("PeerA", {
+            GBL:HandleSyncRequest("PeerA", request{
                 sinceTimestamp = 0,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
@@ -7929,7 +8460,7 @@ describe("Sync", function()
                 scanTime = 2000 * 3600, scannedBy = "Me",
             })
             guildData.seenTxHashes["combat2:277:0"] = 2000 * 3600
-            GBL:HandleSyncRequest("PeerC", {
+            GBL:HandleSyncRequest("PeerC", request{
                 sinceTimestamp = 0,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
@@ -8038,7 +8569,7 @@ describe("Sync", function()
                 scanTime = 1000 * 3600, scannedBy = "OfficerA",
             })
             guildData.seenTxHashes["bidir:277:0"] = 1000 * 3600
-            GBL:HandleSyncRequest("PeerA", {
+            GBL:HandleSyncRequest("PeerA", request{
                 sinceTimestamp = 0,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
@@ -8070,7 +8601,7 @@ describe("Sync", function()
                 scanTime = 1000 * 3600, scannedBy = "OfficerA",
             })
             guildData.seenTxHashes["bidir2:277:0"] = 1000 * 3600
-            GBL:HandleSyncRequest("PeerA", {
+            GBL:HandleSyncRequest("PeerA", request{
                 sinceTimestamp = 0,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
@@ -8110,7 +8641,7 @@ describe("Sync", function()
                 scanTime = 1000 * 3600, scannedBy = "OfficerA",
             })
             guildData.seenTxHashes["bidir3:277:0"] = 1000 * 3600
-            GBL:HandleSyncRequest("PeerA", {
+            GBL:HandleSyncRequest("PeerA", request{
                 sinceTimestamp = 0,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
@@ -8158,7 +8689,7 @@ describe("Sync", function()
             GBL:AddPendingPeer("PeerB")
 
             -- Enter and finish sending to PeerA
-            GBL:HandleSyncRequest("PeerA", {
+            GBL:HandleSyncRequest("PeerA", request{
                 sinceTimestamp = 0,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
@@ -8197,7 +8728,7 @@ describe("Sync", function()
             -- Peer is behind: fewer records, different hash.
             GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 3, dataHash = 999 })
 
-            GBL:HandleSyncRequest("PeerA", {
+            GBL:HandleSyncRequest("PeerA", request{
                 sinceTimestamp = 0,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
@@ -8252,7 +8783,7 @@ describe("Sync", function()
             GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 3, dataHash = 999 })
 
             -- First skip sets lastSupersetNudge for the peer.
-            GBL:HandleSyncRequest("PeerA", {
+            GBL:HandleSyncRequest("PeerA", request{
                 sinceTimestamp = 0,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
@@ -8266,7 +8797,7 @@ describe("Sync", function()
             MockAce.sentCommMessages = {}
 
             -- Second skip at the same server time is inside the throttle window.
-            GBL:HandleSyncRequest("PeerA", {
+            GBL:HandleSyncRequest("PeerA", request{
                 sinceTimestamp = 0,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
@@ -8751,7 +9282,7 @@ describe("Sync", function()
                 scanTime = 1000 * 3600, scannedBy = "Me",
             })
             guildData.seenTxHashes["csend:277:0"] = 1000 * 3600
-            GBL:HandleSyncRequest("PeerX", {
+            GBL:HandleSyncRequest("PeerX", request{
                 sinceTimestamp = 0,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
@@ -8804,7 +9335,7 @@ describe("Sync", function()
                 scanTime = 1000 * 3600, scannedBy = "Me",
             })
             guildData.seenTxHashes["fr:277:0"] = 1000 * 3600
-            GBL:HandleSyncRequest("PeerX", {
+            GBL:HandleSyncRequest("PeerX", request{
                 sinceTimestamp = 0,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
@@ -8838,7 +9369,7 @@ describe("Sync", function()
                 scanTime = 1000 * 3600, scannedBy = "Me",
             })
             guildData.seenTxHashes["ce:277:0"] = 1000 * 3600
-            GBL:HandleSyncRequest("PeerX", {
+            GBL:HandleSyncRequest("PeerX", request{
                 sinceTimestamp = 0,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
@@ -9076,7 +9607,7 @@ describe("Sync", function()
                 scanTime = 1000 * 3600, scannedBy = "Me",
             })
             guildData.seenTxHashes["busy:277:0"] = 1000 * 3600
-            GBL:HandleSyncRequest("PeerA", {
+            GBL:HandleSyncRequest("PeerA", request{
                 sinceTimestamp = 0,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
@@ -9085,7 +9616,7 @@ describe("Sync", function()
             assert.equals("PeerA", GBL:GetSyncStatus().sendTarget)
 
             -- Another peer requests — should still get BUSY
-            GBL:HandleSyncRequest("PeerB", {
+            GBL:HandleSyncRequest("PeerB", request{
                 sinceTimestamp = 0,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
@@ -9249,7 +9780,7 @@ describe("Sync", function()
             end
             GBL:ResetHashCache()
             MockAce.sentCommMessages = {}
-            GBL:HandleSyncRequest("PeerA", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
             -- Now try BroadcastManifest — should be suppressed
@@ -9349,6 +9880,7 @@ describe("Sync", function()
             local requestMsg = GBL:Serialize({
                 type = "SYNC_REQUEST",
                 sinceTimestamp = 0,
+                version = GBL.version,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
             })
@@ -9471,6 +10003,7 @@ describe("Sync", function()
             local requestMsg = GBL:Serialize({
                 type = "SYNC_REQUEST",
                 sinceTimestamp = 0,
+                version = GBL.version,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 guild = "Test Guild",
             })
@@ -9595,7 +10128,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "busy1:0",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
             -- Receive BUSY from OfficerB
@@ -9650,7 +10183,7 @@ describe("Sync", function()
                 type = "deposit", player = "X", timestamp = 1000,
                 scanTime = 1000, id = "ht1",
             })
-            GBL:HandleSyncRequest("OfficerB", { sinceTimestamp = 0 })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
 
             -- Fire the hard timeout
             for _, timer in ipairs(MockWoW.pendingTimers) do

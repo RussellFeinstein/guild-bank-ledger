@@ -240,6 +240,89 @@ describe("Ledger", function()
             assert.equals("deposit", guildData.transactions[1].type)
             assert.equals("withdraw", guildData.transactions[2].type)
         end)
+
+        -- WoW populates tab1/tab2 only for moves, because a move is the only
+        -- transaction that spans two tabs. ReadTabTransactions passed tab1
+        -- straight through, so it read tab T's own log and then threw T away:
+        -- every deposit and withdraw was stored with no tab at all. See #67.
+        describe("the tab a deposit or withdrawal happened in", function()
+            --- A transaction as the API really returns it: tab1 nil unless move.
+            local function apiTransaction(txType, name, itemLink, count, destTab)
+                return {
+                    type = txType, name = name, itemLink = itemLink, count = count,
+                    tab1 = (txType == "move") and 1 or nil,
+                    tab2 = destTab,
+                    year = 0, month = 0, day = 0, hour = 1,
+                }
+            end
+
+            it("is recorded on a deposit", function()
+                local guildData = GBL:GetGuildData()
+                MockWoW.addTab("Supplies", "icon", true)
+                MockWoW.addTab("Consumables", "icon", true)
+                MockWoW.addTab("Reagents", "icon", true)
+                Helpers.addTabTransactions(3, {
+                    apiTransaction("deposit", "Thrall",
+                        Helpers.makeItemLink(111, "Flask", 3), 5),
+                })
+
+                GBL:ReadTabTransactions(3, guildData)
+
+                assert.equals(3, guildData.transactions[1].tab)
+            end)
+
+            it("is recorded on a withdrawal", function()
+                local guildData = GBL:GetGuildData()
+                MockWoW.addTab("Supplies", "icon", true)
+                MockWoW.addTab("Consumables", "icon", true)
+                Helpers.addTabTransactions(2, {
+                    apiTransaction("withdraw", "Jaina",
+                        Helpers.makeItemLink(222, "Potion", 2), 10),
+                })
+
+                GBL:ReadTabTransactions(2, guildData)
+
+                assert.equals(2, guildData.transactions[1].tab)
+            end)
+
+            it("reaches the record id, which is what makes this a compat break", function()
+                -- buildPrefix reads record.tab, so two deposits of the same item
+                -- and count by one player in one hour into different tabs stop
+                -- sharing a prefix. That is the collision this closes, and the
+                -- reason the change has to ride the floor release.
+                local guildData = GBL:GetGuildData()
+                MockWoW.addTab("Supplies", "icon", true)
+                MockWoW.addTab("Consumables", "icon", true)
+                MockWoW.addTab("Reagents", "icon", true)
+                local link = Helpers.makeItemLink(111, "Flask", 3)
+                Helpers.addTabTransactions(3, {
+                    apiTransaction("deposit", "Thrall", link, 5),
+                })
+
+                GBL:ReadTabTransactions(3, guildData)
+
+                assert.truthy(guildData.transactions[1].id:find("|3|", 1, true),
+                    "expected the tab in the id prefix, got "
+                        .. tostring(guildData.transactions[1].id))
+            end)
+
+            it("still prefers the move's own source tab over the log being read", function()
+                -- tab1 is meaningful for a move and must win: the record's tab
+                -- is where the item came from, not which log we happened to read.
+                local guildData = GBL:GetGuildData()
+                MockWoW.addTab("Supplies", "icon", true)
+                MockWoW.addTab("Consumables", "icon", true)
+                Helpers.addTabTransactions(2, {
+                    apiTransaction("move", "Thrall",
+                        Helpers.makeItemLink(111, "Flask", 3), 5, 2),
+                })
+
+                GBL:ReadTabTransactions(2, guildData)
+
+                assert.equals(1, guildData.transactions[1].tab)
+                assert.equals(2, guildData.transactions[1].destTab)
+            end)
+        end)
     end)
 
     describe("ReadMoneyTransactions", function()

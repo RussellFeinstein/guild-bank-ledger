@@ -324,19 +324,24 @@ function GBL:RenderPeerList(container)
                 .. ", " .. seenStr .. "|r")
         else
             -- Production-mode rendering: tag each peer individually.
+            --
+            -- Three states since the v0.37.0 sync floor, not two. A version
+            -- difference is no longer the same thing as a problem: peers inside
+            -- the compatible range sync normally, and saying "outdated" about
+            -- them would send people chasing an update they do not need. Only a
+            -- peer we actually refuse gets a warning colour.
             local versionTag = ""
             if info.outdated then
                 if info.versionRelation == "local_behind" then
-                    versionTag = " |cff44aaff(newer — update available)|r"
+                    versionTag = " |cff44aaff(newer — update to sync)|r"
                 else
-                    versionTag = " |cffff4400(outdated — no sync)|r"
+                    versionTag = " |cffff4400(too old — no sync)|r"
                 end
-            elseif peerVersion ~= self.version then
-                local cmp = self:CompareSemver(self.version, peerVersion)
-                if cmp < 0 then
+            elseif peerVersion ~= self.version and peerVersion ~= "?" then
+                if self:CompareSemver(self.version, peerVersion) < 0 then
                     versionTag = " |cff44aaff(newer — update available)|r"
                 else
-                    versionTag = " |cffff6600(outdated)|r"
+                    versionTag = " |cffa0a0a0(older — syncing)|r"
                 end
             end
 

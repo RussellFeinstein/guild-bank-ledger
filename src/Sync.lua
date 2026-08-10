@@ -9,6 +9,17 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 -- Protocol constants
 local PREFIX = "GBLSync"
 local PROTOCOL_VERSION = 4
+-- Oldest addon version this build will exchange records with.
+--
+-- Until v0.37.0 the gate was exact-match, so every release, patch included,
+-- split the guild into non-communicating islands until every member updated.
+-- This replaces that with a range: we sync with a peer at or above our floor
+-- whose own floor we also meet. v0.37.0 spends one last lockstep update to
+-- establish the baseline, and normal releases after it cost nothing.
+--
+-- Raise this ONLY for a wire, record-identity or fingerprint break, never for
+-- an ordinary release. Raising it re-imposes the split it exists to remove.
+local MIN_SYNC_VERSION = "0.37.0"
 -- Chunk size tuning (v0.28.7 — true 1-fragment target)
 -- Compressed payload targets ≤255 bytes so each chunk is 1 AceComm wire
 -- fragment. v0.28.6 aimed for 2 fragments but actual compression ratio is
@@ -56,6 +67,7 @@ local MAX_RECEIVE_DURATION = 1800  -- 30 minutes absolute maximum receive time
 
 -- Expose constants for testing and UI
 GBL.SYNC_PROTOCOL_VERSION = PROTOCOL_VERSION
+GBL.MIN_SYNC_VERSION = MIN_SYNC_VERSION
 GBL.SYNC_CHUNK_SIZE = MAX_RECORDS_PER_CHUNK
 GBL.SYNC_PREFIX = PREFIX
 GBL.SYNC_MAX_RETRIES = MAX_RETRIES
@@ -76,6 +88,74 @@ GBL.SYNC_MANIFEST_MAX_BUCKETS = MANIFEST_MAX_BUCKETS
 GBL.SYNC_LAYOUT_REQUEST_THROTTLE = LAYOUT_REQUEST_THROTTLE
 GBL.SYNC_COMBAT_COOLDOWN = COMBAT_COOLDOWN
 GBL.SYNC_INTER_CHUNK_GAP_FLOOR = INTER_CHUNK_GAP_FLOOR
+
+------------------------------------------------------------------------
+-- Version compatibility (v0.37.0)
+------------------------------------------------------------------------
+
+--- True when a version string is a bare release number with no pre-release
+-- suffix. A dev build carries "-dev.<id>".
+local function isPlainSemver(v)
+    return type(v) == "string" and v:match("^%d+%.%d+%.%d+$") ~= nil
+end
+
+--- Decide whether we may exchange records with a peer.
+--
+-- The dev-build check has to come before any CompareSemver call, because
+-- CompareSemver deliberately strips "-dev.<id>" to compare release lines. A
+-- range test that reached it would read a dev build and its base release as
+-- compatible and undo the isolation DEV_BUILD exists to provide.
+--
+-- A peer that advertises no floor is running a pre-v0.37.0 build, and the old
+-- exact-match rule is the right reading of it: nothing below the floor release
+-- carries the guarantees the range rests on.
+--
+-- @param remoteVersion string|nil Peer's addon version
+-- @param remoteMin string|nil Peer's advertised MIN_SYNC_VERSION
+-- @return boolean ok
+-- @return string reason One of exact|range|no-version|dev-isolated|
+--                       pre-floor-peer|below-floor|local-below-their-floor
+function GBL:IsVersionCompatible(remoteVersion, remoteMin)
+    if remoteVersion == self.version then return true, "exact" end
+    if not remoteVersion then return false, "no-version" end
+    if not isPlainSemver(self.version) or not isPlainSemver(remoteVersion) then
+        return false, "dev-isolated"
+    end
+    if not isPlainSemver(remoteMin) then return false, "pre-floor-peer" end
+    if self:CompareSemver(remoteVersion, MIN_SYNC_VERSION) < 0 then
+        return false, "below-floor"
+    end
+    if self:CompareSemver(self.version, remoteMin) < 0 then
+        return false, "local-below-their-floor"
+    end
+    return true, "range"
+end
+
+--- One line explaining a refusal, naming both versions so a log read months
+-- later says which side needed to move. Used by all three gate sites.
+-- @param who string Canonical peer key
+-- @param reason string A reason code from IsVersionCompatible
+-- @param remoteVersion string|nil
+-- @param remoteMin string|nil
+-- @return string
+function GBL:DescribeVersionRefusal(who, reason, remoteVersion, remoteMin)
+    local why
+    if reason == "no-version" then
+        why = "advertised no version"
+    elseif reason == "dev-isolated" then
+        why = "dev build isolation"
+    elseif reason == "pre-floor-peer" then
+        why = "predates the sync floor, so an exact match is required"
+    elseif reason == "below-floor" then
+        why = "below our v" .. MIN_SYNC_VERSION .. " sync floor"
+    elseif reason == "local-below-their-floor" then
+        why = "we are below their v" .. tostring(remoteMin) .. " sync floor"
+    else
+        why = "incompatible"
+    end
+    return string.format("%s on v%s refused: %s (this build is v%s)",
+        tostring(who), tostring(remoteVersion or "?"), why, tostring(self.version))
+end
 
 -- Diagnostic: CTL deferral tracking (module-level, survives state resets)
 local ctlDeferTotal = 0  -- monotonic count per sync session
@@ -185,6 +265,7 @@ local syncState = {
     lastForcedHelloTime = 0,
     lastHelloReplyHash = {},  -- name → hash we last communicated to this peer
     lastSupersetNudge = {},   -- peerKey → GetServerTime() of our last superset re-nudge
+    incompatibleReplied = {}, -- peerKey → true once we have told them we refuse
 
     -- Bank layout advertise-and-pull (v0.32.11): timestamp of our last
     -- LAYOUT_REQUEST. Single in-flight guard so a newer-layout cursor seen on
@@ -433,6 +514,7 @@ function GBL:DisableSync()
     syncState.lastForcedHelloTime = 0
     syncState.lastHelloReplyHash = {}
     syncState.lastSupersetNudge = {}
+    syncState.incompatibleReplied = {}
     syncState.peerManifests = {}
     syncState.lastManifestHash = 0
     syncState.lastManifestTime = 0
@@ -480,6 +562,7 @@ function GBL:BroadcastHello(force)
     local msg = self:Serialize({
         type = "HELLO",
         version = self.version,
+        minSyncVersion = MIN_SYNC_VERSION,
         protocolVersion = PROTOCOL_VERSION,
         guild = self:GetGuildName(),
         txCount = txCount,
@@ -608,6 +691,7 @@ function GBL:SendHelloReply(target)
     local msg = self:Serialize({
         type = "HELLO",
         version = self.version,
+        minSyncVersion = MIN_SYNC_VERSION,
         protocolVersion = PROTOCOL_VERSION,
         guild = self:GetGuildName(),
         txCount = txCount,
@@ -884,6 +968,46 @@ function GBL:HandleHello(sender, data)
         end
     end
 
+    -- Version gate (v0.37.0). Everything above this line runs for every peer on
+    -- purpose: access control, the sort policy and the layout cursor are guild
+    -- settings, and a GM's change has to reach members through a mixed-version
+    -- window. Only record exchange is gated.
+    --
+    -- Placed above the reply block so an incompatible peer is answered once per
+    -- session rather than on every heartbeat. They still need one reply to
+    -- discover us and log their own refusal; after that the silence is the
+    -- point.
+    local compatible, refusal = self:IsVersionCompatible(data.version, data.minSyncVersion)
+    if not compatible then
+        local cleanSender = self:CanonicalPeerKey(sender)
+        local explanation = self:DescribeVersionRefusal(
+            cleanSender, refusal, data.version, data.minSyncVersion)
+        if syncState.peers[cleanSender] then
+            syncState.peers[cleanSender].outdated = true
+            -- Which side needs to update. Their floor being above our version
+            -- settles it directly; otherwise compare the two versions.
+            local weAreBehind = (refusal == "local-below-their-floor")
+                or (data.version ~= nil
+                    and self:CompareSemver(self.version, data.version) < 0)
+            syncState.peers[cleanSender].versionRelation =
+                weAreBehind and "local_behind" or "peer_behind"
+        end
+
+        local told = syncState.incompatibleReplied[cleanSender]
+        if not told then
+            -- Marked before the send, not after: a whisper that fails is not
+            -- worth retrying every heartbeat for the life of the mismatch.
+            syncState.incompatibleReplied[cleanSender] = true
+            self:SyncWarn(explanation)
+            if not data.isReply then
+                self:SendHelloReply(sender)
+            end
+        else
+            self:SyncDebug("Still refusing: %s", explanation)
+        end
+        return
+    end
+
     -- Reply to broadcast HELLOs so the sender discovers us.
     -- Hash-gated: only reply when our data changed since we last told this peer,
     -- or on first contact. Suppresses O(N²) reply traffic in large guilds.
@@ -921,20 +1045,6 @@ function GBL:HandleHello(sender, data)
                 cleanSenderReply, data.txCount or 0,
                 gd and (#gd.transactions + #gd.moneyTransactions) or 0)
         end
-    end
-
-    -- Exact version match — refuse sync on any version difference
-    if data.version and data.version ~= self.version then
-        local cleanSender = self:CanonicalPeerKey(sender)
-        if syncState.peers[cleanSender] then
-            syncState.peers[cleanSender].outdated = true
-            local cmp = self:CompareSemver(self.version, data.version)
-            syncState.peers[cleanSender].versionRelation =
-                (cmp < 0) and "local_behind" or "peer_behind"
-        end
-        self:SyncWarn(sender .. " on v" .. tostring(data.version)
-            .. " (version mismatch; this build is v" .. self.version .. ")")
-        return
     end
 
     local guildData = self:GetGuildData()
@@ -1135,6 +1245,84 @@ local function estimateRecordBytes(record)
     return bytes
 end
 
+-- Every transaction type the addon records. A type outside this set is
+-- transit damage, not a record from a newer version: adding a type would be a
+-- compatibility break needing a floor raise, so it cannot arrive unannounced.
+local VALID_RECORD_TYPES = {
+    deposit = true, withdraw = true, move = true,
+    repair = true, buyTab = true, depositSummary = true,
+}
+
+-- Fields whose type is known. Anything not named here passes through untouched:
+-- that forward tolerance is what makes adding a field free, and a whitelist here
+-- would turn every future field into a break. See #68.
+local NUMERIC_RECORD_FIELDS = {
+    "itemID", "count", "tab", "destTab", "classID", "subclassID",
+    "amount", "timestamp",
+}
+local STRING_RECORD_FIELDS = { "type", "player", "id" }
+
+--- Recompute an item record's classID and subclassID from its itemID.
+--
+-- 195 of the 223 corrupted records measured in DATA-MODEL.md section 8 lost
+-- only subclassID, which is derivable from itemID through the same call
+-- CreateTxRecord uses (src/Ledger.lua). Rejecting them would discard
+-- recoverable data, so repair runs before validation rather than after.
+--
+-- @param record table Record being taken in, mutated in place
+-- @return boolean true if anything was repaired
+function GBL:RepairSyncRecordItemFields(record)
+    if type(record.itemID) ~= "number" then return false end
+    if type(record.classID) == "number" and type(record.subclassID) == "number" then
+        return false
+    end
+    if not (C_Item and C_Item.GetItemInfoInstant) then return false end
+
+    local _, _, _, _, _, classID, subclassID = C_Item.GetItemInfoInstant(record.itemID)
+    record.classID = classID or 0
+    record.subclassID = subclassID or 0
+    -- The category was derived from the fields we just replaced.
+    record.category = self:CategorizeItem(record.classID, record.subclassID)
+    return true
+end
+
+--- Check an incoming record's shape before anything reads its fields.
+--
+-- Runs first, not last. Two of these checks are unreachable from the bottom of
+-- reconstructSyncRecord: a non-number timestamp is silently replaced by receipt
+-- time (IsValidTimestamp tests the type), which files the record in the wrong
+-- bucket forever, and a non-string id crashes the id:match calls outright.
+--
+-- @param record table Record received via sync
+-- @return boolean ok
+-- @return string|nil field The field that failed, for the reject counter
+local function validateSyncRecord(record)
+    for _, field in ipairs(STRING_RECORD_FIELDS) do
+        if record[field] ~= nil and type(record[field]) ~= "string" then
+            return false, field
+        end
+    end
+    for _, field in ipairs(NUMERIC_RECORD_FIELDS) do
+        if record[field] ~= nil and type(record[field]) ~= "number" then
+            return false, field
+        end
+    end
+
+    if not record.type or record.type == "" then return false, "type" end
+    if not VALID_RECORD_TYPES[record.type] then return false, "type" end
+    if not record.player or record.player == "" then return false, "player" end
+
+    -- Exactly one of itemID / amount, the discriminator buildPrefix already
+    -- uses. A record with neither takes the money branch and collides with
+    -- every other such record from the same player, type and hour; a record
+    -- with both is not a shape this addon produces.
+    local hasItem = record.itemID ~= nil
+    local hasAmount = record.amount ~= nil
+    if hasItem == hasAmount then return false, "itemID/amount" end
+
+    return true
+end
+
 --- Restore fields stripped by stripForSync on received records.
 -- Called on each record before StoreTx/StoreMoneyTx during sync receive.
 -- Must be resilient to any combination of missing fields — the sender
@@ -1143,7 +1331,14 @@ end
 -- record.scannedBy are always non-nil.
 -- @param record table Transaction record received via sync
 -- @param sender string Name of the peer who sent this record
+-- @return boolean accepted
+-- @return string|nil field The field that failed validation, when rejected
 local function reconstructSyncRecord(record, sender)
+    -- 0. Repair, then validate, before anything below reads a field.
+    GBL:RepairSyncRecordItemFields(record)
+    local valid, badField = validateSyncRecord(record)
+    if not valid then return false, badField end
+
     -- 1. Ensure timestamp exists (needed for id computation below)
     --    Priority: explicit timestamp → recover from id → fallback to now
     if not record.timestamp and record.id then
@@ -1179,14 +1374,7 @@ local function reconstructSyncRecord(record, sender)
     record.scannedBy = "sync:" .. GBL:ResolvePlayerName(sender or "unknown")
     -- tabName/destTabName intentionally left nil — BackfillTabNames fills them
 
-    -- 6. Validate required fields — reject corrupted records
-    --    AceSerializer can mangle field boundaries during transit, producing
-    --    garbage keys like "typyer" (type+player merged). Reject anything
-    --    missing the two fields every record must have.
-    if not record.type or record.type == "" then return false end
-    if not record.player or record.player == "" then return false end
-
-    -- 7. Ensure player name is realm-qualified
+    -- 6. Ensure player name is realm-qualified
     record.player = GBL:ResolvePlayerName(record.player)
     return true
 end
@@ -1226,6 +1414,22 @@ end
 function GBL:RequestSync(target, sinceTimestamp)
     if syncState.receiving then return end
 
+    -- ProcessPendingPeers reaches here without re-checking the version, so a
+    -- peer queued before a mismatch was known would otherwise be pulled from.
+    -- Only refuse on a peer we actually know: an entry with no version yet
+    -- (created by non-HELLO traffic) is left to the HELLO path to resolve.
+    local peerInfo = syncState.peers[self:CanonicalPeerKey(target)]
+    if peerInfo and peerInfo.version then
+        local compatible, reason =
+            self:IsVersionCompatible(peerInfo.version, peerInfo.minSyncVersion)
+        if not compatible then
+            self:SyncWarn("Not requesting. " .. self:DescribeVersionRefusal(
+                self:CanonicalPeerKey(target), reason,
+                peerInfo.version, peerInfo.minSyncVersion))
+            return
+        end
+    end
+
     syncState.receiving = true
     syncState.receiveSource = self:CanonicalPeerKey(target)
     syncState.receiveGot = 0
@@ -1235,7 +1439,13 @@ function GBL:RequestSync(target, sinceTimestamp)
     syncState.receiveItemDuped = 0
     syncState.receiveMoneyStored = 0
     syncState.receiveMoneyDuped = 0
+    syncState.receiveItemRejected = 0
+    syncState.receiveMoneyRejected = 0
+    syncState.receiveRejectFields = {}
     syncState.receiveNormalized = 0
+    syncState.receiveItemRejected = 0
+    syncState.receiveMoneyRejected = 0
+    syncState.receiveRejectFields = {}
     syncState.receiveExpected = 0
     syncState.receiveStartTime = GetServerTime()
 
@@ -1248,6 +1458,11 @@ function GBL:RequestSync(target, sinceTimestamp)
         type = "SYNC_REQUEST",
         sinceTimestamp = sinceTimestamp,
         bucketHashes = bucketHashes,
+        -- The serving side gates on these: a request reaching HandleSyncRequest
+        -- never passed through HandleHello, so this is the only version signal
+        -- the holder gets before handing over records.
+        version = self.version,
+        minSyncVersion = MIN_SYNC_VERSION,
         protocolVersion = PROTOCOL_VERSION,
         guild = self:GetGuildName(),
     })
@@ -1279,6 +1494,18 @@ end
 -- @param sender string Requester name
 -- @param data table Deserialized request payload
 function GBL:HandleSyncRequest(sender, data)
+    -- The serving half of the version gate. A request can arrive without ever
+    -- passing through HandleHello (RequestSync whispers directly), so refusing
+    -- only there would let an incompatible peer help itself to our records.
+    -- Silence rather than BUSY: BUSY means "try again shortly", which would
+    -- keep them retrying for as long as they stay on the old version.
+    local compatible, reason = self:IsVersionCompatible(data.version, data.minSyncVersion)
+    if not compatible then
+        self:SyncWarn("Ignoring SYNC_REQUEST. " .. self:DescribeVersionRefusal(
+            self:CanonicalPeerKey(sender), reason, data.version, data.minSyncVersion))
+        return
+    end
+
     if syncState.sending then
         self:AddAuditEntry("Declined sync from " .. sender
             .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
@@ -2161,12 +2388,27 @@ function GBL:HandleSyncData(sender, data)
 
     local itemStored, itemDuped = 0, 0
     local moneyStored, moneyDuped = 0, 0
+    local itemRejected, moneyRejected = 0, 0
     local normalized = 0
     local chunkTotal = #(data.transactions or {}) + #(data.moneyTransactions or {})
 
+    -- Which field failed, counted per chunk so the summary can name the damage
+    -- shape without a log line per record.
+    syncState.receiveRejectFields = syncState.receiveRejectFields or {}
+    local rejectFields = syncState.receiveRejectFields
+
     for _, tx in ipairs(data.transactions or {}) do
-        if not reconstructSyncRecord(tx, sender) then
-            itemDuped = itemDuped + 1
+        local accepted, badField = reconstructSyncRecord(tx, sender)
+        if not accepted then
+            -- Counted apart from duplicates on purpose. Folding rejects into
+            -- the dupe count made total rejection look like perfect
+            -- convergence: the redundancy line would read 100% duped, which the
+            -- decision rule in CLAUDE.md reads as "the bucket filter is working".
+            itemRejected = itemRejected + 1
+            rejectFields[badField or "unknown"] =
+                (rejectFields[badField or "unknown"] or 0) + 1
+            self:SyncDebug("Rejected item record from %s: bad %s",
+                tostring(sender), tostring(badField))
         else
             local isDup, matchedKey = self:IsDuplicate(tx, guildData)
             if isDup then
@@ -2191,8 +2433,13 @@ function GBL:HandleSyncData(sender, data)
     end
 
     for _, tx in ipairs(data.moneyTransactions or {}) do
-        if not reconstructSyncRecord(tx, sender) then
-            moneyDuped = moneyDuped + 1
+        local accepted, badField = reconstructSyncRecord(tx, sender)
+        if not accepted then
+            moneyRejected = moneyRejected + 1
+            rejectFields[badField or "unknown"] =
+                (rejectFields[badField or "unknown"] or 0) + 1
+            self:SyncDebug("Rejected money record from %s: bad %s",
+                tostring(sender), tostring(badField))
         else
             local isDup, matchedKey = self:IsDuplicate(tx, guildData)
             if isDup then
@@ -2233,6 +2480,10 @@ function GBL:HandleSyncData(sender, data)
     end
 
     syncState.receiveNormalized = (syncState.receiveNormalized or 0) + normalized
+    syncState.receiveItemRejected =
+        (syncState.receiveItemRejected or 0) + itemRejected
+    syncState.receiveMoneyRejected =
+        (syncState.receiveMoneyRejected or 0) + moneyRejected
 
     local stored = itemStored + moneyStored
     -- Invalidate rescan session caches so the next periodic rescan uses
@@ -2425,6 +2676,21 @@ function GBL:FinishReceiving(sender)
         self:AddAuditEntry(line)
     end
 
+    -- Rejects get their own line and their own vocabulary. Folded into the dupe
+    -- count they were invisible, and worse than invisible: a peer sending
+    -- nothing but corrupt records read as a peer we had fully converged with.
+    local rejected = (syncState.receiveItemRejected or 0)
+        + (syncState.receiveMoneyRejected or 0)
+    if rejected > 0 then
+        local fields = {}
+        for field, count in pairs(syncState.receiveRejectFields or {}) do
+            fields[#fields + 1] = field .. " x" .. count
+        end
+        table.sort(fields)
+        self:SyncWarn("Rejected %d record(s) from %s: %s",
+            rejected, tostring(sender or "unknown"), table.concat(fields, ", "))
+    end
+
     if syncState.receiveTimer then
         syncState.receiveTimer:Cancel()
         syncState.receiveTimer = nil
@@ -2440,6 +2706,9 @@ function GBL:FinishReceiving(sender)
     syncState.receiveItemDuped = 0
     syncState.receiveMoneyStored = 0
     syncState.receiveMoneyDuped = 0
+    syncState.receiveItemRejected = 0
+    syncState.receiveMoneyRejected = 0
+    syncState.receiveRejectFields = {}
     syncState.receiveNormalized = 0
     syncState.receiveStartTime = 0
     syncState.receiveNackCount = 0
@@ -2486,16 +2755,20 @@ function GBL:UpdatePeer(sender, data)
     local clean = self:CanonicalPeerKey(sender)
     syncState.peers[clean] = {
         version = data.version,
+        minSyncVersion = data.minSyncVersion,
         txCount = data.txCount or 0,
         dataHash = data.dataHash,
         lastScanTime = data.lastScanTime or 0,
         lastSeen = GetServerTime(),
     }
-    -- Persist for cross-session discovery (survives relog)
+    -- Persist for cross-session discovery (survives relog). The floor rides
+    -- along because InitSync seeds the session peer list from here and
+    -- RequestSync's gate reads it off the seeded entry.
     local guildData = self:GetGuildData()
     if guildData then
         guildData.knownPeers[clean] = {
             version = data.version,
+            minSyncVersion = data.minSyncVersion,
             txCount = data.txCount or 0,
             lastSeen = GetServerTime(),
         }
@@ -2814,6 +3087,10 @@ function GBL:GetSyncStatus()
         combatPaused = syncState.combatPaused,
         pendingPeersCount = syncState.pendingPeersCount,
         receiveNackCount = syncState.receiveNackCount,
+        receiveItemDuped = syncState.receiveItemDuped,
+        receiveMoneyDuped = syncState.receiveMoneyDuped,
+        receiveItemRejected = syncState.receiveItemRejected,
+        receiveMoneyRejected = syncState.receiveMoneyRejected,
     }
 end
 
@@ -2953,6 +3230,7 @@ function GBL:ResetSyncState()
     syncState.lastForcedHelloTime = 0
     syncState.lastHelloReplyHash = {}
     syncState.lastSupersetNudge = {}
+    syncState.incompatibleReplied = {}
     syncState.peerManifests = {}
     syncState.lastManifestHash = 0
     syncState.lastManifestTime = 0

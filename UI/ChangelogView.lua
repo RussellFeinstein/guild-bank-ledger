@@ -29,6 +29,19 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.37.0
+    {"0.37.0", "2026-08-10", {
+        Changed = {
+            "This is the last release that requires your whole guild to update together. Until now the addon refused to sync with anyone on a different version, down to the patch number, so every release split the guild into groups that could not share data until everyone updated. From here on, clients sync across versions as long as both are on 0.37.0 or later. That will only break again if the stored record format itself has to change, which is rare and deliberate.",
+            "The Sync tab tells the three cases apart. A peer on a different but compatible version reads 'older, syncing' in grey rather than being flagged, a newer peer still shows 'update available', and only a peer we genuinely cannot sync with is coloured as a problem.",
+        },
+        Fixed = {
+            "Deposits and withdrawals now record which bank tab they happened in. Only moves ever did, so the tab column was blank for most rows and per-tab history was unanswerable. One-time side effect: whatever is still in the guild bank log when you update (about 25 entries per tab) gets recorded a second time, because those entries are now filed under a different identity. Expect a handful of doubled rows right after updating. It stops on its own once the bank log rolls over.",
+            "Records arriving over sync are checked before being stored. Roughly one in nine records ever received had a field name garbled in transit, and the addon accepted them. Records damaged in the common way are now repaired from the item ID instead of being lost, and anything still malformed is refused.",
+            "Refused records are counted and reported as refusals rather than as duplicates, which previously made a peer sending nothing but corrupt data look exactly like a peer whose data already matched yours.",
+        },
+    }},
+
     -- v0.36.1
     {"0.36.1", "2026-08-10", {
         Changed = {

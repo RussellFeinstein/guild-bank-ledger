@@ -263,8 +263,12 @@ function GBL:ReadTabTransactions(tab, guildData)
             GetGuildBankTransaction(tab, i)
 
         if txType and name then
+            -- WoW fills tab1 only for moves, where it is the source tab. For a
+            -- deposit or withdrawal it is nil, so fall back to the log we are
+            -- actually reading, which IS the tab the transaction happened in.
+            -- Without the fallback those records carried no tab at all (#67).
             local record = self:CreateTxRecord(
-                txType, name, itemLink, count, tab1, tab2,
+                txType, name, itemLink, count, tab1 or tab, tab2,
                 year, month, day, hour
             )
             batch[#batch + 1] = record

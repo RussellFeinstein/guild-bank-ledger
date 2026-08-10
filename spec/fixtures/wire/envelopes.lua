@@ -77,6 +77,45 @@ return {
         },
     },
 
+    -- The floor release's own HELLO, recorded beside the v0.36.0 pair rather
+    -- than replacing them. Both shapes are now live on the wire at once, which
+    -- is the whole point of the floor, so both belong here. The added key is
+    -- minSyncVersion; everything else is unchanged, which is what makes adding
+    -- a field free.
+    {
+        name = "HELLO broadcast, v0.37.0 floor-aware",
+        serialized = "^1^T^Stype^SHELLO^Sguild^STest~`Guild^SdataHash^S8f3a21c4^StxCount^N12310^SlastScanTime^N1775580000^Sversion^S0.37.0^SaccessControl^T^SconfiguredAt^N0^t^SminSyncVersion^S0.37.0^SlayoutUpdatedAt^N1775200000^SprotocolVersion^N4^t^^",
+        decoded = {
+            type = "HELLO",
+            version = "0.37.0",
+            minSyncVersion = "0.37.0",
+            protocolVersion = 4,
+            guild = "Test Guild",
+            txCount = 12310,
+            dataHash = "8f3a21c4",
+            lastScanTime = 1775580000,
+            accessControl = { configuredAt = 0 },
+            layoutUpdatedAt = 1775200000,
+        },
+    },
+
+    -- SYNC_REQUEST gained both fields, because HandleSyncRequest is a door the
+    -- HELLO gate never sees: RequestSync whispers a peer directly.
+    {
+        name = "SYNC_REQUEST, v0.37.0 floor-aware",
+        serialized = "^1^T^Stype^SSYNC_REQUEST^Sversion^S0.37.0^SbucketHashes^T^N123304^N2863311530^N123305^N1431655765^t^SminSyncVersion^S0.37.0^Sguild^STest~`Guild^SsinceTimestamp^N1775000000^SprotocolVersion^N4^t^^",
+        decoded = {
+            type = "SYNC_REQUEST",
+            sinceTimestamp = 1775000000,
+            bucketHashes = { [BUCKET_A] = 2863311530, [BUCKET_B] = 1431655765 },
+            version = "0.37.0",
+            minSyncVersion = "0.37.0",
+            protocolVersion = 4,
+            guild = "Test Guild",
+        },
+        numericKeyPaths = { { "bucketHashes" } },
+    },
+
     -- bucketHashes keys are numbers. If they arrived as strings every lookup on
     -- the receiving side would miss, every bucket would look different, and every
     -- sync would resend everything while reporting a high duplicate rate.

@@ -539,19 +539,27 @@ All under the **Data model integrity** milestone.
 | 2 | `altLinks` declared, never written | #52 |
 | 2 | `eventCounts` written, never declared | #71 |
 | 3 | Two structures named `peers`, the persisted one write-only | #72 |
-| 4 | No deposit or withdraw record knows its tab | #67 |
-| 5 | Item records with no `itemID` collide in the money branch | #69 (locally scanned, unscheduled), #75 (sync-received) |
-| 5 | `NormalizeRecordId` can rewrite a money record from an item record | #68 |
+| 4 | No deposit or withdraw record knows its tab | closed in v0.37.0 (#67) |
+| 5 | Item records with no `itemID` collide in the money branch | #69 (locally scanned, unscheduled); sync-received closed in v0.37.0 (#68) |
+| 5 | `NormalizeRecordId` can rewrite a money record from an item record | closed in v0.37.0 (#68) |
 | 5 | Sync intake does not normalize the money `type` | #68 |
 | 7 | Nothing stops the `schemaVersion` default being raised | #76 |
-| 8 | Intake accepts corrupted records | #68 |
+| 8 | Intake accepts corrupted records | closed in v0.37.0 (#68) |
 | 8 | 223 corrupted records already stored | #75 |
-| 8 | Rejections counted as duplicates | #68 |
+| 8 | Rejections counted as duplicates | closed in v0.37.0 (#68) |
 | 9 | Numeric keys and payload size untested across the wire | closed in v0.36.1 |
 | 9 | AceDB's write path unmodelled in the suite | #77 |
 | 9 | `eventCounts` is unreachable where the empty-chunk SYNC_DATA builder writes it | #70 |
 | - | Per-player category totals declared, never accumulated | #64 |
 
-The compatibility break that several of these ride is #74, and it is the last cheap one: after the
-version floor lands, two peers on different releases will sync, so any later change to `buildPrefix`
-would silently duplicate the guild's dataset unless the floor is raised again.
+The compatibility break several of these rode was #74, **and it has now been spent.** v0.37.0 shipped
+the version floor along with #67 and #68. Two peers on different releases now sync, so any later
+change to `buildPrefix` would silently duplicate the guild's dataset unless `MIN_SYNC_VERSION` is
+raised again, and raising it re-imposes the lockstep split the floor removed. Treat every remaining
+identity-affecting idea in this document as costing a forced guild-wide update from here on.
+
+What that leaves open, in rough order of how much it still hurts: #75 (the 223 damaged records
+already on disk, which #68 stops growing but does not repair, and which can now reuse
+`GBL:RepairSyncRecordItemFields`), #69 (the same itemID-less shape produced by local scans rather
+than by sync, still unscheduled), #62, #71, #72, #76, #77 and #64. None of those touch record
+identity, so none of them cost a floor raise.
