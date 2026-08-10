@@ -19,7 +19,7 @@ The May 2026 honest-status sweep discovered that `UI/Accessibility.lua` had defi
 - **src/Categories.lua** — Item classification via WoW classID/subclassID
 - **src/Dedup.lua** — Deduplication engine (occurrence-based hashing, fuzzy matching, event count metadata, count-based cleanup)
 - **src/Ledger.lua** — Transaction recording from GetGuildBankTransaction API
-- **src/Storage.lua** — Tiered storage, compaction (30d daily, 90d weekly), pruning
+- **src/Storage.lua** — Tiered storage, compaction (30d daily, 90d weekly), pruning. **None of it has ever run.** `RunCompaction` opens with `if self.scanInProgress then return end` and its only caller fires two `C_Timer.After(0)` levels inside the transaction-scan callback, while the async slot scan is still going, so the guard wins on every bank open. Full raw history is intact and the range filters have been answering correctly all along. Being retired rather than repaired (issue #62): compaction is incompatible with sync, and this file is also the only one in the addon calling `os.date`/`os.time`, which WoW's Lua sandbox does not provide. Do not read the code here as a description of runtime behaviour
 - **src/Fingerprint.lua** — Dataset fingerprinting (djb2 hash, XOR aggregation, 6-hour bucket hashes)
 - **src/ItemCache.lua** — Lazy async item info cache (GetItemInfo + GET_ITEM_INFO_RECEIVED for synced records)
 - **src/Sync.lua** — Guild-wide sync via AceComm (HELLO/SYNC_REQUEST/SYNC_DATA/ACK/BUSY/MANIFEST/LAYOUT_REQUEST/LAYOUT_DATA protocol, epidemic gossip propagation, concurrent send+receive, smart peer selection, hash-gated HELLO reply suppression, fingerprint-based delta sync, pending peers queue, NACK backoff, combat/zone guards, bidirectional sync, jitter, bank-layout advertise-and-pull)
