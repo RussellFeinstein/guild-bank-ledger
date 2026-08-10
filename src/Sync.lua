@@ -19,7 +19,7 @@ local PROTOCOL_VERSION = 4
 --
 -- Raise this ONLY for a wire, record-identity or fingerprint break, never for
 -- an ordinary release. Raising it re-imposes the split it exists to remove.
-local MIN_SYNC_VERSION = "0.36.1"
+local MIN_SYNC_VERSION = "0.37.0"
 -- Chunk size tuning (v0.28.7 — true 1-fragment target)
 -- Compressed payload targets ≤255 bytes so each chunk is 1 AceComm wire
 -- fragment. v0.28.6 aimed for 2 fragments but actual compression ratio is
