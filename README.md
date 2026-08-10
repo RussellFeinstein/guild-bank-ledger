@@ -12,8 +12,7 @@ Persistent guild bank transaction logging for World of Warcraft. WoW's built-in 
 - **Deduplication** — Occurrence-based hashing with event count metadata prevents duplicate records across multiple scanners
 - **Money tracking** — Records deposits, withdrawals, repairs, tab purchases
 - **Per-player statistics** — Tracks deposit/withdrawal counts, money totals, first/last seen timestamps
-- **Tiered storage** — Full records (0-30d), daily summaries (30-90d), weekly summaries (90d+)
-- **Automatic compaction** — Old data compressed into summaries on bank open
+- **Full history, kept indefinitely** — Every transaction stays a complete record. `src/Storage.lua` still contains a tiered-storage and compaction layer (full records 0-30d, daily summaries 30-90d, weekly beyond), but it has never once run: its entry point is guarded on `scanInProgress`, and the only caller fires while the scan is still going. It is being retired rather than repaired (issue #62), because compaction is incompatible with sync: a peer that compacted would drop to a 30-day fingerprint, every other peer would read it as far behind and push the records back
 - **UI window** — Tabbed interface with Transactions, Gold Log, Consumption, Sort, Layout, Restock, Sync, Changelog, and About views, opened via `/gbl` or minimap button
 - **Transaction list** — Scrolling list with sortable columns: Timestamp, Player, Action, Item, Count, Category, Tab
 - **Filter bar** — Search by player/item, filter by date range, category, transaction type, tab, with reset button
@@ -37,7 +36,7 @@ These items block the v1.0 release:
 
 - Accessibility audit and keyboard-nav completion: wire `RegisterFocusable` into every AceGUI widget, hook Tab/Shift+Tab via a key handler, verify focus indicators on every tab, screen-reader audit, palette validation against WCAG AAA contrast targets
 - Sync rate limiting (per-peer bandwidth budgeting)
-- Performance audit (SavedVariables size, compaction verification, UI debouncing)
+- Performance audit (SavedVariables size, UI debouncing). Compaction verification came off this list when compaction itself was retired (#62)
 - Community feedback iteration
 
 ### Planned (Post-1.0)

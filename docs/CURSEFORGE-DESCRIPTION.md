@@ -10,7 +10,7 @@ WoW's guild bank log only keeps 25 entries per tab. In an active guild, that rol
 - Records every deposit, withdrawal, move, repair, and gold transaction
 - Categorizes items (flasks, herbs, ore, gems, weapons, armor, and 30+ categories)
 - Deduplicates across multiple scanners so nothing is double-counted
-- Automatically compacts old data to keep SavedVariables small (full records → daily summaries after 30d → weekly after 90d)
+- Keeps every transaction in full, forever. Nothing is ever summarized away, so per-player consumption stays answerable across the guild's whole history
 
 ## Guild-Wide Sync
 
@@ -66,7 +66,7 @@ Settings sync to all guild members automatically.
 
 **Status**: Beta. Recording and dedup are mature. Sync, sort, and UI are in active guild use with known improvements queued. Accessibility ships with palettes, contrast, triple encoding, and font scaling, but keyboard navigation is partial pending a v1.0 audit pass.
 
-**Before v1.0**: complete accessibility audit and keyboard-nav wiring across all UI widgets, sync rate limiting, performance audit (SavedVariables size, compaction verification, UI debouncing).
+**Before v1.0**: complete accessibility audit and keyboard-nav wiring across all UI widgets, sync rate limiting, performance audit (SavedVariables size, UI debouncing).
 
 **Planned post-1.0**: analytics dashboard, raid team management, alt linking, stock tab (passive inventory view), stock alerts, Guild Bank Sort integration, CSV/Discord/BBCode export.
 
