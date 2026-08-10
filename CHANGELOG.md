@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **This is the last release that requires your whole guild to update together.** Until now the addon refused to sync with anyone running a different version, down to the patch number, so every release split the guild into groups that could not share data until everyone had updated. From this release on, clients sync across versions as long as both are on 0.37.0 or later. A future release will only break that again if the stored record format itself has to change, which is rare and deliberate.
 - The Sync tab tells the three cases apart now. A peer running a different but compatible version is marked "older, syncing" in grey rather than warned about, a peer running a newer version still shows "update available", and only a peer we genuinely cannot sync with is coloured as a problem.
 
+### Fixed
+- Deposits and withdrawals now record which bank tab they happened in. Only moves ever did, so the tab column in the Ledger tab was blank for most rows and per-tab history was unanswerable. Two deposits of the same item and count by the same player in the same hour into two different tabs were also told apart only by the order they were scanned in, which this closes.
+  - **One-time side effect worth knowing about:** whatever is still sitting in the guild bank log when you update (roughly 25 entries per tab) gets recorded a second time, because those entries are now filed under a different identity. Expect a handful of doubled rows right after updating. It stops on its own once the bank log rolls over, and it does not affect anything already stored.
+
 ## [0.36.1] - 2026-08-10
 
 ### Changed

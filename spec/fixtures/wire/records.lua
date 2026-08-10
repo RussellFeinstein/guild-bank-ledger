@@ -47,6 +47,33 @@ return {
         reconstructed = { _occurrence = 0, category = "flask", timestamp = TS },
     },
 
+    -- The same deposit as recorded from v0.37.0 on, kept beside the case above
+    -- rather than replacing it. Both are real: the one above is what every peer
+    -- sent until the floor release and what is already on disk everywhere, and
+    -- this one is what new scans produce.
+    --
+    -- The difference is one key, and it moves the id, because buildPrefix reads
+    -- record.tab (src/Dedup.lua). That is what makes #67 a compatibility break
+    -- rather than an additive field, and why it had to ride the floor release:
+    -- after this, an id-format change costs a floor raise forever.
+    {
+        name = "item deposit, v0.37.0 with its tab recorded",
+        accepted = true,
+        serialized = "^1^T^Stype^Sdeposit^Splayer^SAlice-Stormrage^SitemID^N191318^Scount^N20^Stab^N3^SclassID^N0^SsubclassID^N3^Stimestamp^N1775580307^Sid^Sdeposit|Alice-Stormrage|191318|20|3|493216:0^t^^",
+        stripped = {
+            type = "deposit",
+            player = "Alice-Stormrage",
+            itemID = 191318,
+            count = 20,
+            tab = 3,
+            classID = 0,
+            subclassID = 3,
+            timestamp = TS,
+            id = "deposit|Alice-Stormrage|191318|20|3|" .. HOUR_SLOT .. ":0",
+        },
+        reconstructed = { _occurrence = 0, category = "flask", timestamp = TS },
+    },
+
     -- Stored: 17 keys, the only shape carrying tab fields. Wire: 10.
     -- Occurrence 1 rather than 0 so a non-zero suffix is exercised.
     {
