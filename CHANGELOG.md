@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.1] - 2026-08-10
+
+### Changed
+- Nothing in this release changes how the addon behaves. It adds a test suite that checks the sync message format against the real compression and serialization libraries instead of a test stand-in, so the next release can change that format without silently breaking older clients. Updating is worthwhile only so your version matches the rest of your guild.
+
 ## [0.36.0] - 2026-07-02
 
 ### Added

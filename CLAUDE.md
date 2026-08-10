@@ -63,6 +63,23 @@ luacheck .                 # lint production code
 - Test helper: `spec/helpers.lua`
 - Pattern: `*_spec.lua`
 - **Windows/MSYS2:** bare `busted`/`luacheck` require shim scripts in `~/bin/` (see `~/bin/busted`). Fallback: `bash run_tests.sh --verbose` (or `--lint` for luacheck).
+- `busted --verbose` does NOT print test names; it prints the same dots as a bare run. Use `-o gtest` or `-o TAP` when you need to see which tests ran (`-o spec` is not a handler in busted 2.3.0).
+
+### Wire-contract fixtures
+
+`spec/wire_contract_spec.lua` is the one spec that does not use the serializer mock. `spec/wire_helpers.lua` loads a real AceSerializer via `dofile` (`require` cannot be used: the module names contain a dot, which `require` turns into a path separator), stashing and restoring `_G.LibStub` and `strmatch` around the load. Real LibStub reads the existing global and evaluates `LibStub.minor < 2`, which the suite's mock does not have, so skipping the stash either throws or leaves the mock registry replaced for whatever runs next in the same file. The addon's own mixed-in `Serialize`/`Deserialize` are never touched.
+
+**The libraries come from `spec/vendor/`, not `Libs/`.** `Libs/` is gitignored and fetched by the packager from `.pkgmeta` externals, so it exists only on a machine that has run the packager: CI checks out a tree with none. Committing LibStub (51 lines, public domain) and AceSerializer (287 lines) under `spec/vendor/` is what makes the suite hermetic. `spec/vendor/README.md` carries the provenance. The generator additionally diffs those copies against `Libs/` when `Libs/` is present, so a developer still finds out when upstream moves while the test run stays deterministic everywhere.
+
+**No compression in the harness.** LibDeflate is a pure byte-exact codec this addon neither configures nor extends, so pinning it would test LibDeflate rather than GBL, at the cost of vendoring 3,600 more lines. `estimateRecordBytes` is documented against AceSerializer output, and the compressed size that matters at runtime is measured live as `syncState.lastChunkBytes`.
+
+**The golden strings in `spec/fixtures/wire/*.lua` are frozen and are not regenerated.** They are what a v0.36.x peer puts on the wire, and "an older peer's bytes still decode" is the contract the `MIN_SYNC_VERSION` floor (#74) rests on. A record-shape change (#67) adds cases beside them; it never rewrites them. `spec/fixtures/generate_wire_fixtures.lua` is an authoring aid for new cases plus a check that every committed string still decodes to its hand-written table; it is not a refresh tool.
+
+Expectations are hand-written from `docs/DATA-MODEL.md`, never pasted from program output, because a characterization fixture built from what the code prints can only ever agree with the code. The `serialized` field records AceSerializer output rather than the compressed and encoded channel bytes, so a reviewer can read the diff. Field order inside those strings comes from `pairs()` and is not meaningful: the tests only ever decode them.
+
+`src/Sync.lua` exposes `_StripForSync`, `_ReconstructSyncRecord` and `_EstimateRecordBytes` for this spec alone. They have no production callers and exist because the codec is otherwise file-local and unreachable.
+
+Two format facts worth not rediscovering: AceSerializer escapes space (and control codes, `^`, `~`) to two bytes, and an **unescaped** space is silently dropped on decode, so a hand-typed payload containing `"Test Guild"` comes back `"TestGuild"`. Pipes and colons, which record ids are built from, pass through unescaped, which is why `estimateRecordBytes` holds as an upper bound for records.
 
 ## Conventions
 
@@ -111,6 +128,8 @@ See **Branch lifecycle: trunk-based, delete after merge** in `~/.claude/CLAUDE.m
     - `UI/ChangelogView.lua` `CHANGELOG_DATA` table (in-game changelog)
     - This `CLAUDE.md`'s "Current: X.Y.Z" line at the bottom
     - `src/Core.lua` `local DEV_BUILD = ...` constant must be reset to `nil` in the stamp commit. CI rejects any other value via the `Verify DEV_BUILD is nil` workflow step.
+
+  **Do NOT sweep the version string through `spec/fixtures/wire/`.** The HELLO fixtures carry `version = "0.36.0"` on purpose: they are frozen recordings of what a v0.36.0 peer sent, and the whole point is that they keep saying so forever. A grep-and-replace stamp across the repo will try to bump them and quietly destroy the cross-version contract the fixtures exist to hold. Same rule for any later fixture pinned to a specific release.
 
   `spec/ui/changelog_spec.lua` asserts that `CHANGELOG_DATA[1]`'s version matches the addon version, so a half-landed stamp fails the suite instead of shipping. If two branches PR with the same target version, the second to merge rebases onto post-merge `main` and its stamp commit bumps to the next patch. The principle is: one version per PR, one stamp commit per PR, never per-commit churn on these artifacts. (This matches the global `~/.claude/CLAUDE.md` "Commit Versioning" standard, which stamps once at PR-open.)
 - **Doc-only PRs take no version and no tag.** The objective test is whether the PR changes any file that ends up in the packaged zip. `.pkgmeta`'s `ignore:` list strips `spec`, `docs`, `.busted`, `.luacheckrc`, `.gitignore`, `.claude`, `CLAUDE.md`, `*.md`, `*.sh`, `*.bat`, and `VERSION`. If every file a PR touches is stripped, the packaged addon is byte-identical apart from the stamp itself, and there is nothing to release. Stamping one anyway ships a version whose only user-visible content is the announcement of its own existence, and it costs a forced guild-wide sync break (see Release cost below). This narrows the global "every merged PR gets a bump and a tag" rule rather than overturning it: that rule's origin (PR #7) was addon-relevant work shipping untagged, which this test still catches. A PR that touches even one packaged file is a normal release.
@@ -210,4 +229,4 @@ Helpers:
 
 ## Version
 
-Current: 0.36.0 (see `VERSION` file)
+Current: 0.36.1 (see `VERSION` file)

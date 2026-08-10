@@ -1192,6 +1192,31 @@ local function reconstructSyncRecord(record, sender)
 end
 
 ------------------------------------------------------------------------
+-- Wire-contract test seams
+--
+-- The record codec is two file-local functions, so nothing outside this file
+-- could reach it and the wire format went untested for the project's whole
+-- life (docs/DATA-MODEL.md section 9). These three wrappers exist so
+-- spec/wire_contract_spec.lua can pin the format against the real
+-- AceSerializer instead of the pass-through mock. No production caller.
+------------------------------------------------------------------------
+
+--- @see stripForSync
+function GBL:_StripForSync(record)
+    return stripForSync(record)
+end
+
+--- @see reconstructSyncRecord
+function GBL:_ReconstructSyncRecord(record, sender)
+    return reconstructSyncRecord(record, sender)
+end
+
+--- @see estimateRecordBytes
+function GBL:_EstimateRecordBytes(record)
+    return estimateRecordBytes(record)
+end
+
+------------------------------------------------------------------------
 -- Sync request / response
 ------------------------------------------------------------------------
 

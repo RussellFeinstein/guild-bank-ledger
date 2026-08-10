@@ -1,0 +1,205 @@
+--- Golden wire fixtures for the sync message envelopes.
+--
+-- Same freezing rule as records.lua: these are what a v0.36.x peer sends, and
+-- they stay frozen so "an older peer's messages still decode" keeps meaning
+-- something after the MIN_SYNC_VERSION floor (#74) lands.
+--
+-- Coverage is deliberately not all nine message types. Two tiers are here:
+--
+--   * What the floor release changes: HELLO (both builders, BroadcastHello and
+--     SendHelloReply) and SYNC_DATA (both builders, the empty-chunk path in
+--     HandleSyncRequest and the real one in SendNextChunk), which wraps the
+--     records #67 and #68 change.
+--   * What carries a numeric-keyed table: SYNC_REQUEST and MANIFEST send bucket
+--     tables, and bucketKeyForRecord (src/Fingerprint.lua) returns math.floor(),
+--     so those keys are numbers riding the hot path on every single sync.
+--     LAYOUT_DATA carries numeric-keyed stockReserves and bankLayout item rows.
+--
+-- ACK, NACK, BUSY and LAYOUT_REQUEST are excluded: three to five scalar keys
+-- each, no nesting, no numeric keys, nothing a serializer can get wrong. Pinning
+-- them would enlarge the surface every future sync change has to touch without
+-- guarding anything, which is how a characterization suite becomes a rubber stamp.
+
+local TS = 1775580307
+local HOUR_SLOT = 493216
+
+-- Bucket keys are floor(hourSlot / BUCKET_HOURS). These are numbers, and that is
+-- the property under test.
+local BUCKET_A = 123304
+local BUCKET_B = 123305
+
+return {
+    {
+        name = "HELLO broadcast",
+        serialized = "^1^T^Stype^SHELLO^Sguild^STest~`Guild^SdataHash^S8f3a21c4^StxCount^N12310^SlastScanTime^N1775580000^Sversion^S0.36.0^SaccessControl^T^SrankThreshold^N3^SconfiguredBy^SOfficerA-Stormrage^SrestrictedMode^B^SconfiguredAt^N1775000000^t^SlayoutUpdatedAt^N1775200000^SsortAccess^T^SupdatedBy^SGuildMaster-Stormrage^SupdatedAt^N1775100000^Swrite^T^SrankThreshold^N1^Sdelegates^T^SBob-Stormrage^B^t^t^Ssort^T^SrankThreshold^N4^Sdelegates^T^t^t^t^SprotocolVersion^N4^t^^",
+        decoded = {
+            type = "HELLO",
+            version = "0.36.0",
+            protocolVersion = 4,
+            guild = "Test Guild",
+            txCount = 12310,
+            dataHash = "8f3a21c4",
+            lastScanTime = 1775580000,
+            accessControl = {
+                rankThreshold = 3,
+                restrictedMode = true,
+                configuredBy = "OfficerA-Stormrage",
+                configuredAt = 1775000000,
+            },
+            sortAccess = {
+                write = { rankThreshold = 1, delegates = { ["Bob-Stormrage"] = true } },
+                sort = { rankThreshold = 4, delegates = {} },
+                updatedBy = "GuildMaster-Stormrage",
+                updatedAt = 1775100000,
+            },
+            layoutUpdatedAt = 1775200000,
+        },
+    },
+
+    -- The reply builder differs from the broadcast by exactly one key. That is
+    -- what the parity test asserts, and it is why #74 adding minSyncVersion to
+    -- only one of the two would be a silent guild-splitting bug: a peer that
+    -- only ever sees the reply would fall back to exact-version matching.
+    {
+        name = "HELLO reply",
+        serialized = "^1^T^Stype^SHELLO^Sguild^STest~`Guild^SdataHash^S8f3a21c4^StxCount^N12310^SisReply^B^SlastScanTime^N1775580000^Sversion^S0.36.0^SaccessControl^T^SconfiguredAt^N0^t^SlayoutUpdatedAt^N1775200000^SprotocolVersion^N4^t^^",
+        decoded = {
+            type = "HELLO",
+            version = "0.36.0",
+            protocolVersion = 4,
+            guild = "Test Guild",
+            txCount = 12310,
+            dataHash = "8f3a21c4",
+            lastScanTime = 1775580000,
+            isReply = true,
+            accessControl = { configuredAt = 0 },
+            layoutUpdatedAt = 1775200000,
+        },
+    },
+
+    -- bucketHashes keys are numbers. If they arrived as strings every lookup on
+    -- the receiving side would miss, every bucket would look different, and every
+    -- sync would resend everything while reporting a high duplicate rate.
+    {
+        name = "SYNC_REQUEST with numeric bucket hashes",
+        serialized = "^1^T^Stype^SSYNC_REQUEST^SprotocolVersion^N4^SbucketHashes^T^N123304^N2863311530^N123305^N1431655765^t^SsinceTimestamp^N1775000000^Sguild^STest~`Guild^t^^",
+        decoded = {
+            type = "SYNC_REQUEST",
+            sinceTimestamp = 1775000000,
+            bucketHashes = { [BUCKET_A] = 2863311530, [BUCKET_B] = 1431655765 },
+            protocolVersion = 4,
+            guild = "Test Guild",
+        },
+        numericKeyPaths = { { "bucketHashes" } },
+    },
+
+    {
+        name = "MANIFEST with numeric buckets",
+        serialized = "^1^T^Stype^SMANIFEST^SprotocolVersion^N4^SdataHash^S8f3a21c4^Sbuckets^T^N123304^N2863311530^N123305^N1431655765^t^StxCount^N12310^Sguild^STest~`Guild^t^^",
+        decoded = {
+            type = "MANIFEST",
+            protocolVersion = 4,
+            guild = "Test Guild",
+            dataHash = "8f3a21c4",
+            txCount = 12310,
+            buckets = { [BUCKET_A] = 2863311530, [BUCKET_B] = 1431655765 },
+        },
+        numericKeyPaths = { { "buckets" } },
+    },
+
+    -- The empty-chunk builder inside HandleSyncRequest. Sent so a receiver with
+    -- nothing to collect still finishes cleanly.
+    {
+        name = "SYNC_DATA empty chunk",
+        serialized = "^1^T^Sguild^STest~`Guild^Stype^SSYNC_DATA^SprotocolVersion^N4^StotalChunks^N1^Schunk^N1^Stransactions^T^t^SeventCounts^T^t^SmoneyTransactions^T^t^t^^",
+        decoded = {
+            type = "SYNC_DATA",
+            chunk = 1,
+            totalChunks = 1,
+            transactions = {},
+            moneyTransactions = {},
+            eventCounts = {},
+            protocolVersion = 4,
+            guild = "Test Guild",
+        },
+    },
+
+    -- The real builder in SendNextChunk, carrying stripped records of both kinds.
+    -- eventCounts keys are prefix + hourSlot with no occurrence suffix, per
+    -- DATA-MODEL.md section 5.
+    {
+        name = "SYNC_DATA with records",
+        serialized = "^1^T^Sguild^STest~`Guild^Stype^SSYNC_DATA^SprotocolVersion^N4^StotalChunks^N5^Schunk^N2^Stransactions^T^N1^T^Scount^N20^Stype^Sdeposit^SitemID^N191318^Stimestamp^N1775580307^Sid^Sdeposit|Alice-Stormrage|191318|20|0|493216:0^SsubclassID^N3^SclassID^N0^Splayer^SAlice-Stormrage^t^t^SeventCounts^T^Sdeposit|Alice-Stormrage|191318|20|0|493216^T^Scount^N1^SasOf^N1775580307^t^t^SmoneyTransactions^T^N1^T^Stype^Swithdraw^Samount^N10000000^Sid^Swithdraw|Speaknglide-Area52|10000000|493216:0^Stimestamp^N1775580307^Splayer^SSpeaknglide-Area52^t^t^t^^",
+        decoded = {
+            type = "SYNC_DATA",
+            chunk = 2,
+            totalChunks = 5,
+            transactions = {
+                {
+                    type = "deposit",
+                    player = "Alice-Stormrage",
+                    itemID = 191318,
+                    count = 20,
+                    classID = 0,
+                    subclassID = 3,
+                    timestamp = TS,
+                    id = "deposit|Alice-Stormrage|191318|20|0|" .. HOUR_SLOT .. ":0",
+                },
+            },
+            moneyTransactions = {
+                {
+                    type = "withdraw",
+                    player = "Speaknglide-Area52",
+                    amount = 10000000,
+                    timestamp = TS,
+                    id = "withdraw|Speaknglide-Area52|10000000|" .. HOUR_SLOT .. ":0",
+                },
+            },
+            eventCounts = {
+                ["deposit|Alice-Stormrage|191318|20|0|" .. HOUR_SLOT] = { count = 1, asOf = TS },
+            },
+            protocolVersion = 4,
+            guild = "Test Guild",
+        },
+    },
+
+    -- Both nested numeric-keyed stores in one message. bankLayout.tabs is keyed
+    -- by tab index and tabs[].items by itemID; BankLayout.Validate rejects a
+    -- non-numeric item key outright, so a degraded key here would be a rejected
+    -- layout in the field, not a silent type change.
+    {
+        name = "LAYOUT_DATA with numeric item and reserve keys",
+        serialized = "^1^T^Stype^SLAYOUT_DATA^Sguild^STest~`Guild^Schunk^N1^SbankLayout^T^Stabs^T^N1^T^Sitems^T^N191318^T^Sslots^N2^SperSlot^N20^t^N210796^T^Sslots^N1^SperSlot^N200^t^t^Smode^Sdisplay^SslotOrder^T^N1^N191318^N2^N210796^t^t^N2^T^Smode^Soverflow^t^N3^T^Smode^Signore^t^t^SupdatedAt^N1775200000^Sversion^N3^SupdatedBy^SGuildMaster-Stormrage^t^Snchunks^N1^SstockReserves^T^N191318^N40^N210796^N500^t^t^^",
+        decoded = {
+            type = "LAYOUT_DATA",
+            guild = "Test Guild",
+            nchunks = 1,
+            chunk = 1,
+            bankLayout = {
+                version = 3,
+                updatedBy = "GuildMaster-Stormrage",
+                updatedAt = 1775200000,
+                tabs = {
+                    [1] = {
+                        mode = "display",
+                        items = {
+                            [191318] = { slots = 2, perSlot = 20 },
+                            [210796] = { slots = 1, perSlot = 200 },
+                        },
+                        slotOrder = { 191318, 210796 },
+                    },
+                    [2] = { mode = "overflow" },
+                    [3] = { mode = "ignore" },
+                },
+            },
+            stockReserves = { [191318] = 40, [210796] = 500 },
+        },
+        numericKeyPaths = {
+            { "stockReserves" },
+            { "bankLayout", "tabs" },
+            { "bankLayout", "tabs", 1, "items" },
+        },
+        -- Must still satisfy BankLayout.Validate after a real round trip.
+        validatesAsLayout = true,
+    },
+}
