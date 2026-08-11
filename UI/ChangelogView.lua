@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.37.2
+    {"0.37.2", "2026-08-10", {
+        Changed = {
+            "Compatible peers on an older version no longer show their Sync tab status in grey. Grey reads as 'unable to sync' when that tag means syncing is working, and it matched the genuinely inactive states (the roster-only 'online (no HELLO)' text, the dev-build rows). The 'older, syncing' note now renders in the normal text colour; warning colours still mark only peers that actually cannot sync.",
+        },
+    }},
+
     -- v0.37.1
     {"0.37.1", "2026-08-10", {
         Fixed = {

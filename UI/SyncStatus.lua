@@ -31,6 +31,33 @@ function GBL:FormatSyncStatusText(status)
     return (#parts > 0) and table.concat(parts, " | ") or "Idle"
 end
 
+--- Build the version tag shown after a peer's version in the peer list.
+-- Three states since the v0.37.0 sync floor, not two. A version difference
+-- is no longer the same thing as a problem: peers inside the compatible
+-- range sync normally, and saying "outdated" about them would send people
+-- chasing an update they do not need. Only a peer we actually refuse gets
+-- a warning colour. The compatible-older note is deliberately uncoloured:
+-- grey is the inactive colour (roster-only text, dev-build rows), and a
+-- peer in this state is syncing.
+-- @param info table Peer info from GetSyncPeers()
+-- @param peerVersion string info.version, or "?" when unknown
+-- @return string Tag with a leading space, or "" when there is nothing to say
+function GBL:_PeerVersionTag(info, peerVersion)
+    if info.outdated then
+        if info.versionRelation == "local_behind" then
+            return " |cff44aaff(newer - update to sync)|r"
+        end
+        return " |cffff4400(too old - no sync)|r"
+    end
+    if peerVersion ~= self.version and peerVersion ~= "?" then
+        if self:CompareSemver(self.version, peerVersion) < 0 then
+            return " |cff44aaff(newer - update available)|r"
+        end
+        return " (older, syncing)"
+    end
+    return ""
+end
+
 ------------------------------------------------------------------------
 -- Tab builder
 ------------------------------------------------------------------------
@@ -324,26 +351,7 @@ function GBL:RenderPeerList(container)
                 .. ", " .. seenStr .. "|r")
         else
             -- Production-mode rendering: tag each peer individually.
-            --
-            -- Three states since the v0.37.0 sync floor, not two. A version
-            -- difference is no longer the same thing as a problem: peers inside
-            -- the compatible range sync normally, and saying "outdated" about
-            -- them would send people chasing an update they do not need. Only a
-            -- peer we actually refuse gets a warning colour.
-            local versionTag = ""
-            if info.outdated then
-                if info.versionRelation == "local_behind" then
-                    versionTag = " |cff44aaff(newer — update to sync)|r"
-                else
-                    versionTag = " |cffff4400(too old — no sync)|r"
-                end
-            elseif peerVersion ~= self.version and peerVersion ~= "?" then
-                if self:CompareSemver(self.version, peerVersion) < 0 then
-                    versionTag = " |cff44aaff(newer — update available)|r"
-                else
-                    versionTag = " |cffa0a0a0(older — syncing)|r"
-                end
-            end
+            local versionTag = self:_PeerVersionTag(info, peerVersion)
 
             local seenStr = info.rosterOnly
                 and "|cffa0a0a0online (no HELLO)|r"
