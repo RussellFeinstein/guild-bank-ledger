@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Compatible peers on an older version no longer show their Sync tab status in grey. Grey reads as "unable to sync" when the tag means the opposite, that syncing is working fine, and it was easy to confuse with the genuinely inactive states (grey is also the roster-only "online (no HELLO)" text and the dev-build row colour). The "older, syncing" note now renders in the normal text colour; warning colours are unchanged and still mark only peers that actually cannot sync.
+
 ## [0.37.1] - 2026-08-10
 
 ### Fixed
