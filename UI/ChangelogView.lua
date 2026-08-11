@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.37.1
+    {"0.37.1", "2026-08-10", {
+        Fixed = {
+            "The 'Hide moves' filter no longer hides the Location column along with the move rows. Hiding moves is the default, so most users never saw the column at all, including the bank tab that deposits and withdrawals started recording in v0.37.0. The column now stays visible whatever the filters: it shows the tab for every transaction recorded from v0.37.0 on and stays blank for older rows, which never recorded one.",
+        },
+    }},
+
     -- v0.37.0
     {"0.37.0", "2026-08-10", {
         Changed = {
