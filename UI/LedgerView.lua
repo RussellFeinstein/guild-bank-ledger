@@ -101,19 +101,13 @@ end
 -- Ledger view rendering (AceGUI)
 ------------------------------------------------------------------------
 
---- Get the visible columns based on current filters.
--- Hides the Location column when moves are hidden.
--- @param filters table current filter criteria
+--- Get the columns to render.
+-- Every column stays visible regardless of filters. The Location column must
+-- not be tied to hideMoves: deposits and withdrawals carry a tab too (since
+-- v0.37.0), so dropping the column with the move rows discards their data.
 -- @return table array of column definitions to render
-function GBL:GetVisibleColumns(filters)
-    local cols = {}
-    for _, col in ipairs(self.LEDGER_COLUMNS) do
-        local hide = col.key == "tab" and filters and filters.hideMoves
-        if not hide then
-            cols[#cols + 1] = col
-        end
-    end
-    return cols
+function GBL:GetVisibleColumns()
+    return self.LEDGER_COLUMNS
 end
 
 --- Create the ledger view (transaction list) inside a container.
@@ -129,7 +123,7 @@ function GBL:CreateLedgerView(container, transactions, filters)
     local filtered = self:FilterTransactions(transactions or {}, filters)
     self:SortTransactions(filtered, self.ledgerSortColumn, self.ledgerSortAscending)
 
-    local visibleCols = self:GetVisibleColumns(filters)
+    local visibleCols = self:GetVisibleColumns()
 
     -- Pagination
     local pageSize = self.LEDGER_PAGE_SIZE
