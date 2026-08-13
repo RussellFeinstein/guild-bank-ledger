@@ -17,6 +17,40 @@ local function fireJitterTimers()
     end
 end
 
+--- Fire the pending one-shot ACK timer, and fail if there is not one.
+-- The delay comes from the caller as GBL.SYNC_ACK_TIMEOUT rather than a
+-- literal, and a miss is an error rather than a quiet no-op. Both matter: these
+-- sites used to match a hardcoded 8, so when ACK_TIMEOUT became 3 they would
+-- have matched nothing, and the tests that assert "still sending" after a
+-- timeout would have passed without ever firing one.
+-- @param delay number The production ACK_TIMEOUT
+local function fireAckTimeout(delay)
+    for _, timer in ipairs(MockWoW.pendingTimers) do
+        if timer.delay == delay and not timer.cancelled then
+            timer.callback()
+            return
+        end
+    end
+    error(("no pending ACK timer at %ss to fire"):format(tostring(delay)), 2)
+end
+
+--- Fire the adaptive inter-chunk delay that HandleAck schedules the next chunk
+-- on (INTER_CHUNK_DELAY_NORMAL 0.1s, or 0.5s once FPS adaptation kicks in).
+-- HandleAck does not send inline, so without this there is no chunk in flight
+-- and no ACK timer behind it. Takes the newest match, which is the one the ACK
+-- just scheduled, and fails rather than no-op when there is none.
+local function fireNextChunkDelay()
+    for i = #MockWoW.pendingTimers, 1, -1 do
+        local timer = MockWoW.pendingTimers[i]
+        if not timer.cancelled and timer.delay
+            and timer.delay > 0.05 and timer.delay <= 1.0 then
+            timer.callback()
+            return timer.delay
+        end
+    end
+    error("no pending inter-chunk delay timer to fire", 2)
+end
+
 --- Fire the latest uncancelled receive timeout timer (any delay).
 -- With NACK backoff, delays change (20→30→45), so we can't match on exact delay.
 -- Finds the last (newest) uncancelled ticker and fires it.
@@ -2101,7 +2135,7 @@ describe("Sync", function()
             -- ACK timer should still be alive (not cancelled by stale ACK)
             local ackTimerAlive = false
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
+                if timer.delay == GBL.SYNC_ACK_TIMEOUT and not timer.cancelled then
                     ackTimerAlive = true
                 end
             end
@@ -2340,7 +2374,7 @@ describe("Sync", function()
             -- Count ACK timers — hard timer exists but ACK timer should NOT yet
             local ackTimerCount = 0
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
+                if timer.delay == GBL.SYNC_ACK_TIMEOUT and not timer.cancelled then
                     ackTimerCount = ackTimerCount + 1
                 end
             end
@@ -2353,7 +2387,7 @@ describe("Sync", function()
             -- ACK timer should now exist
             ackTimerCount = 0
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
+                if timer.delay == GBL.SYNC_ACK_TIMEOUT and not timer.cancelled then
                     ackTimerCount = ackTimerCount + 1
                 end
             end
@@ -2386,7 +2420,7 @@ describe("Sync", function()
 
             local ackTimerCount = 0
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
+                if timer.delay == GBL.SYNC_ACK_TIMEOUT and not timer.cancelled then
                     ackTimerCount = ackTimerCount + 1
                 end
             end
@@ -2397,7 +2431,7 @@ describe("Sync", function()
 
             ackTimerCount = 0
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
+                if timer.delay == GBL.SYNC_ACK_TIMEOUT and not timer.cancelled then
                     ackTimerCount = ackTimerCount + 1
                 end
             end
@@ -2507,16 +2541,11 @@ describe("Sync", function()
             local sentBefore = #MockAce.sentCommMessages
 
             -- Advance time past the inter-chunk gap floor so the retry fires
-            -- immediately (in production, retries fire 8s after the last send).
+            -- immediately (in production a retry follows one ACK_TIMEOUT after the last send).
             MockWoW.serverTime = MockWoW.serverTime + 10
 
             -- Fire ACK timeout — should retry, not abort
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
-                    timer.callback()
-                    break
-                end
-            end
+            fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
 
             assert.is_true(GBL:GetSyncStatus().sending, "should still be sending after retry")
             -- A new SYNC_DATA message should have been sent (the retry)
@@ -2546,27 +2575,17 @@ describe("Sync", function()
 
             -- Fire ACK timeout MAX_RETRIES times (should keep retrying).
             -- Advance time between firings so the inter-chunk gap floor is
-            -- satisfied for each retry (production gap is 8s per ACK_TIMEOUT).
+            -- satisfied for each retry (one ACK_TIMEOUT elapses per retry in production).
             for attempt = 1, GBL.SYNC_MAX_RETRIES do
                 MockWoW.serverTime = MockWoW.serverTime + 10
-                for _, timer in ipairs(MockWoW.pendingTimers) do
-                    if timer.delay == 8 and not timer.cancelled then
-                        timer.callback()
-                        break
-                    end
-                end
+                fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
                 assert.is_true(GBL:GetSyncStatus().sending,
                     "should still be sending after retry " .. attempt)
             end
 
             -- One more timeout — should abort
             MockWoW.serverTime = MockWoW.serverTime + 10
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
-                    timer.callback()
-                    break
-                end
-            end
+            fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
             assert.is_false(GBL:GetSyncStatus().sending,
                 "should have aborted after max retries")
 
@@ -2576,8 +2595,11 @@ describe("Sync", function()
         it("resets retry counter on successful ACK", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Add tx (fits in 1 chunk with MAX_RECORDS_PER_CHUNK=25)
-            for i = 1, 4 do
+            -- Enough records to span more than one chunk, so there is a chunk 2
+            -- for the reset retry counter to be observed on. Four records fit a
+            -- single chunk and always have, which left the second half of this
+            -- test firing at a timer that was never there.
+            for i = 1, 8 do
                 table.insert(guildData.transactions, {
                     type = "deposit", player = "X", timestamp = 1000 + i,
                     scanTime = 1000 + i, id = "h" .. i,
@@ -2586,31 +2608,23 @@ describe("Sync", function()
             GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
-            -- Advance past gap floor so each retry fires (production 8s gap).
+            -- Advance past the gap floor so the retry issues immediately.
             MockWoW.serverTime = MockWoW.serverTime + 10
 
             -- Fire one ACK timeout (retry attempt 1)
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
-                    timer.callback()
-                    break
-                end
-            end
+            fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
 
-            -- Now simulate successful ACK for chunk 1
+            -- Advance past the gap floor again BEFORE the ACK, so the chunk 2
+            -- send it schedules is not additionally deferred by the gap floor.
+            MockWoW.serverTime = MockWoW.serverTime + 10
             GBL:HandleAck("OfficerB", { chunk = 1 })
 
-            -- Advance past gap floor again for the chunk 2 retry.
-            MockWoW.serverTime = MockWoW.serverTime + 10
+            -- Chunk 2 goes out on the adaptive inter-chunk delay, not inline.
+            fireNextChunkDelay()
 
             -- Fire ACK timeout for chunk 2 — retry counter should be reset,
             -- so this should retry (not abort)
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
-                    timer.callback()
-                    break
-                end
-            end
+            fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
             assert.is_true(GBL:GetSyncStatus().sending,
                 "retry counter should have reset — still sending")
         end)
@@ -2623,12 +2637,7 @@ describe("Sync", function()
     describe("ACK timeout target liveness", function()
         local function fireOneAckTimeout()
             MockWoW.serverTime = MockWoW.serverTime + 10
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
-                    timer.callback()
-                    return
-                end
-            end
+            fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
         end
 
         local function findRetryEntry()
@@ -2821,12 +2830,7 @@ describe("Sync", function()
             MockWoW.serverTime = MockWoW.serverTime + 10
 
             local sentBefore = #MockAce.sentCommMessages
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
-                    timer.callback()
-                    break
-                end
-            end
+            fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
             local sentAfter = #MockAce.sentCommMessages
             assert.is_true(sentAfter > sentBefore,
                 "ACK-timeout retry should fire immediately when gap > floor")
@@ -4664,14 +4668,9 @@ describe("Sync", function()
 
             -- Advance time past gap floor + ACK timeout so the retry fires cleanly
             MockWoW.serverTime = MockWoW.serverTime + 10
-            -- Fire only the 8s ACK timer (avoid firing gap-floor timers that would
+            -- Fire only the ACK timer (avoid firing gap-floor timers that would
             -- cascade through the retry and re-arm new timers indefinitely)
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
-                    timer.callback()
-                    break
-                end
-            end
+            fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
 
             assert.is_table(syncState.chunkOutcomes[1].retryReasons)
             local found = false

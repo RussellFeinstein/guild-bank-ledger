@@ -46,8 +46,22 @@ local MIN_SYNC_VERSION = "0.37.0"
 -- three times running by predicting ratios, which is why this takes the max.
 local MAX_RECORDS_PER_CHUNK = 4
 local CHUNK_TARGET_BYTES = 510
-local MAX_RETRIES = 5
-local ACK_TIMEOUT = 8
+-- ACK_TIMEOUT and MAX_RETRIES move together, and the product is the number that
+-- matters: it is how long a chunk keeps trying before the send gives up.
+--
+-- 8s dates from v0.23.0, when a chunk was 25 records across several fragments.
+-- At one fragment the 2026-08-10 capture measured wire-to-ACK at 0.50-0.67s on
+-- every logged success, so 8s spent most of each retry cycle waiting on a timer
+-- that had already told us what it was going to. 3s keeps ~4.5x headroom over
+-- the worst observation and cuts the cost of a lost fragment by more than half.
+--
+-- MAX_RETRIES rises with it so patience does not collapse: 6 attempts x 8s was
+-- ~40s, 6 x 3s would be ~18s, and a receiver on a 20-30s loading screen would
+-- start failing sends that survive today. 11 x 3s restores ~33s. Exhausting an
+-- 11-attempt ladder at ~19% per-attempt loss is ~1e-8, and a genuinely offline
+-- target still aborts early through the offline check rather than the ladder.
+local MAX_RETRIES = 10
+local ACK_TIMEOUT = 3
 local RECEIVE_CHUNK_TIMEOUT = 20
 local MAX_NACK_RETRIES = 3
 local HELLO_COOLDOWN = 60
@@ -85,6 +99,7 @@ GBL.SYNC_CHUNK_SIZE = MAX_RECORDS_PER_CHUNK
 GBL.SYNC_CHUNK_TARGET_BYTES = CHUNK_TARGET_BYTES
 GBL.SYNC_PREFIX = PREFIX
 GBL.SYNC_MAX_RETRIES = MAX_RETRIES
+GBL.SYNC_ACK_TIMEOUT = ACK_TIMEOUT
 GBL.SYNC_MAX_NACK_RETRIES = MAX_NACK_RETRIES
 GBL.SYNC_PEER_STALE_SECONDS = PEER_STALE_SECONDS
 GBL.SYNC_HELLO_HEARTBEAT_INTERVAL = HELLO_HEARTBEAT_INTERVAL
@@ -2245,6 +2260,8 @@ function GBL:FinishSending()
     local chunksSeen, totalAttempts, wireLossRetries = 0, 0, 0
     local sumFrags = 0
     local ratios = {}
+    local wireToAcks = {}
+    local overSized = 0
 
     for _, o in pairs(syncState.chunkOutcomes or {}) do
         chunksSeen = chunksSeen + 1
@@ -2270,9 +2287,20 @@ function GBL:FinishSending()
 
         if o.bytes and o.bytes > 0 then
             sumFrags = sumFrags + math.ceil(o.bytes / 255)
+            -- The one-fragment invariant, measured rather than assumed. #92
+            -- sized the packer for the worst compression ratio ever recorded,
+            -- but every one of those ratios was measured on a message three
+            -- times this size, and LibDeflate does worse on smaller inputs. A
+            -- non-zero count here is that assumption failing.
+            if o.bytes > 255 then
+                overSized = overSized + 1
+            end
         end
         if o.ratio and o.ratio > 0 then
             table.insert(ratios, o.ratio)
+        end
+        if o.outcome == "ok" and o.wireToAck and o.wireToAck > 0 then
+            table.insert(wireToAcks, o.wireToAck)
         end
     end
 
@@ -2304,7 +2332,21 @@ function GBL:FinishSending()
     self:AddAuditEntry("Retry causes for " .. target .. ": "
         .. "ackTimeout=" .. causes.ackTimeout .. ", nack=" .. causes.nack
         .. " | chunkFail=" .. chunkFail .. ", p_frag=" .. pFragStr)
-    self:AddAuditEntry("Compression for " .. target .. ": " .. ratioSummary)
+    self:AddAuditEntry("Compression for " .. target .. ": " .. ratioSummary
+        .. ", " .. overSized .. " chunk(s) over 1 fragment")
+
+    -- Wire-to-ACK has been recorded per chunk since v0.28.7 and never
+    -- aggregated. It is what says whether ACK_TIMEOUT has headroom: the
+    -- timeout is only sane while its max sits well below it.
+    local latencySummary = "n/a"
+    if #wireToAcks > 0 then
+        table.sort(wireToAcks)
+        latencySummary = string.format("%.2fs / %.2fs / %.2fs (min/med/max)",
+            wireToAcks[1], wireToAcks[math.floor(#wireToAcks / 2) + 1],
+            wireToAcks[#wireToAcks])
+    end
+    self:AddAuditEntry("Wire-to-ACK for " .. target .. ": " .. latencySummary
+        .. ", timeout " .. ACK_TIMEOUT .. "s")
 
     syncState.sending = false
     syncState.sendTarget = nil

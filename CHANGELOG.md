@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Sync gives up on a lost chunk faster and retries more times before abandoning a peer. Waiting eight seconds to notice a dropped chunk made sense when chunks were large; measured replies come back in about half a second, so most of that wait was dead time. The wait is now three seconds with eleven attempts instead of six, which keeps roughly the same overall patience for someone on a slow loading screen while wasting far less time on each lost packet.
+- The sync summary reports how long peers took to acknowledge each chunk, and counts any chunk that went out larger than a single packet. Both are there to catch the sizing above going wrong on a route it was not measured on.
+
 ### Fixed
 - Sync chunks are sized by what the whole message weighs, not by the records alone. Each chunk was meant to fit a single 255-byte packet, and none of them ever did: the per-item event counts that ride along with the records and the message header were both attached after the size check, and together they outweighed the records they travelled with. Every chunk was going out as three packets instead of one, and losing any one of the three meant sending the whole thing again, which is why a long catch-up sync could spend hours retrying and still not finish. Chunks now carry fewer records each and arrive in one piece.
 
