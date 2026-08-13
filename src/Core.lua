@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.37.4"
+local VERSION = "0.37.5"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -129,7 +129,7 @@ local defaults = {
             scale = 1.0, width = 1000, height = 600,
             font = "Fonts\\FRIZQT__.TTF", fontSize = 12,
             colorblindMode = false, highContrast = false, lockFrame = false,
-            openOnBankOpen = true,
+            openOnBankOpen = false,
         },
         scanning = {
             autoScan = true, scanDelay = 0.5, notifyOnScan = true,

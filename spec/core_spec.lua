@@ -77,6 +77,46 @@ describe("Core", function()
         end)
     end)
 
+    -- Most members never need the window, and the ones who want it can tick
+    -- the setting once. Opening it over the bank frame for everyone was the
+    -- wrong default.
+    describe("open with guild bank", function()
+        before_each(function()
+            GBL:OnInitialize()
+            MockWoW.guild.name = "Test Guild"
+            GBL:OnEnable()
+        end)
+
+        --- Fire a bank open and report how many times the frame was built.
+        -- IsShown returns true so the branch stops at creation rather than
+        -- running Show and a full UI refresh.
+        local function frameBuildsOnBankOpen()
+            local built = 0
+            GBL.CreateMainFrame = function(self)
+                built = built + 1
+                self.mainFrame = self.mainFrame or {
+                    frame = { IsShown = function() return true end },
+                }
+            end
+            MockAce.fireEvent("PLAYER_INTERACTION_MANAGER_FRAME_SHOW",
+                Enum.PlayerInteractionType.GuildBanker)
+            return built
+        end
+
+        it("defaults to off", function()
+            assert.is_false(GBL.db.profile.ui.openOnBankOpen)
+        end)
+
+        it("does not open the window when the bank opens", function()
+            assert.equals(0, frameBuildsOnBankOpen())
+        end)
+
+        it("still opens the window when the setting is on", function()
+            GBL.db.profile.ui.openOnBankOpen = true
+            assert.equals(1, frameBuildsOnBankOpen())
+        end)
+    end)
+
     describe("IsBankOpen", function()
         it("returns correct state", function()
             GBL:OnInitialize()

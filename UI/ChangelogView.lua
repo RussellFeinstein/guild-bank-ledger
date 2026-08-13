@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.37.5
+    {"0.37.5", "2026-08-13", {
+        Changed = {
+            "The ledger window no longer opens by itself when you open the guild bank. Most members never need it there, and it landed on top of the bank frame every time. Tick 'Open with Guild Bank' in Settings to get the old behaviour back, or open it any time with /gbl. Note that anyone who had never changed this setting is now on the new default; anyone who had already turned it off is unaffected.",
+        },
+    }},
+
     -- v0.37.4
     {"0.37.4", "2026-08-13", {
         Fixed = {
