@@ -29,11 +29,16 @@ All record IDs in a bucket are hashed (djb2) and XOR'd together to produce a 32-
 ### Sync Protocol Flow
 
 1. **HELLO** (GUILD broadcast, every 120s): Announces `txCount` and `dataHash`
-2. **MANIFEST** (GUILD broadcast, every 300s if changed): Broadcasts bucket-level hashes (capped at 200 most recent)
-3. **SYNC_REQUEST** (WHISPER): Requester sends ALL local bucket hashes to target
-4. **SYNC_DATA** (WHISPER, chunked): Responder sends records from differing buckets
-5. **ACK/NACK**: Chunk-level acknowledgment with timeout and retry
-6. **Post-sync HELLO**: Broadcasts updated state for epidemic propagation
+2. **SYNC_REQUEST** (WHISPER): Requester sends ALL local bucket hashes to target
+3. **SYNC_DATA** (WHISPER, chunked): Responder sends records from differing buckets
+4. **ACK/NACK**: Chunk-level acknowledgment with timeout and retry
+5. **Post-sync HELLO**: Broadcasts updated state for epidemic propagation
+
+> **Retired in vX.** A MANIFEST broadcast used to sit between steps 1 and 2, sending
+> bucket-level hashes to the guild every 300s when the data had changed. It fed peer-selection
+> scoring and nothing else, and that scoring is gone (see the section below). Everything in this
+> document that reasons about MANIFEST is kept as the record of why, but describes a message the
+> addon no longer sends.
 
 ### Key Protocol Constraints
 
@@ -222,9 +227,9 @@ When a peer has been offline, differing buckets span a time range:
 
 3h wins by 0.2s. 1h loses to request overhead. Differences are negligible for single catch-up events.
 
-## MANIFEST Coverage
+## MANIFEST Coverage (historical: the message was retired in vX)
 
-MANIFEST_MAX_BUCKETS = 200 caps how many bucket hashes are broadcast on the GUILD channel. Truncation drops the oldest buckets.
+MANIFEST_MAX_BUCKETS = 200 capped how many bucket hashes were broadcast on the GUILD channel. Truncation dropped the oldest buckets.
 
 | Bucket size | Buckets in 30d | Fits in 200? | Coverage |
 |-------------|---------------|-------------|----------|
@@ -232,9 +237,9 @@ MANIFEST_MAX_BUCKETS = 200 caps how many bucket hashes are broadcast on the GUIL
 | 3-hour | 240 (if saturated) | No (truncated) | 25 days |
 | 1-hour | 720 (if saturated) | No (heavy truncation) | 8.3 days |
 
-**Impact of truncation:** MANIFEST is used ONLY for peer-selection scoring in `PopPendingPeer` (`diffCount × 20` priority). It does NOT affect delta sync precision — SYNC_REQUEST always sends complete bucket hashes. So truncation degrades peer prioritization quality but not correctness.
+**Impact of truncation:** MANIFEST was used ONLY for peer-selection scoring in `PopPendingPeer` (`diffCount × 20` priority). It did NOT affect delta sync precision — SYNC_REQUEST always sends complete bucket hashes, computed independently. So truncation degraded peer prioritization quality but not correctness.
 
-With 70 peers and 10-peer pending queue (`MAX_PENDING_PEERS = 10`), peer-selection quality matters more — but even with truncation, the scoring still has `txCountDiff × 10` and starvation prevention as fallback signals.
+That sentence is also why the message could be deleted outright. Its single consumer was the scoring, so when the scored queue went, nothing else was reading it. Sync now pairs whoever is free with whoever advertises a difference, and this whole section became a question nobody asks.
 
 ## Cross-Version Rollout
 
@@ -268,11 +273,11 @@ The protocol requires sending ALL bucket hashes in every SYNC_REQUEST. This coup
 
 The highest-impact optimization would decouple bucket count from request size:
 
-1. Requester has cached MANIFEST from the peer (already broadcast every 5 minutes)
+1. Requester has a cached bucket manifest from the peer
 2. Requester pre-computes diff: `local buckets` vs `cached peer MANIFEST`
 3. SYNC_REQUEST includes only `requestedBuckets = {key1, key2, ...}` (the differing ones)
 4. Responder sends records from requested buckets only
-5. Fallback: if no MANIFEST cached, send all bucket hashes (current behavior)
+5. Fallback: if nothing cached, send all bucket hashes (current behavior)
 
 This would make SYNC_REQUEST size proportional to the DIFF (typically 1-5 buckets = 16-80 bytes), not the total dataset. With this change, even 1-hour buckets would be viable:
 
@@ -285,6 +290,8 @@ Sparse request + 1h buckets:
 ```
 
 This requires a protocol version bump and a new SYNC_REQUEST field, but is backwards-compatible (old peers ignore the new field and use `bucketHashes`).
+
+**The cost of this design moved in vX.** It was written when a MANIFEST broadcast already existed and was free to build on: step 1 assumed the cache was simply there. With that broadcast retired, this design now has to pay for its own input, either by reintroducing a periodic broadcast (and with it the traffic and the bookkeeping that were just removed) or by carrying the finer manifest inside the SYNC_REQUEST/SYNC_DATA session itself, which is the more promising direction precisely because it costs no idle traffic. Read the numbers above as still valid and the plan as needing a new first step.
 
 ## Appendix: Raw Data Distribution
 

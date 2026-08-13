@@ -13,10 +13,10 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 - Tab recording for deposits and withdrawals (v0.37.0): every item transaction now stores the tab it happened in; previously only moves carried one
 
 **Guild-wide sync** (v0.11.0--v0.30.x):
-- AceComm protocol (HELLO / SYNC_REQUEST / SYNC_DATA / ACK / NACK / BUSY / MANIFEST)
+- AceComm protocol (HELLO / SYNC_REQUEST / SYNC_DATA / ACK / NACK / BUSY / LAYOUT_REQUEST / LAYOUT_DATA). MANIFEST shipped in v0.25.0 and was retired in vX: it existed only to score which peer to sync with next, which gossip does not need.
 - Fingerprint-based delta sync with 6-hour bucket hashing
 - LibDeflate compression, chunked transfer with 1-fragment chunks (510 B whole-message budget, covering records, event counts and the envelope together) and a 1.0s gap floor for cross-realm reliability
-- Epidemic gossip propagation, smart peer selection, hash-gated HELLO reply suppression
+- Epidemic gossip propagation, free-agent pairing (retired the scored peer selection in vX), hash-gated HELLO reply suppression
 - Retry logic, FPS-adaptive throttling, combat / zone change protection
 - Peer canonicalization (`CanonicalPeerKey`) handling cross-realm and bare-name ambiguity correctly
 - Per-chunk audit outcomes (ok / ackTimeout / nack / combatAbort / zoneAbort / busyAbort / sendFailed)
@@ -76,7 +76,7 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 Per-area status:
 
 - **Mature**: recording, categorization, deduplication.
-- **Active** (in guild use, improvements queued): sync (rate limiting and manifest tuning pending), UI (sort/filter polish, pagination layout, window resize), sort + layout (confirmation-speed tuning, the overflow-pack full-stack-merge edge case, layout editor slot visibility, refresh flicker). Restock (new in v0.34.0): layout-driven targets and Auctionator buying are in initial use, with a UI polish pass and the reserve-targets producer queued.
+- **Active** (in guild use, improvements queued): sync (rate limiting pending), UI (sort/filter polish, pagination layout, window resize), sort + layout (confirmation-speed tuning, the overflow-pack full-stack-merge edge case, layout editor slot visibility, refresh flicker). Restock (new in v0.34.0): layout-driven targets and Auctionator buying are in initial use, with a UI polish pass and the reserve-targets producer queued.
 - **Under audit**: accessibility. Palettes, contrast, triple encoding, and font scaling are wired; keyboard-navigation primitives exist but are not threaded through all UI widgets. An independent audit pass is the next planned milestone and is a v1.0 release gate.
 - **Under audit**: the storage layer. `docs/DATA-MODEL.md` measured the declared schema against a live 12,310-record file and found the defaults block, the record builders and the stored data all disagreeing. Tiered storage is being retired rather than repaired, because compaction has never once run (issue #62). Schema migrations work but nothing pins the entry point of the ladder, and roughly 12% of everything ever received via sync arrived with mangled field names. Intake validation and repair shipped in v0.37.0, so new arrivals are checked before they land; the corrupted backlog already on disk is issue #75. Tracked under the Data model integrity milestone and a v1.0 release gate.
 
@@ -101,7 +101,7 @@ v1.0.0 signals production readiness, not a feature gate. It means:
 1. Core features (logging, sync, dedup, storage, UI) are stable and tested.
 2. Accessibility audit complete: keyboard navigation wired end-to-end across every UI widget, focus indicators verified, screen-reader audit passed, palettes validated against WCAG AAA contrast targets.
 3. Schema migration path is reliable.
-4. Sync protocol is rate-limited per peer and has the manifest exchange hardened.
+4. Sync protocol is rate-limited per peer, and gossip convergence is capture-verified: a guild whose members hold divergent datasets converges to a shared hash through HELLO-driven pairing alone, within a small number of session cycles and with no starved peer. Demonstrated from audit captures, not asserted from reading the code.
 5. Breaking changes follow semver from v1.0.0 onward.
 
 ---

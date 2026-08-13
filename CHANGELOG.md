@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Members now share notes with whoever is available instead of waiting for a preferred partner. Every member used to broadcast a summary of what it held every five minutes, keep a picture of everyone else's, and score that picture to decide who to sync with next. Sync spreads through the guild the way gossip does, so it arrives regardless of the order it travels in, and the bookkeeping was buying an ordering that does not matter. A member that finishes syncing now simply becomes available and answers the next member who says they have something new. Nothing about what gets synced changes, and this update syncs normally with members who have not taken it yet.
+
+### Removed
+- The five-minute guild-wide summary broadcast, and the queue that scored which member to sync with next.
+
 ## [0.37.5] - 2026-08-13
 
 ### Changed
