@@ -465,8 +465,10 @@ fragment count is measured live as `syncState.lastChunkBytes`.
 **The scope named here was too narrow.** This section used to name `stockReserves` and
 `bankLayout.tabs[].items`, both of which ride LAYOUT_DATA, a rare pull. The larger exposure is the
 fingerprint bucket tables: `bucketKeyForRecord` (`src/Fingerprint.lua:106-116`) returns
-`math.floor(...)`, a number, so `bucketHashes` on SYNC_REQUEST and `buckets` on MANIFEST are
-numeric-keyed and cross the wire on **every sync**. Had those degraded to strings, every bucket
+`math.floor(...)`, a number, so `bucketHashes` on SYNC_REQUEST is numeric-keyed and crosses the wire
+on **every sync**. (MANIFEST carried a second numeric-keyed `buckets` table until v0.37.6 retired it; the
+SYNC_REQUEST half is unaffected, because it is computed independently and was never fed by the
+manifest.) Had those degraded to strings, every bucket
 comparison would miss, every sync would resend everything, and the symptom would be a high duplicate
 rate, which is the one reading the redundancy line already cannot be trusted to explain.
 
