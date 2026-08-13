@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.3] - 2026-08-13
+
 ### Changed
 - Sync gives up on a lost chunk faster and retries more times before abandoning a peer. Waiting eight seconds to notice a dropped chunk made sense when chunks were large; measured replies come back in about half a second, so most of that wait was dead time. The wait is now three seconds with eleven attempts instead of six, which keeps roughly the same overall patience for someone on a slow loading screen while wasting far less time on each lost packet.
 - The sync summary reports how long peers took to acknowledge each chunk, and counts any chunk that went out larger than a single packet. Both are there to catch the sizing above going wrong on a route it was not measured on.
