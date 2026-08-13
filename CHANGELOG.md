@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.4] - 2026-08-13
+
 ### Fixed
 - The Sync tab no longer tells you a peer is syncing when it is refusing them. A peer running a version too old to sync with was only marked as such while their messages were arriving; after a reload the mark was gone, and a peer who stayed quiet (sitting in a dungeon, where addon messages do not reach the guild) was shown as an older peer syncing normally. The tab now works the status out from the version the peer advertises, so it reads correctly whether or not they have said anything this session.
 - Peers remembered from a previous session kept their version but lost the compatibility range that goes with it, so until they spoke again they were treated as though they predated the sync floor. That made the addon refuse a peer it can sync with, and label them as too old in the peer list.
