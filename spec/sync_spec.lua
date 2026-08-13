@@ -4097,17 +4097,21 @@ describe("Sync", function()
 
             --- ACK each chunk and fire the inter-chunk gap so the whole
             --- session actually goes out, the way a healthy peer drives it.
+            --- The clock has to move: SendNextChunk enforces a wall-clock gap
+            --- floor between issues, and against a frozen GetTime it just
+            --- reschedules itself and the send never leaves chunk one.
             local function drainSend(target)
-                for _ = 1, 600 do
+                for _ = 1, 4000 do
                     if not GBL:GetSyncStatus().sending then break end
                     local idx = tonumber(
                         GBL:GetSyncStatus().sendProgress:match("^(%d+)"))
                     GBL:HandleAck(target, { chunk = idx })
+                    MockWoW.serverTime = MockWoW.serverTime + 2
                     local fired = false
                     for i = #MockWoW.pendingTimers, 1, -1 do
                         local t = MockWoW.pendingTimers[i]
                         if not t.cancelled and not t.fired and t.delay
-                            and t.delay > 0.05 and t.delay <= 2.0 then
+                            and t.delay > 0 and t.delay <= 2.0 then
                             t.fired = true
                             t.callback()
                             fired = true
@@ -4270,10 +4274,14 @@ describe("Sync", function()
                 assert.is_false(GBL:GetSyncStatus().receiving)
             end)
 
+            -- Two real sessions back to back. The second sender says nothing
+            -- about buckets left over, so reporting one means the first
+            -- session's count survived a teardown it should not have.
+            -- (ResetSyncState is deliberately not used here: it clears the
+            -- sync log, which is the evidence this test reads.)
             it("clears the count when a new session starts", function()
                 GBL:RequestSync("OfficerB", 0)
                 GBL:HandleSyncData("OfficerB", chunkFrom{ remaining = 4 })
-                GBL:ResetSyncState()
                 GBL:RequestSync("OfficerC", 0)
                 GBL:HandleSyncData("OfficerC", chunkFrom{})
 

@@ -87,6 +87,14 @@ local INITIAL_CHUNK_TIMEOUT = 10
 -- whole mechanism.
 local BUSY_COOLDOWN = 30
 local FORCED_HELLO_COOLDOWN = 10
+-- How many records one session aims to carry, before rounding up to whole
+-- bucket boundaries. At the post-#92 density of roughly one record per chunk
+-- and the 1.0s inter-chunk gap floor, 300 is about five minutes on the wire.
+-- That is short enough that both peers rejoin the gossip pool quickly and far
+-- enough inside MAX_RECEIVE_DURATION (1800s) that a session ends because it
+-- finished rather than because it ran out of time. Expect it to halve in
+-- duration if the chunk budget rises to fill both wire fragments (#96).
+local SESSION_RECORD_CAP = 300
 local LAYOUT_REQUEST_THROTTLE = 30  -- min seconds between bank-layout pull requests
 local WHISPER_TRACK_EXPIRE = 30
 local MAX_RECEIVE_DURATION = 1800  -- 30 minutes absolute maximum receive time
@@ -108,6 +116,7 @@ GBL.SYNC_BUSY_COOLDOWN = BUSY_COOLDOWN
 GBL.SYNC_MAX_RECEIVE_DURATION = MAX_RECEIVE_DURATION
 GBL.SYNC_FORCED_HELLO_COOLDOWN = FORCED_HELLO_COOLDOWN
 GBL.SYNC_SUPERSET_NUDGE_THROTTLE = SUPERSET_NUDGE_THROTTLE
+GBL.SYNC_SESSION_RECORD_CAP = SESSION_RECORD_CAP
 GBL.SYNC_LAYOUT_REQUEST_THROTTLE = LAYOUT_REQUEST_THROTTLE
 GBL.SYNC_COMBAT_COOLDOWN = COMBAT_COOLDOWN
 GBL.SYNC_INTER_CHUNK_GAP_FLOOR = INTER_CHUNK_GAP_FLOOR
@@ -328,6 +337,14 @@ local syncState = {
     -- re-advertises only if this is set, so a raid leaving combat together
     -- does not produce one broadcast per member.
     helloAfterCombat = false,
+
+    -- What each peer got last session: targetKey -> { bucketKey -> local hash
+    -- at send time }. Feeds the session cap's demotion set so a bucket we
+    -- already sent, and have not changed since, waits behind everything else.
+    capLastTranche = {},
+    -- Buckets held back from the session now sending, announced to the
+    -- receiver on the final chunk.
+    sendRemainingBuckets = 0,
 
     -- HELLO traffic management (M4)
     lastForcedHelloTime = 0,
@@ -567,6 +584,7 @@ function GBL:DisableSync()
     self:StopFpsMonitor()
     syncState.peerBusyUntil = {}
     syncState.helloAfterCombat = false
+    syncState.capLastTranche = {}
     syncState.lastForcedHelloTime = 0
     syncState.lastHelloReplyHash = {}
     syncState.lastSupersetNudge = {}
@@ -1303,6 +1321,10 @@ local function estimateEnvelopeBytes(guildName)
     field("totalChunks", 5)
     field("protocolVersion", #tostring(PROTOCOL_VERSION))
     field("guild", escapedLength(guildName))
+    -- The session cap's leftover count. It rides only the final chunk, but
+    -- the allowance is permanent: the budget has to hold for every chunk,
+    -- and the final one is not knowable while packing.
+    field("remaining", 5)
     -- The three payload containers, each an empty table wrapper of its own.
     field("transactions", 6)
     field("moneyTransactions", 6)
@@ -1519,6 +1541,7 @@ function GBL:RequestSync(target, sinceTimestamp)
     syncState.receiveItemRejected = 0
     syncState.receiveMoneyRejected = 0
     syncState.receiveRejectFields = {}
+    syncState.receiveRemaining = nil
     syncState.receiveNormalized = 0
     syncState.receiveItemRejected = 0
     syncState.receiveMoneyRejected = 0
@@ -1604,10 +1627,14 @@ function GBL:HandleSyncRequest(sender, data)
     local txToSend = {}
     local moneyToSend = {}
     local diffDays  -- bucket keys that differ (nil = send all)
+    -- Computed on both paths. The bucket diff below needs it, and so does the
+    -- per-target tranche memory that keeps a capped session rotating, which
+    -- would otherwise serve the same slice forever to a peer whose request
+    -- carried no hashes.
+    local localBuckets = self:ComputeBucketHashes(guildData)
 
     if data.bucketHashes then
         -- Bucket-filtered sync: only send records from days where hashes differ
-        local localBuckets = self:ComputeBucketHashes(guildData)
         diffDays = {}
         local totalLocalDays = 0
         local totalRemoteDays = 0
@@ -1696,10 +1723,36 @@ function GBL:HandleSyncRequest(sender, data)
             .. date("%Y-%m-%d %H:00", oldestTs))
     end
 
-    -- Collect eventCounts for the buckets we're sending (nil diffDays = send all)
-    -- before chunking, so the packer can weigh them: they are part of the
-    -- message the budget has to cover, not a rider stapled on afterwards (#92).
-    local sendEventCounts = self:CollectEventCountsForBuckets(guildData, diffDays)
+    -- Cap the session to whole buckets. The peer gets the rest next time they
+    -- ask, and both of us are back in the gossip pool in minutes rather than
+    -- hours. Buckets already sent to this peer whose local hash has not moved
+    -- since sort last, so a receiver-superset diff cannot pin us to the same
+    -- tranche forever (see _SelectSessionBuckets).
+    local sendTarget = self:CanonicalPeerKey(sender)
+    local demoteSet
+    local lastTranche = syncState.capLastTranche[sendTarget]
+    if lastTranche then
+        demoteSet = {}
+        for key, hashWhenSent in pairs(lastTranche) do
+            if localBuckets[key] == hashWhenSent then demoteSet[key] = true end
+        end
+    end
+
+    local sentBuckets, deferredBuckets
+    txToSend, moneyToSend, sentBuckets, deferredBuckets =
+        self:_SelectSessionBuckets(txToSend, moneyToSend, SESSION_RECORD_CAP, demoteSet)
+
+    local tranche = {}
+    for key in pairs(sentBuckets) do tranche[key] = localBuckets[key] end
+    syncState.capLastTranche[sendTarget] = tranche
+
+    -- Collect eventCounts for the buckets we're sending. On the bucket path
+    -- that is the capped set, so counts ride only with the records they
+    -- describe. On the fallback path there are no bucket keys to filter by,
+    -- so it stays nil (send all) and the carrier-chunk path from #92 is
+    -- unchanged.
+    local countBuckets = diffDays and sentBuckets or nil
+    local sendEventCounts = self:CollectEventCountsForBuckets(guildData, countBuckets)
 
     -- Prepare and send chunks
     local chunks = self:PrepareChunks(txToSend, moneyToSend, sendEventCounts)
@@ -1730,11 +1783,16 @@ function GBL:HandleSyncRequest(sender, data)
     syncState.sendChunkIndex = 0
     syncState.sendStartTime = GetServerTime()
     syncState.sendTotalRecords = #txToSend + #moneyToSend
+    syncState.sendRemainingBuckets = deferredBuckets or 0
     self:StartFpsMonitor()
 
     local totalTx = #txToSend + #moneyToSend
+    local capNote = ""
+    if (deferredBuckets or 0) > 0 then
+        capNote = ", capped: " .. deferredBuckets .. " bucket(s) deferred"
+    end
     self:AddAuditEntry("Sending " .. totalTx
-        .. " tx to " .. sender .. " in " .. #chunks .. " chunk(s)")
+        .. " tx to " .. sender .. " in " .. #chunks .. " chunk(s)" .. capNote)
 
     ctlDeferTotal = 0
     -- Per-session drain instrumentation reset. timersPending is deliberately
@@ -1769,6 +1827,82 @@ end
 ------------------------------------------------------------------------
 -- Chunking
 ------------------------------------------------------------------------
+
+--- Cut a send list down to one session's worth of whole buckets.
+--
+-- Whole buckets, never a partial one. A half-sent bucket hashes differently
+-- from either side's copy, so it matches nobody and comes back entire on the
+-- next request; a complete bucket converges and drops out of the diff for
+-- good. That is the difference between a backfill that makes progress across
+-- sessions and one that re-sends the same records forever.
+--
+-- Newest first, because a peer that is far behind needs current activity more
+-- than old history, except for buckets in demoteSet, which sort behind
+-- everything else. That set is the deadlock fix: when the buckets that differ
+-- are ones the receiver already holds from a third peer, an unqualified
+-- newest-first cap re-sends the same all-duplicate tranche every session and
+-- older differing buckets starve. Buckets we already sent to this peer whose
+-- contents have not changed since are exactly the ones to try last.
+--
+-- @param txList table Item records, already newest-first
+-- @param moneyList table Money records, already newest-first
+-- @param cap number Target record count before bucket rounding
+-- @param demoteSet table|nil bucketKey -> true, buckets to try last
+-- @return table filtered item records
+-- @return table filtered money records
+-- @return table bucketKey -> true for the buckets this session carries
+-- @return number how many buckets were held back
+function GBL:_SelectSessionBuckets(txList, moneyList, cap, demoteSet)
+    local counts = {}
+    local order = {}
+    local function tally(list)
+        for _, rec in ipairs(list) do
+            local key = self:BucketKeyForRecord(rec)
+            if not counts[key] then
+                counts[key] = 0
+                order[#order + 1] = key
+            end
+            counts[key] = counts[key] + 1
+        end
+    end
+    tally(txList)
+    tally(moneyList)
+
+    if #order == 0 then return {}, {}, {}, 0 end
+
+    table.sort(order, function(a, b)
+        local aDemoted = (demoteSet and demoteSet[a]) and 1 or 0
+        local bDemoted = (demoteSet and demoteSet[b]) and 1 or 0
+        if aDemoted ~= bDemoted then return aDemoted < bDemoted end
+        return a > b
+    end)
+
+    -- A bucket larger than the whole cap still goes out whole. Nothing here
+    -- special-cases it: taken is zero on the first pass, so the first bucket
+    -- is selected before the cap can refuse anything, and refusing it would
+    -- mean never sending that bucket at all.
+    local selected = {}
+    local taken = 0
+    local remaining = 0
+    for _, key in ipairs(order) do
+        if taken < cap then
+            selected[key] = true
+            taken = taken + counts[key]
+        else
+            remaining = remaining + 1
+        end
+    end
+
+    local function filter(list)
+        local out = {}
+        for _, rec in ipairs(list) do
+            if selected[self:BucketKeyForRecord(rec)] then out[#out + 1] = rec end
+        end
+        return out
+    end
+
+    return filter(txList), filter(moneyList), selected, remaining
+end
 
 --- Sort a sync send list so the most recent 6-hour buckets come first.
 -- PrepareChunks packs records into chunks in list order, so a newest-first
@@ -2036,6 +2170,16 @@ function GBL:SendNextChunk()
     end
     syncState.chunkOutcomes[idx].attempts = syncState.chunkOutcomes[idx].attempts + 1
 
+    -- Attached at serialize time rather than baked into the chunk so a NACK
+    -- or timeout retransmit of the final chunk still carries it. Only on the
+    -- final chunk, and only when something is actually left: an uncapped
+    -- session puts nothing new on the wire, which is what keeps the builder
+    -- key-parity check in the wire contract green.
+    local remaining
+    if idx == #syncState.sendChunks and (syncState.sendRemainingBuckets or 0) > 0 then
+        remaining = syncState.sendRemainingBuckets
+    end
+
     local serialized = self:Serialize({
         type = "SYNC_DATA",
         chunk = idx,
@@ -2043,6 +2187,7 @@ function GBL:SendNextChunk()
         transactions = chunk.transactions,
         moneyTransactions = chunk.moneyTransactions,
         eventCounts = chunk.eventCounts,
+        remaining = remaining,
         protocolVersion = PROTOCOL_VERSION,
         guild = self:GetGuildName(),
     })
@@ -2331,6 +2476,7 @@ function GBL:FinishSending()
     syncState.sendRetryCount = 0
     syncState.sendStartTime = 0
     syncState.sendTotalRecords = 0
+    syncState.sendRemainingBuckets = 0
     syncState.sendChunkSentAt = 0
     syncState.lastChunkBytes = 0
     syncState.lastSendIssuedAt = 0
@@ -2597,6 +2743,10 @@ function GBL:HandleSyncData(sender, data)
         self._lastMoneyBatchCounts = nil
     end
     local duped = itemDuped + moneyDuped
+    -- Assigned unconditionally, so a chunk without the field clears whatever
+    -- an earlier one set. Only the final chunk carries it, so anything else
+    -- arriving means the session is still running.
+    syncState.receiveRemaining = data.remaining
     syncState.receiveGot = syncState.receiveGot + 1
     syncState.receiveStored = syncState.receiveStored + stored
     syncState.receiveDuped = syncState.receiveDuped + duped
@@ -2701,6 +2851,10 @@ end
 -- @param sender string The peer we synced from
 function GBL:FinishReceiving(sender)
     local totalStored = syncState.receiveStored
+    -- Read before the cleanup below, which decrements totalStored, and before
+    -- the teardown that zeroes the counters.
+    local remainingBuckets = syncState.receiveRemaining or 0
+    local madeProgress = totalStored > 0 or (syncState.receiveNormalized or 0) > 0
 
     local guildData = self:GetGuildData()
     if guildData then
@@ -2810,6 +2964,7 @@ function GBL:FinishReceiving(sender)
     syncState.receiveItemRejected = 0
     syncState.receiveMoneyRejected = 0
     syncState.receiveRejectFields = {}
+    syncState.receiveRemaining = nil
     syncState.receiveNormalized = 0
     syncState.receiveStartTime = 0
     syncState.receiveNackCount = 0
@@ -2821,6 +2976,18 @@ function GBL:FinishReceiving(sender)
     if self.mainFrame and self.mainFrame.frame
         and self.mainFrame.frame:IsShown() then
         self:RefreshUI()
+    end
+
+    -- A capped session leaves buckets behind. Nothing is scheduled to chase
+    -- them: the post-sync HELLO below advertises what we now hold, the
+    -- sender sees we are still behind and nudges, and the next slice starts
+    -- through the ordinary pairing path. Recording it makes the seam between
+    -- slices measurable in a capture, which is what decides whether a
+    -- self-scheduled continuation is worth building.
+    if remainingBuckets > 0 then
+        self:AddAuditEntry("Partial session from " .. tostring(sender) .. ": "
+            .. remainingBuckets .. " bucket(s) remaining"
+            .. (madeProgress and "" or " (no progress)"))
     end
 
     -- We are free again the moment this returns. Nothing is scheduled to
@@ -3122,12 +3289,14 @@ function GBL:ResetSyncState()
     syncState.sendRetryCount = 0
     syncState.sendStartTime = 0
     syncState.sendTotalRecords = 0
+    syncState.sendRemainingBuckets = 0
     syncState.sendChunkSentAt = 0
     syncState.receiving = false
     syncState.receiveSource = nil
     syncState.receiveExpected = 0
     syncState.receiveGot = 0
     syncState.receiveStored = 0
+    syncState.receiveRemaining = nil
     syncState.receiveDuped = 0
     syncState.receiveTimer = nil
     syncState.receiveStartTime = 0
@@ -3152,6 +3321,7 @@ function GBL:ResetSyncState()
     syncState.lastFpsCheck = 0
     syncState.peerBusyUntil = {}
     syncState.helloAfterCombat = false
+    syncState.capLastTranche = {}
     syncState.lastForcedHelloTime = 0
     syncState.lastHelloReplyHash = {}
     syncState.lastSupersetNudge = {}
@@ -3342,6 +3512,7 @@ function GBL:HandleBusy(sender, data) -- luacheck: ignore 212/data
         syncState.receiveStored = 0
         syncState.receiveDuped = 0
         syncState.receiveNormalized = 0
+        syncState.receiveRemaining = nil
         syncState.receiveStartTime = 0
         syncState.receiveNackCount = 0
         self._syncReceiving = false
@@ -3374,6 +3545,7 @@ function GBL:HandleBusy(sender, data) -- luacheck: ignore 212/data
         syncState.sendRetryCount = 0
         syncState.sendStartTime = 0
         syncState.sendTotalRecords = 0
+        syncState.sendRemainingBuckets = 0
         self:StopFpsMonitor()
 
         self:AddAuditEntry(cleanSender .. " busy — aborting send")
