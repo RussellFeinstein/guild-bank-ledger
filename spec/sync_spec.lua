@@ -17,6 +17,40 @@ local function fireJitterTimers()
     end
 end
 
+--- Fire the pending one-shot ACK timer, and fail if there is not one.
+-- The delay comes from the caller as GBL.SYNC_ACK_TIMEOUT rather than a
+-- literal, and a miss is an error rather than a quiet no-op. Both matter: these
+-- sites used to match a hardcoded 8, so when ACK_TIMEOUT became 3 they would
+-- have matched nothing, and the tests that assert "still sending" after a
+-- timeout would have passed without ever firing one.
+-- @param delay number The production ACK_TIMEOUT
+local function fireAckTimeout(delay)
+    for _, timer in ipairs(MockWoW.pendingTimers) do
+        if timer.delay == delay and not timer.cancelled then
+            timer.callback()
+            return
+        end
+    end
+    error(("no pending ACK timer at %ss to fire"):format(tostring(delay)), 2)
+end
+
+--- Fire the adaptive inter-chunk delay that HandleAck schedules the next chunk
+-- on (INTER_CHUNK_DELAY_NORMAL 0.1s, or 0.5s once FPS adaptation kicks in).
+-- HandleAck does not send inline, so without this there is no chunk in flight
+-- and no ACK timer behind it. Takes the newest match, which is the one the ACK
+-- just scheduled, and fails rather than no-op when there is none.
+local function fireNextChunkDelay()
+    for i = #MockWoW.pendingTimers, 1, -1 do
+        local timer = MockWoW.pendingTimers[i]
+        if not timer.cancelled and timer.delay
+            and timer.delay > 0.05 and timer.delay <= 1.0 then
+            timer.callback()
+            return timer.delay
+        end
+    end
+    error("no pending inter-chunk delay timer to fire", 2)
+end
+
 --- Fire the latest uncancelled receive timeout timer (any delay).
 -- With NACK backoff, delays change (20→30→45), so we can't match on exact delay.
 -- Finds the last (newest) uncancelled ticker and fires it.
@@ -957,8 +991,10 @@ describe("Sync", function()
 
     describe("HandleSyncRequest", function()
         it("sends matching transactions as SYNC_DATA", function()
-            -- Add some transactions
-            for i = 1, 3 do
+            -- Two records, because this is about the message shape and the
+            -- chunk numbering on a single-chunk send. Enough records to need a
+            -- second chunk would change what is being asserted, not improve it.
+            for i = 1, 2 do
                 table.insert(guildData.transactions, {
                     type = "deposit", player = "Player" .. i,
                     itemID = 1000 + i, count = i, tab = 1,
@@ -979,7 +1015,7 @@ describe("Sync", function()
             local ok, data = GBL:Deserialize(sent.text)
             assert.is_true(ok)
             assert.equals("SYNC_DATA", data.type)
-            assert.equals(3, #data.transactions)
+            assert.equals(2, #data.transactions)
             assert.equals(1, data.chunk)
             assert.equals(1, data.totalChunks)
         end)
@@ -1098,6 +1134,178 @@ describe("Sync", function()
             assert.equals(2, #chunks)
             assert.equals(1, #chunks[1].transactions)
             assert.equals(1, #chunks[2].transactions)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- PrepareChunks: the event count rider (#92)
+    --
+    -- Event counts used to be partitioned into fixed batches of 10 and stapled
+    -- onto chunks by index after packing, so they never touched the budget. The
+    -- packer now takes them as an argument and fills each chunk to a
+    -- whole-message target that counts records, entries and the envelope
+    -- together. spec/wire_contract_spec.lua pins the estimators against the real
+    -- serializer; these pin the packing behaviour.
+    ---------------------------------------------------------------------------
+
+    describe("PrepareChunks with event counts", function()
+        --- Small realistic records, well under the target on their own.
+        local function makeRecords(n, kind)
+            local list = {}
+            for i = 1, n do
+                list[i] = {
+                    type = kind or "deposit",
+                    player = "Alice-Stormrage",
+                    itemID = 191318 + i,
+                    count = 20,
+                    tab = 3,
+                    classID = 0,
+                    subclassID = 3,
+                    timestamp = 1775580307 - i,
+                    id = ("deposit|Alice-Stormrage|%d|20|3|493216:0"):format(191318 + i),
+                }
+            end
+            return list
+        end
+
+        local function makeEventCounts(n)
+            local ec = {}
+            for i = 1, n do
+                ec[("deposit|Alice-Stormrage|%d|20|3|493216"):format(191318 + i)] =
+                    { count = i, asOf = 1775580307 }
+            end
+            return ec
+        end
+
+        --- What the whole serialized message is estimated to weigh.
+        local function wholeMessageEstimate(chunk)
+            local bytes = GBL:_EstimateEnvelopeBytes(GBL:GetGuildName())
+            for _, rec in ipairs(chunk.transactions) do
+                bytes = bytes + GBL:_EstimateRecordBytes(rec)
+            end
+            for _, rec in ipairs(chunk.moneyTransactions) do
+                bytes = bytes + GBL:_EstimateRecordBytes(rec)
+            end
+            for key, entry in pairs(chunk.eventCounts or {}) do
+                bytes = bytes + GBL:_EstimateEventCountBytes(key, entry)
+            end
+            return bytes
+        end
+
+        local function countPairs(t)
+            local n = 0
+            for _ in pairs(t or {}) do n = n + 1 end
+            return n
+        end
+
+        it("keeps every chunk's whole-message estimate inside the target", function()
+            local chunks = GBL:PrepareChunks(makeRecords(20), {}, makeEventCounts(20))
+            assert.is_true(#chunks > 0, "expected chunks")
+            for i, chunk in ipairs(chunks) do
+                local estimate = wholeMessageEstimate(chunk)
+                assert.is_true(estimate <= GBL.SYNC_CHUNK_TARGET_BYTES,
+                    ("chunk %d estimates %d bytes, over the %d target"):format(
+                        i, estimate, GBL.SYNC_CHUNK_TARGET_BYTES))
+            end
+        end)
+
+        it("packs every event count entry exactly once", function()
+            local ec = makeEventCounts(25)
+            local chunks = GBL:PrepareChunks(makeRecords(8), {}, ec)
+
+            -- pairs() order is nondeterministic, so this counts rather than
+            -- asserting which chunk any given entry landed on.
+            local seen = {}
+            local total = 0
+            for _, chunk in ipairs(chunks) do
+                for key, entry in pairs(chunk.eventCounts or {}) do
+                    assert.is_nil(seen[key], "entry packed twice: " .. key)
+                    seen[key] = true
+                    total = total + 1
+                    assert.equals(ec[key].count, entry.count)
+                end
+            end
+            assert.equals(25, total)
+        end)
+
+        it("adds carrier chunks when event counts outrun the record chunks", function()
+            -- Two records fill at most one chunk; 40 entries cannot ride along.
+            local chunks = GBL:PrepareChunks(makeRecords(2), {}, makeEventCounts(40))
+            assert.is_true(#chunks > 1,
+                "event counts beyond the record chunks need carrier chunks")
+
+            local total = 0
+            for _, chunk in ipairs(chunks) do
+                total = total + countPairs(chunk.eventCounts)
+            end
+            assert.equals(40, total)
+        end)
+
+        it("packs event counts when there are no records at all", function()
+            local chunks = GBL:PrepareChunks({}, {}, makeEventCounts(15))
+            assert.is_true(#chunks > 0, "event counts alone still need chunks")
+
+            local total = 0
+            for _, chunk in ipairs(chunks) do
+                assert.equals(0, #chunk.transactions)
+                assert.equals(0, #chunk.moneyTransactions)
+                total = total + countPairs(chunk.eventCounts)
+            end
+            assert.equals(15, total)
+        end)
+
+        it("returns no chunks when there is nothing to send", function()
+            assert.equals(0, #GBL:PrepareChunks({}, {}, {}))
+            assert.equals(0, #GBL:PrepareChunks({}, {}, nil))
+        end)
+
+        it("still places a record that overshoots the target on its own", function()
+            -- A long cross-realm id can exceed the target by itself. The packer
+            -- must make progress rather than seal an empty chunk forever.
+            local txList = {
+                { type = "deposit", player = "P", timestamp = 1, id = string.rep("x", 900) },
+                { type = "deposit", player = "P", timestamp = 2, id = "small" },
+            }
+            local chunks = GBL:PrepareChunks(txList, {}, {})
+            local total = 0
+            for _, chunk in ipairs(chunks) do total = total + #chunk.transactions end
+            assert.equals(2, total, "no record may be dropped")
+            assert.equals(1, #chunks[1].transactions,
+                "the oversized record takes a chunk of its own")
+        end)
+
+        it("still places an event count entry that overshoots on its own", function()
+            local ec = { [string.rep("k", 900)] = { count = 1, asOf = 1775580307 } }
+            local chunks = GBL:PrepareChunks({}, {}, ec)
+            local total = 0
+            for _, chunk in ipairs(chunks) do
+                total = total + countPairs(chunk.eventCounts)
+            end
+            assert.equals(1, total, "no entry may be dropped")
+        end)
+
+        it("keeps the record cap as a backstop", function()
+            local chunks = GBL:PrepareChunks(makeRecords(30), {}, {})
+            for _, chunk in ipairs(chunks) do
+                assert.is_true(#chunk.transactions + #chunk.moneyTransactions
+                    <= GBL.SYNC_CHUNK_SIZE, "no chunk may exceed the record cap")
+            end
+        end)
+
+        it("keeps the newest-first record order the sender chose", function()
+            local records = makeRecords(12)
+            local chunks = GBL:PrepareChunks(records, {}, makeEventCounts(6))
+
+            local flat = {}
+            for _, chunk in ipairs(chunks) do
+                for _, rec in ipairs(chunk.transactions) do
+                    flat[#flat + 1] = rec.id
+                end
+            end
+            assert.equals(#records, #flat)
+            for i, rec in ipairs(records) do
+                assert.equals(rec.id, flat[i], "packing reordered the send list")
+            end
         end)
     end)
 
@@ -1927,7 +2135,7 @@ describe("Sync", function()
             -- ACK timer should still be alive (not cancelled by stale ACK)
             local ackTimerAlive = false
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
+                if timer.delay == GBL.SYNC_ACK_TIMEOUT and not timer.cancelled then
                     ackTimerAlive = true
                 end
             end
@@ -2166,7 +2374,7 @@ describe("Sync", function()
             -- Count ACK timers — hard timer exists but ACK timer should NOT yet
             local ackTimerCount = 0
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
+                if timer.delay == GBL.SYNC_ACK_TIMEOUT and not timer.cancelled then
                     ackTimerCount = ackTimerCount + 1
                 end
             end
@@ -2179,7 +2387,7 @@ describe("Sync", function()
             -- ACK timer should now exist
             ackTimerCount = 0
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
+                if timer.delay == GBL.SYNC_ACK_TIMEOUT and not timer.cancelled then
                     ackTimerCount = ackTimerCount + 1
                 end
             end
@@ -2212,7 +2420,7 @@ describe("Sync", function()
 
             local ackTimerCount = 0
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
+                if timer.delay == GBL.SYNC_ACK_TIMEOUT and not timer.cancelled then
                     ackTimerCount = ackTimerCount + 1
                 end
             end
@@ -2223,7 +2431,7 @@ describe("Sync", function()
 
             ackTimerCount = 0
             for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
+                if timer.delay == GBL.SYNC_ACK_TIMEOUT and not timer.cancelled then
                     ackTimerCount = ackTimerCount + 1
                 end
             end
@@ -2333,16 +2541,11 @@ describe("Sync", function()
             local sentBefore = #MockAce.sentCommMessages
 
             -- Advance time past the inter-chunk gap floor so the retry fires
-            -- immediately (in production, retries fire 8s after the last send).
+            -- immediately (in production a retry follows one ACK_TIMEOUT after the last send).
             MockWoW.serverTime = MockWoW.serverTime + 10
 
             -- Fire ACK timeout — should retry, not abort
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
-                    timer.callback()
-                    break
-                end
-            end
+            fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
 
             assert.is_true(GBL:GetSyncStatus().sending, "should still be sending after retry")
             -- A new SYNC_DATA message should have been sent (the retry)
@@ -2372,27 +2575,17 @@ describe("Sync", function()
 
             -- Fire ACK timeout MAX_RETRIES times (should keep retrying).
             -- Advance time between firings so the inter-chunk gap floor is
-            -- satisfied for each retry (production gap is 8s per ACK_TIMEOUT).
+            -- satisfied for each retry (one ACK_TIMEOUT elapses per retry in production).
             for attempt = 1, GBL.SYNC_MAX_RETRIES do
                 MockWoW.serverTime = MockWoW.serverTime + 10
-                for _, timer in ipairs(MockWoW.pendingTimers) do
-                    if timer.delay == 8 and not timer.cancelled then
-                        timer.callback()
-                        break
-                    end
-                end
+                fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
                 assert.is_true(GBL:GetSyncStatus().sending,
                     "should still be sending after retry " .. attempt)
             end
 
             -- One more timeout — should abort
             MockWoW.serverTime = MockWoW.serverTime + 10
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
-                    timer.callback()
-                    break
-                end
-            end
+            fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
             assert.is_false(GBL:GetSyncStatus().sending,
                 "should have aborted after max retries")
 
@@ -2402,8 +2595,11 @@ describe("Sync", function()
         it("resets retry counter on successful ACK", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Add tx (fits in 1 chunk with MAX_RECORDS_PER_CHUNK=25)
-            for i = 1, 4 do
+            -- Enough records to span more than one chunk, so there is a chunk 2
+            -- for the reset retry counter to be observed on. Four records fit a
+            -- single chunk and always have, which left the second half of this
+            -- test firing at a timer that was never there.
+            for i = 1, 8 do
                 table.insert(guildData.transactions, {
                     type = "deposit", player = "X", timestamp = 1000 + i,
                     scanTime = 1000 + i, id = "h" .. i,
@@ -2412,31 +2608,23 @@ describe("Sync", function()
             GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
             assert.is_true(GBL:GetSyncStatus().sending)
 
-            -- Advance past gap floor so each retry fires (production 8s gap).
+            -- Advance past the gap floor so the retry issues immediately.
             MockWoW.serverTime = MockWoW.serverTime + 10
 
             -- Fire one ACK timeout (retry attempt 1)
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
-                    timer.callback()
-                    break
-                end
-            end
+            fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
 
-            -- Now simulate successful ACK for chunk 1
+            -- Advance past the gap floor again BEFORE the ACK, so the chunk 2
+            -- send it schedules is not additionally deferred by the gap floor.
+            MockWoW.serverTime = MockWoW.serverTime + 10
             GBL:HandleAck("OfficerB", { chunk = 1 })
 
-            -- Advance past gap floor again for the chunk 2 retry.
-            MockWoW.serverTime = MockWoW.serverTime + 10
+            -- Chunk 2 goes out on the adaptive inter-chunk delay, not inline.
+            fireNextChunkDelay()
 
             -- Fire ACK timeout for chunk 2 — retry counter should be reset,
             -- so this should retry (not abort)
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
-                    timer.callback()
-                    break
-                end
-            end
+            fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
             assert.is_true(GBL:GetSyncStatus().sending,
                 "retry counter should have reset — still sending")
         end)
@@ -2449,12 +2637,7 @@ describe("Sync", function()
     describe("ACK timeout target liveness", function()
         local function fireOneAckTimeout()
             MockWoW.serverTime = MockWoW.serverTime + 10
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
-                    timer.callback()
-                    return
-                end
-            end
+            fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
         end
 
         local function findRetryEntry()
@@ -2647,12 +2830,7 @@ describe("Sync", function()
             MockWoW.serverTime = MockWoW.serverTime + 10
 
             local sentBefore = #MockAce.sentCommMessages
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
-                    timer.callback()
-                    break
-                end
-            end
+            fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
             local sentAfter = #MockAce.sentCommMessages
             assert.is_true(sentAfter > sentBefore,
                 "ACK-timeout retry should fire immediately when gap > floor")
@@ -4490,14 +4668,9 @@ describe("Sync", function()
 
             -- Advance time past gap floor + ACK timeout so the retry fires cleanly
             MockWoW.serverTime = MockWoW.serverTime + 10
-            -- Fire only the 8s ACK timer (avoid firing gap-floor timers that would
+            -- Fire only the ACK timer (avoid firing gap-floor timers that would
             -- cascade through the retry and re-arm new timers indefinitely)
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 8 and not timer.cancelled then
-                    timer.callback()
-                    break
-                end
-            end
+            fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
 
             assert.is_table(syncState.chunkOutcomes[1].retryReasons)
             local found = false
@@ -7672,80 +7845,6 @@ describe("Sync", function()
             })
             -- max(3, 2) = 3 — stays at 3
             assert.equals(3, guildData.eventCounts[baseHash].count)
-        end)
-    end)
-
-    ---------------------------------------------------------------------------
-    -- PartitionEventCounts
-    ---------------------------------------------------------------------------
-
-    describe("PartitionEventCounts", function()
-        it("splits into batches of batchSize", function()
-            local ec = {}
-            for i = 1, 25 do
-                ec["key" .. i] = { count = i, asOf = 1000 }
-            end
-            local batches = GBL:PartitionEventCounts(ec, 10)
-            assert.equals(3, #batches)
-
-            -- Verify all entries present (no loss)
-            local total = 0
-            local seen = {}
-            for _, batch in ipairs(batches) do
-                for k, v in pairs(batch) do
-                    assert.is_nil(seen[k])
-                    seen[k] = true
-                    total = total + 1
-                    assert.equals("table", type(v))
-                    assert.equals("number", type(v.count))
-                end
-            end
-            assert.equals(25, total)
-        end)
-
-        it("returns empty array for empty input", function()
-            local batches = GBL:PartitionEventCounts({}, 10)
-            assert.equals(0, #batches)
-        end)
-
-        it("returns empty array for nil input", function()
-            local batches = GBL:PartitionEventCounts(nil, 10)
-            assert.equals(0, #batches)
-        end)
-
-        it("returns single batch for fewer entries than batchSize", function()
-            local ec = {
-                ["a"] = { count = 1, asOf = 100 },
-                ["b"] = { count = 2, asOf = 200 },
-                ["c"] = { count = 3, asOf = 300 },
-            }
-            local batches = GBL:PartitionEventCounts(ec, 10)
-            assert.equals(1, #batches)
-            -- All 3 entries in the one batch
-            local count = 0
-            for _ in pairs(batches[1]) do count = count + 1 end
-            assert.equals(3, count)
-        end)
-
-        it("returns single batch for exactly batchSize entries", function()
-            local ec = {}
-            for i = 1, 10 do
-                ec["key" .. i] = { count = i, asOf = 1000 }
-            end
-            local batches = GBL:PartitionEventCounts(ec, 10)
-            assert.equals(1, #batches)
-            local count = 0
-            for _ in pairs(batches[1]) do count = count + 1 end
-            assert.equals(10, count)
-        end)
-
-        it("uses default batch size from constant", function()
-            local ec = {}
-            for i = 1, GBL.SYNC_EVENTCOUNTS_PER_BATCH + 1 do
-                ec["key" .. i] = { count = i, asOf = 1000 }
-            end
-            local batches = GBL:PartitionEventCounts(ec)
-            assert.equals(2, #batches)
         end)
     end)
 

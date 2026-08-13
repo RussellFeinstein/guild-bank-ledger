@@ -224,6 +224,137 @@ describe("Wire contract", function()
     end)
 
     --------------------------------------------------------------------
+    -- Whole-message chunk budget (#92).
+    --
+    -- The budget the packer enforces has only ever counted records. The
+    -- eventCounts rider and the envelope keys attach at serialize time, after
+    -- chunking, so roughly half of every real message was never weighed. The
+    -- 2026-08-10 capture measured the consequence: about 1,700 raw bytes per
+    -- chunk, 3 AceComm fragments, and 46% per-attempt chunk loss against a
+    -- design that targets one fragment.
+    --
+    -- Measured here before the fix, on a full first chunk: 1,637 raw bytes, of
+    -- which 736 are the four records the budget counted, 768 are the ten event
+    -- count entries it did not, and 133 are the envelope. The rider outweighed
+    -- the payload it rode with.
+    --
+    -- These weigh what the send path actually emits, with the real serializer,
+    -- against the one-fragment target. Compression is not modelled here (see
+    -- the file header); 510 is the raw budget that keeps a compressed message
+    -- inside one 255-byte fragment at the worst ratio ever measured (~50%).
+    --------------------------------------------------------------------
+    describe("whole-message chunk budget", function()
+        --- Seed records and event counts so a realistic full send runs.
+        local function seedFullSend(gd, recordCount, eventCountCount)
+            -- The post-#67 deposit shape, which is what new scans produce.
+            local base = RECORD_CASES[2].stripped
+            for i = 1, recordCount do
+                local record = copy(base)
+                record.itemID = base.itemID + i
+                record.id = ("deposit|Alice-Stormrage|%d|20|3|493216:0"):format(record.itemID)
+                record.timestamp = base.timestamp - i
+                record._occurrence = 0
+                record.scanTime = record.timestamp
+                record.scannedBy = "OfficerA-TestRealm"
+                table.insert(gd.transactions, record)
+                gd.seenTxHashes[record.id] = record.timestamp
+            end
+            gd.eventCounts = gd.eventCounts or {}
+            for i = 1, eventCountCount do
+                local key = ("deposit|Alice-Stormrage|%d|20|3|493216"):format(base.itemID + i)
+                gd.eventCounts[key] = { count = 1, asOf = base.timestamp }
+            end
+        end
+
+        local function allOfType(payloads, messageType)
+            local out = {}
+            for _, payload in ipairs(payloads) do
+                if payload.type == messageType then out[#out + 1] = payload end
+            end
+            return out
+        end
+
+        local function countPairs(t)
+            local n = 0
+            for _ in pairs(t or {}) do n = n + 1 end
+            return n
+        end
+
+        it("keeps every SYNC_DATA the send path emits inside the budget", function()
+            assert.is_number(GBL.SYNC_CHUNK_TARGET_BYTES,
+                "GBL.SYNC_CHUNK_TARGET_BYTES is not exported")
+
+            local gd = GBL:GetGuildData()
+            GBL.db.profile.sync.enabled = true
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            seedFullSend(gd, 12, 12)
+
+            local sent = allOfType(capturePayloads(function()
+                GBL:HandleSyncRequest("PeerA", {
+                    sinceTimestamp = 0,
+                    version = GBL.version,
+                    protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                    guild = "Test Guild",
+                })
+            end), "SYNC_DATA")
+
+            assert.is_true(#sent > 0, "no SYNC_DATA was built")
+
+            for _, payload in ipairs(sent) do
+                local raw = #Wire.serialize(payload)
+                assert.is_true(raw <= GBL.SYNC_CHUNK_TARGET_BYTES,
+                    ("chunk %s/%s serialized to %d raw bytes, over the %d budget "
+                     .. "(%d item + %d money records, %d event counts)"):format(
+                        tostring(payload.chunk), tostring(payload.totalChunks),
+                        raw, GBL.SYNC_CHUNK_TARGET_BYTES,
+                        #payload.transactions, #payload.moneyTransactions,
+                        countPairs(payload.eventCounts)))
+            end
+        end)
+
+        it("bounds a whole event count map from the per-entry estimate", function()
+            local ec = {}
+            for i = 1, 12 do
+                ec[("deposit|Alice-Stormrage|%d|20|3|493216"):format(191318 + i)] =
+                    { count = i, asOf = 1775580307 }
+            end
+
+            -- The packer adds entries one at a time, so what has to hold is that
+            -- the running sum bounds the real map. The empty-table wrapper is the
+            -- envelope's to carry, so it is added here rather than per entry.
+            local estimated = #Wire.serialize({})
+            for key, entry in pairs(ec) do
+                estimated = estimated + GBL:_EstimateEventCountBytes(key, entry)
+            end
+
+            local actual = #Wire.serialize(ec)
+            assert.is_true(estimated >= actual,
+                ("estimate %d is below the real %d bytes"):format(estimated, actual))
+        end)
+
+        it("bounds the envelope at its widest chunk numbering", function()
+            -- The allowance is computed before packing ends, so it cannot know
+            -- totalChunks. It reserves five digits for each of chunk and
+            -- totalChunks, which is what this pins.
+            local skeleton = {
+                type = "SYNC_DATA",
+                chunk = 99999,
+                totalChunks = 99999,
+                transactions = {},
+                moneyTransactions = {},
+                eventCounts = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            }
+
+            local estimated = GBL:_EstimateEnvelopeBytes("Test Guild")
+            local actual = #Wire.serialize(skeleton)
+            assert.is_true(estimated >= actual,
+                ("envelope estimate %d is below the real %d bytes"):format(estimated, actual))
+        end)
+    end)
+
+    --------------------------------------------------------------------
     -- Message envelopes, golden decode.
     --------------------------------------------------------------------
     describe("decoding frozen envelopes", function()

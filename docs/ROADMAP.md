@@ -15,7 +15,7 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 **Guild-wide sync** (v0.11.0--v0.30.x):
 - AceComm protocol (HELLO / SYNC_REQUEST / SYNC_DATA / ACK / NACK / BUSY / MANIFEST)
 - Fingerprint-based delta sync with 6-hour bucket hashing
-- LibDeflate compression, chunked transfer with 1-fragment chunks (900 B budget) and a 1.0s gap floor for cross-realm reliability
+- LibDeflate compression, chunked transfer with 1-fragment chunks (510 B whole-message budget, covering records, event counts and the envelope together) and a 1.0s gap floor for cross-realm reliability
 - Epidemic gossip propagation, smart peer selection, hash-gated HELLO reply suppression
 - Retry logic, FPS-adaptive throttling, combat / zone change protection
 - Peer canonicalization (`CanonicalPeerKey`) handling cross-realm and bare-name ambiguity correctly
