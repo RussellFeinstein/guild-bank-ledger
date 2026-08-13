@@ -3569,6 +3569,100 @@ describe("Sync", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Peer version classification
+    --
+    -- ClassifyPeerVersion answers "can we sync with this peer, and which
+    -- side is ahead" from the peer's advertised version and floor alone.
+    -- The session-only `outdated` flag is deliberately not an input: it is
+    -- written by live message intake, so a peer seeded from knownPeers at
+    -- login never has one, and a below-floor peer who spends the session in
+    -- an instance would otherwise read as syncable.
+    ---------------------------------------------------------------------------
+
+    describe("ClassifyPeerVersion", function()
+        --- Older than us but at or above the floor, derived rather than
+        --- hardcoded so a stamp commit leaves it valid.
+        local function compatibleOlder()
+            local maj, min, patch = GBL.version:match("^(%d+)%.(%d+)%.(%d+)")
+            patch = tonumber(patch)
+            if patch and patch > 0 then
+                local candidate = maj .. "." .. min .. "." .. (patch - 1)
+                if GBL:CompareSemver(candidate, GBL.MIN_SYNC_VERSION) >= 0 then
+                    return candidate
+                end
+            end
+            return GBL.MIN_SYNC_VERSION
+        end
+
+        local function aheadVersion()
+            local major = tonumber(GBL.version:match("^(%d+)")) or 0
+            return (major + 1) .. ".0.0"
+        end
+
+        it("classifies a below-floor peer as incompatible_old", function()
+            assert.equals("incompatible_old",
+                GBL:ClassifyPeerVersion({ version = "0.1.0" }))
+        end)
+
+        it("classifies a peer whose floor is above us as incompatible_new",
+        function()
+            local ahead = aheadVersion()
+            assert.equals("incompatible_new", GBL:ClassifyPeerVersion({
+                version = ahead, minSyncVersion = ahead,
+            }))
+        end)
+
+        it("classifies a compatible older peer as older_ok", function()
+            assert.equals("older_ok", GBL:ClassifyPeerVersion({
+                version = compatibleOlder(),
+                minSyncVersion = GBL.MIN_SYNC_VERSION,
+            }))
+        end)
+
+        it("classifies a compatible newer peer as newer_ok", function()
+            assert.equals("newer_ok", GBL:ClassifyPeerVersion({
+                version = aheadVersion(),
+                minSyncVersion = GBL.MIN_SYNC_VERSION,
+            }))
+        end)
+
+        it("classifies our own version as same", function()
+            assert.equals("same", GBL:ClassifyPeerVersion({
+                version = GBL.version, minSyncVersion = GBL.MIN_SYNC_VERSION,
+            }))
+        end)
+
+        it("classifies a dev-build peer as dev_peer", function()
+            assert.equals("dev_peer", GBL:ClassifyPeerVersion({
+                version = GBL.version .. "-dev.branch",
+            }))
+        end)
+
+        it("classifies missing and unknown versions as unknown", function()
+            assert.equals("unknown", GBL:ClassifyPeerVersion(nil))
+            assert.equals("unknown", GBL:ClassifyPeerVersion({}))
+            assert.equals("unknown", GBL:ClassifyPeerVersion({ version = "?" }))
+        end)
+
+        -- The whole point of the classifier: the verdict comes from the
+        -- versions, so a stale flag cannot contradict it in either
+        -- direction.
+        it("ignores the outdated flag entirely", function()
+            local compatible = {
+                version = compatibleOlder(),
+                minSyncVersion = GBL.MIN_SYNC_VERSION,
+                outdated = true,
+                versionRelation = "peer_behind",
+            }
+            assert.equals("older_ok", GBL:ClassifyPeerVersion(compatible))
+
+            -- And the reload case: refused peer, flag long gone.
+            assert.equals("incompatible_old",
+                GBL:ClassifyPeerVersion({ version = "0.1.0" }))
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Cross-realm name matching
     ---------------------------------------------------------------------------
 
@@ -5369,6 +5463,28 @@ describe("Sync", function()
             assert.is_not_nil(peer)
             assert.equals("0.20.0", peer.version)
             assert.equals(99000, peer.lastSeen)  -- stays stale
+        end)
+
+        -- UpdatePeer persists minSyncVersion into knownPeers specifically so
+        -- the seed can carry it, and RequestSync's gate reads the floor off
+        -- the seeded entry. Dropping it in the copy made every seeded peer
+        -- look pre-floor (exact match required) until their first live HELLO,
+        -- which also drove the peer list to call a compatible peer refused.
+        it("InitSync seeds minSyncVersion from knownPeers", function()
+            MockWoW.serverTime = 100000
+            guildData.knownPeers["OfficerB"] = {
+                version = GBL.version,
+                minSyncVersion = GBL.MIN_SYNC_VERSION,
+                txCount = 10,
+                lastSeen = 99000,
+            }
+
+            GBL:ResetSyncState()
+            GBL:InitSync()
+
+            local peer = GBL:GetAllPeers()["OfficerB"]
+            assert.is_not_nil(peer)
+            assert.equals(GBL.MIN_SYNC_VERSION, peer.minSyncVersion)
         end)
 
         it("seeded peer with roster online appears in GetSyncPeers", function()
