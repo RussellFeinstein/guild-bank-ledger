@@ -1102,6 +1102,178 @@ describe("Sync", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- PrepareChunks: the event count rider (#92)
+    --
+    -- Event counts used to be partitioned into fixed batches of 10 and stapled
+    -- onto chunks by index after packing, so they never touched the budget. The
+    -- packer now takes them as an argument and fills each chunk to a
+    -- whole-message target that counts records, entries and the envelope
+    -- together. spec/wire_contract_spec.lua pins the estimators against the real
+    -- serializer; these pin the packing behaviour.
+    ---------------------------------------------------------------------------
+
+    describe("PrepareChunks with event counts", function()
+        --- Small realistic records, well under the target on their own.
+        local function makeRecords(n, kind)
+            local list = {}
+            for i = 1, n do
+                list[i] = {
+                    type = kind or "deposit",
+                    player = "Alice-Stormrage",
+                    itemID = 191318 + i,
+                    count = 20,
+                    tab = 3,
+                    classID = 0,
+                    subclassID = 3,
+                    timestamp = 1775580307 - i,
+                    id = ("deposit|Alice-Stormrage|%d|20|3|493216:0"):format(191318 + i),
+                }
+            end
+            return list
+        end
+
+        local function makeEventCounts(n)
+            local ec = {}
+            for i = 1, n do
+                ec[("deposit|Alice-Stormrage|%d|20|3|493216"):format(191318 + i)] =
+                    { count = i, asOf = 1775580307 }
+            end
+            return ec
+        end
+
+        --- What the whole serialized message is estimated to weigh.
+        local function wholeMessageEstimate(chunk)
+            local bytes = GBL:_EstimateEnvelopeBytes(GBL:GetGuildName())
+            for _, rec in ipairs(chunk.transactions) do
+                bytes = bytes + GBL:_EstimateRecordBytes(rec)
+            end
+            for _, rec in ipairs(chunk.moneyTransactions) do
+                bytes = bytes + GBL:_EstimateRecordBytes(rec)
+            end
+            for key, entry in pairs(chunk.eventCounts or {}) do
+                bytes = bytes + GBL:_EstimateEventCountBytes(key, entry)
+            end
+            return bytes
+        end
+
+        local function countPairs(t)
+            local n = 0
+            for _ in pairs(t or {}) do n = n + 1 end
+            return n
+        end
+
+        it("keeps every chunk's whole-message estimate inside the target", function()
+            local chunks = GBL:PrepareChunks(makeRecords(20), {}, makeEventCounts(20))
+            assert.is_true(#chunks > 0, "expected chunks")
+            for i, chunk in ipairs(chunks) do
+                local estimate = wholeMessageEstimate(chunk)
+                assert.is_true(estimate <= GBL.SYNC_CHUNK_TARGET_BYTES,
+                    ("chunk %d estimates %d bytes, over the %d target"):format(
+                        i, estimate, GBL.SYNC_CHUNK_TARGET_BYTES))
+            end
+        end)
+
+        it("packs every event count entry exactly once", function()
+            local ec = makeEventCounts(25)
+            local chunks = GBL:PrepareChunks(makeRecords(8), {}, ec)
+
+            -- pairs() order is nondeterministic, so this counts rather than
+            -- asserting which chunk any given entry landed on.
+            local seen = {}
+            local total = 0
+            for _, chunk in ipairs(chunks) do
+                for key, entry in pairs(chunk.eventCounts or {}) do
+                    assert.is_nil(seen[key], "entry packed twice: " .. key)
+                    seen[key] = true
+                    total = total + 1
+                    assert.equals(ec[key].count, entry.count)
+                end
+            end
+            assert.equals(25, total)
+        end)
+
+        it("adds carrier chunks when event counts outrun the record chunks", function()
+            -- Two records fill at most one chunk; 40 entries cannot ride along.
+            local chunks = GBL:PrepareChunks(makeRecords(2), {}, makeEventCounts(40))
+            assert.is_true(#chunks > 1,
+                "event counts beyond the record chunks need carrier chunks")
+
+            local total = 0
+            for _, chunk in ipairs(chunks) do
+                total = total + countPairs(chunk.eventCounts)
+            end
+            assert.equals(40, total)
+        end)
+
+        it("packs event counts when there are no records at all", function()
+            local chunks = GBL:PrepareChunks({}, {}, makeEventCounts(15))
+            assert.is_true(#chunks > 0, "event counts alone still need chunks")
+
+            local total = 0
+            for _, chunk in ipairs(chunks) do
+                assert.equals(0, #chunk.transactions)
+                assert.equals(0, #chunk.moneyTransactions)
+                total = total + countPairs(chunk.eventCounts)
+            end
+            assert.equals(15, total)
+        end)
+
+        it("returns no chunks when there is nothing to send", function()
+            assert.equals(0, #GBL:PrepareChunks({}, {}, {}))
+            assert.equals(0, #GBL:PrepareChunks({}, {}, nil))
+        end)
+
+        it("still places a record that overshoots the target on its own", function()
+            -- A long cross-realm id can exceed the target by itself. The packer
+            -- must make progress rather than seal an empty chunk forever.
+            local txList = {
+                { type = "deposit", player = "P", timestamp = 1, id = string.rep("x", 900) },
+                { type = "deposit", player = "P", timestamp = 2, id = "small" },
+            }
+            local chunks = GBL:PrepareChunks(txList, {}, {})
+            local total = 0
+            for _, chunk in ipairs(chunks) do total = total + #chunk.transactions end
+            assert.equals(2, total, "no record may be dropped")
+            assert.equals(1, #chunks[1].transactions,
+                "the oversized record takes a chunk of its own")
+        end)
+
+        it("still places an event count entry that overshoots on its own", function()
+            local ec = { [string.rep("k", 900)] = { count = 1, asOf = 1775580307 } }
+            local chunks = GBL:PrepareChunks({}, {}, ec)
+            local total = 0
+            for _, chunk in ipairs(chunks) do
+                total = total + countPairs(chunk.eventCounts)
+            end
+            assert.equals(1, total, "no entry may be dropped")
+        end)
+
+        it("keeps the record cap as a backstop", function()
+            local chunks = GBL:PrepareChunks(makeRecords(30), {}, {})
+            for _, chunk in ipairs(chunks) do
+                assert.is_true(#chunk.transactions + #chunk.moneyTransactions
+                    <= GBL.SYNC_CHUNK_SIZE, "no chunk may exceed the record cap")
+            end
+        end)
+
+        it("keeps the newest-first record order the sender chose", function()
+            local records = makeRecords(12)
+            local chunks = GBL:PrepareChunks(records, {}, makeEventCounts(6))
+
+            local flat = {}
+            for _, chunk in ipairs(chunks) do
+                for _, rec in ipairs(chunk.transactions) do
+                    flat[#flat + 1] = rec.id
+                end
+            end
+            assert.equals(#records, #flat)
+            for i, rec in ipairs(records) do
+                assert.equals(rec.id, flat[i], "packing reordered the send list")
+            end
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- HandleSyncData (receiver side)
     ---------------------------------------------------------------------------
 
