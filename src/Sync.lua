@@ -159,6 +159,45 @@ function GBL:IsVersionCompatible(remoteVersion, remoteMin)
     return true, "range"
 end
 
+--- Classify a peer's version for display: can we sync with them, and which
+-- side is ahead.
+--
+-- Derived from the advertised version and floor, never from the session-only
+-- `outdated` flag. That flag is written by live message intake, so a peer
+-- seeded out of knownPeers at login does not have one, and a below-floor peer
+-- who spends the session in an instance (where guild addon messages do not
+-- reliably cross the boundary) would otherwise render as though sync worked.
+-- Classifying from the versions is stale-proof by construction; persisting the
+-- flag would only move the staleness somewhere harder to see.
+--
+-- @param info table|nil Peer info (reads .version and .minSyncVersion)
+-- @param peerVersion string|nil Override for info.version
+-- @return string One of incompatible_old, incompatible_new, dev_peer,
+--   older_ok, newer_ok, same, unknown
+function GBL:ClassifyPeerVersion(info, peerVersion)
+    local version = peerVersion or (info and info.version)
+    if not version or version == "?" then return "unknown" end
+
+    local compatible, refusal =
+        self:IsVersionCompatible(version, info and info.minSyncVersion)
+
+    if not compatible then
+        -- A dev build refuses everyone in both directions by design. Calling
+        -- it "too old" would point the viewer at an update that does not
+        -- exist and is not theirs to make.
+        if refusal == "dev-isolated" then return "dev_peer" end
+        -- Which side has to move. Their floor sitting above our version
+        -- settles it directly; otherwise the versions do.
+        local weAreBehind = (refusal == "local-below-their-floor")
+            or self:CompareSemver(self.version, version) < 0
+        return weAreBehind and "incompatible_new" or "incompatible_old"
+    end
+
+    local cmp = self:CompareSemver(self.version, version)
+    if cmp == 0 then return "same" end
+    return (cmp < 0) and "newer_ok" or "older_ok"
+end
+
 --- One line explaining a refusal, naming both versions so a log read months
 -- later says which side needed to move. Used by all three gate sites.
 -- @param who string Canonical peer key
@@ -445,6 +484,12 @@ function GBL:InitSync()
                 if not existingPeer or (info.lastSeen or 0) > (existingPeer.lastSeen or 0) then
                     syncState.peers[clean] = {
                         version = info.version,
+                        -- The floor rides along because RequestSync's gate
+                        -- reads it off the seeded entry, and the peer list
+                        -- classifies from it. Without it a seeded post-floor
+                        -- peer looks pre-floor (exact match required) until
+                        -- their first live HELLO.
+                        minSyncVersion = info.minSyncVersion,
                         txCount = info.txCount or 0,
                         lastSeen = info.lastSeen or 0,
                     }
