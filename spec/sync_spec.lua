@@ -3941,6 +3941,355 @@ describe("Sync", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Bounded sync sessions
+    --
+    -- A fresh install used to pull the sender's whole history in one
+    -- session. At roughly one record per chunk and a 1.0s gap floor that is
+    -- hours, during which both peers BUSY everyone else and neither starts
+    -- anything, and MAX_RECEIVE_DURATION aborts it at 30 minutes anyway. So
+    -- large backfills could not complete in one session at all: they only
+    -- ever progressed through the abort-recovery path.
+    --
+    -- The sender now caps each session at whole 6-hour buckets worth about
+    -- SESSION_RECORD_CAP records, newest first, and says how many buckets
+    -- are left on the final chunk. Whole buckets matter: a half-sent bucket
+    -- hashes differently from either side and gets re-sent entire next
+    -- time, while a complete one converges and drops out of the diff.
+    ---------------------------------------------------------------------------
+
+    describe("session cap", function()
+        local BUCKET = 6 * 3600
+
+        --- Build n records inside one 6-hour bucket.
+        local function recordsInBucket(bucketKey, n, prefix)
+            local out = {}
+            for i = 1, n do
+                out[#out + 1] = {
+                    type = "deposit", player = "P1", tab = 1, itemID = 100 + i,
+                    classID = 0, subclassID = 0, count = 1,
+                    timestamp = bucketKey * BUCKET + i,
+                    scanTime = bucketKey * BUCKET + i,
+                    id = prefix .. ":" .. bucketKey .. ":" .. i,
+                    _occurrence = 0, scannedBy = "OfficerA",
+                }
+            end
+            return out
+        end
+
+        local function bucketKeysOf(list)
+            local seen = {}
+            for _, rec in ipairs(list) do
+                seen[GBL:BucketKeyForRecord(rec)] = true
+            end
+            return seen
+        end
+
+        describe("_SelectSessionBuckets", function()
+            it("takes whole buckets newest first until the cap is met", function()
+                local newest = recordsInBucket(475100, 2, "a")
+                local middle = recordsInBucket(475099, 2, "b")
+                local oldest = recordsInBucket(475098, 2, "c")
+                local all = {}
+                for _, set in ipairs({ newest, middle, oldest }) do
+                    for _, r in ipairs(set) do all[#all + 1] = r end
+                end
+
+                local tx, money, sent, remaining =
+                    GBL:_SelectSessionBuckets(all, {}, 3)
+
+                -- 2 records is under the cap of 3, so it takes a second whole
+                -- bucket and stops: 4 records, never a partial bucket.
+                assert.equals(4, #tx)
+                assert.equals(0, #money)
+                assert.is_true(sent[475100])
+                assert.is_true(sent[475099])
+                assert.is_nil(sent[475098])
+                assert.equals(1, remaining)
+            end)
+
+            it("always sends at least one bucket, even over the cap", function()
+                local big = recordsInBucket(475100, 10, "big")
+                local tx, _, sent, remaining = GBL:_SelectSessionBuckets(big, {}, 3)
+
+                assert.equals(10, #tx)
+                assert.is_true(sent[475100])
+                assert.equals(0, remaining)
+            end)
+
+            it("counts item and money records against one cap", function()
+                local items = recordsInBucket(475100, 2, "i")
+                local money = recordsInBucket(475099, 2, "m")
+
+                local tx, mn, _, remaining =
+                    GBL:_SelectSessionBuckets(items, money, 2)
+
+                -- The newest bucket alone meets the cap, so the money bucket
+                -- waits even though it is a different list.
+                assert.equals(2, #tx)
+                assert.equals(0, #mn)
+                assert.equals(1, remaining)
+            end)
+
+            it("returns empty results for empty input", function()
+                local tx, money, sent, remaining = GBL:_SelectSessionBuckets({}, {}, 300)
+                assert.same({}, tx)
+                assert.same({}, money)
+                assert.same({}, sent)
+                assert.equals(0, remaining)
+            end)
+
+            -- The one real deadlock. If the differing buckets are ones the
+            -- receiver already holds from a third peer, a plain newest-first
+            -- cap re-sends the same all-duplicate tranche every session and
+            -- older differing buckets never get a turn. Buckets we already
+            -- sent to this peer, whose contents have not changed since, sort
+            -- behind everything else.
+            it("demotes buckets already sent to this peer unchanged", function()
+                local newest = recordsInBucket(475100, 2, "a")
+                local older = recordsInBucket(475099, 2, "b")
+                local all = {}
+                for _, set in ipairs({ newest, older }) do
+                    for _, r in ipairs(set) do all[#all + 1] = r end
+                end
+
+                local demote = { [475100] = true }
+                local tx, _, sent, remaining =
+                    GBL:_SelectSessionBuckets(all, {}, 2, demote)
+
+                assert.is_true(sent[475099], "the un-demoted bucket goes first")
+                assert.is_nil(sent[475100])
+                assert.equals(2, #tx)
+                assert.equals(1, remaining)
+            end)
+
+            it("preserves input order inside a bucket", function()
+                local recs = recordsInBucket(475100, 3, "ord")
+                local tx = GBL:_SelectSessionBuckets(recs, {}, 300)
+                assert.equals(recs[1].id, tx[1].id)
+                assert.equals(recs[2].id, tx[2].id)
+                assert.equals(recs[3].id, tx[3].id)
+            end)
+        end)
+
+        describe("capped sends", function()
+            --- Seed more records than one session may carry, spread over
+            --- enough buckets that the cap has somewhere to stop.
+            local function seedOverCap()
+                local perBucket = math.ceil(GBL.SYNC_SESSION_RECORD_CAP / 2)
+                for b = 0, 3 do
+                    for _, rec in ipairs(
+                        recordsInBucket(475100 - b, perBucket, "seed" .. b)) do
+                        table.insert(guildData.transactions, rec)
+                        guildData.seenTxHashes[rec.id] = rec.timestamp
+                    end
+                end
+                GBL:ResetHashCache()
+            end
+
+            local function sentChunks()
+                local out = {}
+                for _, msg in ipairs(MockAce.sentCommMessages) do
+                    local ok, data = GBL:Deserialize(msg.text)
+                    if ok and data.type == "SYNC_DATA" then out[#out + 1] = data end
+                end
+                return out
+            end
+
+            --- ACK each chunk and fire the inter-chunk gap so the whole
+            --- session actually goes out, the way a healthy peer drives it.
+            local function drainSend(target)
+                for _ = 1, 600 do
+                    if not GBL:GetSyncStatus().sending then break end
+                    local idx = tonumber(
+                        GBL:GetSyncStatus().sendProgress:match("^(%d+)"))
+                    GBL:HandleAck(target, { chunk = idx })
+                    local fired = false
+                    for i = #MockWoW.pendingTimers, 1, -1 do
+                        local t = MockWoW.pendingTimers[i]
+                        if not t.cancelled and not t.fired and t.delay
+                            and t.delay > 0.05 and t.delay <= 2.0 then
+                            t.fired = true
+                            t.callback()
+                            fired = true
+                            break
+                        end
+                    end
+                    if not fired then break end
+                end
+            end
+
+            local function recordsSent()
+                local total = 0
+                for _, chunk in ipairs(sentChunks()) do
+                    total = total + #(chunk.transactions or {})
+                        + #(chunk.moneyTransactions or {})
+                end
+                return total
+            end
+
+            it("sends fewer records than it holds, and says how many buckets wait",
+            function()
+                seedOverCap()
+                local held = #guildData.transactions
+
+                GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+                drainSend("OfficerB")
+
+                local sent = recordsSent()
+                assert.is_true(sent > 0, "a capped session still sends something")
+                assert.is_true(sent < held,
+                    "a capped session should hold records back")
+
+                local capped = false
+                for _, entry in ipairs(GBL:GetAuditTrail()) do
+                    if entry.message and entry.message:find("capped", 1, true) then
+                        capped = true
+                    end
+                end
+                assert.is_true(capped, "the cap should be visible in a capture")
+            end)
+
+            -- Only the last chunk carries it, and only when there is
+            -- something left, so an uncapped send puts nothing new on the
+            -- wire at all.
+            it("puts remaining on the final chunk only", function()
+                seedOverCap()
+                GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+                drainSend("OfficerB")
+
+                local chunks = sentChunks()
+                assert.is_true(#chunks > 0)
+                for i = 1, #chunks - 1 do
+                    assert.is_nil(chunks[i].remaining,
+                        "only the final chunk announces what is left")
+                end
+                assert.is_true((chunks[#chunks].remaining or 0) > 0)
+            end)
+
+            it("omits remaining when everything fits in one session", function()
+                table.insert(guildData.transactions, recordsInBucket(475100, 1, "small")[1])
+                guildData.seenTxHashes["small:475100:1"] = 475100 * BUCKET + 1
+                GBL:ResetHashCache()
+
+                GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+                drainSend("OfficerB")
+
+                for _, chunk in ipairs(sentChunks()) do
+                    assert.is_nil(chunk.remaining)
+                end
+            end)
+
+            -- Rotation: asking again gets the buckets that waited, not the
+            -- same tranche forever.
+            it("serves the deferred buckets on the next request", function()
+                seedOverCap()
+                GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+                drainSend("OfficerB")
+                local firstPass = {}
+                for _, chunk in ipairs(sentChunks()) do
+                    for _, rec in ipairs(chunk.transactions or {}) do
+                        firstPass[GBL:BucketKeyForRecord(rec)] = true
+                    end
+                end
+
+                MockAce.sentCommMessages = {}
+                GBL:FinishSending()
+                GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+                drainSend("OfficerB")
+
+                local secondPassHasNew = false
+                for _, chunk in ipairs(sentChunks()) do
+                    for _, rec in ipairs(chunk.transactions or {}) do
+                        if not firstPass[GBL:BucketKeyForRecord(rec)] then
+                            secondPassHasNew = true
+                        end
+                    end
+                end
+                assert.is_true(secondPassHasNew,
+                    "the second session must reach buckets the first deferred")
+            end)
+        end)
+
+        describe("receiver side", function()
+            local function chunkFrom(fields)
+                local base = {
+                    chunk = 1, totalChunks = 1,
+                    transactions = {}, moneyTransactions = {},
+                    protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                    guild = "Test Guild",
+                }
+                for k, v in pairs(fields or {}) do base[k] = v end
+                return base
+            end
+
+            it("records what the sender said is left", function()
+                GBL:RequestSync("OfficerB", 0)
+                GBL:HandleSyncData("OfficerB", chunkFrom{
+                    chunk = 1, totalChunks = 2, remaining = nil,
+                })
+                GBL:HandleSyncData("OfficerB", chunkFrom{
+                    chunk = 2, totalChunks = 2, remaining = 7,
+                })
+
+                local found = false
+                for _, entry in ipairs(GBL:GetAuditTrail()) do
+                    if entry.message
+                        and entry.message:find("Partial session", 1, true)
+                        and entry.message:find("7", 1, true) then
+                        found = true
+                    end
+                end
+                assert.is_true(found,
+                    "a partial session should be visible in a capture")
+            end)
+
+            it("says nothing about partial sessions on a complete one", function()
+                GBL:RequestSync("OfficerB", 0)
+                GBL:HandleSyncData("OfficerB", chunkFrom{})
+
+                for _, entry in ipairs(GBL:GetAuditTrail()) do
+                    if entry.message then
+                        assert.is_nil(entry.message:find("Partial session", 1, true))
+                    end
+                end
+            end)
+
+            -- The seam is the sender's post-receive HELLO and the nudges,
+            -- not a timer we own. Scheduling our own continuation here is
+            -- the contingency, held back until a capture shows the gossip
+            -- seam is actually too slow.
+            it("schedules no continuation of its own", function()
+                GBL:RequestSync("OfficerB", 0)
+                MockWoW.pendingTimers = {}
+                GBL:HandleSyncData("OfficerB", chunkFrom{ remaining = 4 })
+
+                for _, timer in ipairs(MockWoW.pendingTimers) do
+                    assert.is_not.equals(3.0, timer.delay,
+                        "no self-scheduled continuation in the free model")
+                end
+                assert.is_false(GBL:GetSyncStatus().receiving)
+            end)
+
+            it("clears the count when a new session starts", function()
+                GBL:RequestSync("OfficerB", 0)
+                GBL:HandleSyncData("OfficerB", chunkFrom{ remaining = 4 })
+                GBL:ResetSyncState()
+                GBL:RequestSync("OfficerC", 0)
+                GBL:HandleSyncData("OfficerC", chunkFrom{})
+
+                local partials = 0
+                for _, entry in ipairs(GBL:GetAuditTrail()) do
+                    if entry.message and entry.message:find("Partial session", 1, true) then
+                        partials = partials + 1
+                    end
+                end
+                assert.equals(1, partials,
+                    "a stale count must not follow into the next session")
+            end)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Cross-realm name matching
     ---------------------------------------------------------------------------
 
