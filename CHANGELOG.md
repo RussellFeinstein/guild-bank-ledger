@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Sync chunks are sized by what the whole message weighs, not by the records alone. Each chunk was meant to fit a single 255-byte packet, and none of them ever did: the per-item event counts that ride along with the records and the message header were both attached after the size check, and together they outweighed the records they travelled with. Every chunk was going out as three packets instead of one, and losing any one of the three meant sending the whole thing again, which is why a long catch-up sync could spend hours retrying and still not finish. Chunks now carry fewer records each and arrive in one piece.
+
 ## [0.37.2] - 2026-08-10
 
 ### Changed

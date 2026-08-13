@@ -957,8 +957,10 @@ describe("Sync", function()
 
     describe("HandleSyncRequest", function()
         it("sends matching transactions as SYNC_DATA", function()
-            -- Add some transactions
-            for i = 1, 3 do
+            -- Two records, because this is about the message shape and the
+            -- chunk numbering on a single-chunk send. Enough records to need a
+            -- second chunk would change what is being asserted, not improve it.
+            for i = 1, 2 do
                 table.insert(guildData.transactions, {
                     type = "deposit", player = "Player" .. i,
                     itemID = 1000 + i, count = i, tab = 1,
@@ -979,7 +981,7 @@ describe("Sync", function()
             local ok, data = GBL:Deserialize(sent.text)
             assert.is_true(ok)
             assert.equals("SYNC_DATA", data.type)
-            assert.equals(3, #data.transactions)
+            assert.equals(2, #data.transactions)
             assert.equals(1, data.chunk)
             assert.equals(1, data.totalChunks)
         end)
@@ -7844,80 +7846,6 @@ describe("Sync", function()
             })
             -- max(3, 2) = 3 — stays at 3
             assert.equals(3, guildData.eventCounts[baseHash].count)
-        end)
-    end)
-
-    ---------------------------------------------------------------------------
-    -- PartitionEventCounts
-    ---------------------------------------------------------------------------
-
-    describe("PartitionEventCounts", function()
-        it("splits into batches of batchSize", function()
-            local ec = {}
-            for i = 1, 25 do
-                ec["key" .. i] = { count = i, asOf = 1000 }
-            end
-            local batches = GBL:PartitionEventCounts(ec, 10)
-            assert.equals(3, #batches)
-
-            -- Verify all entries present (no loss)
-            local total = 0
-            local seen = {}
-            for _, batch in ipairs(batches) do
-                for k, v in pairs(batch) do
-                    assert.is_nil(seen[k])
-                    seen[k] = true
-                    total = total + 1
-                    assert.equals("table", type(v))
-                    assert.equals("number", type(v.count))
-                end
-            end
-            assert.equals(25, total)
-        end)
-
-        it("returns empty array for empty input", function()
-            local batches = GBL:PartitionEventCounts({}, 10)
-            assert.equals(0, #batches)
-        end)
-
-        it("returns empty array for nil input", function()
-            local batches = GBL:PartitionEventCounts(nil, 10)
-            assert.equals(0, #batches)
-        end)
-
-        it("returns single batch for fewer entries than batchSize", function()
-            local ec = {
-                ["a"] = { count = 1, asOf = 100 },
-                ["b"] = { count = 2, asOf = 200 },
-                ["c"] = { count = 3, asOf = 300 },
-            }
-            local batches = GBL:PartitionEventCounts(ec, 10)
-            assert.equals(1, #batches)
-            -- All 3 entries in the one batch
-            local count = 0
-            for _ in pairs(batches[1]) do count = count + 1 end
-            assert.equals(3, count)
-        end)
-
-        it("returns single batch for exactly batchSize entries", function()
-            local ec = {}
-            for i = 1, 10 do
-                ec["key" .. i] = { count = i, asOf = 1000 }
-            end
-            local batches = GBL:PartitionEventCounts(ec, 10)
-            assert.equals(1, #batches)
-            local count = 0
-            for _ in pairs(batches[1]) do count = count + 1 end
-            assert.equals(10, count)
-        end)
-
-        it("uses default batch size from constant", function()
-            local ec = {}
-            for i = 1, GBL.SYNC_EVENTCOUNTS_PER_BATCH + 1 do
-                ec["key" .. i] = { count = i, asOf = 1000 }
-            end
-            local batches = GBL:PartitionEventCounts(ec)
-            assert.equals(2, #batches)
         end)
     end)
 

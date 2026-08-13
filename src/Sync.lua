@@ -20,18 +20,32 @@ local PROTOCOL_VERSION = 4
 -- Raise this ONLY for a wire, record-identity or fingerprint break, never for
 -- an ordinary release. Raising it re-imposes the split it exists to remove.
 local MIN_SYNC_VERSION = "0.37.0"
--- Chunk size tuning (v0.28.7 — true 1-fragment target)
--- Compressed payload targets ≤255 bytes so each chunk is 1 AceComm wire
--- fragment. v0.28.6 aimed for 2 fragments but actual compression ratio is
--- 23–26% of raw (not ~18% as predicted), so a 2500-byte raw budget landed at
--- ~660 bytes compressed = 3 fragments, giving ~45% per-attempt chunk loss.
--- At 900-byte raw budget with 26% worst-case compression, compressed stays
--- ≤240 bytes = 1 fragment. Per-attempt loss equals per-fragment loss
--- (~18% observed), giving ~0.003% 6-retry failure per chunk. Sync of
--- ~3300 records ≈ 18 minutes at the 1.0s gap floor; subsequent syncs are
--- much shorter after the bucket-delta filter converges.
+-- Chunk size tuning (#92 — the budget covers the whole message)
+--
+-- AceComm splits a message into 255-byte wire fragments, and whole-chunk loss
+-- compounds per fragment: 1-(1-p)^n. One fragment per chunk has been the design
+-- target since v0.28.7 and has never once held. The 2026-08-10 capture measured
+-- n=3.0 fragments per chunk, chunkFail 46.1% against p_frag 18.7%.
+--
+-- Two causes, both fixed here. The 900-byte budget could never fire at 4 records
+-- per chunk (4 records estimate ~790, so the record cap always won first), and
+-- it only ever weighed records: the event count rider and the envelope attach at
+-- serialize time, after chunking. Measured on a real first chunk: 1,637 raw
+-- bytes, of which 736 were the records the budget counted, 768 were the ten
+-- event count entries it did not, and 133 were the envelope.
+--
+-- So the budget now governs the whole serialized message, and PrepareChunks
+-- fills each chunk with records and event count entries against it together.
+--
+-- Where 510 comes from: wire = raw × ratio, and the ratio measured across every
+-- capture is 23–49% (money-heavy chunks compress worst). Guaranteeing one
+-- fragment at the worst ratio ever seen gives raw ≤ 255 / 0.50 = 510. This is
+-- the same formula that produced the 900, with the measured worst ratio instead
+-- of an assumed 26% and with the whole message counted instead of the records
+-- alone. Do not re-derive it from a median: the v0.28.5→28.6→28.7 arc missed
+-- three times running by predicting ratios, which is why this takes the max.
 local MAX_RECORDS_PER_CHUNK = 4
-local CHUNK_BYTE_BUDGET = 900
+local CHUNK_TARGET_BYTES = 510
 local MAX_RETRIES = 5
 local ACK_TIMEOUT = 8
 local RECEIVE_CHUNK_TIMEOUT = 20
@@ -52,7 +66,6 @@ local INTER_CHUNK_GAP_FLOOR = 1.0     -- v0.28.5: min seconds between chunk issu
                                        -- (server-side per-recipient whisper throttle)
 local PEER_STALE_SECONDS = 300
 local HELLO_HEARTBEAT_INTERVAL = 120
-local EVENTCOUNTS_PER_BATCH = 10
 local MAX_PENDING_PEERS = 10
 local KNOWN_PEER_EXPIRE_SECONDS = 30 * 24 * 3600  -- 30 days
 local INITIAL_CHUNK_TIMEOUT = 10
@@ -69,12 +82,12 @@ local MAX_RECEIVE_DURATION = 1800  -- 30 minutes absolute maximum receive time
 GBL.SYNC_PROTOCOL_VERSION = PROTOCOL_VERSION
 GBL.MIN_SYNC_VERSION = MIN_SYNC_VERSION
 GBL.SYNC_CHUNK_SIZE = MAX_RECORDS_PER_CHUNK
+GBL.SYNC_CHUNK_TARGET_BYTES = CHUNK_TARGET_BYTES
 GBL.SYNC_PREFIX = PREFIX
 GBL.SYNC_MAX_RETRIES = MAX_RETRIES
 GBL.SYNC_MAX_NACK_RETRIES = MAX_NACK_RETRIES
 GBL.SYNC_PEER_STALE_SECONDS = PEER_STALE_SECONDS
 GBL.SYNC_HELLO_HEARTBEAT_INTERVAL = HELLO_HEARTBEAT_INTERVAL
-GBL.SYNC_EVENTCOUNTS_PER_BATCH = EVENTCOUNTS_PER_BATCH
 GBL.SYNC_MAX_PENDING_PEERS = MAX_PENDING_PEERS
 GBL.SYNC_KNOWN_PEER_EXPIRE_SECONDS = KNOWN_PEER_EXPIRE_SECONDS
 GBL.SYNC_INITIAL_CHUNK_TIMEOUT = INITIAL_CHUNK_TIMEOUT
@@ -1245,6 +1258,69 @@ local function estimateRecordBytes(record)
     return bytes
 end
 
+--- Serialized length of a string once AceSerializer has escaped it.
+-- Records cannot contain these characters, which is why estimateRecordBytes
+-- gets away with a raw length. Guild names can: "Knights of the Round" costs
+-- three extra bytes, and the envelope carries one on every chunk.
+-- @param s string
+-- @return number Length after escaping
+local function escapedLength(s)
+    s = tostring(s or "")
+    local extra = 0
+    for i = 1, #s do
+        local b = s:byte(i)
+        -- AceSerializer doubles space, control codes, ^ and ~
+        if b == 32 or b < 32 or b == 94 or b == 126 then
+            extra = extra + 1
+        end
+    end
+    return #s + extra
+end
+
+--- Estimate the serialized byte size of one event count entry.
+-- The same arithmetic as estimateRecordBytes, for a keyed nested table. The
+-- eventCounts table's own wrapper belongs to the envelope, not to any entry, so
+-- summing this over entries bounds the map without counting a wrapper per item.
+-- @param baseHash string The entry key (a record id with its occurrence removed)
+-- @param entry table { count=N, asOf=T }
+-- @return number Estimated byte count
+local function estimateEventCountBytes(baseHash, entry)
+    local bytes = #tostring(baseHash) + 3    -- key + delimiters
+    bytes = bytes + 6                        -- nested table wrapper
+    for k, v in pairs(entry or {}) do
+        bytes = bytes + #tostring(k) + 3
+        bytes = bytes + #tostring(v) + 3
+    end
+    return bytes
+end
+
+--- Estimate the serialized byte size of a SYNC_DATA envelope carrying nothing.
+-- Computed once per send and reserved from the chunk target, so what the packer
+-- fills is the room a message actually has left. The field names are fixed and
+-- so is the type string; the guild name is measured escaped.
+--
+-- chunk and totalChunks get a fixed five-digit allowance because the real
+-- totalChunks is unknowable until packing has finished, and packing is what
+-- this number governs. Five digits covers any sync this addon can produce.
+-- @param guildName string
+-- @return number Estimated byte count
+local function estimateEnvelopeBytes(guildName)
+    local bytes = 6  -- table wrapper overhead
+    local function field(key, valueLength)
+        bytes = bytes + #key + 3 + valueLength + 3
+    end
+    field("type", #"SYNC_DATA")
+    field("chunk", 5)
+    field("totalChunks", 5)
+    field("protocolVersion", #tostring(PROTOCOL_VERSION))
+    field("guild", escapedLength(guildName))
+    -- The three payload containers, each an empty table wrapper of its own.
+    field("transactions", 6)
+    field("moneyTransactions", 6)
+    field("eventCounts", 6)
+    return bytes
+end
+
 -- Every transaction type the addon records. A type outside this set is
 -- transit damage, not a record from a newer version: adding a type would be a
 -- compatibility break needing a floor raise, so it cannot arrive unannounced.
@@ -1402,6 +1478,16 @@ end
 --- @see estimateRecordBytes
 function GBL:_EstimateRecordBytes(record)
     return estimateRecordBytes(record)
+end
+
+--- @see estimateEventCountBytes
+function GBL:_EstimateEventCountBytes(baseHash, entry)
+    return estimateEventCountBytes(baseHash, entry)
+end
+
+--- @see estimateEnvelopeBytes
+function GBL:_EstimateEnvelopeBytes(guildName)
+    return estimateEnvelopeBytes(guildName)
 end
 
 ------------------------------------------------------------------------
@@ -1619,29 +1705,25 @@ function GBL:HandleSyncRequest(sender, data)
             .. date("%Y-%m-%d %H:00", oldestTs))
     end
 
-    -- Prepare and send chunks
-    local chunks = self:PrepareChunks(txToSend, moneyToSend)
-
     -- Collect eventCounts for the buckets we're sending (nil diffDays = send all)
+    -- before chunking, so the packer can weigh them: they are part of the
+    -- message the budget has to cover, not a rider stapled on afterwards (#92).
     local sendEventCounts = self:CollectEventCountsForBuckets(guildData, diffDays)
 
-    -- Partition eventCounts into batches to spread across chunks
-    local batches = self:PartitionEventCounts(sendEventCounts)
-
-    -- Extend chunks array if more batches than record chunks
-    while #batches > #chunks do
-        chunks[#chunks + 1] = { transactions = {}, moneyTransactions = {} }
-    end
+    -- Prepare and send chunks
+    local chunks = self:PrepareChunks(txToSend, moneyToSend, sendEventCounts)
 
     if #chunks == 0 then
-        -- Nothing to send — send an empty chunk so receiver finishes cleanly
+        -- Nothing to send — send an empty chunk so receiver finishes cleanly.
+        -- Reaching here means no records AND no event counts: anything with
+        -- event counts to share gets a carrier chunk from PrepareChunks and
+        -- goes out through SendNextChunk instead.
         local msg = self:Serialize({
             type = "SYNC_DATA",
             chunk = 1,
             totalChunks = 1,
             transactions = {},
             moneyTransactions = {},
-            eventCounts = batches[1],
             protocolVersion = PROTOCOL_VERSION,
             guild = self:GetGuildName(),
         })
@@ -1657,7 +1739,6 @@ function GBL:HandleSyncRequest(sender, data)
     syncState.sendChunkIndex = 0
     syncState.sendStartTime = GetServerTime()
     syncState.sendTotalRecords = #txToSend + #moneyToSend
-    syncState.sendEventCountBatches = batches
     self:StartFpsMonitor()
 
     local totalTx = #txToSend + #moneyToSend
@@ -1698,37 +1779,6 @@ end
 -- Chunking
 ------------------------------------------------------------------------
 
---- Partition an eventCounts table into fixed-size batches for spread across chunks.
--- Each batch contains at most batchSize entries.
--- @param eventCounts table { [baseHash] = { count=N, asOf=T } }
--- @param batchSize number max entries per batch
--- @return table array of sub-tables, each a slice of the eventCounts map
-function GBL:PartitionEventCounts(eventCounts, batchSize)
-    if not eventCounts then return {} end
-    batchSize = batchSize or EVENTCOUNTS_PER_BATCH
-
-    local batches = {}
-    local current = {}
-    local count = 0
-
-    for baseHash, entry in pairs(eventCounts) do
-        current[baseHash] = entry
-        count = count + 1
-        if count >= batchSize then
-            batches[#batches + 1] = current
-            current = {}
-            count = 0
-        end
-    end
-
-    -- Seal the last partial batch
-    if count > 0 then
-        batches[#batches + 1] = current
-    end
-
-    return batches
-end
-
 --- Sort a sync send list so the most recent 6-hour buckets come first.
 -- PrepareChunks packs records into chunks in list order, so a newest-first
 -- list puts current activity in the early chunks. A peer that is far behind
@@ -1754,14 +1804,26 @@ function GBL:SortSendListNewestFirst(list)
     return list
 end
 
---- Split transaction arrays into size-aware chunks.
--- Each chunk stays under CHUNK_BYTE_BUDGET estimated bytes and
--- MAX_RECORDS_PER_CHUNK records (hard cap).
+--- Split records and event counts into chunks that fit one wire fragment.
+-- The budget governs the whole serialized message, so the envelope is reserved
+-- up front and records and event count entries are filled against what is left
+-- (#92; before this, the budget weighed records only and the rider rode free).
+-- MAX_RECORDS_PER_CHUNK remains a hard cap on top of the byte target.
+--
+-- Every chunk takes at least one item even when that item overshoots the budget
+-- on its own, which a long cross-realm id can. Without that the packer would
+-- seal empty chunks forever; with it the overshoot is visible instead, as a
+-- chunk that exceeds one fragment in the FinishSending summary.
 -- @param transactions table Array of stripped item transaction records
 -- @param moneyTransactions table Array of stripped money transaction records
--- @return table Array of chunk tables, each with .transactions and .moneyTransactions
-function GBL:PrepareChunks(transactions, moneyTransactions)
+-- @param eventCounts table|nil { [baseHash] = { count=N, asOf=T } } to spread
+-- @return table Array of chunks, each with .transactions, .moneyTransactions
+--               and an optional .eventCounts
+function GBL:PrepareChunks(transactions, moneyTransactions, eventCounts)
+    local budget = CHUNK_TARGET_BYTES - estimateEnvelopeBytes(self:GetGuildName())
+
     local chunks = {}
+    local chunkBytes = {}    -- running estimate per sealed chunk, same indices
     local currentTx = {}
     local currentMoney = {}
     local count = 0
@@ -1773,6 +1835,7 @@ function GBL:PrepareChunks(transactions, moneyTransactions)
                 transactions = currentTx,
                 moneyTransactions = currentMoney,
             }
+            chunkBytes[#chunks] = estimatedBytes
         end
         currentTx = {}
         currentMoney = {}
@@ -1782,7 +1845,7 @@ function GBL:PrepareChunks(transactions, moneyTransactions)
 
     for _, tx in ipairs(transactions) do
         local recBytes = estimateRecordBytes(tx)
-        if count > 0 and (estimatedBytes + recBytes > CHUNK_BYTE_BUDGET
+        if count > 0 and (estimatedBytes + recBytes > budget
                           or count >= MAX_RECORDS_PER_CHUNK) then
             sealChunk()
         end
@@ -1793,7 +1856,7 @@ function GBL:PrepareChunks(transactions, moneyTransactions)
 
     for _, tx in ipairs(moneyTransactions) do
         local recBytes = estimateRecordBytes(tx)
-        if count > 0 and (estimatedBytes + recBytes > CHUNK_BYTE_BUDGET
+        if count > 0 and (estimatedBytes + recBytes > budget
                           or count >= MAX_RECORDS_PER_CHUNK) then
             sealChunk()
         end
@@ -1803,6 +1866,36 @@ function GBL:PrepareChunks(transactions, moneyTransactions)
     end
 
     sealChunk()
+
+    -- Top each chunk up with event count entries while it stays inside the
+    -- budget, opening carrier chunks once the record chunks are full. The
+    -- cursor only moves forward: an entry never revisits a chunk it has already
+    -- passed, so packing stays linear in the number of entries.
+    if eventCounts then
+        local idx = 1
+        for baseHash, entry in pairs(eventCounts) do
+            local entryBytes = estimateEventCountBytes(baseHash, entry)
+            while true do
+                if idx > #chunks then
+                    chunks[idx] = { transactions = {}, moneyTransactions = {} }
+                    chunkBytes[idx] = 0
+                end
+                -- A carrier chunk that is still completely empty takes the entry
+                -- whatever it weighs. That is the minimum-progress guarantee: it
+                -- is the only branch that can place an oversized entry, and it
+                -- is why the cursor cannot advance forever.
+                if chunkBytes[idx] + entryBytes <= budget or chunkBytes[idx] == 0 then
+                    local chunk = chunks[idx]
+                    chunk.eventCounts = chunk.eventCounts or {}
+                    chunk.eventCounts[baseHash] = entry
+                    chunkBytes[idx] = chunkBytes[idx] + entryBytes
+                    break
+                end
+                idx = idx + 1
+            end
+        end
+    end
+
     return chunks
 end
 
@@ -1958,8 +2051,7 @@ function GBL:SendNextChunk()
         totalChunks = #syncState.sendChunks,
         transactions = chunk.transactions,
         moneyTransactions = chunk.moneyTransactions,
-        eventCounts = syncState.sendEventCountBatches
-            and syncState.sendEventCountBatches[idx] or nil,
+        eventCounts = chunk.eventCounts,
         protocolVersion = PROTOCOL_VERSION,
         guild = self:GetGuildName(),
     })
@@ -2222,7 +2314,6 @@ function GBL:FinishSending()
     syncState.sendStartTime = 0
     syncState.sendTotalRecords = 0
     syncState.sendChunkSentAt = 0
-    syncState.sendEventCountBatches = nil
     syncState.lastChunkBytes = 0
     syncState.lastSendIssuedAt = 0
     syncState.sendChunkTransmittedAt = 0
@@ -3197,7 +3288,6 @@ function GBL:ResetSyncState()
     syncState.sendStartTime = 0
     syncState.sendTotalRecords = 0
     syncState.sendChunkSentAt = 0
-    syncState.sendEventCountBatches = nil
     syncState.receiving = false
     syncState.receiveSource = nil
     syncState.receiveExpected = 0
@@ -3456,7 +3546,6 @@ function GBL:HandleBusy(sender, data) -- luacheck: ignore 212/data
         syncState.sendRetryCount = 0
         syncState.sendStartTime = 0
         syncState.sendTotalRecords = 0
-        syncState.sendEventCountBatches = nil
         self:StopFpsMonitor()
 
         self:AddAuditEntry(cleanSender .. " busy — aborting send")
