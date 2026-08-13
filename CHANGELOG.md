@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.8] - 2026-08-13
+
+### Fixed
+- Text the addon puts on screen no longer relies on characters WoW's fonts may not have. Dashes, arrows, multiplication signs and tick marks were drawing as blanks or boxes for some players depending on their font and locale, so a sort progress line could read "Executing 4 / 9" with a hole where the dash belonged, and a Layout tab row that matched the template showed a green mark that was not there at all, leaving colour as the only signal. All of it is plain text now, including the in-game changelog.
+
 ## [0.37.7] - 2026-08-13
 
 ### Changed

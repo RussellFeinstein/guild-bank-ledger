@@ -84,6 +84,7 @@ Two format facts worth not rediscovering: AceSerializer escapes space (and contr
 ## Conventions
 
 - Addon object: `GBL` (local alias for the AceAddon instance)
+- **In-game strings are ASCII.** Anything the addon can put on screen stays inside byte 127: chat output, labels, tooltips, audit lines, and `CHANGELOG_DATA`. WoW's default fonts carry Latin-1 and little past it, so an em dash, an arrow or a check mark draws as a blank or a box depending on the font and the client's locale. Symbols used as UI encoding fail worst, because a check mark that does not draw leaves a row whose state is carried by colour alone, which is the triple-encoding failure the accessibility rule exists to prevent. Code comments are exempt: they never reach a player. `spec/ascii_strings_spec.lua` enforces this over the file list in the `.toc`, stripping comments first and decoding decimal escapes, since `"\226\156\147"` is ASCII on disk and a check mark on screen.
 - Module registration: use AceAddon modules, not standalone globals
 - Events: always check interaction type before acting on `PLAYER_INTERACTION_MANAGER_FRAME_SHOW`
 - Timestamps: always `GetServerTime()`, never `time()`
@@ -247,4 +248,4 @@ Helpers:
 
 ## Version
 
-Current: 0.37.7 (see `VERSION` file)
+Current: 0.37.8 (see `VERSION` file)

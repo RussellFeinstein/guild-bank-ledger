@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.37.7"
+local VERSION = "0.37.8"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -1958,7 +1958,7 @@ function GBL:InstallBankCloseHook()
         C_PlayerInteractionManager.ClearInteraction = function(interactionType, ...)
             if interactionType == Enum.PlayerInteractionType.GuildBanker
                 and GBL:ShouldBlockBankClose() then
-                GBL:Print("Scan in progress — bank close blocked. Uncheck 'Lock while scanning' to disable.")
+                GBL:Print("Scan in progress - bank close blocked. Uncheck 'Lock while scanning' to disable.")
                 return
             end
             return originalClear(interactionType, ...)
@@ -1970,7 +1970,7 @@ function GBL:InstallBankCloseHook()
         local originalClose = CloseGuildBankFrame
         _G.CloseGuildBankFrame = function(...)
             if GBL:ShouldBlockBankClose() then
-                GBL:Print("Scan in progress — bank close blocked.")
+                GBL:Print("Scan in progress - bank close blocked.")
                 return
             end
             return originalClose(...)
@@ -2601,7 +2601,7 @@ function GBL:PrintSortPreview()
 
     if opsN == 0 and defN == 0 and unpN == 0 then
         if totalDemands == 0 then
-            self:Print("  |cffffaa55Reason: layout has no display-tab demands — no template to sort toward. " ..
+            self:Print("  |cffffaa55Reason: layout has no display-tab demands - no template to sort toward. " ..
                        "Use Capture or Add Item on the Layout tab.|r")
         else
             self:Print("  |cff00ff88Reason: every demand is already satisfied by a slot at the correct count.|r")

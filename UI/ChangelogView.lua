@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.37.8
+    {"0.37.8", "2026-08-13", {
+        Fixed = {
+            "Text the addon puts on screen no longer relies on characters WoW's fonts may not have. Dashes, arrows, multiplication signs and tick marks were drawing as blanks or boxes for some players depending on their font and locale, so a sort progress line could read 'Executing 4 / 9' with a hole where the dash belonged, and a Layout tab row that matched the template showed a green mark that was not there at all, leaving colour as the only signal. All of it is plain text now, including this changelog.",
+        },
+    }},
+
     -- v0.37.7
     {"0.37.7", "2026-08-13", {
         Changed = {
@@ -283,7 +290,7 @@ GBL.CHANGELOG_DATA = {
     -- v0.32.3
     {"0.32.3", "2026-05-12", {
         Fixed = {
-            "ChatFilters: NPC chat event handlers now exit immediately when inside any instance (party, raid, M+, pvp, arena, scenario). Blizzard marks NPC sender values as 'secret' in instanced content, causing a Lua crash when the name was used as a table key. The filter has no purpose in instances — the guild bank doesn't exist there. The sender guard was also tightened from a nil-check to type() == 'string' so any non-string value is safely rejected before the table lookup.",
+            "ChatFilters: NPC chat event handlers now exit immediately when inside any instance (party, raid, M+, pvp, arena, scenario). Blizzard marks NPC sender values as 'secret' in instanced content, causing a Lua crash when the name was used as a table key. The filter has no purpose in instances - the guild bank doesn't exist there. The sender guard was also tightened from a nil-check to type() == 'string' so any non-string value is safely rejected before the table lookup.",
         },
     }},
 
@@ -362,7 +369,7 @@ GBL.CHANGELOG_DATA = {
             "Schema-11 migration MigrateRecoverPeerRealms no longer prematurely bumps schemaVersion when the roster API is cold. Previously, when GetLocalRealm() was valid but GetNumGuildMembers() returned 0 the migration walked an empty roster, recovered nothing, and still bumped to schema 11; affected users got stuck at 11 with the recovery never having actually run. Fix: return 0 without bumping when numMembers == 0 so the migration retries on a later session or via the GUILD_ROSTER_UPDATE retrigger.",
             "Hyphen-corrupted playerRealms entries from a long-fixed code path now self-heal. Affected entries (a realm string containing a hyphen, like 'Stormrage-Stormrage-Stormrage...') persisted in saved variables for offline peers because BuildRosterCache only writes for currently-rostered members. New RepairCorruptedPlayerRealms helper trims them at OnEnable and on every GUILD_ROSTER_UPDATE. CanonicalPeerKey defensively rejects hyphen-bearing realms as a belt-and-suspenders measure.",
             "ResolvePlayerName no longer falls back through other guilds' playerRealms. The previous implementation iterated self.db.global.guilds as a last resort, which could resolve a bank-log name to a realm from a guild the user no longer belongs to. New priority: explicit playerRealms arg, current guild's playerRealms, local realm fallback. Migrations pass per-guild tables explicitly so they remain correct.",
-            "Schema migration ladder skip-chain (Codex P1). Later migrations had loose '>= target' gates that would let the ladder bump straight from schema 8 to 10 or 11 if MigrateNormalizePeerNames short-circuited on cold realm APIs, permanently skipping the 8 → 9 work. Now strict-gated on schemaVersion == prev_target so the chain stays in order.",
+            "Schema migration ladder skip-chain (Codex P1). Later migrations had loose '>= target' gates that would let the ladder bump straight from schema 8 to 10 or 11 if MigrateNormalizePeerNames short-circuited on cold realm APIs, permanently skipping the 8 -> 9 work. Now strict-gated on schemaVersion == prev_target so the chain stays in order.",
             "Stale record.id after realm rewrite (Codex P1). MigrateNormalizeStoredRealms previously mutated record.player without rebuilding record.id (which ComputeTxHash derives from the player field) or seenTxHashes. Sync would re-import the same transaction under its new id and dedup wouldn't catch it. Fixed by recomputing the id inline after a rewrite and rebuilding seenTxHashes once at the end.",
             "Schema-11 recovery realm normalization (Codex P2 follow-up). MigrateRecoverPeerRealms was building its bare-name to realm lookup from GetGuildRosterInfo without normalizing the realm portion. GetGuildRosterInfo can return raw spaced realm names ('Aerie Peak') for cross-realm guildmates depending on the realm topology. The unnormalized realm then flowed into CanonicalPeerKey at the rewrite site, which preserved the cross-realm form as-is. Result: recovered keys like 'Alice-Aerie Peak' while every other call site of CanonicalPeerKey produced 'Alice-AeriePeak', silently splitting the same peer across two keys after the recovery migration. Affected users on multi-word realms (Aerie Peak, Burning Blade, Argent Dawn, etc.). Fix: normalize realm once before storing in the lookup.",
             "InitSync seed loop syncState.peers writes are now recency-checked (Codex P3 follow-up). The seed loop wrote to syncState.peers[clean] unconditionally per pairs() iteration. When knownPeers contains both legacy bare and canonical qualified forms of the same peer, both raw keys canonicalize to the same clean key, and pairs() iteration order is undefined, so an older snapshot could nondeterministically overwrite a newer one in the runtime cache. The knownPeers consolidation already had a recency check; the syncState.peers write did not. Fix: wrap the runtime write in the same recency check.",
@@ -409,8 +416,8 @@ GBL.CHANGELOG_DATA = {
     -- v0.30.2
     {"0.30.2", "2026-04-27", {
         Added = {
-            "Sync audit trail now records when a SYNC_DATA chunk arrives at chunk N>1 while no receive session is active — that means the receiver missed an earlier abort signal (combat with a lost BUSY, or a sender desync) and is recovering data mid-stream. Look for 'Auto-bootstrap at chunk N from <sender>' in /gbl synclog.",
-            "Sync ACK timeout retry log now appends 'target=online|offline|unknown' so future capture analysis can tell apart 'peer was already offline and we kept retrying' from 'peer was nominally online but timed out anyway' (likely true wire loss or in-instance silent abort). 'unknown' covers both 'not in roster' and 'roster not yet populated' — the latter only happens for a few seconds right after login.",
+            "Sync audit trail now records when a SYNC_DATA chunk arrives at chunk N>1 while no receive session is active - that means the receiver missed an earlier abort signal (combat with a lost BUSY, or a sender desync) and is recovering data mid-stream. Look for 'Auto-bootstrap at chunk N from <sender>' in /gbl synclog.",
+            "Sync ACK timeout retry log now appends 'target=online|offline|unknown' so future capture analysis can tell apart 'peer was already offline and we kept retrying' from 'peer was nominally online but timed out anyway' (likely true wire loss or in-instance silent abort). 'unknown' covers both 'not in roster' and 'roster not yet populated' - the latter only happens for a few seconds right after login.",
         },
     }},
 
@@ -424,7 +431,7 @@ GBL.CHANGELOG_DATA = {
     -- v0.30.0
     {"0.30.0", "2026-04-24", {
         Added = {
-            "Sort Access now has two independent tiers. The Layout tab's Sort Access section is split into Layout Write access (edit templates, capture, pin slots, change stock reserves — inherently includes sort) and Sort-only access (press Execute on the Sort tab but cannot edit the layout). Each tier has its own rank threshold and its own delegate list. Only the Guild Master can change the policy. Grant sort execution widely while keeping layout edits locked down.",
+            "Sort Access now has two independent tiers. The Layout tab's Sort Access section is split into Layout Write access (edit templates, capture, pin slots, change stock reserves - inherently includes sort) and Sort-only access (press Execute on the Sort tab but cannot edit the layout). Each tier has its own rank threshold and its own delegate list. Only the Guild Master can change the policy. Grant sort execution widely while keeping layout edits locked down.",
             "Defense-in-depth gate at the storage API. SaveBankLayout and SetStockReserve now reject any caller that does not pass HasLayoutWrite(), in addition to the existing UI callback check.",
         },
         Changed = {
@@ -435,7 +442,7 @@ GBL.CHANGELOG_DATA = {
     -- v0.29.26
     {"0.29.26", "2026-04-24", {
         Fixed = {
-            "Sort progress counter no longer shows impossible values like '34/33' after a replan. The old display used (done+failed)/total, but done and failed accumulate across replans while total is the current plan's size, so the numerator could exceed the denominator once a replan reissued work. Switched to 'op N / T' using the executor's live op index and current-plan total — always in range and reflects 'where are we in the plan that's actually running.'",
+            "Sort progress counter no longer shows impossible values like '34/33' after a replan. The old display used (done+failed)/total, but done and failed accumulate across replans while total is the current plan's size, so the numerator could exceed the denominator once a replan reissued work. Switched to 'op N / T' using the executor's live op index and current-plan total - always in range and reflects 'where are we in the plan that's actually running.'",
             "Move list and per-op status markers now realign after a replan. Previously the UI kept rendering the original plan's rows while the executor had moved on to a different post-replan plan, so row markers drifted onto the wrong moves and the counter referenced a plan that was no longer executing. SortExecutor now broadcasts the new plan via a 'planupdated' progress phase, and SortView swaps the cached plan, clears stale op markers, and rebuilds the move list to match what's actually running.",
         },
     }},
@@ -444,39 +451,39 @@ GBL.CHANGELOG_DATA = {
     {"0.29.25", "2026-04-24", {
         Fixed = {
             "Sort progress markers on each move row now render in WoW's default font. v0.29.23 used Unicode triangle/check/cross glyphs that FRIZQT__ doesn't ship, so users saw colored boxes instead. Replaced with colored ASCII: '>' (yellow) for the op currently in flight, '+' (green) for completed (including late-ACK reclassified), 'x' (red) for failed. Same colors, actual shapes.",
-            "Per-op status markers now survive Sort tab rebuilds mid-sort. Previously, every successful move created a transaction log entry; the ledger rescan reacted by firing RefreshUI, which (for the Sort tab) full-rebuilt the tab and wiped all per-row widget refs. The top progress line recovered on the next event but the per-op markers on already-completed rows were lost forever. Fixed by persisting a '_sortOpStatus' table and a cached progress-text string that the Preview loop repaints into freshly-built widgets on every rebuild — so a rescan, a tab switch, or any other rebuild now preserves the full visual state.",
+            "Per-op status markers now survive Sort tab rebuilds mid-sort. Previously, every successful move created a transaction log entry; the ledger rescan reacted by firing RefreshUI, which (for the Sort tab) full-rebuilt the tab and wiped all per-row widget refs. The top progress line recovered on the next event but the per-op markers on already-completed rows were lost forever. Fixed by persisting a '_sortOpStatus' table and a cached progress-text string that the Preview loop repaints into freshly-built widgets on every rebuild - so a rescan, a tab switch, or any other rebuild now preserves the full visual state.",
         },
     }},
 
     -- v0.29.24
     {"0.29.24", "2026-04-24", {
         Changed = {
-            "Every sort now ends by tidying the overflow (stock) tab. A new Phase 4 in the planner reshapes the overflow tab into a deterministic contiguous layout starting at slot 1: stacks sorted by itemID, larger stacks first within a group, no gaps. Previously the overflow was a dumping ground — Phase 1B and Phase 3 only grouped *new* spills using adjacency, so any pre-existing scattered stacks or gaps stayed scattered. Repeat sorts are now idempotent (already-compact overflow → zero compaction ops). Partial-stack merging (e.g. merging two half-stacks of Linen Cloth) is explicitly out of scope here — the planner has no max-stack-size knowledge; that's a follow-up.",
+            "Every sort now ends by tidying the overflow (stock) tab. A new Phase 4 in the planner reshapes the overflow tab into a deterministic contiguous layout starting at slot 1: stacks sorted by itemID, larger stacks first within a group, no gaps. Previously the overflow was a dumping ground - Phase 1B and Phase 3 only grouped *new* spills using adjacency, so any pre-existing scattered stacks or gaps stayed scattered. Repeat sorts are now idempotent (already-compact overflow -> zero compaction ops). Partial-stack merging (e.g. merging two half-stacks of Linen Cloth) is explicitly out of scope here - the planner has no max-stack-size knowledge; that's a follow-up.",
         },
     }},
 
     -- v0.29.23
     {"0.29.23", "2026-04-23", {
         Added = {
-            "Live progress display in the Sort tab while a sort is executing. A running 'Executing — N/T (X done, Y failed, Z replans)' line updates at the top of the move list every time an op starts, completes, fails, or gets reclassified by the late-ACK path. Each move row also gets a status marker prefixed to it as it advances: ▶ for the op currently in flight, ✓ for completed (including late-ACK success), ✗ for failed. Sort execution is 100% local so these updates have no bandwidth cost — they're just direct SetText calls on widgets we already have references to.",
-            "On sort completion, the progress line switches to 'Sort complete — N done, M failed, K replans. Rescanning...' immediately, then the tab refreshes with the post-sort plan once the rescan lands. No more waiting on the scan to see whether the sort succeeded.",
+            "Live progress display in the Sort tab while a sort is executing. A running 'Executing - N/T (X done, Y failed, Z replans)' line updates at the top of the move list every time an op starts, completes, fails, or gets reclassified by the late-ACK path. Each move row also gets a status marker prefixed to it as it advances: > for the op currently in flight, [ok] for completed (including late-ACK success), [x] for failed. Sort execution is 100% local so these updates have no bandwidth cost - they're just direct SetText calls on widgets we already have references to.",
+            "On sort completion, the progress line switches to 'Sort complete - N done, M failed, K replans. Rescanning...' immediately, then the tab refreshes with the post-sort plan once the rescan lands. No more waiting on the scan to see whether the sort succeeded.",
         },
     }},
 
     -- v0.29.22
     {"0.29.22", "2026-04-23", {
         Fixed = {
-            "Late server ACKs for move ops are now reclassified correctly even when the next op is already in flight. v0.29.19 added the grace window but only fired it when no op was waiting — in a live sort the 0.3s inter-move gap means an op is almost always armed, so the grace window essentially never fired. The handler now checks both 'is this a late ACK for a timed-out prior op' and 'does this advance the current in-flight op' as independent concerns. Expected effect: cleaner audit trails (fewer 'op N timed out / op N+1 pre-check fail' cascades) and more accurate done/failed counters after a sort completes.",
+            "Late server ACKs for move ops are now reclassified correctly even when the next op is already in flight. v0.29.19 added the grace window but only fired it when no op was waiting - in a live sort the 0.3s inter-move gap means an op is almost always armed, so the grace window essentially never fired. The handler now checks both 'is this a late ACK for a timed-out prior op' and 'does this advance the current in-flight op' as independent concerns. Expected effect: cleaner audit trails (fewer 'op N timed out / op N+1 pre-check fail' cascades) and more accurate done/failed counters after a sort completes.",
         },
         Changed = {
-            "Removed the loud Capture-button diagnostics added in v0.29.21 now that the reported regression wasn't reproducible (it cleared on /reload). Kept the pcall-wrapped error handler and the pinned-slot count in the success message — cheap, informative, won't spam chat.",
+            "Removed the loud Capture-button diagnostics added in v0.29.21 now that the reported regression wasn't reproducible (it cleared on /reload). Kept the pcall-wrapped error handler and the pinned-slot count in the success message - cheap, informative, won't spam chat.",
         },
     }},
 
     -- v0.29.21
     {"0.29.21", "2026-04-23", {
         Added = {
-            "Diagnostic output on the Layout editor's Capture button. When clicked, the button now always prints at least one chat line — the initial click, the guard state (scan/slots/writable), and either a success or a wrapped-pcall error message. Added to chase down a reported regression where Capture on a freshly-switched-to-Display tab looked like it was doing nothing.",
+            "Diagnostic output on the Layout editor's Capture button. When clicked, the button now always prints at least one chat line - the initial click, the guard state (scan/slots/writable), and either a success or a wrapped-pcall error message. Added to chase down a reported regression where Capture on a freshly-switched-to-Display tab looked like it was doing nothing.",
             "Capture success message now reports both the distinct-item count and the pinned-slot count ('Captured tab 5: 34 distinct item(s), 66 slot(s) pinned') so you can tell at a glance whether slotOrder got populated from the scan.",
         },
     }},
@@ -494,14 +501,14 @@ GBL.CHANGELOG_DATA = {
         Fixed = {
             "Sort no longer aborts mid-run when the server takes slightly longer than 2s to confirm a move. The executor used to classify the (legitimate but late) GUILDBANKBAGSLOTS_CHANGED event as 'foreign activity' and trigger a replan; the replan's fresh snapshot then saw the move already settled and the resulting plan sometimes pre-check-failed on op 1, cascading through all 5 replan retries before aborting. Now: if a recent op timed out and its destination slot is now populated as expected, the late event retroactively reclassifies the op as success and execution continues.",
             "Raised MOVE_CONFIRM_TIMEOUT from 2s to 4s to give high-latency realms more headroom before a legitimate server ACK is misclassified as a timeout. Happy-path sorts are unchanged (fast ACKs advance immediately); this only affects slow ACKs that would otherwise stall the run.",
-            "Raised SCAN_WAIT_TIMEOUT from 5s to 10s. Full-bank scans on populated 7+ tab banks were observed taking ~4s in-game — uncomfortably close to the old 5s cap — and a single slow scan during a replan was enough to abort an otherwise-recoverable sort.",
+            "Raised SCAN_WAIT_TIMEOUT from 5s to 10s. Full-bank scans on populated 7+ tab banks were observed taking ~4s in-game - uncomfortably close to the old 5s cap - and a single slow scan during a replan was enough to abort an otherwise-recoverable sort.",
         },
     }},
 
     -- v0.29.18
     {"0.29.18", "2026-04-23", {
         Added = {
-            "'Unpin all slots' button on each display tab in the Layout editor. Wipes slotOrder (keeps items). Use when a captured layout is forcing new restock stacks to scatter to the end of the tab — after unpinning, the planner packs everything by adjacency at sort time.",
+            "'Unpin all slots' button on each display tab in the Layout editor. Wipes slotOrder (keeps items). Use when a captured layout is forcing new restock stacks to scatter to the end of the tab - after unpinning, the planner packs everything by adjacency at sort time.",
             "Per-item 'Unpin' button on every item row. Clears pinned slots for just that item while the rest of the tab stays pinned. Useful for 'mostly frozen, except this one high-churn item' setups. Disabled when the item has no pinned slots.",
             "Each item row now shows a pin count ('3 pinned' in yellow, or 'not pinned' in gray) between the = total and the action buttons, so you can see at a glance which items are fixed to positions and which aren't.",
             "Three modes now legible in the editor: Fully pinned (Capture everything, positions locked), Fully declarative (no pins, planner places at sort time), or Mixed (pin some, let others flow). Pick the mode that matches how much you care about exact placement vs. tolerating reorganization.",
@@ -511,50 +518,50 @@ GBL.CHANGELOG_DATA = {
     -- v0.29.17
     {"0.29.17", "2026-04-23", {
         Added = {
-            "Demand origin tracking in the sort planner. Each demand is tagged 'pinned' (from Capture), 'extend-right' / 'extend-left' (planner adjacency), or 'first-empty' (fallback when no adjacency is possible). The gem-tab restock pattern — pinned captures forcing new stacks to scatter — is now visible in diagnostics as a high first-empty count alongside many pinned demands.",
+            "Demand origin tracking in the sort planner. Each demand is tagged 'pinned' (from Capture), 'extend-right' / 'extend-left' (planner adjacency), or 'first-empty' (fallback when no adjacency is possible). The gem-tab restock pattern - pinned captures forcing new stacks to scatter - is now visible in diagnostics as a high first-empty count alongside many pinned demands.",
             "/gbl sortpreview now breaks down each display tab's demands by origin (pinned / auto-placed / extend-right / extend-left / first-empty) and annotates each planned move line with its destination origin so you can trace why each move lands where it lands.",
-            "Layout editor slot map header now shows 'N pinned + M auto-placed; K empty' instead of just 'N/98 pinned.' The per-item 'auto-placed at sort time' list distinguishes all-new items from mixed ones ('1 pinned + 3 auto-placed') — the second form is the gem-tab pattern where Capture locked in old stacks and a later Slots bump added new ones.",
+            "Layout editor slot map header now shows 'N pinned + M auto-placed; K empty' instead of just 'N/98 pinned.' The per-item 'auto-placed at sort time' list distinguishes all-new items from mixed ones ('1 pinned + 3 auto-placed') - the second form is the gem-tab pattern where Capture locked in old stacks and a later Slots bump added new ones.",
         },
     }},
 
     -- v0.29.16
     {"0.29.16", "2026-04-23", {
         Fixed = {
-            "Layout tab edits no longer show a visible scroll-snap flicker. v0.29.15 preserved scroll position across rebuilds, but the Release → Build → SetScroll sequence was still visible as a brief blank-then-snap. The TabGroup's content frame is now hidden for the duration of the rebuild and revealed after scroll has been re-applied, so the tab appears static during edits.",
+            "Layout tab edits no longer show a visible scroll-snap flicker. v0.29.15 preserved scroll position across rebuilds, but the Release -> Build -> SetScroll sequence was still visible as a brief blank-then-snap. The TabGroup's content frame is now hidden for the duration of the rebuild and revealed after scroll has been re-applied, so the tab appears static during edits.",
         },
     }},
 
     -- v0.29.15
     {"0.29.15", "2026-04-23", {
         Fixed = {
-            "Layout tab no longer scrolls to the top every time you press Enter in an edit field. The tab rebuilds on every field change (to keep the slot budget, save/discard buttons, and slot map in sync), and that rebuild was also re-creating the ScrollFrame — throwing away scroll position. Editing Slots or Per slot halfway down the page used to jump you back to the top; the ScrollFrame now persists its scroll offset across rebuilds and snaps back to where you were.",
+            "Layout tab no longer scrolls to the top every time you press Enter in an edit field. The tab rebuilds on every field change (to keep the slot budget, save/discard buttons, and slot map in sync), and that rebuild was also re-creating the ScrollFrame - throwing away scroll position. Editing Slots or Per slot halfway down the page used to jump you back to the top; the ScrollFrame now persists its scroll offset across rebuilds and snaps back to where you were.",
         },
     }},
 
     -- v0.29.14
     {"0.29.14", "2026-04-23", {
         Added = {
-            "Slot map panel in the Layout editor. Every display tab now shows its slotOrder as a compact run-length list (e.g. 'S1-S23 (23): Silvermoon Health Potion × 20') right under the item rows. A 1-slot run wedged between two long runs of the same other item now stands out visually — which is exactly what the v0.29.12 hidden-swap incident needed.",
-            "Slot map compares against the current bank scan when one is available: green ✓ if every slot in the run matches, red ✗ with per-slot detail lines naming what's actually sitting there otherwise. Items whose Slots count exceeds their pinned slotOrder entries list below as 'auto-placed at sort time,' matching the v0.29.13 ownership split (Capture pins, planner places everything else at sort time).",
+            "Slot map panel in the Layout editor. Every display tab now shows its slotOrder as a compact run-length list (e.g. 'S1-S23 (23): Silvermoon Health Potion x 20') right under the item rows. A 1-slot run wedged between two long runs of the same other item now stands out visually - which is exactly what the v0.29.12 hidden-swap incident needed.",
+            "Slot map compares against the current bank scan when one is available: green [ok] if every slot in the run matches, red [x] with per-slot detail lines naming what's actually sitting there otherwise. Items whose Slots count exceeds their pinned slotOrder entries list below as 'auto-placed at sort time,' matching the v0.29.13 ownership split (Capture pins, planner places everything else at sort time).",
         },
     }},
 
     -- v0.29.13
     {"0.29.13", "2026-04-23", {
         Changed = {
-            "Layout editor no longer pre-pins slotOrder positions for Add Item or Slots-up. The UI used to heuristically pin positions on edit — indistinguishable from a real Capture — which the planner then rigidly enforced. Same adjacency logic now runs at plan time instead, so slotOrder unambiguously means 'pin because observed,' saved layouts are smaller, and the post-sort bank state is byte-identical to before. Capture, Slots-down trim, and Remove cleanup are unchanged.",
+            "Layout editor no longer pre-pins slotOrder positions for Add Item or Slots-up. The UI used to heuristically pin positions on edit - indistinguishable from a real Capture - which the planner then rigidly enforced. Same adjacency logic now runs at plan time instead, so slotOrder unambiguously means 'pin because observed,' saved layouts are smaller, and the post-sort bank state is byte-identical to before. Capture, Slots-down trim, and Remove cleanup are unchanged.",
         },
         Fixed = {
-            "Adding an item to a full captured tab no longer leaves partial slotOrder state. Previously items[id].slots would be set but only some of the requested slots got slotOrder entries when the tab was nearly full; the over-budget error surfaced only at save time. With the prefill gone, the authoritative items[].slots sum is what validation checks — single clean failure mode.",
+            "Adding an item to a full captured tab no longer leaves partial slotOrder state. Previously items[id].slots would be set but only some of the requested slots got slotOrder entries when the tab was nearly full; the over-budget error surfaced only at save time. With the prefill gone, the authoritative items[].slots sum is what validation checks - single clean failure mode.",
         },
     }},
 
     -- v0.29.12
     {"0.29.12", "2026-04-23", {
         Added = {
-            "/gbl deviations (alias /gbl devs) compares the current bank to the layout's expected demand map and prints every slot that doesn't match — wrong item, wrong count, empty-where-expected, or extras in unclaimed slots.",
+            "/gbl deviations (alias /gbl devs) compares the current bank to the layout's expected demand map and prints every slot that doesn't match - wrong item, wrong count, empty-where-expected, or extras in unclaimed slots.",
             "Auto-run deviation check after Execute. The Sort tab already rescans after Execute (v0.29.9); it now also prints the deviation report when the fresh scan lands, so any mismatch between plan and result is immediately visible.",
-            "Pre-check failure audit entries now include the observed state (e.g. 'expected it:12345 x>=20, got it:99999 x10') instead of a bare 'src mismatch' message — makes it obvious whether the failure was foreign activity, a stack-size drift, or a planner bug.",
+            "Pre-check failure audit entries now include the observed state (e.g. 'expected it:12345 x>=20, got it:99999 x10') instead of a bare 'src mismatch' message - makes it obvious whether the failure was foreign activity, a stack-size drift, or a planner bug.",
         },
     }},
 
@@ -570,7 +577,7 @@ GBL.CHANGELOG_DATA = {
     -- v0.29.10
     {"0.29.10", "2026-04-23", {
         Fixed = {
-            "First bank scan after login no longer misses every item. The scanner was reading slots immediately after requesting tab data, but on first open the client has no data yet — 98 nil slots, event unregistered, real data ignored when it arrived. The scanner now waits for the server's response event before scanning, with a 3-second timeout fallback for empty tabs that don't fire the event.",
+            "First bank scan after login no longer misses every item. The scanner was reading slots immediately after requesting tab data, but on first open the client has no data yet - 98 nil slots, event unregistered, real data ignored when it arrived. The scanner now waits for the server's response event before scanning, with a 3-second timeout fallback for empty tabs that don't fire the event.",
         },
     }},
 
@@ -586,7 +593,7 @@ GBL.CHANGELOG_DATA = {
         Fixed = {
             "Sort planner now honors items[id].slots as the authoritative demand count. Before, if you captured a layout with 3 slots of an item then edited Slots to 5 in the Layout UI, the 2 extra slots were silently dropped and sort saw 'no discrepancy' even when the bank was obviously off. The planner now emits demands up to items[id].slots, adding extras at the first unclaimed slot indices.",
             "Layout editor's Slots input now syncs slotOrder on edit so the mismatch above can't reappear. Increasing Slots pins new positions at the first unclaimed indices; decreasing Slots trims from the highest slot index down.",
-            "Phase 3 sweep no longer mis-evicts items placed by dynamically-added demands (was a consequence of the above fix — discovered via the regression tests).",
+            "Phase 3 sweep no longer mis-evicts items placed by dynamically-added demands (was a consequence of the above fix - discovered via the regression tests).",
         },
         Added = {
             "/gbl sortpreview now prints a diagnostic breakdown: per-display-tab demand counts, overflow/ignore tab indices, scan contents by tab, and a plain-English reason when the plan is empty. Tells you whether a 0-op result is a config issue (no demands) or the bank genuinely matches the layout.",
@@ -596,7 +603,7 @@ GBL.CHANGELOG_DATA = {
     -- v0.29.7
     {"0.29.7", "2026-04-23", {
         Changed = {
-            "Sort planner rewritten from three-pass greedy to assign-then-schedule. Same inputs and outputs — drop-in upgrade. Items in the wrong slot of the right tab now move directly instead of round-tripping through overflow; oversize stacks feed multiple demands from a single source; the planner picks the largest source first to minimize split count; and swap cycles are detected and resolved with a pivot (3 ops for a 2-cycle, 4 for a 3-cycle, down from 4 and 6).",
+            "Sort planner rewritten from three-pass greedy to assign-then-schedule. Same inputs and outputs - drop-in upgrade. Items in the wrong slot of the right tab now move directly instead of round-tripping through overflow; oversize stacks feed multiple demands from a single source; the planner picks the largest source first to minimize split count; and swap cycles are detected and resolved with a pivot (3 ops for a 2-cycle, 4 for a 3-cycle, down from 4 and 6).",
             "Unreachable swap cycles (no empty unclaimed slot anywhere) are now reported as unplaced with a 'cycle-no-pivot' reason instead of emitting half-broken ops.",
         },
     }, milestone = "M-sort-2.5: Planner algorithm upgrade"},
@@ -604,7 +611,7 @@ GBL.CHANGELOG_DATA = {
     -- v0.29.6
     {"0.29.6", "2026-04-23", {
         Changed = {
-            "Layout tab save-bar is now self-explanatory: status banner reads 'You have unsaved changes' vs 'Layout is up to date', the save button is disabled and labels itself 'Saved ✓' when clean, and 'Revert' was renamed to 'Discard changes'. Edits still buffer until Save (deliberate, so validation and sync run once per logical change), just with clearer signals.",
+            "Layout tab save-bar is now self-explanatory: status banner reads 'You have unsaved changes' vs 'Layout is up to date', the save button is disabled and labels itself 'Saved [ok]' when clean, and 'Revert' was renamed to 'Discard changes'. Edits still buffer until Save (deliberate, so validation and sync run once per logical change), just with clearer signals.",
         },
     }},
 
@@ -626,17 +633,17 @@ GBL.CHANGELOG_DATA = {
     -- v0.29.3
     {"0.29.3", "2026-04-23", {
         Added = {
-            "Layout tab — per-tab mode picker (display/overflow/ignore), item template rows with Slots + Per-slot inputs, live slot-budget readout, Capture-current-layout button, and Add-item input that takes an itemID or a pasted item link.",
-            "Sort tab — Preview builds and displays the planned moves with human-readable item names, deficits, and unplaced items. Execute runs the plan through SortExecutor with progress prints. Cancel aborts.",
-            "Sort Access section (on the Layout tab) — GM sets a rank threshold and named delegates. Non-GMs see the policy read-only. Layout tab visibility itself now depends on sort access.",
+            "Layout tab - per-tab mode picker (display/overflow/ignore), item template rows with Slots + Per-slot inputs, live slot-budget readout, Capture-current-layout button, and Add-item input that takes an itemID or a pasted item link.",
+            "Sort tab - Preview builds and displays the planned moves with human-readable item names, deficits, and unplaced items. Execute runs the plan through SortExecutor with progress prints. Cancel aborts.",
+            "Sort Access section (on the Layout tab) - GM sets a rank threshold and named delegates. Non-GMs see the policy read-only. Layout tab visibility itself now depends on sort access.",
         },
     }, milestone = "M-sort-2 (UI): Layout editor + Sort tab"},
 
     -- v0.29.2
     {"0.29.2", "2026-04-23", {
         Added = {
-            "SortAccess policy — GM configures a rank threshold and named delegates to control who can edit layouts and execute sort. Default is GM-only; policy writes are GM-only so delegates can't self-escalate.",
-            "SortExecutor — executes plans one op at a time with throttling, pre-step verification against live bank, replan-on-foreign-activity (cap 5), bank-close abort, and cursor-leak safety on every exit path.",
+            "SortAccess policy - GM configures a rank threshold and named delegates to control who can edit layouts and execute sort. Default is GM-only; policy writes are GM-only so delegates can't self-escalate.",
+            "SortExecutor - executes plans one op at a time with throttling, pre-step verification against live bank, replan-on-foreign-activity (cap 5), bank-close abort, and cursor-leak safety on every exit path.",
             "Slash commands: /gbl sortexec (run the current plan) and /gbl sortcancel (cancel a running sort), both gated by HasSortAccess.",
         },
     }, milestone = "M-sort-2 (backbone): Executor + Access policy"},
@@ -648,7 +655,7 @@ GBL.CHANGELOG_DATA = {
             "Four sort-planner regression tests: ignore-tab invisibility, keep-slot protection, multi-tab orphan routing, and no-duplicate-unplaced under overflow saturation.",
         },
         Fixed = {
-            "SortPlanner no longer produces duplicate unplaced entries when the overflow tab is full — Pass 1 now drops the working-bank copy of any slot it records as unplaced so later passes don't re-process it.",
+            "SortPlanner no longer produces duplicate unplaced entries when the overflow tab is full - Pass 1 now drops the working-bank copy of any slot it records as unplaced so later passes don't re-process it.",
         },
     }, milestone = "M-sort-1.1: Audit cleanup"},
 
@@ -656,7 +663,7 @@ GBL.CHANGELOG_DATA = {
     {"0.29.0", "2026-04-23", {
         Added = {
             "Bank layout model: per-guild saved templates that describe each tab's role (display, overflow, or ignore). Display tabs list the items they hold along with how many slots each occupies and the target stack size per slot. Includes a Capture tool that reads the current contents of a hand-arranged tab and saves it as the canonical layout.",
-            "Sort planner: given a bank scan and a saved layout, produces an ordered list of moves that will reshape the bank to match — splitting oversize stacks, pulling from other display tabs or the overflow tab to fill deficits, and routing unassigned items to overflow. Pure function, fully tested. No execution or UI yet; those arrive in subsequent milestones.",
+            "Sort planner: given a bank scan and a saved layout, produces an ordered list of moves that will reshape the bank to match - splitting oversize stacks, pulling from other display tabs or the overflow tab to fill deficits, and routing unassigned items to overflow. Pure function, fully tested. No execution or UI yet; those arrive in subsequent milestones.",
             "Debug: /gbl sortpreview prints the current sort plan to chat.",
         },
     }, milestone = "M-sort-1: Bank sorting foundation"},
@@ -702,7 +709,7 @@ GBL.CHANGELOG_DATA = {
             "Receiver-side redundancy metric in sync audit. New "
                 .. "\"Redundancy from <peer>\" line reports total dupes/received "
                 .. "with item-vs-money split; per-chunk audit gains a running "
-                .. "\"X% dup\" annotation. Diagnostics-only — no protocol or "
+                .. "\"X% dup\" annotation. Diagnostics-only - no protocol or "
                 .. "behavior change. Informs whether bucket-granularity "
                 .. "redundancy justifies a future manifest-exchange protocol change.",
         },
@@ -711,7 +718,7 @@ GBL.CHANGELOG_DATA = {
     -- v0.28.7
     {"0.28.7", "2026-04-22", {
         Fixed = {
-            "Sync reliability: chunks shrunk to 1 AceComm wire fragment (4 records / 900 byte budget) after v0.28.6's 2-fragment target missed — actual compression ratio is 23–26%, not ~18% as assumed. Cross-realm syncs now complete instead of aborting mid-stream.",
+            "Sync reliability: chunks shrunk to 1 AceComm wire fragment (4 records / 900 byte budget) after v0.28.6's 2-fragment target missed - actual compression ratio is 23-26%, not ~18% as assumed. Cross-realm syncs now complete instead of aborting mid-stream.",
         },
         Added = {
             "Diagnostics: retry cause tagging (ackTimeout/nack split out from combat/zone/busy/offline aborts), corrected p_frag math, per-peer outcome lines, and end-of-sync compression-ratio summary (min/med/max) so A/B analysis across chunk-size changes is now one-line rather than multi-line parse.",
@@ -757,21 +764,21 @@ GBL.CHANGELOG_DATA = {
         },
         Changed = {
             "Audit trail cap increased from 200 to 2000 entries to capture full sync lifecycle",
-            "CTL deferral entries rate-limited: first 10 verbose, then every 20th — prevents audit eviction",
+            "CTL deferral entries rate-limited: first 10 verbose, then every 20th - prevents audit eviction",
         },
     }},
     -- v0.28.0
     {"0.28.0", "2026-04-19", {
         Changed = {
             "Sync throughput optimized: broadcasts suppressed during active sync with keepalive every ~280s, CTL backoff reduced to 0.25s, bandwidth threshold lowered to 200",
-            "Chunk density increased: byte budget 3200→5000, record cap 25→35, reducing chunk count by ~36% for large syncs",
+            "Chunk density increased: byte budget 3200->5000, record cap 25->35, reducing chunk count by ~36% for large syncs",
         },
     }},
     -- v0.27.0
     {"0.27.0", "2026-04-19", {
         Fixed = {
-            "Records with Unix epoch 0 timestamps repaired — multiple 'or 0' fallbacks replaced with validated timestamps",
-            "Schema migration 7→8 repairs existing epoch-0 records and cleans up bogus 1970-01-01 compacted summaries",
+            "Records with Unix epoch 0 timestamps repaired - multiple 'or 0' fallbacks replaced with validated timestamps",
+            "Schema migration 7->8 repairs existing epoch-0 records and cleans up bogus 1970-01-01 compacted summaries",
         },
         Added = {
             "\"Open Sync Log\" button in Sync tab for quick access to the copy-pastable sync log",
@@ -779,13 +786,13 @@ GBL.CHANGELOG_DATA = {
             "IsValidTimestamp validation helper prevents future epoch-0 writes at all storage boundaries",
         },
         Changed = {
-            "Sync logging unified into single AddAuditEntry system — SyncLog function removed; chat and audit trail now report identical information",
+            "Sync logging unified into single AddAuditEntry system - SyncLog function removed; chat and audit trail now report identical information",
         },
     }},
     -- v0.26.0
     {"0.26.0", "2026-04-17", {
         Added = {
-            "Sync aborts immediately when entering combat and notifies partner via BUSY — no more 95-second NACK timeout stalls during M+ or raid",
+            "Sync aborts immediately when entering combat and notifies partner via BUSY - no more 95-second NACK timeout stalls during M+ or raid",
             "Separate 2-second combat cooldown prevents sync from resuming during rapid trash-pack combat cycling",
             "HandleBusy now also aborts sending when the send target reports busy",
             "Sync status UI shows \"Paused (combat)\" when combat pause is active",
@@ -794,20 +801,20 @@ GBL.CHANGELOG_DATA = {
     -- v0.25.5
     {"0.25.5", "2026-04-17", {
         Fixed = {
-            "Periodic rescan no longer double-stores records that arrived via sync — session caches are invalidated after each sync chunk",
+            "Periodic rescan no longer double-stores records that arrived via sync - session caches are invalidated after each sync chunk",
         },
     }},
     -- v0.25.4
     {"0.25.4", "2026-04-17", {
         Fixed = {
-            "Sync no longer requests data from peers with fewer records — avoids receiving duplicate chunks that waste bandwidth",
+            "Sync no longer requests data from peers with fewer records - avoids receiving duplicate chunks that waste bandwidth",
             "Bidirectional check after sending skips reverse-requesting from peers with fewer records",
         },
     }},
     -- v0.25.3
     {"0.25.3", "2026-04-17", {
         Fixed = {
-            "Sync receiving state no longer gets permanently stuck when a sync request goes unanswered — properly retries with backoff and aborts after 3 attempts",
+            "Sync receiving state no longer gets permanently stuck when a sync request goes unanswered - properly retries with backoff and aborts after 3 attempts",
             "BUSY response from a peer now clears receiving state even with partial data received, preventing stuck sync",
             "Added 30-minute safety net to auto-abort any stuck receive session",
         },
@@ -822,37 +829,37 @@ GBL.CHANGELOG_DATA = {
     -- v0.25.1
     {"0.25.1", "2026-04-16", {
         Fixed = {
-            "Online peers list showed peers for up to 5 minutes after disconnect — roster is now cross-checked for recently-seen peers",
+            "Online peers list showed peers for up to 5 minutes after disconnect - roster is now cross-checked for recently-seen peers",
         },
     }},
     -- v0.25.0
     {"0.25.0", "2026-04-16", {
         Added = {
-            "Epidemic gossip sync — data propagates exponentially across guild; each peer becomes a seed after receiving",
-            "Concurrent send + receive — send to one peer while receiving from another simultaneously",
-            "Smart peer selection — priority scoring replaces FIFO queue (most divergent peers sync first)",
-            "GUILD manifest broadcast — bucket hashes broadcast every 5 min for state discovery",
-            "Hash-gated HELLO reply suppression — near-zero WHISPER traffic in large guilds",
-            "Forced HELLO rate limiting — prevents broadcast storms during rapid propagation",
+            "Epidemic gossip sync - data propagates exponentially across guild; each peer becomes a seed after receiving",
+            "Concurrent send + receive - send to one peer while receiving from another simultaneously",
+            "Smart peer selection - priority scoring replaces FIFO queue (most divergent peers sync first)",
+            "GUILD manifest broadcast - bucket hashes broadcast every 5 min for state discovery",
+            "Hash-gated HELLO reply suppression - near-zero WHISPER traffic in large guilds",
+            "Forced HELLO rate limiting - prevents broadcast storms during rapid propagation",
         },
         Changed = {
-            "Bidirectional check delay: 3s → 0.5s",
-            "Post-receive HELLO delay: 2s → 0.5–2s with jitter",
-            "Pending peers processing delay: 1s → 0.2s",
-            "Sync initiation jitter: 0–2s → 0–1s",
+            "Bidirectional check delay: 3s -> 0.5s",
+            "Post-receive HELLO delay: 2s -> 0.5-2s with jitter",
+            "Pending peers processing delay: 1s -> 0.2s",
+            "Sync initiation jitter: 0-2s -> 0-1s",
         },
     }},
     -- v0.24.0
     {"0.24.0", "2026-04-15", {
         Added = {
-            "\"Show minimap button\" toggle — hide the minimap icon while keeping the LDB launcher for display addons (requested by Rox)",
+            "\"Show minimap button\" toggle - hide the minimap icon while keeping the LDB launcher for display addons (requested by Rox)",
         },
     }},
     -- v0.23.0
     {"0.23.0", "2026-04-15", {
         Changed = {
-            "Sync chunk budget doubled and record cap raised (15→25) — halves chunk count for faster syncs",
-            "ACK timeout reduced from 15s to 8s with more retries (3→5) — faster recovery from message loss",
+            "Sync chunk budget doubled and record cap raised (15->25) - halves chunk count for faster syncs",
+            "ACK timeout reduced from 15s to 8s with more retries (3->5) - faster recovery from message loss",
             "ACK and NACK messages now sent with ALERT priority for faster delivery",
         },
         Fixed = {
@@ -921,7 +928,7 @@ GBL.CHANGELOG_DATA = {
             "Documentation sync for beta preparation: README, ROADMAP, CurseForge description updated",
         },
         Fixed = {
-            "Changelog tab showing blank content — nav bar moved inside scroll frame",
+            "Changelog tab showing blank content - nav bar moved inside scroll frame",
         },
         Removed = {
             "Obsolete planning docs (IMPLEMENTATION_PLAN.md, PLAN.md) deleted",
@@ -943,7 +950,7 @@ GBL.CHANGELOG_DATA = {
     -- v0.19.1
     {"0.19.1", "2026-04-14", {
         Fixed = {
-            "Sync chunk 1 no longer oversized — eventCounts spread across chunks",
+            "Sync chunk 1 no longer oversized - eventCounts spread across chunks",
         },
     }},
     -- v0.19.0
@@ -968,7 +975,7 @@ GBL.CHANGELOG_DATA = {
     -- v0.18.0
     {"0.18.0", "2026-04-14", {
         Added = {
-            "Directional peer version status — shows who needs to update",
+            "Directional peer version status - shows who needs to update",
             "Version label in top-right corner with peer-based update detection",
             "CompareSemver utility and GetHighestPeerVersion getter",
         },
@@ -976,7 +983,7 @@ GBL.CHANGELOG_DATA = {
     -- v0.17.0
     {"0.17.0", "2026-04-14", {
         Added = {
-            "Event count metadata — persists API-observed counts for accurate dedup",
+            "Event count metadata - persists API-observed counts for accurate dedup",
             "Count-based cleanup replaces heuristic anchor logic",
             "Post-sync cleanup trims diverged-index duplicates automatically",
             "eventCounts synced between peers (max wins, backwards-compatible)",
@@ -985,7 +992,7 @@ GBL.CHANGELOG_DATA = {
     }},
     -- v0.16.0
     {"0.16.0", "2026-04-14", {
-        Added = {"Changelog tab in addon UI — scrollable version history"},
+        Added = {"Changelog tab in addon UI - scrollable version history"},
     }},
     -- v0.15.x
     {"0.15.2", "2026-04-14", {
