@@ -19,6 +19,7 @@ Every guild member running the addon automatically logs and shares data. No setu
 - Data spreads exponentially across the guild through epidemic gossip
 - Concurrent send and receive for maximum throughput
 - Members constantly share notes: whoever is free pairs with whoever needs data next, so nobody waits on a "best" partner
+- Catching up happens in short sessions rather than one long one, so a member joining a guild with years of history fills in over a series of handovers instead of tying up a partner for hours
 - Delta sync only transfers what's actually different
 - Compressed transfers, retry on failure, FPS-adaptive throttling
 - **Members on different versions keep syncing** (0.37.0 and later). Your guild does not have to update in lockstep for data to keep flowing
