@@ -300,7 +300,7 @@ function GBL:UpdateVersionLabel()
     local highest = self:GetHighestPeerVersion()
     if highest and self:CompareSemver(self.version, highest) < 0 then
         self._versionLabel:SetText("|cffff8800v" .. self.version
-            .. " — update available (v" .. highest .. ")!|r")
+            .. " - update available (v" .. highest .. ")!|r")
     else
         self._versionLabel:SetText("|cff888888v" .. self.version .. "|r")
     end
@@ -329,7 +329,7 @@ function GBL:SelectTab(tabName)
     if accessLevel == "own_transactions" then
         self:AddRestrictedBanner(self.tabGroup, "Showing your transactions only.")
     elseif accessLevel == "sync_only" then
-        self:AddRestrictedBanner(self.tabGroup, "Restricted view — limited tabs available.")
+        self:AddRestrictedBanner(self.tabGroup, "Restricted view - limited tabs available.")
     end
 
     local guildData = self:GetGuildData()

@@ -462,7 +462,7 @@ function GBL:InitSync()
             if syncState.sending and syncState.sendTarget
                 and GBL:StripRealm(syncState.sendTarget) == bare then
                 GBL:AddAuditEntry("Target " .. syncState.sendTarget
-                    .. " confirmed offline (system error) — aborting send")
+                    .. " confirmed offline (system error) - aborting send")
                 GBL:FinishSending()
             end
             return true  -- suppress the system message
@@ -1076,7 +1076,7 @@ function GBL:HandleHello(sender, data)
     -- Fast path: skip when datasets are identical (hash + count match)
     if localDataHash and data.dataHash == localDataHash and localCount == remoteCount then
         self:AddAuditEntry("Skipped sync from " .. sender
-            .. " — datasets identical (hash: " .. localDataHash
+            .. " - datasets identical (hash: " .. localDataHash
             .. ", tx: " .. localCount .. ")")
         return
     end
@@ -1089,7 +1089,7 @@ function GBL:HandleHello(sender, data)
             -- We have strictly more records — likely a superset.
             -- Peer will request from us; bidirectional check handles edge cases.
             self:AddAuditEntry("Skipped request from " .. sender
-                .. " — likely superset (local=" .. localCount
+                .. " - likely superset (local=" .. localCount
                 .. " > remote=" .. remoteCount .. ")")
             -- Correlate the skip with the reply gate above: if we are ahead AND
             -- the reply was suppressed-hash-unchanged AND no SYNC_REQUEST follows
@@ -1139,12 +1139,12 @@ function GBL:HandleHello(sender, data)
             -- is not stored; combat end re-advertises and the pairing comes
             -- back around through the usual HELLO exchange.
             syncState.helloAfterCombat = true
-            self:AddAuditEntry("Deferred sync from " .. sender .. " — in combat")
+            self:AddAuditEntry("Deferred sync from " .. sender .. " - in combat")
         else
             -- Add 0-2s random jitter to prevent mutual SYNC_REQUEST oscillation
             -- when multiple peers respond to the same HELLO simultaneously
             self:AddAuditEntry("Sync triggered by " .. syncReason
-                .. " — requesting from " .. sender .. " (with jitter)")
+                .. " - requesting from " .. sender .. " (with jitter)")
             local jitter = math.random() * 1
             C_Timer.After(jitter, function()
                 -- Someone else got here first during the jitter window. Drop
@@ -1687,7 +1687,7 @@ function GBL:HandleSyncRequest(sender, data)
         -- Fallback: old-style sinceTimestamp filtering (no bucket hashes from requester)
         local sinceTimestamp = data.sinceTimestamp or 0
         local totalLocal = #guildData.transactions + #guildData.moneyTransactions
-        self:AddAuditEntry("No bucket hashes in request — falling back to sinceTimestamp="
+        self:AddAuditEntry("No bucket hashes in request - falling back to sinceTimestamp="
             .. sinceTimestamp .. " (local has " .. totalLocal .. " total tx)")
         for _, tx in ipairs(guildData.transactions) do
             local when = tx.scanTime or tx.timestamp or 0
@@ -2036,7 +2036,7 @@ function GBL:SendNextChunk()
         if ctlDrain.episodeStart then
             ctlDrain.episodePaused = true
         end
-        self:AddAuditEntry("SendNextChunk deferred — zone/combat transition in progress")
+        self:AddAuditEntry("SendNextChunk deferred - zone/combat transition in progress")
         return
     end
 
@@ -2085,7 +2085,7 @@ function GBL:SendNextChunk()
                 .. ", #" .. ctlDeferTotal
                 .. ", t=" .. string.format("%.3f", nowT)
                 .. suffix
-                .. ") — deferring " .. CTL_BACKOFF_DELAY .. "s")
+                .. ") - deferring " .. CTL_BACKOFF_DELAY .. "s")
         end
         C_Timer.After(CTL_BACKOFF_DELAY, function()
             ctlDrain.timersPending = math.max(0, ctlDrain.timersPending - 1)
@@ -2220,7 +2220,7 @@ function GBL:SendNextChunk()
     local gapStr = interChunkGap and string.format(", gap=%.2fs", interChunkGap) or ""
     local chunkMsg = "Sending chunk " .. idx .. "/" .. total
         .. " to " .. (syncState.sendTarget or "?")
-        .. " (" .. chunkRecords .. " records, " .. rawLen .. "→" .. msgLen .. " bytes"
+        .. " (" .. chunkRecords .. " records, " .. rawLen .. "->" .. msgLen .. " bytes"
         .. ", " .. math.floor((1 - msgLen / math.max(rawLen, 1)) * 100) .. "% compressed"
         .. ctlAvailAtSend .. gapStr .. ")"
     -- Chat: every chunk; audit trail: 1st, every 10th, and last
@@ -2329,7 +2329,7 @@ function GBL:FinishSending()
     local elapsed = GetServerTime() - syncState.sendStartTime
 
     self:AddAuditEntry("Send complete to " .. target
-        .. " — " .. sent .. "/" .. total .. " chunks"
+        .. " - " .. sent .. "/" .. total .. " chunks"
         .. ", " .. syncState.sendTotalRecords .. " records, " .. elapsed .. "s")
 
     -- Close a drain episode that is still open, BEFORE the stats line reads
@@ -2519,7 +2519,7 @@ function GBL:FinishSending()
             if peerInfo.dataHash ~= localHash
                 or remoteTxCount ~= localCount then
                 if localCount > remoteTxCount then
-                    self:AddAuditEntry("Bidirectional check: skipped — likely superset (local="
+                    self:AddAuditEntry("Bidirectional check: skipped - likely superset (local="
                         .. localCount .. " > remote=" .. remoteTxCount .. ")")
                     -- Symmetric with the HandleHello superset re-nudge (v0.32.12):
                     -- we are ahead and skipping, so a behind peer past the hash-gate
@@ -2540,16 +2540,16 @@ function GBL:FinishSending()
                     end
                 elseif self:IsPeerBusy(cleanTarget) then
                     self:AddAuditEntry("Bidirectional check: skipped "
-                        .. cleanTarget .. " — busy cooldown")
+                        .. cleanTarget .. " - busy cooldown")
                 else
                     self:AddAuditEntry("Bidirectional check: hashes still differ with "
-                        .. cleanTarget .. " — requesting sync")
+                        .. cleanTarget .. " - requesting sync")
                     local since = gd.syncState.lastSyncTimestamp or 0
                     self:RequestSync(cleanTarget, since)
                 end
             else
                 self:AddAuditEntry("Bidirectional check: hashes match with "
-                    .. cleanTarget .. " — no sync needed")
+                    .. cleanTarget .. " - no sync needed")
             end
         end)
     end
@@ -2896,7 +2896,7 @@ function GBL:FinishReceiving(sender)
     local newHash = guildData and self:GetDataHash(guildData) or 0
 
     self:AddAuditEntry("Sync complete from " .. (sender or "unknown")
-        .. " — " .. totalStored .. " new, " .. totalDuped .. " duped"
+        .. " - " .. totalStored .. " new, " .. totalDuped .. " duped"
         .. ", " .. totalNormalized .. " normalized"
         .. ", " .. chunksGot .. " chunks, " .. elapsed .. "s"
         .. " | total tx now: " .. totalTxAfter .. ", hash: " .. newHash)
@@ -2926,7 +2926,7 @@ function GBL:FinishReceiving(sender)
         local line = "Redundancy from " .. (sender or "unknown") .. ": "
             .. totalDupPct .. "% duped (" .. totalDuped .. "/" .. totalGot .. " received)"
         if #segments > 0 then
-            line = line .. " — " .. table.concat(segments, ", ")
+            line = line .. " - " .. table.concat(segments, ", ")
         end
         self:AddAuditEntry(line)
     end
@@ -3471,7 +3471,7 @@ function GBL:HandleNack(sender, data)
     syncState.nacksReceivedDuringSync = (syncState.nacksReceivedDuringSync or 0) + 1
     syncState.nacksForCurrentChunk = (syncState.nacksForCurrentChunk or 0) + 1
     self:AddAuditEntry("NACK from " .. sender .. " for chunk " .. requestedChunk
-        .. " — re-transmitting" .. ctlState)
+        .. " - re-transmitting" .. ctlState)
 
     -- v0.28.7: tag retry cause on the chunk we're re-requesting
     if syncState.chunkOutcomes and syncState.chunkOutcomes[requestedChunk] then
@@ -3517,7 +3517,7 @@ function GBL:HandleBusy(sender, data) -- luacheck: ignore 212/data
         syncState.receiveNackCount = 0
         self._syncReceiving = false
 
-        self:AddAuditEntry(cleanSender .. " busy — cleared receive state, will retry later")
+        self:AddAuditEntry(cleanSender .. " busy - cleared receive state, will retry later")
     end
 
     -- Also abort sending if BUSY came from our send target
@@ -3548,7 +3548,7 @@ function GBL:HandleBusy(sender, data) -- luacheck: ignore 212/data
         syncState.sendRemainingBuckets = 0
         self:StopFpsMonitor()
 
-        self:AddAuditEntry(cleanSender .. " busy — aborting send")
+        self:AddAuditEntry(cleanSender .. " busy - aborting send")
     end
 
     -- Leave them alone for a while, regardless of whether we cleared state.
@@ -3576,7 +3576,7 @@ function GBL:OnCombatStart()
         syncState.combatCooldownTimer = nil
     end
 
-    self:AddAuditEntry("Combat started — aborting sync")
+    self:AddAuditEntry("Combat started - aborting sync")
 
     -- Capture partner names BEFORE calling Finish (which clears them)
     local sendTarget = syncState.sendTarget
@@ -3653,7 +3653,7 @@ function GBL:OnCombatEnd()
         syncState.combatCooldownTimer = C_Timer.NewTicker(COMBAT_COOLDOWN, function()
             syncState.combatPaused = false
             syncState.combatCooldownTimer = nil
-            self:AddAuditEntry("Combat cooldown complete — sync resumed")
+            self:AddAuditEntry("Combat cooldown complete - sync resumed")
             -- Combat aborted a live session, so our peers were left mid-
             -- exchange. Re-advertise whatever we ended up holding.
             syncState.helloAfterCombat = false
@@ -3670,7 +3670,7 @@ function GBL:OnCombatEnd()
             if isSyncPaused() then return end
             if not self.db.profile.sync.enabled then return end
             self:BroadcastHello(true)
-            self:AddAuditEntry("Combat ended — re-advertising to resume pairing")
+            self:AddAuditEntry("Combat ended - re-advertising to resume pairing")
         end)
     end
 end
@@ -3684,7 +3684,7 @@ end
 function GBL:OnLoadingScreenStart()
     if not syncState.sending and not syncState.receiving then return end
     syncState.zonePaused = true
-    self:AddAuditEntry("Loading screen detected — sync paused")
+    self:AddAuditEntry("Loading screen detected - sync paused")
 
     -- v0.28.7: tag the in-flight chunk so the histogram attributes the gap
     -- to a zone pause, not to a successful ACK on the pre-pause chunk. The
@@ -3734,11 +3734,11 @@ function GBL:OnLoadingScreenEnd()
 
         -- Don't resume if still in combat (zone change during combat scenario)
         if syncState.combatPaused then
-            self:AddAuditEntry("Zone cooldown complete but still in combat — deferring")
+            self:AddAuditEntry("Zone cooldown complete but still in combat - deferring")
             return
         end
 
-        self:AddAuditEntry("Zone cooldown complete — sync resumed")
+        self:AddAuditEntry("Zone cooldown complete - sync resumed")
 
         -- Resume sending if we were the sender
         if syncState.sending then
@@ -3781,11 +3781,11 @@ function GBL:StartFpsMonitor()
         if fps < FPS_THRESHOLD_LOW and syncState.currentDelay < INTER_CHUNK_DELAY_SLOW then
             syncState.currentDelay = INTER_CHUNK_DELAY_SLOW
             self_ref:AddAuditEntry("FPS low (" .. math.floor(fps)
-                .. ") — sync delay increased to " .. INTER_CHUNK_DELAY_SLOW .. "s")
+                .. ") - sync delay increased to " .. INTER_CHUNK_DELAY_SLOW .. "s")
         elseif fps > FPS_THRESHOLD_RECOVER and syncState.currentDelay > INTER_CHUNK_DELAY_NORMAL then
             syncState.currentDelay = INTER_CHUNK_DELAY_NORMAL
             self_ref:AddAuditEntry("FPS recovered (" .. math.floor(fps)
-                .. ") — sync delay restored to " .. INTER_CHUNK_DELAY_NORMAL .. "s")
+                .. ") - sync delay restored to " .. INTER_CHUNK_DELAY_NORMAL .. "s")
         end
     end)
 end

@@ -25,7 +25,7 @@ end
 --- to be visible to both call sites.
 local function formatOpRow(op, marker)
     local prefix = marker or "  "
-    return format("%s%s  %d × %s   T%d/%d → T%d/%d",
+    return format("%s%s  %d x %s   T%d/%d -> T%d/%d",
         prefix, op.op, op.count, itemLabel(op.itemID),
         op.srcTab, op.srcSlot, op.dstTab, op.dstSlot)
 end
@@ -81,9 +81,9 @@ function GBL:BuildSortTab(container)
     if not self:IsBankOpen() then
         status:SetText("|cffffcc00Open the guild bank to preview and execute sort.|r")
     elseif self._sortViewRescanning then
-        status:SetText("|cffffaa55Rescanning bank after sort \226\128\148 preview will update automatically.|r")
+        status:SetText("|cffffaa55Rescanning bank after sort - preview will update automatically.|r")
     elseif self:IsSortRunning() then
-        status:SetText("|cffffaa55Sort in progress \226\128\148 see progress below.|r")
+        status:SetText("|cffffaa55Sort in progress - see progress below.|r")
     else
         status:SetText("Ready. Click Preview to inspect the planned moves.")
     end
@@ -200,7 +200,7 @@ function GBL:_SortView_Preview()
     if self._sortViewRescanning then
         local lbl = AceGUI:Create("Label")
         lbl:SetFullWidth(true)
-        lbl:SetText("|cffffaa55Waiting for fresh scan results\226\128\166|r")
+        lbl:SetText("|cffffaa55Waiting for fresh scan results...|r")
         content:AddChild(lbl)
         return
     end
@@ -248,7 +248,7 @@ function GBL:_SortView_Preview()
     local summary = AceGUI:Create("Label")
     summary:SetFullWidth(true)
     summary:SetText(format(
-        "|cff00ff88Plan:|r %d moves · |cffffaa55%d deficits|r · |cffff5555%d unplaced|r",
+        "|cff00ff88Plan:|r %d moves, |cffffaa55%d deficits|r, |cffff5555%d unplaced|r",
         opsN, defN, unpN))
     headerParent:AddChild(summary)
 
@@ -272,7 +272,7 @@ function GBL:_SortView_Preview()
     if opsN == 0 and defN == 0 and unpN == 0 then
         local lbl = AceGUI:Create("Label")
         lbl:SetFullWidth(true)
-        lbl:SetText("|cff00ff88Bank already matches layout — nothing to do.|r")
+        lbl:SetText("|cff00ff88Bank already matches layout - nothing to do.|r")
         content:AddChild(lbl)
         return
     end
@@ -289,7 +289,7 @@ function GBL:_SortView_Preview()
             local lbl = AceGUI:Create("Label")
             lbl:SetFullWidth(true)
             lbl:SetFontObject(GameFontNormalSmall)
-            lbl:SetText(format("  %s  %d × %s   T%d/%d → T%d/%d",
+            lbl:SetText(format("  %s  %d x %s   T%d/%d -> T%d/%d",
                 op.op, op.count, itemLabel(op.itemID),
                 op.srcTab, op.srcSlot, op.dstTab, op.dstSlot))
             content:AddChild(lbl)
@@ -321,7 +321,7 @@ function GBL:_SortView_Preview()
             local lbl = AceGUI:Create("Label")
             lbl:SetFullWidth(true)
             lbl:SetFontObject(GameFontNormalSmall)
-            lbl:SetText(format("  |cffffaa55missing %d × %s|r", count, itemLabel(itemID)))
+            lbl:SetText(format("  |cffffaa55missing %d x %s|r", count, itemLabel(itemID)))
             content:AddChild(lbl)
         end
     end
@@ -330,13 +330,13 @@ function GBL:_SortView_Preview()
     if unpN > 0 then
         local h = AceGUI:Create("Heading")
         h:SetFullWidth(true)
-        h:SetText("Unplaced (couldn't route — overflow full)")
+        h:SetText("Unplaced (couldn't route - overflow full)")
         content:AddChild(h)
         for _, u in ipairs(plan.unplaced) do
             local lbl = AceGUI:Create("Label")
             lbl:SetFullWidth(true)
             lbl:SetFontObject(GameFontNormalSmall)
-            lbl:SetText(format("  |cffff5555%d × %s at T%d/%d|r",
+            lbl:SetText(format("  |cffff5555%d x %s at T%d/%d|r",
                 u.count, itemLabel(u.itemID), u.tabIndex, u.slotIndex))
             content:AddChild(lbl)
         end
@@ -363,7 +363,7 @@ function GBL:_SortView_Execute()
 
     local plan = self._sortLastPlan
     if not plan or not plan.ops or #plan.ops == 0 then
-        self:Print("No plan to execute — click Preview first.")
+        self:Print("No plan to execute - click Preview first.")
         return
     end
     local layout = self:GetBankLayout()
@@ -421,21 +421,21 @@ function GBL:_SortView_OnProgress(_msg, payload)
     if phase == "finish" then
         if payload.ok then
             text = format(
-                "|cff00ff88Sort complete|r — %d done, %d failed, %d replans. Rescanning...",
+                "|cff00ff88Sort complete|r - %d done, %d failed, %d replans. Rescanning...",
                 payload.done or 0, payload.failed or 0, payload.replans or 0)
         else
             text = format(
-                "|cffff5555Sort aborted|r (%s) — %d done, %d failed, %d replans.",
+                "|cffff5555Sort aborted|r (%s) - %d done, %d failed, %d replans.",
                 tostring(payload.reason or "?"),
                 payload.done or 0, payload.failed or 0, payload.replans or 0)
         end
     elseif phase == "replan" then
         text = format(
-            "|cffffaa55Replan %d|r (%s) — %d done, %d failed so far.",
+            "|cffffaa55Replan %d|r (%s) - %d done, %d failed so far.",
             payload.replans or 0, tostring(payload.replanReason or "?"),
             payload.done or 0, payload.failed or 0)
     elseif phase == "start" then
-        text = format("|cffffaa55Starting|r — 0 / %d moves.", payload.total or 0)
+        text = format("|cffffaa55Starting|r - 0 / %d moves.", payload.total or 0)
     else
         -- step / complete / failed / reclassify / planupdated — show
         -- position within the CURRENT plan. We deliberately don't use
@@ -447,7 +447,7 @@ function GBL:_SortView_OnProgress(_msg, payload)
         local opT = payload.total or 0
         if opN > opT then opN = opT end  -- clamp at finish
         text = format(
-            "|cffffaa55Executing|r — op %d / %d  (%d done, %d failed, %d replans)",
+            "|cffffaa55Executing|r - op %d / %d  (%d done, %d failed, %d replans)",
             opN, opT,
             payload.done or 0, payload.failed or 0, payload.replans or 0)
     end

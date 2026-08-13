@@ -80,6 +80,46 @@ local function stripComments(src)
     return table.concat(out)
 end
 
+--- Line numbers carrying a byte above 127, decimal escapes included.
+-- `"\226\156\147"` is ASCII on disk and a check mark on screen, so reading
+-- the source bytes alone misses it. Backslashes are consumed as escapes so
+-- an escaped backslash cannot make the digits after it look like one.
+-- @param code string Source with comments already blanked
+-- @return table Array of line numbers, each listed once
+local function nonAsciiLines(code)
+    local hits, seen = {}, {}
+    local line, i, n = 1, 1, #code
+
+    local function report()
+        if not seen[line] then
+            seen[line] = true
+            hits[#hits + 1] = line
+        end
+    end
+
+    while i <= n do
+        local byte = code:byte(i)
+        if byte == 10 then
+            line = line + 1
+            i = i + 1
+        elseif byte == 92 then
+            local digits = code:match("^\\(%d%d?%d?)", i)
+            if digits then
+                if tonumber(digits) > 127 then report() end
+                i = i + 1 + #digits
+            else
+                if code:byte(i + 1) == 10 then line = line + 1 end
+                i = i + 2
+            end
+        else
+            if byte > 127 then report() end
+            i = i + 1
+        end
+    end
+
+    return hits
+end
+
 --- Read a whole file, or nil if it cannot be opened.
 local function readFile(path)
     local fh = io.open(path, "rb")
@@ -121,22 +161,33 @@ describe("In-game strings", function()
         for _, path in ipairs(tocSourceFiles() or {}) do
             local src = readFile(path)
             assert.is_string(src, "could not read " .. path)
-
-            local code = stripComments(src)
-            local line = 1
-            local reportedOnLine = nil
-            for i = 1, #code do
-                local byte = code:byte(i)
-                if byte == 10 then
-                    line = line + 1
-                elseif byte > 127 and reportedOnLine ~= line then
-                    reportedOnLine = line
-                    offenders[#offenders + 1] = path .. ":" .. line
-                end
+            for _, line in ipairs(nonAsciiLines(stripComments(src))) do
+                offenders[#offenders + 1] = path .. ":" .. line
             end
         end
 
         assert.same({}, offenders)
+    end)
+
+    describe("escape decoding", function()
+        it("flags a decimal escape above 127", function()
+            assert.same({ 1 }, nonAsciiLines([[x = "\226\156\147"]]))
+        end)
+
+        it("passes a decimal escape inside ASCII", function()
+            assert.same({}, nonAsciiLines([[x = "\65\66"]]))
+        end)
+
+        -- The backslash of an escaped backslash swallows the second one, so
+        -- the digits after it are text rather than an escape.
+        it("does not read digits after an escaped backslash as an escape",
+        function()
+            assert.same({}, nonAsciiLines('x = "a\\\\226"'))
+        end)
+
+        it("reports each line once and counts lines correctly", function()
+            assert.same({ 2 }, nonAsciiLines('a\nx = "\\200\\201"\nb'))
+        end)
     end)
 
     -- The stripper is doing the load-bearing work: get it wrong in the

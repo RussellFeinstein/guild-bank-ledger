@@ -365,7 +365,7 @@ function GBL:RenderPeerList(container)
                 or ("seen " .. agoStr)
 
             lbl:SetText("  " .. name
-                .. " — v" .. peerVersion .. versionTag
+                .. " - v" .. peerVersion .. versionTag
                 .. ", " .. (info.txCount or 0) .. " tx"
                 .. ", " .. seenStr)
         end

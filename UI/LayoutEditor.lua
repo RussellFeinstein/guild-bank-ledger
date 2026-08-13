@@ -238,7 +238,7 @@ function GBL:_LayoutGrantSummary()
     local tier = sa and sa.write or nil
     local who = "GM only"
     if tier and tier.rankThreshold ~= nil then
-        who = "GM + ranks \226\137\164 " .. tier.rankThreshold  -- "<="
+        who = "GM + ranks <= " .. tier.rankThreshold
     end
     local n = 0
     if tier and type(tier.delegates) == "table" then
@@ -444,7 +444,7 @@ function GBL:_LayoutEditor_RenderSaveBar(parent, writable)
         saveBtn:SetText("Save Layout")
         saveBtn:SetDisabled(false)
     else
-        saveBtn:SetText("Saved \226\156\147")  -- "Saved ✓"
+        saveBtn:SetText("Saved [ok]")
         saveBtn:SetDisabled(true)
     end
     saveBtn:SetCallback("OnClick", function()
@@ -834,7 +834,7 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
     if #itemIDs == 0 then
         local empty = AceGUI:Create("Label")
         empty:SetFullWidth(true)
-        empty:SetText("|cff888888(no items configured — use Capture or Add Item)|r")
+        empty:SetText("|cff888888(no items configured - use Capture or Add Item)|r")
         parent:AddChild(empty)
     else
         for _, itemID in ipairs(itemIDs) do
@@ -1119,7 +1119,7 @@ function GBL:_LayoutEditor_RenderSlotMap(parent, tabIndex)
                 totalMismatches, MAX_SLOTS))
         end
     else
-        table.insert(parts, "|cff888888(no scan loaded — comparison unavailable)|r")
+        table.insert(parts, "|cff888888(no scan loaded - comparison unavailable)|r")
     end
     summary:SetText(table.concat(parts, "; "))
     parent:AddChild(summary)
@@ -1135,7 +1135,7 @@ function GBL:_LayoutEditor_RenderSlotMap(parent, tabIndex)
         else
             rangeStr = format("S%d-S%d", run.startSlot, run.endSlot)
         end
-        local baseText = format("|cffcccccc%s (%d):|r  %s × %d",
+        local baseText = format("|cffcccccc%s (%d):|r  %s x %d",
             rangeStr, run.length, itemLabelFor(run.itemID), perSlot)
         local line = AceGUI:Create("Label")
         line:SetFullWidth(true)
@@ -1143,9 +1143,9 @@ function GBL:_LayoutEditor_RenderSlotMap(parent, tabIndex)
         if not scanSlots then
             line:SetText(baseText)
         elseif #mismatches == 0 then
-            line:SetText(baseText .. "  |cff00ff88✓|r")
+            line:SetText(baseText .. "  |cff00ff88[ok]|r")
         else
-            line:SetText(format("%s  |cffff5555✗ %d mismatch(es)|r",
+            line:SetText(format("%s  |cffff5555[x] %d mismatch(es)|r",
                 baseText, #mismatches))
         end
         parent:AddChild(line)
@@ -1211,7 +1211,7 @@ function GBL:_LayoutEditor_RenderSlotMap(parent, tabIndex)
             else
                 suffix = format("(%d auto-placed)", unpinnedByItem[id])
             end
-            line:SetText(format("    %s × %d  %s",
+            line:SetText(format("    %s x %d  %s",
                 itemLabelFor(id), perSlot, suffix))
             parent:AddChild(line)
         end
@@ -1247,7 +1247,7 @@ local function renderAccessTier(self, parent, sa, tierKey, tierLabel, tierHelp, 
     summary:SetFontObject(GameFontNormalSmall)
     local who = "GM only"
     if tier.rankThreshold ~= nil then
-        who = "GM + ranks \226\137\164 " .. tier.rankThreshold
+        who = "GM + ranks <= " .. tier.rankThreshold
     end
     local delegateCount = 0
     for _ in pairs(tier.delegates or {}) do delegateCount = delegateCount + 1 end
