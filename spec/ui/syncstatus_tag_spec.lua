@@ -24,8 +24,8 @@ describe("Peer version tag", function()
         GBL:OnInitialize()
     end)
 
-    -- Versions derived relative to the runtime version and the floor so
-    -- stamp commits change nothing here (2026-05-05 version-literal lesson).
+    -- Versions derived from the floor rather than written out, so stamp
+    -- commits change nothing here (2026-05-05 version-literal lesson).
     local function belowFloor() return "0.1.0" end
 
     local function newerVersion(v)
@@ -33,18 +33,24 @@ describe("Peer version tag", function()
         return (major + 1) .. ".0.0"
     end
 
+    --- Shift a semver by whole patch releases.
+    local function bumpPatch(v, by)
+        local maj, min, patch = v:match("^(%d+)%.(%d+)%.(%d+)")
+        return maj .. "." .. min .. "." .. (tonumber(patch) + by)
+    end
+
     --- Older than us but still at or above the floor, so genuinely compatible.
     local function compatibleOlder()
-        local maj, min, patch = GBL.version:match("^(%d+)%.(%d+)%.(%d+)")
-        patch = tonumber(patch)
-        if patch and patch > 0 then
-            local candidate = maj .. "." .. min .. "." .. (patch - 1)
-            if GBL:CompareSemver(candidate, GBL.MIN_SYNC_VERSION) >= 0 then
-                return candidate
-            end
-        end
-        return GBL.MIN_SYNC_VERSION
+        return bumpPatch(GBL.MIN_SYNC_VERSION, 1)
     end
+
+    -- State the local version instead of inheriting the build's. A dev
+    -- branch sets DEV_BUILD, and a dev version refuses every peer by
+    -- design, so otherwise every case here would tag as a dev build and
+    -- the block would be testing isolation rather than the tags.
+    before_each(function()
+        GBL.version = bumpPatch(GBL.MIN_SYNC_VERSION, 2)
+    end)
 
     it("tags a peer below the floor as refused, in warning colour", function()
         local tag = GBL:_PeerVersionTag(

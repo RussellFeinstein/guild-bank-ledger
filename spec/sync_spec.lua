@@ -3580,24 +3580,32 @@ describe("Sync", function()
     ---------------------------------------------------------------------------
 
     describe("ClassifyPeerVersion", function()
-        --- Older than us but at or above the floor, derived rather than
-        --- hardcoded so a stamp commit leaves it valid.
+        --- Shift a semver by whole patch releases.
+        local function bumpPatch(v, by)
+            local maj, min, patch = v:match("^(%d+)%.(%d+)%.(%d+)")
+            return maj .. "." .. min .. "." .. (tonumber(patch) + by)
+        end
+
+        --- Older than us but at or above the floor, so genuinely compatible.
         local function compatibleOlder()
-            local maj, min, patch = GBL.version:match("^(%d+)%.(%d+)%.(%d+)")
-            patch = tonumber(patch)
-            if patch and patch > 0 then
-                local candidate = maj .. "." .. min .. "." .. (patch - 1)
-                if GBL:CompareSemver(candidate, GBL.MIN_SYNC_VERSION) >= 0 then
-                    return candidate
-                end
-            end
-            return GBL.MIN_SYNC_VERSION
+            return bumpPatch(GBL.MIN_SYNC_VERSION, 1)
         end
 
         local function aheadVersion()
             local major = tonumber(GBL.version:match("^(%d+)")) or 0
             return (major + 1) .. ".0.0"
         end
+
+        -- State the local version rather than inheriting the build's, the
+        -- way the MIN_SYNC_VERSION block does. Two reasons: a dev branch
+        -- sets DEV_BUILD, and a dev version refuses every peer by design,
+        -- so without this every case below would classify as dev_peer and
+        -- the block would be testing the isolation rather than the
+        -- classifier. It also keeps the versions derived from the floor,
+        -- which only moves on a deliberate compatibility break.
+        before_each(function()
+            GBL.version = bumpPatch(GBL.MIN_SYNC_VERSION, 2)
+        end)
 
         it("classifies a below-floor peer as incompatible_old", function()
             assert.equals("incompatible_old",
@@ -3659,6 +3667,232 @@ describe("Sync", function()
             -- And the reload case: refused peer, flag long gone.
             assert.equals("incompatible_old",
                 GBL:ClassifyPeerVersion({ version = "0.1.0" }))
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Free-agent pairing
+    --
+    -- A peer that finishes a session becomes free and takes whatever the
+    -- next HELLO offers. There is no manifest of other members' bucket
+    -- hashes and no scored queue choosing a "best" next partner: gossip
+    -- converges without either, and the bookkeeping cost was paid on every
+    -- pop (a full bucket-hash walk per queued peer).
+    --
+    -- Two things the queue was quietly carrying have to survive it: not
+    -- hammering a peer that just said BUSY, and not losing a sync
+    -- opportunity to a combat window.
+    ---------------------------------------------------------------------------
+
+    describe("free-agent pairing", function()
+        --- A HELLO from a compatible peer holding data we do not have.
+        local function hello(fields)
+            fields = fields or {}
+            return {
+                type = "HELLO",
+                version = fields.version or GBL.version,
+                minSyncVersion = fields.minSyncVersion or GBL.MIN_SYNC_VERSION,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+                txCount = fields.txCount or 999,
+                dataHash = fields.dataHash or 987654,
+                lastScanTime = fields.lastScanTime or 1000,
+                isReply = fields.isReply,
+            }
+        end
+
+        local function countSent(msgType, target)
+            local count = 0
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                if ok and data.type == msgType
+                    and (target == nil or sent.target == target) then
+                    count = count + 1
+                end
+            end
+            return count
+        end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            MockWoW.guildRoster = {
+                { name = "OfficerB-TestRealm", isOnline = true },
+                { name = "OfficerC-TestRealm", isOnline = true },
+            }
+        end)
+
+        -----------------------------------------------------------------
+        -- The scored machinery is gone
+        -----------------------------------------------------------------
+
+        it("has no manifest broadcast or pending-peer queue API", function()
+            assert.is_nil(GBL.BroadcastManifest)
+            assert.is_nil(GBL.HandleManifest)
+            assert.is_nil(GBL.AddPendingPeer)
+            assert.is_nil(GBL.PopPendingPeer)
+            assert.is_nil(GBL.RemovePendingPeer)
+            assert.is_nil(GBL.ProcessPendingPeers)
+        end)
+
+        it("no longer reports a pending peer count", function()
+            assert.is_nil(GBL:GetSyncStatus().pendingPeersCount)
+        end)
+
+        -- An older peer keeps broadcasting MANIFEST at us for as long as
+        -- they are on an older build. The dispatch chain has no else, so
+        -- this is a no-op, and that is the whole compatibility story: no
+        -- protocol bump, no floor raise.
+        it("ignores a MANIFEST from an older peer without erroring", function()
+            local msg = GBL:Serialize({
+                type = "MANIFEST",
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+                dataHash = 4242,
+                txCount = 500,
+                buckets = { [1] = 11, [2] = 22 },
+            })
+            assert.has_no.errors(function()
+                GBL:OnSyncMessage(GBL.SYNC_PREFIX, msg, "GUILD", "OfficerB")
+            end)
+        end)
+
+        -----------------------------------------------------------------
+        -- BUSY backoff, without a queue to carry it
+        -----------------------------------------------------------------
+
+        it("marks a peer busy on BUSY and clears the mark when it expires",
+        function()
+            MockWoW.serverTime = 100000
+            GBL:HandleBusy("OfficerB", {})
+            assert.is_true(GBL:IsPeerBusy("OfficerB"))
+
+            MockWoW.serverTime = 100000 + GBL.SYNC_BUSY_COOLDOWN + 1
+            assert.is_false(GBL:IsPeerBusy("OfficerB"))
+        end)
+
+        it("does not request from a peer inside its BUSY cooldown", function()
+            MockWoW.serverTime = 100000
+            GBL:HandleBusy("OfficerB", {})
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleHello("OfficerB", hello())
+            fireJitterTimers()
+
+            assert.equals(0, countSent("SYNC_REQUEST", "OfficerB"))
+        end)
+
+        it("requests from the same peer once the cooldown expires", function()
+            MockWoW.serverTime = 100000
+            GBL:HandleBusy("OfficerB", {})
+            MockAce.sentCommMessages = {}
+
+            MockWoW.serverTime = 100000 + GBL.SYNC_BUSY_COOLDOWN + 1
+            GBL:HandleHello("OfficerB", hello())
+            fireJitterTimers()
+
+            assert.equals(1, countSent("SYNC_REQUEST", "OfficerB"))
+        end)
+
+        -- The check belongs at the automatic initiation sites, not inside
+        -- RequestSync: a manual pull is the user asking, and refusing it
+        -- silently would be its own bug.
+        it("still allows a direct RequestSync to a busy peer", function()
+            MockWoW.serverTime = 100000
+            GBL:HandleBusy("OfficerB", {})
+            MockAce.sentCommMessages = {}
+
+            GBL:RequestSync("OfficerB", 0)
+
+            assert.equals(1, countSent("SYNC_REQUEST", "OfficerB"))
+        end)
+
+        -----------------------------------------------------------------
+        -- Combat, without a queue to drain
+        -----------------------------------------------------------------
+
+        it("defers a combat-time HELLO and re-broadcasts when combat ends",
+        function()
+            MockWoW.inCombat = true
+            GBL:HandleHello("OfficerB", hello())
+            fireJitterTimers()
+            assert.equals(0, countSent("SYNC_REQUEST", "OfficerB"))
+
+            MockWoW.inCombat = false
+            MockAce.sentCommMessages = {}
+            GBL:OnCombatEnd()
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if not timer.cancelled and not timer.fired then
+                    timer.callback()
+                    timer.fired = true
+                end
+            end
+
+            assert.equals(1, countSent("HELLO"),
+                "combat end should re-advertise so pairing can resume")
+        end)
+
+        -- Twenty raid members ending combat together must not each fire a
+        -- broadcast. Only a client that actually deferred something does.
+        it("broadcasts nothing on combat end when nothing was deferred",
+        function()
+            MockAce.sentCommMessages = {}
+            GBL:OnCombatEnd()
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if not timer.cancelled and not timer.fired then
+                    timer.callback()
+                    timer.fired = true
+                end
+            end
+
+            assert.equals(0, countSent("HELLO"))
+        end)
+
+        -----------------------------------------------------------------
+        -- Free after a session, and drop what we cannot take now
+        -----------------------------------------------------------------
+
+        it("drops a HELLO that arrives mid-receive rather than queuing it",
+        function()
+            GBL:RequestSync("OfficerB", 0)
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleHello("OfficerC", hello({ dataHash = 555111 }))
+            fireJitterTimers()
+
+            assert.equals(0, countSent("SYNC_REQUEST", "OfficerC"))
+            assert.equals("OfficerB", GBL:GetSyncStatus().receiveSource)
+        end)
+
+        it("takes the next HELLO immediately once the session ends", function()
+            GBL:RequestSync("OfficerB", 0)
+            GBL:HandleHello("OfficerC", hello({ dataHash = 555111 }))
+            fireJitterTimers()
+
+            GBL:FinishReceiving("OfficerB")
+            MockAce.sentCommMessages = {}
+
+            -- The peer re-advertises on its own heartbeat; we are free now.
+            GBL:HandleHello("OfficerC", hello({ dataHash = 555111 }))
+            fireJitterTimers()
+
+            assert.equals(1, countSent("SYNC_REQUEST", "OfficerC"))
+        end)
+
+        -----------------------------------------------------------------
+        -- The pause guard the queue used to provide
+        -----------------------------------------------------------------
+
+        -- ProcessPendingPeers checked isSyncPaused before initiating, and
+        -- the jitter callback never had to because the queue was the
+        -- deferral. With the queue gone the callback is the only path.
+        it("does not request while a zone change has sync paused", function()
+            GBL:HandleHello("OfficerB", hello())
+            GBL:OnLoadingScreenStart()
+            MockAce.sentCommMessages = {}
+            fireJitterTimers()
+
+            assert.equals(0, countSent("SYNC_REQUEST", "OfficerB"))
         end)
     end)
 
