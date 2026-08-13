@@ -335,11 +335,15 @@ describe("Wire contract", function()
         it("bounds the envelope at its widest chunk numbering", function()
             -- The allowance is computed before packing ends, so it cannot know
             -- totalChunks. It reserves five digits for each of chunk and
-            -- totalChunks, which is what this pins.
+            -- totalChunks, which is what this pins. `remaining` is in the
+            -- skeleton for the same reason: it rides only the final chunk, but
+            -- which chunk is final is unknown while packing, so the allowance
+            -- carries it on every chunk and has to cover its widest value.
             local skeleton = {
                 type = "SYNC_DATA",
                 chunk = 99999,
                 totalChunks = 99999,
+                remaining = 99999,
                 transactions = {},
                 moneyTransactions = {},
                 eventCounts = {},

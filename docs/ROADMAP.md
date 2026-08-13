@@ -17,6 +17,7 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 - Fingerprint-based delta sync with 6-hour bucket hashing
 - LibDeflate compression, chunked transfer with 1-fragment chunks (510 B whole-message budget, covering records, event counts and the envelope together) and a 1.0s gap floor for cross-realm reliability
 - Epidemic gossip propagation, free-agent pairing (retired the scored peer selection in v0.37.6), hash-gated HELLO reply suppression
+- Bounded sessions (v0.37.7): a session carries about 300 records in whole buckets and reports what it held back, so a long backfill completes across a series of short sessions instead of one hours-long lock
 - Retry logic, FPS-adaptive throttling, combat / zone change protection
 - Peer canonicalization (`CanonicalPeerKey`) handling cross-realm and bare-name ambiguity correctly
 - Per-chunk audit outcomes (ok / ackTimeout / nack / combatAbort / zoneAbort / busyAbort / sendFailed)

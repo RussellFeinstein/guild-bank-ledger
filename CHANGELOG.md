@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.7] - 2026-08-13
+
+### Changed
+- A sync session now hands over a bounded slice and stops, instead of running until everything one member is missing has been transferred. A member catching up on months of history used to hold a partner for hours, and anything that interrupted that (combat, a loading screen, a disconnect) threw the session away and started it over. A session now carries roughly 300 records, tells the receiver how much is still waiting, and ends. The receiver asks again and picks up where it left off, so a backfill finishes across a series of short sessions and both members are back in the pool for other partners within minutes. Members who have not taken this update sync with it normally.
+
 ## [0.37.6] - 2026-08-13
 
 ### Changed
