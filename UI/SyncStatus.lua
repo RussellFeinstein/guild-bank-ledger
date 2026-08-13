@@ -39,21 +39,28 @@ end
 -- a warning colour. The compatible-older note is deliberately uncoloured:
 -- grey is the inactive colour (roster-only text, dev-build rows), and a
 -- peer in this state is syncing.
+--
+-- The verdict comes from GBL:ClassifyPeerVersion, which reads the peer's
+-- advertised version and floor rather than the session-only `outdated`
+-- flag, so a peer seeded from knownPeers after a reload is tagged
+-- correctly even when they never transmit this session.
 -- @param info table Peer info from GetSyncPeers()
 -- @param peerVersion string info.version, or "?" when unknown
 -- @return string Tag with a leading space, or "" when there is nothing to say
 function GBL:_PeerVersionTag(info, peerVersion)
-    if info.outdated then
-        if info.versionRelation == "local_behind" then
-            return " |cff44aaff(newer - update to sync)|r"
-        end
-        return " |cffff4400(too old - no sync)|r"
-    end
-    if peerVersion ~= self.version and peerVersion ~= "?" then
-        if self:CompareSemver(self.version, peerVersion) < 0 then
-            return " |cff44aaff(newer - update available)|r"
-        end
-        return " (older, syncing)"
+    local class = self:ClassifyPeerVersion(info, peerVersion)
+    if class == "incompatible_new" then
+        return " |cff44aaff(newer | update to sync)|r"
+    elseif class == "incompatible_old" then
+        return " |cffff4400(too old | sync refused)|r"
+    elseif class == "dev_peer" then
+        -- Nothing for the viewer to act on, so the inactive colour rather
+        -- than the warning one.
+        return " |cffa0a0a0(dev build | sync refused)|r"
+    elseif class == "newer_ok" then
+        return " |cff44aaff(newer | update available)|r"
+    elseif class == "older_ok" then
+        return " (older | syncing)"
     end
     return ""
 end
