@@ -34,7 +34,7 @@ All record IDs in a bucket are hashed (djb2) and XOR'd together to produce a 32-
 4. **ACK/NACK**: Chunk-level acknowledgment with timeout and retry
 5. **Post-sync HELLO**: Broadcasts updated state for epidemic propagation
 
-> **Retired in vX.** A MANIFEST broadcast used to sit between steps 1 and 2, sending
+> **Retired in v0.37.6.** A MANIFEST broadcast used to sit between steps 1 and 2, sending
 > bucket-level hashes to the guild every 300s when the data had changed. It fed peer-selection
 > scoring and nothing else, and that scoring is gone (see the section below). Everything in this
 > document that reasons about MANIFEST is kept as the record of why, but describes a message the
@@ -227,7 +227,7 @@ When a peer has been offline, differing buckets span a time range:
 
 3h wins by 0.2s. 1h loses to request overhead. Differences are negligible for single catch-up events.
 
-## MANIFEST Coverage (historical: the message was retired in vX)
+## MANIFEST Coverage (historical: the message was retired in v0.37.6)
 
 MANIFEST_MAX_BUCKETS = 200 capped how many bucket hashes were broadcast on the GUILD channel. Truncation dropped the oldest buckets.
 
@@ -291,7 +291,7 @@ Sparse request + 1h buckets:
 
 This requires a protocol version bump and a new SYNC_REQUEST field, but is backwards-compatible (old peers ignore the new field and use `bucketHashes`).
 
-**The cost of this design moved in vX.** It was written when a MANIFEST broadcast already existed and was free to build on: step 1 assumed the cache was simply there. With that broadcast retired, this design now has to pay for its own input, either by reintroducing a periodic broadcast (and with it the traffic and the bookkeeping that were just removed) or by carrying the finer manifest inside the SYNC_REQUEST/SYNC_DATA session itself, which is the more promising direction precisely because it costs no idle traffic. Read the numbers above as still valid and the plan as needing a new first step.
+**The cost of this design moved in v0.37.6.** It was written when a MANIFEST broadcast already existed and was free to build on: step 1 assumed the cache was simply there. With that broadcast retired, this design now has to pay for its own input, either by reintroducing a periodic broadcast (and with it the traffic and the bookkeeping that were just removed) or by carrying the finer manifest inside the SYNC_REQUEST/SYNC_DATA session itself, which is the more promising direction precisely because it costs no idle traffic. Read the numbers above as still valid and the plan as needing a new first step.
 
 ## Appendix: Raw Data Distribution
 

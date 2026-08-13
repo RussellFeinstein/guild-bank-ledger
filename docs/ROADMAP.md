@@ -13,10 +13,10 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 - Tab recording for deposits and withdrawals (v0.37.0): every item transaction now stores the tab it happened in; previously only moves carried one
 
 **Guild-wide sync** (v0.11.0--v0.30.x):
-- AceComm protocol (HELLO / SYNC_REQUEST / SYNC_DATA / ACK / NACK / BUSY / LAYOUT_REQUEST / LAYOUT_DATA). MANIFEST shipped in v0.25.0 and was retired in vX: it existed only to score which peer to sync with next, which gossip does not need.
+- AceComm protocol (HELLO / SYNC_REQUEST / SYNC_DATA / ACK / NACK / BUSY / LAYOUT_REQUEST / LAYOUT_DATA). MANIFEST shipped in v0.25.0 and was retired in v0.37.6: it existed only to score which peer to sync with next, which gossip does not need.
 - Fingerprint-based delta sync with 6-hour bucket hashing
 - LibDeflate compression, chunked transfer with 1-fragment chunks (510 B whole-message budget, covering records, event counts and the envelope together) and a 1.0s gap floor for cross-realm reliability
-- Epidemic gossip propagation, free-agent pairing (retired the scored peer selection in vX), hash-gated HELLO reply suppression
+- Epidemic gossip propagation, free-agent pairing (retired the scored peer selection in v0.37.6), hash-gated HELLO reply suppression
 - Retry logic, FPS-adaptive throttling, combat / zone change protection
 - Peer canonicalization (`CanonicalPeerKey`) handling cross-realm and bare-name ambiguity correctly
 - Per-chunk audit outcomes (ok / ackTimeout / nack / combatAbort / zoneAbort / busyAbort / sendFailed)
