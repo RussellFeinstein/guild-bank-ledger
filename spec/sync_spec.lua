@@ -3762,9 +3762,12 @@ describe("Sync", function()
 
             GBL:HandleHello("OfficerB", hello())
 
-            -- Counting timers used to be the discriminator here. It is not
-            -- one any more: the happy path schedules nothing either, so that
-            -- assertion would hold with the check deleted.
+            -- Counting timers used to be the discriminator here. Its stated
+            -- reason died with the jitter timer, and the power it kept was
+            -- incidental: a deleted busy check would still bump the count,
+            -- but only via the receive timeout RequestSync arms for the
+            -- request it should not be making. Asserting on the wire pins
+            -- the contract for a reason that survives timer rearrangement.
             assert.equals(0, countSent("SYNC_REQUEST", "OfficerB"))
             local logged = false
             for _, entry in ipairs(GBL:GetAuditTrail()) do
