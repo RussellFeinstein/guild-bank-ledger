@@ -475,6 +475,30 @@ rate, which is the one reading the redundancy line already cannot be trusted to 
 `_RestockBuildItemUniverse` and the layout editor number-coerce their keys, which was a symptom of
 the untested boundary rather than a fix for it.
 
+**`bucketHashes` stopped being the whole picture in v0.37.11 (#108).** It kept its name, its numeric
+keys and its meaning, but it now carries only the newest `SYNC_REQUEST_DETAIL_BUCKETS` (50) buckets.
+Everything older rides a second field, `spans`: an array of `{ s, e, h }` where `s` and `e` are
+bucket keys bounding a range and `h` is that range's fold. The spans tile
+`[oldest key .. detailStart-1]` with no gaps, so a bucket the requester has never held still falls
+inside a declared range on the serving side and shows up as a fold mismatch rather than slipping
+through an uncovered hole. The request is therefore 58 entries at any history depth, where it used
+to be one per bucket forever and had already crossed the whisper reliability ceiling.
+
+`spans` is an array, so its own keys are numeric too, and they have to stay that way or `ipairs`
+would walk nothing and every span would be skipped, which reads as "no spans declared" and quietly
+falls back to offering all of old history. The wire fixture pins both tables.
+
+The fold is order-dependent djb2 over `(key, hash)` pairs, **not** XOR (`GBL:FoldBucketRange`,
+`src/Fingerprint.lua`). Bucket hashes are themselves XOR aggregates, so XORing them together
+collapses to a single XOR over every record in the range, and two peers each holding records the
+other lacks can then compute matching span folds over genuinely different data. Both sides recompute
+that deterministically every session, so such a divergence would never be offered again: it is the
+same cancellation objection that rejected prefix-only record hashing, one level up.
+
+No floor raise accompanied the change. A peer that predates it sends a full `bucketHashes` and no
+`spans`, and every key the spans do not cover takes the comparison this code has always made, so
+both shapes are live on the wire at once.
+
 Two facts the fixtures established that were not previously written down:
 
 - **AceSerializer escapes a space to a two-byte sequence, and an unescaped space is dropped on
