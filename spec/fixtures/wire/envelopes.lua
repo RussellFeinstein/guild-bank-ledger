@@ -132,6 +132,36 @@ return {
         numericKeyPaths = { { "bucketHashes" } },
     },
 
+    -- The hierarchical manifest (#108). Recorded beside the two cases above
+    -- rather than replacing them, for the same reason the v0.37.0 HELLO was:
+    -- both shapes are live on the wire at once. A peer that predates this sends
+    -- exactly those, and the serving side still reads them, because no floor
+    -- raise accompanies this change.
+    --
+    -- bucketHashes keeps its name and its numeric keys and now carries only the
+    -- recent detail window. `spans` covers everything older, tiling the range
+    -- below the detail window so a bucket the requester has never held still
+    -- falls inside a declared span. Its keys are array indices, and they have to
+    -- stay numeric or ipairs would walk nothing and every span would be skipped.
+    {
+        name = "SYNC_REQUEST with a hierarchical manifest",
+        serialized = "^1^T^Sguild^STest~`Guild^Stype^SSYNC_REQUEST^Sversion^S0.37.0^SbucketHashes^T^N123304^N2863311530^N123305^N1431655765^t^Sspans^T^N1^T^Se^N123150^Sh^N3735928559^Ss^N123000^t^N2^T^Se^N123303^Sh^N2596069104^Ss^N123151^t^t^SprotocolVersion^N4^SsinceTimestamp^N1775000000^SminSyncVersion^S0.37.0^t^^",
+        decoded = {
+            type = "SYNC_REQUEST",
+            sinceTimestamp = 1775000000,
+            bucketHashes = { [BUCKET_A] = 2863311530, [BUCKET_B] = 1431655765 },
+            spans = {
+                { s = 123000, e = 123150, h = 3735928559 },
+                { s = 123151, e = 123303, h = 2596069104 },
+            },
+            version = "0.37.0",
+            minSyncVersion = "0.37.0",
+            protocolVersion = 4,
+            guild = "Test Guild",
+        },
+        numericKeyPaths = { { "bucketHashes" }, { "spans" } },
+    },
+
     {
         name = "MANIFEST with numeric buckets",
         serialized = "^1^T^Stype^SMANIFEST^SprotocolVersion^N4^SdataHash^S8f3a21c4^Sbuckets^T^N123304^N2863311530^N123305^N1431655765^t^StxCount^N12310^Sguild^STest~`Guild^t^^",

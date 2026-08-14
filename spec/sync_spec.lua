@@ -2193,15 +2193,55 @@ describe("Sync", function()
             assert.equals("Test Guild", data.guild)
         end)
 
-        it("corrupted message data is silently dropped", function()
+        -- This used to assert only that a corrupt message changed nothing, and
+        -- the dropping really was silent: two bare returns at every level. That
+        -- is the shape a lost middle fragment takes, because AceComm reassembles
+        -- multipart with no sequence numbers and no completeness check, so it
+        -- hands up a truncated payload and calls it delivered. Nothing said so,
+        -- which is why a capture could not tell wire loss from a peer that never
+        -- spoke. The byte count is the useful part: it says how much of the
+        -- message survived, and therefore how the route is losing fragments.
+        it("warns when a message cannot be decoded, with its size", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Send a non-serialized string
             GBL:OnSyncMessage("GBLSync", "not-valid-data", "GUILD", "OfficerB")
 
-            -- Should not crash, should not update peers
             local peers = GBL:GetSyncPeers()
-            assert.is_nil(peers["OfficerB"])
+            assert.is_nil(peers["OfficerB"], "a corrupt message must change nothing")
+
+            local warned = false
+            for _, entry in ipairs(GBL:GetLog("sync")) do
+                if entry.level == "WARN"
+                    and entry.message:find("OfficerB", 1, true)
+                    and entry.message:find(tostring(#"not-valid-data"), 1, true) then
+                    warned = true
+                end
+            end
+            assert.is_true(warned, "the drop should be visible in a capture")
+        end)
+
+        it("warns when a message cannot be decompressed", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- The LibDeflate mock is an identity transform, so the decompress
+            -- branch is unreachable without standing in for a failure.
+            local LibDeflate = LibStub("LibDeflate")
+            local realDecode = LibDeflate.DecodeForWoWAddonChannel
+            LibDeflate.DecodeForWoWAddonChannel = function() return nil end
+
+            GBL:OnSyncMessage("GBLSync", "garbled-payload", "WHISPER", "OfficerB")
+
+            LibDeflate.DecodeForWoWAddonChannel = realDecode
+
+            local warned = false
+            for _, entry in ipairs(GBL:GetLog("sync")) do
+                if entry.level == "WARN"
+                    and entry.message:find("decompress", 1, true)
+                    and entry.message:find("OfficerB", 1, true) then
+                    warned = true
+                end
+            end
+            assert.is_true(warned, "a failed decompress should be visible too")
         end)
 
         it("SYNC_DATA with nil transaction arrays is handled", function()
@@ -4584,6 +4624,345 @@ describe("Sync", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Hierarchical request manifest (requesting side)
+    ---------------------------------------------------------------------------
+
+    describe("bounded request manifest", function()
+        local BASE = 80000
+
+        local function addRecordInBucket(key, tag)
+            local ts = key * GBL.BUCKET_SECONDS
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P" .. tag,
+                itemID = 1000, count = 1, tab = 1,
+                timestamp = ts, scanTime = ts,
+                scannedBy = "OfficerA", id = "rec_" .. tag .. ":0",
+            })
+        end
+
+        local function sentRequest()
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                if ok and data.type == "SYNC_REQUEST" then return data end
+            end
+        end
+
+        local function manifestSize(req)
+            local n = 0
+            for _ in pairs(req.bucketHashes) do n = n + 1 end
+            return n + #(req.spans or {})
+        end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+        end)
+
+        it("declares no spans when the history fits the detail window", function()
+            for i = 1, 10 do addRecordInBucket(BASE + i, "r" .. i) end
+
+            GBL:RequestSync("OfficerB", 0)
+
+            local req = sentRequest()
+            assert.is_not_nil(req)
+            assert.is_nil(req.spans)
+            assert.equals(10, manifestSize(req))
+        end)
+
+        it("declares no spans at exactly the detail window", function()
+            for i = 1, GBL.SYNC_REQUEST_DETAIL_BUCKETS do
+                addRecordInBucket(BASE + i, "r" .. i)
+            end
+
+            GBL:RequestSync("OfficerB", 0)
+
+            local req = sentRequest()
+            assert.is_nil(req.spans)
+            assert.equals(GBL.SYNC_REQUEST_DETAIL_BUCKETS, manifestSize(req))
+        end)
+
+        it("summarizes older history as spans once past the window", function()
+            for i = 1, GBL.SYNC_REQUEST_DETAIL_BUCKETS + 200 do
+                addRecordInBucket(BASE + i, "r" .. i)
+            end
+
+            GBL:RequestSync("OfficerB", 0)
+
+            local req = sentRequest()
+            local detailCount = 0
+            for _ in pairs(req.bucketHashes) do detailCount = detailCount + 1 end
+            assert.equals(GBL.SYNC_REQUEST_DETAIL_BUCKETS, detailCount)
+            assert.equals(GBL.SYNC_REQUEST_SPAN_COUNT, #req.spans)
+        end)
+
+        it("stays the same size as the history grows", function()
+            -- The whole point of #108: the request used to carry one entry per
+            -- bucket forever, so it outgrew the whisper ceiling and stopped
+            -- arriving. Ten times the history must not mean a larger request.
+            for i = 1, GBL.SYNC_REQUEST_DETAIL_BUCKETS + 50 do
+                addRecordInBucket(BASE + i, "a" .. i)
+            end
+            GBL:RequestSync("OfficerB", 0)
+            local small = manifestSize(sentRequest())
+
+            MockAce.sentCommMessages = {}
+            GBL:ResetSyncState()
+            for i = 1, 500 do addRecordInBucket(BASE - i, "b" .. i) end
+            GBL:RequestSync("OfficerB", 0)
+            local large = manifestSize(sentRequest())
+
+            assert.equals(small, large)
+            assert.equals(
+                GBL.SYNC_REQUEST_DETAIL_BUCKETS + GBL.SYNC_REQUEST_SPAN_COUNT,
+                large)
+        end)
+
+        it("still carries the version fields the serving gate reads", function()
+            for i = 1, GBL.SYNC_REQUEST_DETAIL_BUCKETS + 5 do
+                addRecordInBucket(BASE + i, "r" .. i)
+            end
+
+            GBL:RequestSync("OfficerB", 0)
+
+            local req = sentRequest()
+            assert.equals(GBL.version, req.version)
+            assert.equals(GBL.MIN_SYNC_VERSION, req.minSyncVersion)
+            assert.equals(GBL.SYNC_PROTOCOL_VERSION, req.protocolVersion)
+        end)
+
+        it("omits bucketHashes entirely when there is no guild data", function()
+            -- Preserves the serving side's sinceTimestamp fallback, which keys
+            -- off the field being absent rather than empty.
+            GBL.db.profile.guilds = {}
+            MockWoW.guild.name = nil
+
+            GBL:RequestSync("OfficerB", 0)
+
+            local req = sentRequest()
+            if req then
+                assert.is_nil(req.spans)
+            end
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Hierarchical request manifest (serving side)
+    ---------------------------------------------------------------------------
+
+    describe("span-aware bucket diff", function()
+        -- Bucket key 80000 is 86400 * 20000 seconds, comfortably inside the
+        -- era IsValidTimestamp accepts. Record ids carry no pipe, so bucket
+        -- placement falls back to the timestamp, same as the older specs here.
+        local BASE = 80000
+
+        local function addRecordInBucket(key, tag)
+            local ts = key * GBL.BUCKET_SECONDS
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P" .. tag,
+                itemID = 1000, count = 1, tab = 1,
+                timestamp = ts, scanTime = ts,
+                scannedBy = "OfficerA", id = "rec_" .. tag .. ":0",
+            })
+        end
+
+        -- Only the first chunk leaves synchronously, so a send has to be
+        -- driven to completion before asking what it offered.
+        local function drainSend(target)
+            for _ = 1, 4000 do
+                if not GBL:GetSyncStatus().sending then break end
+                local idx = tonumber(
+                    GBL:GetSyncStatus().sendProgress:match("^(%d+)"))
+                GBL:HandleAck(target, { chunk = idx })
+                MockWoW.serverTime = MockWoW.serverTime + 2
+                local fired = false
+                for i = #MockWoW.pendingTimers, 1, -1 do
+                    local t = MockWoW.pendingTimers[i]
+                    if not t.cancelled and not t.fired and t.delay
+                        and t.delay > 0 and t.delay <= 2.0 then
+                        t.fired = true
+                        t.callback()
+                        fired = true
+                        break
+                    end
+                end
+                if not fired then break end
+            end
+        end
+
+        local function serve(payload)
+            GBL:HandleSyncRequest("OfficerB", request(payload))
+            drainSend("OfficerB")
+
+            local ids = {}
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                if ok and data.type == "SYNC_DATA" then
+                    for _, tx in ipairs(data.transactions or {}) do
+                        ids[tx.id] = true
+                    end
+                end
+            end
+            return ids
+        end
+
+        local function countKeys(t)
+            local n = 0
+            for _ in pairs(t) do n = n + 1 end
+            return n
+        end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+        end)
+
+        it("clears every bucket inside a span whose fold matches", function()
+            addRecordInBucket(BASE, "old1")
+            addRecordInBucket(BASE + 1, "old2")
+            addRecordInBucket(BASE + 2, "old3")
+            addRecordInBucket(BASE + 10, "recent")
+
+            local localBuckets = GBL:ComputeBucketHashes(guildData)
+            local ids = serve{
+                sinceTimestamp = 0,
+                bucketHashes = { [BASE + 10] = localBuckets[BASE + 10] },
+                spans = {
+                    { s = BASE, e = BASE + 9,
+                      h = GBL:FoldBucketRange(localBuckets, BASE, BASE + 9) },
+                },
+            }
+
+            assert.equals(0, countKeys(ids))
+        end)
+
+        it("offers every local bucket in a span whose fold differs", function()
+            addRecordInBucket(BASE, "old1")
+            addRecordInBucket(BASE + 1, "old2")
+            addRecordInBucket(BASE + 2, "old3")
+            addRecordInBucket(BASE + 10, "recent")
+
+            local localBuckets = GBL:ComputeBucketHashes(guildData)
+            local ids = serve{
+                sinceTimestamp = 0,
+                bucketHashes = { [BASE + 10] = localBuckets[BASE + 10] },
+                spans = {
+                    { s = BASE, e = BASE + 9,
+                      h = GBL:FoldBucketRange(localBuckets, BASE, BASE + 9) + 1 },
+                },
+            }
+
+            assert.is_true(ids["rec_old1:0"])
+            assert.is_true(ids["rec_old2:0"])
+            assert.is_true(ids["rec_old3:0"])
+            assert.is_nil(ids["rec_recent:0"])
+        end)
+
+        it("offers a bucket older than every declared span", function()
+            addRecordInBucket(BASE - 5, "ancient")
+            addRecordInBucket(BASE, "old1")
+            addRecordInBucket(BASE + 10, "recent")
+
+            local localBuckets = GBL:ComputeBucketHashes(guildData)
+            local ids = serve{
+                sinceTimestamp = 0,
+                bucketHashes = { [BASE + 10] = localBuckets[BASE + 10] },
+                spans = {
+                    { s = BASE, e = BASE + 9,
+                      h = GBL:FoldBucketRange(localBuckets, BASE, BASE + 9) },
+                },
+            }
+
+            assert.is_true(ids["rec_ancient:0"])
+            assert.is_nil(ids["rec_old1:0"])
+            assert.is_nil(ids["rec_recent:0"])
+        end)
+
+        it("offers a bucket sitting in a hole in the detail window", function()
+            addRecordInBucket(BASE + 10, "listed")
+            addRecordInBucket(BASE + 12, "unlisted")
+
+            local localBuckets = GBL:ComputeBucketHashes(guildData)
+            local ids = serve{
+                sinceTimestamp = 0,
+                bucketHashes = { [BASE + 10] = localBuckets[BASE + 10] },
+            }
+
+            assert.is_true(ids["rec_unlisted:0"])
+            assert.is_nil(ids["rec_listed:0"])
+        end)
+
+        it("sends nothing when the requester hands back our own manifest", function()
+            for i = 1, GBL.SYNC_REQUEST_DETAIL_BUCKETS + 20 do
+                addRecordInBucket(BASE + i, "r" .. i)
+            end
+
+            local detail, spans = GBL:BuildRequestManifest(
+                GBL:ComputeBucketHashes(guildData))
+            assert.is_not_nil(spans)
+
+            local ids = serve{
+                sinceTimestamp = 0, bucketHashes = detail, spans = spans,
+            }
+
+            assert.equals(0, countKeys(ids))
+        end)
+
+        it("offers the one changed bucket out of a long history", function()
+            for i = 1, GBL.SYNC_REQUEST_DETAIL_BUCKETS + 20 do
+                addRecordInBucket(BASE + i, "r" .. i)
+            end
+
+            -- Snapshot the requester's view, then add a record to an old
+            -- bucket so exactly one span's fold moves underneath it.
+            local detail, spans = GBL:BuildRequestManifest(
+                GBL:ComputeBucketHashes(guildData))
+            addRecordInBucket(BASE + 3, "late")
+
+            local ids = serve{
+                sinceTimestamp = 0, bucketHashes = detail, spans = spans,
+            }
+
+            assert.is_true(ids["rec_late:0"])
+            assert.is_true(ids["rec_r3:0"])   -- rides along, same span
+            assert.is_nil(ids["rec_r60:0"])   -- untouched detail bucket
+        end)
+
+        it("ignores malformed spans and falls back to the detail compare", function()
+            addRecordInBucket(BASE, "old1")
+
+            -- Nothing legible covers BASE, so it goes through the per-bucket
+            -- compare and is offered. Erring toward sending is the safe way to
+            -- misread a request.
+            local ids = serve{
+                sinceTimestamp = 0,
+                bucketHashes = {},
+                spans = {
+                    { s = "not a number", e = BASE + 9, h = 1 },
+                    { s = BASE, e = BASE + 9 },           -- no fold
+                    "not even a table",
+                },
+            }
+
+            assert.is_true(ids["rec_old1:0"])
+        end)
+
+        it("treats a request carrying no spans exactly as before", function()
+            -- The compatibility proof for a peer that predates the manifest:
+            -- it sends its whole bucket table and no spans, and every key must
+            -- take the same per-bucket comparison it always took.
+            addRecordInBucket(BASE, "old1")
+            addRecordInBucket(BASE + 1, "old2")
+
+            local localBuckets = GBL:ComputeBucketHashes(guildData)
+            local ids = serve{
+                sinceTimestamp = 0,
+                bucketHashes = { [BASE] = localBuckets[BASE] },
+            }
+
+            assert.is_nil(ids["rec_old1:0"])
+            assert.is_true(ids["rec_old2:0"])
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Send order (newest-first)
     ---------------------------------------------------------------------------
 
@@ -4915,44 +5294,99 @@ describe("Sync", function()
             assert.equals(sentBefore, #MockAce.sentCommMessages)
         end)
 
-        it("initial request timeout sends NACK for chunk 1", function()
+        -- Silence at zero chunks means the request itself went missing, so
+        -- the thing to repeat is the request. NACKing chunk 1 asks a peer to
+        -- retransmit a chunk it never built, and HandleNack drops it on the
+        -- floor because it is not sending: the retry signal crossed the wire
+        -- and was discarded. Once chunks are arriving the NACK is right again.
+        it("resends the request when the timeout fires at zero chunks", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Request sync (puts us in receiving state)
             GBL:RequestSync("OfficerB", 0)
             assert.is_true(GBL:GetSyncStatus().receiving)
             MockAce.sentCommMessages = {}
 
-            -- Fire the receive timeout (now uses ScheduleReceiveTimeout with backoff)
             fireReceiveTimeout()
 
-            -- Should have sent a NACK for chunk 1, not aborted
             assert.is_true(GBL:GetSyncStatus().receiving,
-                "should still be receiving after initial NACK")
+                "should still be receiving after the first resend")
             assert.is_true(#MockAce.sentCommMessages >= 1)
-            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[#MockAce.sentCommMessages].text)
+            local ok, data = GBL:Deserialize(
+                MockAce.sentCommMessages[#MockAce.sentCommMessages].text)
             assert.is_true(ok)
-            assert.equals("NACK", data.type)
-            assert.equals(1, data.chunk)
+            assert.equals("SYNC_REQUEST", data.type)
         end)
 
-        it("RequestSync timeout retries and aborts after MAX_NACK_RETRIES", function()
+        it("resends with the timestamp the original request used", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:RequestSync("OfficerB", 4242)
+            MockAce.sentCommMessages = {}
+
+            fireReceiveTimeout()
+
+            local _, data = GBL:Deserialize(
+                MockAce.sentCommMessages[#MockAce.sentCommMessages].text)
+            assert.equals(4242, data.sinceTimestamp)
+        end)
+
+        it("resends a manifest, not an empty request", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local ts = 80000 * GBL.BUCKET_SECONDS
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P", itemID = 1, count = 1, tab = 1,
+                timestamp = ts, scanTime = ts, scannedBy = "OfficerA",
+                id = "resend_rec:0",
+            })
+
+            GBL:RequestSync("OfficerB", 0)
+            MockAce.sentCommMessages = {}
+
+            fireReceiveTimeout()
+
+            local _, data = GBL:Deserialize(
+                MockAce.sentCommMessages[#MockAce.sentCommMessages].text)
+            assert.is_table(data.bucketHashes)
+            assert.is_not_nil(data.bucketHashes[80000])
+        end)
+
+        it("still NACKs a stall once chunks have started arriving", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:RequestSync("OfficerB", 0)
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 3,
+                transactions = {}, moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            MockAce.sentCommMessages = {}
+
+            fireReceiveTimeout()
+
+            local _, data = GBL:Deserialize(
+                MockAce.sentCommMessages[#MockAce.sentCommMessages].text)
+            assert.equals("NACK", data.type)
+            assert.equals(2, data.chunk)
+        end)
+
+        it("RequestSync timeout resends and aborts after MAX_NACK_RETRIES", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
             GBL:RequestSync("OfficerB", 0)
             assert.is_true(GBL:GetSyncStatus().receiving)
 
-            -- Fire timeout MAX_NACK_RETRIES times (sends NACKs, stays receiving)
             for _ = 1, GBL.SYNC_MAX_NACK_RETRIES do
                 fireReceiveTimeout()
                 assert.is_true(GBL:GetSyncStatus().receiving,
-                    "should still be receiving during NACK retries")
+                    "should still be receiving while resends remain")
             end
 
-            -- One more timeout — should abort after exhausting retries
+            -- One more timeout, and the budget is spent
             fireReceiveTimeout()
             assert.is_false(GBL:IsSyncing(),
-                "should no longer be syncing after NACK retries exhausted")
+                "should no longer be syncing after the retry budget is spent")
             assert.is_false(GBL:GetSyncStatus().receiving)
         end)
 
@@ -8703,6 +9137,41 @@ describe("Sync", function()
                 end
             end
             assert.is_true(found, "BUSY message should have been sent to PeerB")
+        end)
+
+        -- The retry above means the peer we are already serving may ask again
+        -- while its first request is being answered. Answering that with BUSY
+        -- would make it abort the very receive we are feeding, so a duplicate
+        -- from the current target is ignored instead.
+        it("ignores a repeat request from the peer we are already sending to", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            local gd = GBL:GetGuildData()
+            for i = 1, 12 do
+                local ts = (1000 + i) * 3600
+                table.insert(gd.transactions, {
+                    type = "deposit", player = "Player1", tab = 1, itemID = 123,
+                    classID = 0, subclassID = 0, count = 1,
+                    timestamp = ts, id = "dup" .. i .. ":277:0",
+                    _occurrence = 0, scanTime = ts, scannedBy = "OfficerA",
+                })
+            end
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending)
+            local progressBefore = GBL:GetSyncStatus().sendProgress
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, d = GBL:Deserialize(msg.text)
+                assert.is_false(ok and type(d) == "table" and d.type == "BUSY",
+                    "a repeat from the current target must not draw a BUSY")
+            end
+            assert.is_true(GBL:GetSyncStatus().sending,
+                "the session in flight should survive the repeat")
+            assert.equals(progressBefore, GBL:GetSyncStatus().sendProgress,
+                "the repeat should not restart or advance the send")
         end)
 
         it("HandleBusy clears receiving state when waiting for that peer", function()

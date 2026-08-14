@@ -144,6 +144,109 @@ function GBL:ComputeBucketHashes(guildData)
     return buckets
 end
 
+------------------------------------------------------------------------
+-- Request manifest (bounded SYNC_REQUEST payload)
+------------------------------------------------------------------------
+
+-- A SYNC_REQUEST used to carry one entry per 6-hour bucket over the guild's
+-- whole history, so it grew forever and crossed AceComm's whisper reliability
+-- ceiling at around 230 buckets. The manifest keeps full detail for the recent
+-- window, where essentially all divergence lives, and summarizes everything
+-- older as a handful of coarse span fingerprints. Size is then fixed no matter
+-- how far back the history runs.
+local SYNC_REQUEST_DETAIL_BUCKETS = 50
+local SYNC_REQUEST_SPAN_COUNT = 8
+GBL.SYNC_REQUEST_DETAIL_BUCKETS = SYNC_REQUEST_DETAIL_BUCKETS
+GBL.SYNC_REQUEST_SPAN_COUNT = SYNC_REQUEST_SPAN_COUNT
+
+--- Fold every bucket hash in [s, e] into one 32-bit span fingerprint.
+-- Order-dependent djb2 over (key, hash) pairs in ascending key order.
+--
+-- Deliberately NOT XOR. Bucket hashes are themselves XOR aggregates, so an
+-- XOR of them flattens to a single XOR over every record in the span: two
+-- peers each missing records whose hashes cancel would compute the same span
+-- fingerprint over genuinely different data, and because both sides recompute
+-- it deterministically every session the divergence would never be seen again.
+-- Record IDs are highly structured, which makes that cancellation reachable
+-- rather than astronomically unlikely. Weighting each entry by a distinct power
+-- of 33 removes the algebraic escape and leaves only honest hash collisions.
+-- @param bucketHashes table Map of bucketKey (number) -> hash (number)
+-- @param s number First bucket key in the range (inclusive)
+-- @param e number Last bucket key in the range (inclusive)
+-- @return number Fold value (0 to 2^32-1); the djb2 seed for an empty range
+function GBL:FoldBucketRange(bucketHashes, s, e)
+    if not bucketHashes then return 5381 end
+
+    local keys = {}
+    for key in pairs(bucketHashes) do
+        if type(key) == "number" and key >= s and key <= e then
+            keys[#keys + 1] = key
+        end
+    end
+    table.sort(keys)
+
+    local h = 5381
+    for i = 1, #keys do
+        local key = keys[i]
+        h = (h * 33 + key) % 4294967296
+        h = (h * 33 + (bucketHashes[key] or 0)) % 4294967296
+    end
+    return h
+end
+
+--- Split a bucket-hash table into the bounded shape a SYNC_REQUEST carries.
+-- The newest SYNC_REQUEST_DETAIL_BUCKETS buckets ride verbatim; everything
+-- older is covered by up to SYNC_REQUEST_SPAN_COUNT coarse spans that tile
+-- [oldest key .. detailStart-1] with no gaps. Tiling matters: a serving peer
+-- holding a bucket this requester has never seen must still fall inside a
+-- declared span, or its fold would not change and the bucket would never be
+-- offered.
+-- @param bucketHashes table|nil Map of bucketKey -> hash, or nil
+-- @return table|nil detail Newest buckets, same shape as the input (nil in, nil out)
+-- @return table|nil spans Array of { s, e, h }, or nil when nothing is older
+function GBL:BuildRequestManifest(bucketHashes)
+    if not bucketHashes then return nil, nil end
+
+    local keys = {}
+    for key in pairs(bucketHashes) do
+        if type(key) == "number" then keys[#keys + 1] = key end
+    end
+    table.sort(keys)
+
+    local total = #keys
+    local detailCount = math.min(total, SYNC_REQUEST_DETAIL_BUCKETS)
+    local olderCount = total - detailCount
+
+    local detail = {}
+    for i = olderCount + 1, total do
+        detail[keys[i]] = bucketHashes[keys[i]]
+    end
+
+    if olderCount == 0 then return detail, nil end
+
+    local detailStart = keys[olderCount + 1]
+    local spanCount = math.min(SYNC_REQUEST_SPAN_COUNT, olderCount)
+    local base = math.floor(olderCount / spanCount)
+    local remainder = olderCount % spanCount
+
+    local spans = {}
+    local idx = 1
+    for i = 1, spanCount do
+        local size = base
+        if i <= remainder then size = size + 1 end
+
+        local s = keys[idx]
+        idx = idx + size
+        -- Each span ends where the next one begins, so the ranges tile rather
+        -- than hugging the keys this peer happens to hold.
+        local e = (i == spanCount) and (detailStart - 1) or (keys[idx] - 1)
+
+        spans[i] = { s = s, e = e, h = self:FoldBucketRange(bucketHashes, s, e) }
+    end
+
+    return detail, spans
+end
+
 --- Reset the hash cache. Exposed for testing.
 function GBL:ResetHashCache()
     hashCache.dataHash = 0

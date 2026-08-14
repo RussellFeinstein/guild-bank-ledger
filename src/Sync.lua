@@ -310,6 +310,9 @@ local syncState = {
     receiveTimer = nil,
     receiveStartTime = 0,
     receiveNackCount = 0,
+    -- What the outstanding request asked for, so a resend repeats it rather
+    -- than silently widening or narrowing the window it asked about.
+    receiveSinceTimestamp = 0,
 
     peers = {},
     auditTrail = {},
@@ -818,10 +821,31 @@ function GBL:OnSyncMessage(_prefix, message, distribution, sender)
     local myName = UnitName("player")
     if self:CanonicalPeerKey(sender) == myName then return end
 
+    -- Both of these used to be bare returns, which made a corrupt arrival
+    -- indistinguishable from a peer that never spoke. That matters more than it
+    -- sounds: AceComm reassembles a multipart message with no sequence numbers
+    -- and no completeness check, so losing a middle fragment does not drop the
+    -- message, it delivers a truncated one and it lands right here. The byte
+    -- count is the diagnostic. How much of a message survived says whether a
+    -- route is losing single fragments or whole bursts of them, which is the
+    -- difference between two very different fixes.
+    local rawBytes = type(message) == "string" and #message or 0
+
     local decompressed = decompressMessage(message)
-    if not decompressed then return end
+    if not decompressed then
+        self:SyncWarn("Could not decompress a %s message from %s (%d B); "
+            .. "likely a lost or corrupt fragment",
+            tostring(distribution), tostring(sender), rawBytes)
+        return
+    end
+
     local success, data = self:Deserialize(decompressed)
-    if not success or type(data) ~= "table" then return end
+    if not success or type(data) ~= "table" then
+        self:SyncWarn("Could not read a %s message from %s (%d B on the wire, "
+            .. "%d B decompressed); likely a lost or corrupt fragment",
+            tostring(distribution), tostring(sender), rawBytes, #decompressed)
+        return
+    end
 
     local msgType = data.type
 
@@ -1499,6 +1523,63 @@ end
 -- Sync request / response
 ------------------------------------------------------------------------
 
+--- Build and whisper one SYNC_REQUEST.
+-- Split out of RequestSync so the retry that fires when nothing comes back can
+-- put the identical payload on the wire without re-entering the receive-state
+-- setup, and so only one place knows the request's shape.
+--
+-- The manifest is what keeps this message small. It used to carry one entry per
+-- 6-hour bucket over the guild's whole history, which crossed AceComm's whisper
+-- reliability ceiling at around 230 buckets and then kept growing, so requests
+-- from a peer with a long history simply stopped arriving.
+-- @param target string Target player name
+-- @param sinceTimestamp number Only request transactions after this time
+-- @return boolean true when the whisper was handed to AceComm
+function GBL:SendSyncRequestTo(target, sinceTimestamp)
+    local guildData = self:GetGuildData()
+    local bucketHashes = guildData and self:ComputeBucketHashes(guildData) or nil
+    -- nil in, nil out: a request with no bucketHashes key at all is what puts
+    -- the serving side onto its sinceTimestamp fallback.
+    local detail, spans = self:BuildRequestManifest(bucketHashes)
+
+    local msg = self:Serialize({
+        type = "SYNC_REQUEST",
+        sinceTimestamp = sinceTimestamp,
+        bucketHashes = detail,
+        spans = spans,
+        -- The serving side gates on these: a request reaching HandleSyncRequest
+        -- never passed through HandleHello, so this is the only version signal
+        -- the holder gets before handing over records.
+        version = self.version,
+        minSyncVersion = MIN_SYNC_VERSION,
+        protocolVersion = PROTOCOL_VERSION,
+        guild = self:GetGuildName(),
+    })
+    msg = compressMessage(msg)
+
+    local msgBytes = #msg
+    if msgBytes > WHISPER_SAFE_BYTES then
+        -- The manifest is bounded, so this should never fire. If it does, the
+        -- request is back to being dropped on lossy routes with nothing to say
+        -- so, which is the failure this whole shape exists to end.
+        self:SyncWarn("SYNC_REQUEST to %s is %d B (> %d safe); the manifest "
+            .. "should have bounded this", target, msgBytes, WHISPER_SAFE_BYTES)
+    end
+
+    if not self:SendSyncWhisper(PREFIX, msg, target) then return false end
+
+    local detailCount = 0
+    if detail then
+        for _ in pairs(detail) do detailCount = detailCount + 1 end
+    end
+    self:AddAuditEntry("Requesting sync from " .. target
+        .. " (since " .. sinceTimestamp
+        .. ", " .. detailCount .. " detail bucket(s), "
+        .. (spans and #spans or 0) .. " span(s)"
+        .. ", " .. msgBytes .. " bytes)")
+    return true
+end
+
 --- Send a SYNC_REQUEST to a specific peer.
 -- @param target string Target player name
 -- @param sinceTimestamp number Only request transactions after this time
@@ -1544,39 +1625,13 @@ function GBL:RequestSync(target, sinceTimestamp)
     syncState.receiveStartTime = GetServerTime()
 
     sinceTimestamp = sinceTimestamp or 0
+    syncState.receiveSinceTimestamp = sinceTimestamp
 
-    local guildData = self:GetGuildData()
-    local bucketHashes = guildData and self:ComputeBucketHashes(guildData) or nil
-
-    local msg = self:Serialize({
-        type = "SYNC_REQUEST",
-        sinceTimestamp = sinceTimestamp,
-        bucketHashes = bucketHashes,
-        -- The serving side gates on these: a request reaching HandleSyncRequest
-        -- never passed through HandleHello, so this is the only version signal
-        -- the holder gets before handing over records.
-        version = self.version,
-        minSyncVersion = MIN_SYNC_VERSION,
-        protocolVersion = PROTOCOL_VERSION,
-        guild = self:GetGuildName(),
-    })
-    msg = compressMessage(msg)
-
-    local bucketCount = 0
-    if bucketHashes then
-        for _ in pairs(bucketHashes) do bucketCount = bucketCount + 1 end
-    end
-
-    local msgBytes = #msg
-    if not self:SendSyncWhisper(PREFIX, msg, target) then
+    if not self:SendSyncRequestTo(target, sinceTimestamp) then
         self:SyncError("Target offline, aborting sync request to " .. target)
         self:FinishReceiving(target)
         return
     end
-    self:AddAuditEntry("Requesting sync from " .. target
-        .. " (since " .. sinceTimestamp
-        .. ", " .. bucketCount .. " bucket days"
-        .. ", " .. msgBytes .. " bytes)")
     self:SendMessage("GBL_SYNC_STARTED", target)
 
     -- Request timeout — NACK with backoff, then abort after MAX_NACK_RETRIES
@@ -1601,6 +1656,18 @@ function GBL:HandleSyncRequest(sender, data)
     end
 
     if syncState.sending then
+        -- A peer whose request went missing resends it, and the resend can
+        -- arrive while we are already answering the first one. Answering that
+        -- with BUSY would make it abort the receive we are feeding right now
+        -- (HandleBusy tears down the receive it names), so a duplicate from
+        -- the peer we are already serving is simply ignored. BUSY still goes
+        -- to anyone else, who genuinely does need to try later.
+        if self:CanonicalPeerKey(sender) == self:CanonicalPeerKey(syncState.sendTarget) then
+            self:SyncDebug("Ignoring repeat SYNC_REQUEST from %s, already sending to them",
+                self:CanonicalPeerKey(sender))
+            return
+        end
+
         self:AddAuditEntry("Declined sync from " .. sender
             .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
         -- Send BUSY so requester doesn't wait 60s for data that will never come
@@ -1628,7 +1695,10 @@ function GBL:HandleSyncRequest(sender, data)
     local localBuckets = self:ComputeBucketHashes(guildData)
 
     if data.bucketHashes then
-        -- Bucket-filtered sync: only send records from days where hashes differ
+        -- Bucket-filtered sync: only send records from buckets that differ.
+        -- Since the hierarchical manifest, a request describes its recent
+        -- window bucket by bucket and everything older as a handful of coarse
+        -- spans, so a bucket is judged by whichever of the two covers it.
         diffDays = {}
         local totalLocalDays = 0
         local totalRemoteDays = 0
@@ -1637,8 +1707,45 @@ function GBL:HandleSyncRequest(sender, data)
         for _ in pairs(localBuckets) do totalLocalDays = totalLocalDays + 1 end
         for _ in pairs(data.bucketHashes) do totalRemoteDays = totalRemoteDays + 1 end
 
+        -- Fold our own buckets over each declared span once, up front. A span
+        -- that matches clears every bucket inside it in one comparison; a span
+        -- that differs offers all of them, because the fold says something in
+        -- the range moved but not what (drilling down would cost a round trip,
+        -- and the session cap already bounds what one session hands over).
+        local spans = {}
+        local differingSpans = 0
+        if type(data.spans) == "table" then
+            for _, span in ipairs(data.spans) do
+                if type(span) == "table" and type(span.s) == "number"
+                    and type(span.e) == "number" and type(span.h) == "number" then
+                    local differs =
+                        self:FoldBucketRange(localBuckets, span.s, span.e) ~= span.h
+                    if differs then differingSpans = differingSpans + 1 end
+                    spans[#spans + 1] = { s = span.s, e = span.e, differs = differs }
+                end
+            end
+        end
+
         for dayKey, localHash in pairs(localBuckets) do
-            if localHash ~= (data.bucketHashes[dayKey] or 0) then
+            local covering
+            for i = 1, #spans do
+                if dayKey >= spans[i].s and dayKey <= spans[i].e then
+                    covering = spans[i]
+                    break
+                end
+            end
+
+            if covering then
+                if covering.differs then
+                    diffDays[dayKey] = true
+                else
+                    matchingDays = matchingDays + 1
+                end
+            elseif localHash ~= (data.bucketHashes[dayKey] or 0) then
+                -- Not covered by any span, so it is either in the requester's
+                -- detail window or older than anything it declared. Both cases
+                -- take the comparison this line has always made: a bucket the
+                -- requester never mentioned reads as hash 0 and is offered.
                 diffDays[dayKey] = true
             else
                 matchingDays = matchingDays + 1
@@ -1669,8 +1776,12 @@ function GBL:HandleSyncRequest(sender, data)
             end
         end
 
+        local spanNote = ""
+        if #spans > 0 then
+            spanNote = ", " .. #spans .. " span(s) (" .. differingSpans .. " differing)"
+        end
         self:AddAuditEntry("Bucket filter: " .. totalLocalDays .. " local bucket(s), "
-            .. totalRemoteDays .. " remote bucket(s), "
+            .. totalRemoteDays .. " remote detail bucket(s)" .. spanNote .. ", "
             .. matchingDays .. " matching, " .. diffCount .. " differing")
         if diffCount > 0 then
             self:AddAuditEntry("Differing dates: " .. table.concat(diffDateList, ", "))
@@ -2962,6 +3073,7 @@ function GBL:FinishReceiving(sender)
     syncState.receiveNormalized = 0
     syncState.receiveStartTime = 0
     syncState.receiveNackCount = 0
+    syncState.receiveSinceTimestamp = 0
     self._syncReceiving = false
 
     self:SendMessage("GBL_SYNC_COMPLETE", sender, totalStored)
@@ -3295,6 +3407,7 @@ function GBL:ResetSyncState()
     syncState.receiveTimer = nil
     syncState.receiveStartTime = 0
     syncState.receiveNackCount = 0
+    syncState.receiveSinceTimestamp = 0
     syncState.peers = {}
     syncState.auditTrail = {}    -- legacy field, unused; kept zero for any direct readers
     self:ClearLog("sync")        -- clear the real sync buffer in Logger.lua
@@ -3401,10 +3514,30 @@ function GBL:ScheduleReceiveTimeout()
         end
 
         if syncState.receiveNackCount >= MAX_NACK_RETRIES then
-            self:SyncError("NACK limit reached for chunk "
+            self:SyncError("Retry limit reached waiting on chunk "
                 .. (syncState.receiveGot + 1) .. " from "
                 .. (syncState.receiveSource or "unknown") .. ", aborting")
             self:FinishReceiving(syncState.receiveSource)
+        elseif syncState.receiveGot == 0 then
+            -- Nothing has arrived at all, so what went missing is the request,
+            -- not a chunk. A NACK here would ask the peer to retransmit chunk 1
+            -- of a send it never started, and HandleNack discards it because it
+            -- is not sending: the retry crosses the wire and is thrown away.
+            -- Repeating the request is the signal that can actually be acted on,
+            -- and since the manifest bounded it to a couple of fragments a
+            -- resend is likely to survive the route that ate the first one.
+            local target = syncState.receiveSource
+            syncState.receiveNackCount = syncState.receiveNackCount + 1
+            self:SyncInfo("No reply from %s, resending the request (attempt %d of %d)",
+                tostring(target or "unknown"),
+                syncState.receiveNackCount, MAX_NACK_RETRIES)
+            if not self:SendSyncRequestTo(target, syncState.receiveSinceTimestamp or 0) then
+                self:SyncError("Target offline, aborting sync request to "
+                    .. tostring(target or "unknown"))
+                self:FinishReceiving(target)
+                return
+            end
+            self:ScheduleReceiveTimeout()
         else
             self:SendNack(syncState.receiveSource, syncState.receiveGot + 1)
             -- Reschedule with increased backoff
@@ -3509,6 +3642,7 @@ function GBL:HandleBusy(sender, data) -- luacheck: ignore 212/data
         syncState.receiveRemaining = nil
         syncState.receiveStartTime = 0
         syncState.receiveNackCount = 0
+        syncState.receiveSinceTimestamp = 0
         self._syncReceiving = false
 
         self:AddAuditEntry(cleanSender .. " busy - cleared receive state, will retry later")
