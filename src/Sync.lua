@@ -310,6 +310,9 @@ local syncState = {
     receiveTimer = nil,
     receiveStartTime = 0,
     receiveNackCount = 0,
+    -- What the outstanding request asked for, so a resend repeats it rather
+    -- than silently widening or narrowing the window it asked about.
+    receiveSinceTimestamp = 0,
 
     peers = {},
     auditTrail = {},
@@ -1601,6 +1604,7 @@ function GBL:RequestSync(target, sinceTimestamp)
     syncState.receiveStartTime = GetServerTime()
 
     sinceTimestamp = sinceTimestamp or 0
+    syncState.receiveSinceTimestamp = sinceTimestamp
 
     if not self:SendSyncRequestTo(target, sinceTimestamp) then
         self:SyncError("Target offline, aborting sync request to " .. target)
@@ -1631,6 +1635,18 @@ function GBL:HandleSyncRequest(sender, data)
     end
 
     if syncState.sending then
+        -- A peer whose request went missing resends it, and the resend can
+        -- arrive while we are already answering the first one. Answering that
+        -- with BUSY would make it abort the receive we are feeding right now
+        -- (HandleBusy tears down the receive it names), so a duplicate from
+        -- the peer we are already serving is simply ignored. BUSY still goes
+        -- to anyone else, who genuinely does need to try later.
+        if self:CanonicalPeerKey(sender) == self:CanonicalPeerKey(syncState.sendTarget) then
+            self:SyncDebug("Ignoring repeat SYNC_REQUEST from %s, already sending to them",
+                self:CanonicalPeerKey(sender))
+            return
+        end
+
         self:AddAuditEntry("Declined sync from " .. sender
             .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
         -- Send BUSY so requester doesn't wait 60s for data that will never come
@@ -3036,6 +3052,7 @@ function GBL:FinishReceiving(sender)
     syncState.receiveNormalized = 0
     syncState.receiveStartTime = 0
     syncState.receiveNackCount = 0
+    syncState.receiveSinceTimestamp = 0
     self._syncReceiving = false
 
     self:SendMessage("GBL_SYNC_COMPLETE", sender, totalStored)
@@ -3369,6 +3386,7 @@ function GBL:ResetSyncState()
     syncState.receiveTimer = nil
     syncState.receiveStartTime = 0
     syncState.receiveNackCount = 0
+    syncState.receiveSinceTimestamp = 0
     syncState.peers = {}
     syncState.auditTrail = {}    -- legacy field, unused; kept zero for any direct readers
     self:ClearLog("sync")        -- clear the real sync buffer in Logger.lua
@@ -3475,10 +3493,30 @@ function GBL:ScheduleReceiveTimeout()
         end
 
         if syncState.receiveNackCount >= MAX_NACK_RETRIES then
-            self:SyncError("NACK limit reached for chunk "
+            self:SyncError("Retry limit reached waiting on chunk "
                 .. (syncState.receiveGot + 1) .. " from "
                 .. (syncState.receiveSource or "unknown") .. ", aborting")
             self:FinishReceiving(syncState.receiveSource)
+        elseif syncState.receiveGot == 0 then
+            -- Nothing has arrived at all, so what went missing is the request,
+            -- not a chunk. A NACK here would ask the peer to retransmit chunk 1
+            -- of a send it never started, and HandleNack discards it because it
+            -- is not sending: the retry crosses the wire and is thrown away.
+            -- Repeating the request is the signal that can actually be acted on,
+            -- and since the manifest bounded it to a couple of fragments a
+            -- resend is likely to survive the route that ate the first one.
+            local target = syncState.receiveSource
+            syncState.receiveNackCount = syncState.receiveNackCount + 1
+            self:SyncInfo("No reply from %s, resending the request (attempt %d of %d)",
+                tostring(target or "unknown"),
+                syncState.receiveNackCount, MAX_NACK_RETRIES)
+            if not self:SendSyncRequestTo(target, syncState.receiveSinceTimestamp or 0) then
+                self:SyncError("Target offline, aborting sync request to "
+                    .. tostring(target or "unknown"))
+                self:FinishReceiving(target)
+                return
+            end
+            self:ScheduleReceiveTimeout()
         else
             self:SendNack(syncState.receiveSource, syncState.receiveGot + 1)
             -- Reschedule with increased backoff
@@ -3583,6 +3621,7 @@ function GBL:HandleBusy(sender, data) -- luacheck: ignore 212/data
         syncState.receiveRemaining = nil
         syncState.receiveStartTime = 0
         syncState.receiveNackCount = 0
+        syncState.receiveSinceTimestamp = 0
         self._syncReceiving = false
 
         self:AddAuditEntry(cleanSender .. " busy - cleared receive state, will retry later")

@@ -5254,44 +5254,99 @@ describe("Sync", function()
             assert.equals(sentBefore, #MockAce.sentCommMessages)
         end)
 
-        it("initial request timeout sends NACK for chunk 1", function()
+        -- Silence at zero chunks means the request itself went missing, so
+        -- the thing to repeat is the request. NACKing chunk 1 asks a peer to
+        -- retransmit a chunk it never built, and HandleNack drops it on the
+        -- floor because it is not sending: the retry signal crossed the wire
+        -- and was discarded. Once chunks are arriving the NACK is right again.
+        it("resends the request when the timeout fires at zero chunks", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Request sync (puts us in receiving state)
             GBL:RequestSync("OfficerB", 0)
             assert.is_true(GBL:GetSyncStatus().receiving)
             MockAce.sentCommMessages = {}
 
-            -- Fire the receive timeout (now uses ScheduleReceiveTimeout with backoff)
             fireReceiveTimeout()
 
-            -- Should have sent a NACK for chunk 1, not aborted
             assert.is_true(GBL:GetSyncStatus().receiving,
-                "should still be receiving after initial NACK")
+                "should still be receiving after the first resend")
             assert.is_true(#MockAce.sentCommMessages >= 1)
-            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[#MockAce.sentCommMessages].text)
+            local ok, data = GBL:Deserialize(
+                MockAce.sentCommMessages[#MockAce.sentCommMessages].text)
             assert.is_true(ok)
-            assert.equals("NACK", data.type)
-            assert.equals(1, data.chunk)
+            assert.equals("SYNC_REQUEST", data.type)
         end)
 
-        it("RequestSync timeout retries and aborts after MAX_NACK_RETRIES", function()
+        it("resends with the timestamp the original request used", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:RequestSync("OfficerB", 4242)
+            MockAce.sentCommMessages = {}
+
+            fireReceiveTimeout()
+
+            local _, data = GBL:Deserialize(
+                MockAce.sentCommMessages[#MockAce.sentCommMessages].text)
+            assert.equals(4242, data.sinceTimestamp)
+        end)
+
+        it("resends a manifest, not an empty request", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local ts = 80000 * GBL.BUCKET_SECONDS
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P", itemID = 1, count = 1, tab = 1,
+                timestamp = ts, scanTime = ts, scannedBy = "OfficerA",
+                id = "resend_rec:0",
+            })
+
+            GBL:RequestSync("OfficerB", 0)
+            MockAce.sentCommMessages = {}
+
+            fireReceiveTimeout()
+
+            local _, data = GBL:Deserialize(
+                MockAce.sentCommMessages[#MockAce.sentCommMessages].text)
+            assert.is_table(data.bucketHashes)
+            assert.is_not_nil(data.bucketHashes[80000])
+        end)
+
+        it("still NACKs a stall once chunks have started arriving", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            GBL:RequestSync("OfficerB", 0)
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 3,
+                transactions = {}, moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            MockAce.sentCommMessages = {}
+
+            fireReceiveTimeout()
+
+            local _, data = GBL:Deserialize(
+                MockAce.sentCommMessages[#MockAce.sentCommMessages].text)
+            assert.equals("NACK", data.type)
+            assert.equals(2, data.chunk)
+        end)
+
+        it("RequestSync timeout resends and aborts after MAX_NACK_RETRIES", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
             GBL:RequestSync("OfficerB", 0)
             assert.is_true(GBL:GetSyncStatus().receiving)
 
-            -- Fire timeout MAX_NACK_RETRIES times (sends NACKs, stays receiving)
             for _ = 1, GBL.SYNC_MAX_NACK_RETRIES do
                 fireReceiveTimeout()
                 assert.is_true(GBL:GetSyncStatus().receiving,
-                    "should still be receiving during NACK retries")
+                    "should still be receiving while resends remain")
             end
 
-            -- One more timeout — should abort after exhausting retries
+            -- One more timeout, and the budget is spent
             fireReceiveTimeout()
             assert.is_false(GBL:IsSyncing(),
-                "should no longer be syncing after NACK retries exhausted")
+                "should no longer be syncing after the retry budget is spent")
             assert.is_false(GBL:GetSyncStatus().receiving)
         end)
 
@@ -9042,6 +9097,41 @@ describe("Sync", function()
                 end
             end
             assert.is_true(found, "BUSY message should have been sent to PeerB")
+        end)
+
+        -- The retry above means the peer we are already serving may ask again
+        -- while its first request is being answered. Answering that with BUSY
+        -- would make it abort the very receive we are feeding, so a duplicate
+        -- from the current target is ignored instead.
+        it("ignores a repeat request from the peer we are already sending to", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            local gd = GBL:GetGuildData()
+            for i = 1, 12 do
+                local ts = (1000 + i) * 3600
+                table.insert(gd.transactions, {
+                    type = "deposit", player = "Player1", tab = 1, itemID = 123,
+                    classID = 0, subclassID = 0, count = 1,
+                    timestamp = ts, id = "dup" .. i .. ":277:0",
+                    _occurrence = 0, scanTime = ts, scannedBy = "OfficerA",
+                })
+            end
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending)
+            local progressBefore = GBL:GetSyncStatus().sendProgress
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, d = GBL:Deserialize(msg.text)
+                assert.is_false(ok and type(d) == "table" and d.type == "BUSY",
+                    "a repeat from the current target must not draw a BUSY")
+            end
+            assert.is_true(GBL:GetSyncStatus().sending,
+                "the session in flight should survive the repeat")
+            assert.equals(progressBefore, GBL:GetSyncStatus().sendProgress,
+                "the repeat should not restart or advance the send")
         end)
 
         it("HandleBusy clears receiving state when waiting for that peer", function()
