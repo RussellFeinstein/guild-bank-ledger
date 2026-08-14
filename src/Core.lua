@@ -2661,9 +2661,9 @@ function GBL:PrintHelp()
     self:Print("  /gbl sortlog     - Show the sort-channel session log")
     self:Print("  /gbl logs        - Show the master log (sync + sort + system)")
     self:Print("  /gbl logs dump [N]                       - Dump last N master entries to chat")
-    self:Print("  /gbl logs clear sync|sort|system|all     - Truncate channel(s)")
-    self:Print("  /gbl logs debug sync|sort|system on|off  - Toggle DEBUG-to-chat for a channel")
-    self:Print("  /gbl audit on|off|status|clear           - Persistent log capture (on by default)")
+    self:Print("  /gbl logs clear sync||sort||system||all     - Truncate channel(s)")
+    self:Print("  /gbl logs debug sync||sort||system on||off  - Toggle DEBUG-to-chat for a channel")
+    self:Print("  /gbl audit on||off||status||clear           - Persistent log capture (on by default)")
     self:Print("  /gbl help    - Show this help message")
 end
 
@@ -3034,7 +3034,7 @@ function GBL:HandleLogsCommand(rest)
     if sub == "clear" then
         local target = (tail or ""):lower()
         if not LOG_CHANNEL_KEYS[target] then
-            self:Print("Usage: /gbl logs clear sync|sort|system|all")
+            self:Print("Usage: /gbl logs clear sync||sort||system||all")
             return
         end
         if target == "all" then
@@ -3053,7 +3053,7 @@ function GBL:HandleLogsCommand(rest)
         state = state and state:lower() or nil
         if not channel or not LOG_CHANNEL_KEYS[channel] or channel == "all"
            or (state ~= "on" and state ~= "off") then
-            self:Print("Usage: /gbl logs debug sync|sort|system on|off")
+            self:Print("Usage: /gbl logs debug sync||sort||system on||off")
             return
         end
         local enable = state == "on"
@@ -3066,7 +3066,7 @@ function GBL:HandleLogsCommand(rest)
         return
     end
 
-    self:Print("Usage: /gbl logs [dump N | clear sync|sort|system|all | debug sync|sort|system on|off]")
+    self:Print("Usage: /gbl logs [dump N || clear sync||sort||system||all || debug sync||sort||system on||off]")
 end
 
 function GBL:ManualScan()

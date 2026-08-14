@@ -2452,7 +2452,7 @@ function GBL:FinishSending()
         .. outcomes.busyAbort .. " busy + " .. outcomes.sendFailed .. " offline")
     self:AddAuditEntry("Retry causes for " .. target .. ": "
         .. "ackTimeout=" .. causes.ackTimeout .. ", nack=" .. causes.nack
-        .. " | chunkFail=" .. chunkFail .. ", p_frag=" .. pFragStr)
+        .. ", chunkFail=" .. chunkFail .. ", p_frag=" .. pFragStr)
     self:AddAuditEntry("Compression for " .. target .. ": " .. ratioSummary
         .. ", " .. overSized .. " chunk(s) over 1 fragment")
 
@@ -2789,7 +2789,7 @@ function GBL:HandleSyncData(sender, data)
         .. " (" .. chunkTotal .. " records: "
         .. itemStored .. " item new, " .. itemDuped .. " item duped, "
         .. moneyStored .. " money new, " .. moneyDuped .. " money duped"
-        .. " | total so far: " .. syncState.receiveStored .. " new" .. dupPctSuffix .. ")")
+        .. " - total so far: " .. syncState.receiveStored .. " new" .. dupPctSuffix .. ")")
 
     self:SendMessage("GBL_SYNC_PROGRESS", sender,
         data.chunk or 0, data.totalChunks or 0, stored)
@@ -2899,7 +2899,7 @@ function GBL:FinishReceiving(sender)
         .. " - " .. totalStored .. " new, " .. totalDuped .. " duped"
         .. ", " .. totalNormalized .. " normalized"
         .. ", " .. chunksGot .. " chunks, " .. elapsed .. "s"
-        .. " | total tx now: " .. totalTxAfter .. ", hash: " .. newHash)
+        .. " - total tx now: " .. totalTxAfter .. ", hash: " .. newHash)
 
     -- v0.28.8: redundancy metric — measures bucket-granularity inefficiency.
     -- Suppressed if zero records received (empty sync).

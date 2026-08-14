@@ -28,7 +28,7 @@ function GBL:FormatSyncStatusText(status)
     if status.combatPaused then
         table.insert(parts, "Paused (combat)")
     end
-    return (#parts > 0) and table.concat(parts, " | ") or "Idle"
+    return (#parts > 0) and table.concat(parts, " || ") or "Idle"
 end
 
 --- Build the version tag shown after a peer's version in the peer list.
@@ -50,17 +50,17 @@ end
 function GBL:_PeerVersionTag(info, peerVersion)
     local class = self:ClassifyPeerVersion(info, peerVersion)
     if class == "incompatible_new" then
-        return " |cff44aaff(newer | update to sync)|r"
+        return " |cff44aaff(newer || update to sync)|r"
     elseif class == "incompatible_old" then
-        return " |cffff4400(too old | sync refused)|r"
+        return " |cffff4400(too old || sync refused)|r"
     elseif class == "dev_peer" then
         -- Nothing for the viewer to act on, so the inactive colour rather
         -- than the warning one.
-        return " |cffa0a0a0(dev build | sync refused)|r"
+        return " |cffa0a0a0(dev build || sync refused)|r"
     elseif class == "newer_ok" then
-        return " |cff44aaff(newer | update available)|r"
+        return " |cff44aaff(newer || update available)|r"
     elseif class == "older_ok" then
-        return " (older | syncing)"
+        return " (older || syncing)"
     end
     return ""
 end

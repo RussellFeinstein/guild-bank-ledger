@@ -221,5 +221,5 @@ function GBL:HandleAuditCommand(rest)
         return
     end
 
-    self:Print("Usage: /gbl audit on|off|status|clear")
+    self:Print("Usage: /gbl audit on||off||status||clear")
 end
