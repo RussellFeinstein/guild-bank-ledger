@@ -3783,20 +3783,21 @@ describe("Sync", function()
 
         -- The fast-path check needs its own pin: a mutation test showed the
         -- test above still passed with it removed, because the check inside
-        -- the jitter callback caught the same case. That second check goes
+        -- the jitter callback caught the same case. That second check went
         -- away with the jitter, so this test is what keeps the surviving one
         -- honest. It also covers the audit line, without which a capture
         -- shows a HELLO arriving and simply nothing happening.
-        it("skips a busy peer without scheduling anything, and says why",
-        function()
+        it("skips a busy peer without requesting, and says why", function()
             MockWoW.serverTime = 100000
             GBL:HandleBusy("OfficerB", {})
-            local timersBefore = #MockWoW.pendingTimers
+            MockAce.sentCommMessages = {}
 
             GBL:HandleHello("OfficerB", hello())
 
-            assert.equals(timersBefore, #MockWoW.pendingTimers,
-                "a busy peer should not even get a jitter timer")
+            -- Counting timers used to be the discriminator here. It is not
+            -- one any more: the happy path schedules nothing either, so that
+            -- assertion would hold with the check deleted.
+            assert.equals(0, countSent("SYNC_REQUEST", "OfficerB"))
             local logged = false
             for _, entry in ipairs(GBL:GetAuditTrail()) do
                 if entry.message and entry.message:find("busy cooldown", 1, true) then
@@ -3908,10 +3909,13 @@ describe("Sync", function()
         -- The pause guard the queue used to provide
         -----------------------------------------------------------------
 
-        -- ProcessPendingPeers checked isSyncPaused before initiating, and
-        -- the jitter callback never had to because the queue was the
-        -- deferral. With the queue gone the callback is the only path.
-        it("does not request while a zone change has sync paused", function()
+        -- ProcessPendingPeers checked isSyncPaused before initiating, and the
+        -- queue was the deferral. With both the queue and the jitter gone,
+        -- HandleHello's own skip chain is the only place left to check it.
+        -- The pause outlives its trigger by a cooldown, so this arm covers a
+        -- window the combat-lockdown check above it no longer sees.
+        it("does not request while a zone change has sync paused, and says why",
+        function()
             -- OnLoadingScreenStart only pauses a live session, so enter one
             -- and end it, which leaves zonePaused set until its cooldown.
             GBL:RequestSync("OfficerC", 0)
@@ -3927,6 +3931,16 @@ describe("Sync", function()
             fireJitterTimers()
 
             assert.equals(0, countSent("SYNC_REQUEST", "OfficerB"))
+
+            -- Silence here is what made the old jitter callback's five returns
+            -- undiagnosable, so the skip has to name itself in the capture.
+            local logged = false
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message and entry.message:find("zone cooldown", 1, true) then
+                    logged = true
+                end
+            end
+            assert.is_true(logged)
         end)
     end)
 
@@ -8938,12 +8952,13 @@ describe("Sync", function()
     end)
 
     ---------------------------------------------------------------------------
-    -- Sync jitter
+    -- HELLO-driven sync initiation
     ---------------------------------------------------------------------------
 
-    describe("sync jitter", function()
-        it("jitter timer fires and initiates sync", function()
+    describe("sync initiation from HELLO", function()
+        it("requests during the HELLO, not behind a timer", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
             GBL:HandleHello("PeerA", {
                 version = GBL.version,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
@@ -8952,15 +8967,23 @@ describe("Sync", function()
                 isReply = true,
             })
 
-            -- Before firing jitter, should not be receiving
-            assert.is_false(GBL:GetSyncStatus().receiving)
-
-            -- After firing jitter, should be receiving
-            fireJitterTimers()
+            -- Asserted with no timer fired in between, which is also the guard
+            -- against the deferral coming back: anything that puts the request
+            -- behind a timer again leaves this false. The decision to sync and
+            -- the request being one event is what makes a capture readable,
+            -- since a deferred request could be dropped with nothing logged.
             assert.is_true(GBL:GetSyncStatus().receiving)
             assert.equals("PeerA", GBL:GetSyncStatus().receiveSource)
-        end)
 
+            local requests = 0
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                if ok and data.type == "SYNC_REQUEST" and sent.target == "PeerA" then
+                    requests = requests + 1
+                end
+            end
+            assert.equals(1, requests)
+        end)
     end)
 
     ---------------------------------------------------------------------------
