@@ -3781,11 +3781,12 @@ describe("Sync", function()
             assert.equals(0, countSent("SYNC_REQUEST", "OfficerB"))
         end)
 
-        -- There are two busy checks, and a mutation test showed each hid
-        -- the other: removing either one alone left the test above passing.
-        -- These pin them separately. The first is the fast path, which also
-        -- puts a reason in the audit trail; without it a capture shows a
-        -- HELLO arriving and simply nothing happening.
+        -- The fast-path check needs its own pin: a mutation test showed the
+        -- test above still passed with it removed, because the check inside
+        -- the jitter callback caught the same case. That second check goes
+        -- away with the jitter, so this test is what keeps the surviving one
+        -- honest. It also covers the audit line, without which a capture
+        -- shows a HELLO arriving and simply nothing happening.
         it("skips a busy peer without scheduling anything, and says why",
         function()
             MockWoW.serverTime = 100000
@@ -3803,20 +3804,6 @@ describe("Sync", function()
                 end
             end
             assert.is_true(logged)
-        end)
-
-        -- The second check is the race guard: the peer was fine when the
-        -- HELLO landed and told us they were busy during the jitter window.
-        it("abandons a scheduled request if BUSY arrives during the jitter",
-        function()
-            MockWoW.serverTime = 100000
-            GBL:HandleHello("OfficerB", hello())
-            MockAce.sentCommMessages = {}
-
-            GBL:HandleBusy("OfficerB", {})
-            fireJitterTimers()
-
-            assert.equals(0, countSent("SYNC_REQUEST", "OfficerB"))
         end)
 
         it("requests from the same peer once the cooldown expires", function()
@@ -3932,8 +3919,11 @@ describe("Sync", function()
             GBL:FinishReceiving("OfficerC")
             assert.is_true(GBL:GetSyncStatus().zonePaused)
 
-            GBL:HandleHello("OfficerB", hello())
+            -- Clear before the HELLO, not after: once the request is issued
+            -- inline, a clear that follows HandleHello wipes the very message
+            -- this test is looking for and it passes without pinning anything.
             MockAce.sentCommMessages = {}
+            GBL:HandleHello("OfficerB", hello())
             fireJitterTimers()
 
             assert.equals(0, countSent("SYNC_REQUEST", "OfficerB"))
@@ -8971,27 +8961,6 @@ describe("Sync", function()
             assert.equals("PeerA", GBL:GetSyncStatus().receiveSource)
         end)
 
-        it("drops the request if we started receiving during the jitter", function()
-            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
-            GBL:HandleHello("PeerA", {
-                version = GBL.version,
-                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
-                txCount = 50,
-                dataHash = 999,
-                isReply = true,
-            })
-
-            -- Before the jitter fires, start receiving from someone else
-            GBL:UpdatePeer("PeerB", { version = GBL.version, txCount = 10, dataHash = 123 })
-            GBL:RequestSync("PeerB", 0)
-            assert.is_true(GBL:GetSyncStatus().receiving)
-
-            -- The jitter fires into a busy client. PeerA is dropped rather
-            -- than remembered: they keep advertising, and we answer the next
-            -- one once this session is done.
-            fireJitterTimers()
-            assert.equals("PeerB", GBL:GetSyncStatus().receiveSource)
-        end)
     end)
 
     ---------------------------------------------------------------------------
