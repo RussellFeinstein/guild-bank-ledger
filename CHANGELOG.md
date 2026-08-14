@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.10] - 2026-08-14
+
 ### Changed
 - Your client now asks a guildmate for their records the moment it decides to, instead of waiting up to a second first. The wait was there to stop several people answering the same broadcast at once, but the addon already handles that by telling the extra askers to try again shortly. The delay could also quietly abandon a sync it had just decided to start, with nothing written to the log to say so, which made stalled members hard to diagnose. Syncs that get skipped for a reason now say which reason in the sync log.
 

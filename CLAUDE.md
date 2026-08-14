@@ -248,4 +248,4 @@ Helpers:
 
 ## Version
 
-Current: 0.37.9 (see `VERSION` file)
+Current: 0.37.10 (see `VERSION` file)
