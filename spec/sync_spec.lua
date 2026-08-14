@@ -4584,6 +4584,224 @@ describe("Sync", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Hierarchical request manifest (serving side)
+    ---------------------------------------------------------------------------
+
+    describe("span-aware bucket diff", function()
+        -- Bucket key 80000 is 86400 * 20000 seconds, comfortably inside the
+        -- era IsValidTimestamp accepts. Record ids carry no pipe, so bucket
+        -- placement falls back to the timestamp, same as the older specs here.
+        local BASE = 80000
+
+        local function addRecordInBucket(key, tag)
+            local ts = key * GBL.BUCKET_SECONDS
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P" .. tag,
+                itemID = 1000, count = 1, tab = 1,
+                timestamp = ts, scanTime = ts,
+                scannedBy = "OfficerA", id = "rec_" .. tag .. ":0",
+            })
+        end
+
+        -- Only the first chunk leaves synchronously, so a send has to be
+        -- driven to completion before asking what it offered.
+        local function drainSend(target)
+            for _ = 1, 4000 do
+                if not GBL:GetSyncStatus().sending then break end
+                local idx = tonumber(
+                    GBL:GetSyncStatus().sendProgress:match("^(%d+)"))
+                GBL:HandleAck(target, { chunk = idx })
+                MockWoW.serverTime = MockWoW.serverTime + 2
+                local fired = false
+                for i = #MockWoW.pendingTimers, 1, -1 do
+                    local t = MockWoW.pendingTimers[i]
+                    if not t.cancelled and not t.fired and t.delay
+                        and t.delay > 0 and t.delay <= 2.0 then
+                        t.fired = true
+                        t.callback()
+                        fired = true
+                        break
+                    end
+                end
+                if not fired then break end
+            end
+        end
+
+        local function serve(payload)
+            GBL:HandleSyncRequest("OfficerB", request(payload))
+            drainSend("OfficerB")
+
+            local ids = {}
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                if ok and data.type == "SYNC_DATA" then
+                    for _, tx in ipairs(data.transactions or {}) do
+                        ids[tx.id] = true
+                    end
+                end
+            end
+            return ids
+        end
+
+        local function countKeys(t)
+            local n = 0
+            for _ in pairs(t) do n = n + 1 end
+            return n
+        end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+        end)
+
+        it("clears every bucket inside a span whose fold matches", function()
+            addRecordInBucket(BASE, "old1")
+            addRecordInBucket(BASE + 1, "old2")
+            addRecordInBucket(BASE + 2, "old3")
+            addRecordInBucket(BASE + 10, "recent")
+
+            local localBuckets = GBL:ComputeBucketHashes(guildData)
+            local ids = serve{
+                sinceTimestamp = 0,
+                bucketHashes = { [BASE + 10] = localBuckets[BASE + 10] },
+                spans = {
+                    { s = BASE, e = BASE + 9,
+                      h = GBL:FoldBucketRange(localBuckets, BASE, BASE + 9) },
+                },
+            }
+
+            assert.equals(0, countKeys(ids))
+        end)
+
+        it("offers every local bucket in a span whose fold differs", function()
+            addRecordInBucket(BASE, "old1")
+            addRecordInBucket(BASE + 1, "old2")
+            addRecordInBucket(BASE + 2, "old3")
+            addRecordInBucket(BASE + 10, "recent")
+
+            local localBuckets = GBL:ComputeBucketHashes(guildData)
+            local ids = serve{
+                sinceTimestamp = 0,
+                bucketHashes = { [BASE + 10] = localBuckets[BASE + 10] },
+                spans = {
+                    { s = BASE, e = BASE + 9,
+                      h = GBL:FoldBucketRange(localBuckets, BASE, BASE + 9) + 1 },
+                },
+            }
+
+            assert.is_true(ids["rec_old1:0"])
+            assert.is_true(ids["rec_old2:0"])
+            assert.is_true(ids["rec_old3:0"])
+            assert.is_nil(ids["rec_recent:0"])
+        end)
+
+        it("offers a bucket older than every declared span", function()
+            addRecordInBucket(BASE - 5, "ancient")
+            addRecordInBucket(BASE, "old1")
+            addRecordInBucket(BASE + 10, "recent")
+
+            local localBuckets = GBL:ComputeBucketHashes(guildData)
+            local ids = serve{
+                sinceTimestamp = 0,
+                bucketHashes = { [BASE + 10] = localBuckets[BASE + 10] },
+                spans = {
+                    { s = BASE, e = BASE + 9,
+                      h = GBL:FoldBucketRange(localBuckets, BASE, BASE + 9) },
+                },
+            }
+
+            assert.is_true(ids["rec_ancient:0"])
+            assert.is_nil(ids["rec_old1:0"])
+            assert.is_nil(ids["rec_recent:0"])
+        end)
+
+        it("offers a bucket sitting in a hole in the detail window", function()
+            addRecordInBucket(BASE + 10, "listed")
+            addRecordInBucket(BASE + 12, "unlisted")
+
+            local localBuckets = GBL:ComputeBucketHashes(guildData)
+            local ids = serve{
+                sinceTimestamp = 0,
+                bucketHashes = { [BASE + 10] = localBuckets[BASE + 10] },
+            }
+
+            assert.is_true(ids["rec_unlisted:0"])
+            assert.is_nil(ids["rec_listed:0"])
+        end)
+
+        it("sends nothing when the requester hands back our own manifest", function()
+            for i = 1, GBL.SYNC_REQUEST_DETAIL_BUCKETS + 20 do
+                addRecordInBucket(BASE + i, "r" .. i)
+            end
+
+            local detail, spans = GBL:BuildRequestManifest(
+                GBL:ComputeBucketHashes(guildData))
+            assert.is_not_nil(spans)
+
+            local ids = serve{
+                sinceTimestamp = 0, bucketHashes = detail, spans = spans,
+            }
+
+            assert.equals(0, countKeys(ids))
+        end)
+
+        it("offers the one changed bucket out of a long history", function()
+            for i = 1, GBL.SYNC_REQUEST_DETAIL_BUCKETS + 20 do
+                addRecordInBucket(BASE + i, "r" .. i)
+            end
+
+            -- Snapshot the requester's view, then add a record to an old
+            -- bucket so exactly one span's fold moves underneath it.
+            local detail, spans = GBL:BuildRequestManifest(
+                GBL:ComputeBucketHashes(guildData))
+            addRecordInBucket(BASE + 3, "late")
+
+            local ids = serve{
+                sinceTimestamp = 0, bucketHashes = detail, spans = spans,
+            }
+
+            assert.is_true(ids["rec_late:0"])
+            assert.is_true(ids["rec_r3:0"])   -- rides along, same span
+            assert.is_nil(ids["rec_r60:0"])   -- untouched detail bucket
+        end)
+
+        it("ignores malformed spans and falls back to the detail compare", function()
+            addRecordInBucket(BASE, "old1")
+
+            -- Nothing legible covers BASE, so it goes through the per-bucket
+            -- compare and is offered. Erring toward sending is the safe way to
+            -- misread a request.
+            local ids = serve{
+                sinceTimestamp = 0,
+                bucketHashes = {},
+                spans = {
+                    { s = "not a number", e = BASE + 9, h = 1 },
+                    { s = BASE, e = BASE + 9 },           -- no fold
+                    "not even a table",
+                },
+            }
+
+            assert.is_true(ids["rec_old1:0"])
+        end)
+
+        it("treats a request carrying no spans exactly as before", function()
+            -- The compatibility proof for a peer that predates the manifest:
+            -- it sends its whole bucket table and no spans, and every key must
+            -- take the same per-bucket comparison it always took.
+            addRecordInBucket(BASE, "old1")
+            addRecordInBucket(BASE + 1, "old2")
+
+            local localBuckets = GBL:ComputeBucketHashes(guildData)
+            local ids = serve{
+                sinceTimestamp = 0,
+                bucketHashes = { [BASE] = localBuckets[BASE] },
+            }
+
+            assert.is_nil(ids["rec_old1:0"])
+            assert.is_true(ids["rec_old2:0"])
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Send order (newest-first)
     ---------------------------------------------------------------------------
 

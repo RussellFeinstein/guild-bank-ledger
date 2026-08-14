@@ -1628,7 +1628,10 @@ function GBL:HandleSyncRequest(sender, data)
     local localBuckets = self:ComputeBucketHashes(guildData)
 
     if data.bucketHashes then
-        -- Bucket-filtered sync: only send records from days where hashes differ
+        -- Bucket-filtered sync: only send records from buckets that differ.
+        -- Since the hierarchical manifest, a request describes its recent
+        -- window bucket by bucket and everything older as a handful of coarse
+        -- spans, so a bucket is judged by whichever of the two covers it.
         diffDays = {}
         local totalLocalDays = 0
         local totalRemoteDays = 0
@@ -1637,8 +1640,45 @@ function GBL:HandleSyncRequest(sender, data)
         for _ in pairs(localBuckets) do totalLocalDays = totalLocalDays + 1 end
         for _ in pairs(data.bucketHashes) do totalRemoteDays = totalRemoteDays + 1 end
 
+        -- Fold our own buckets over each declared span once, up front. A span
+        -- that matches clears every bucket inside it in one comparison; a span
+        -- that differs offers all of them, because the fold says something in
+        -- the range moved but not what (drilling down would cost a round trip,
+        -- and the session cap already bounds what one session hands over).
+        local spans = {}
+        local differingSpans = 0
+        if type(data.spans) == "table" then
+            for _, span in ipairs(data.spans) do
+                if type(span) == "table" and type(span.s) == "number"
+                    and type(span.e) == "number" and type(span.h) == "number" then
+                    local differs =
+                        self:FoldBucketRange(localBuckets, span.s, span.e) ~= span.h
+                    if differs then differingSpans = differingSpans + 1 end
+                    spans[#spans + 1] = { s = span.s, e = span.e, differs = differs }
+                end
+            end
+        end
+
         for dayKey, localHash in pairs(localBuckets) do
-            if localHash ~= (data.bucketHashes[dayKey] or 0) then
+            local covering
+            for i = 1, #spans do
+                if dayKey >= spans[i].s and dayKey <= spans[i].e then
+                    covering = spans[i]
+                    break
+                end
+            end
+
+            if covering then
+                if covering.differs then
+                    diffDays[dayKey] = true
+                else
+                    matchingDays = matchingDays + 1
+                end
+            elseif localHash ~= (data.bucketHashes[dayKey] or 0) then
+                -- Not covered by any span, so it is either in the requester's
+                -- detail window or older than anything it declared. Both cases
+                -- take the comparison this line has always made: a bucket the
+                -- requester never mentioned reads as hash 0 and is offered.
                 diffDays[dayKey] = true
             else
                 matchingDays = matchingDays + 1
@@ -1669,8 +1709,12 @@ function GBL:HandleSyncRequest(sender, data)
             end
         end
 
+        local spanNote = ""
+        if #spans > 0 then
+            spanNote = ", " .. #spans .. " span(s) (" .. differingSpans .. " differing)"
+        end
         self:AddAuditEntry("Bucket filter: " .. totalLocalDays .. " local bucket(s), "
-            .. totalRemoteDays .. " remote bucket(s), "
+            .. totalRemoteDays .. " remote detail bucket(s)" .. spanNote .. ", "
             .. matchingDays .. " matching, " .. diffCount .. " differing")
         if diffCount > 0 then
             self:AddAuditEntry("Differing dates: " .. table.concat(diffDateList, ", "))
