@@ -6,17 +6,6 @@ local Helpers = require("spec.helpers")
 local MockAce = Helpers.MockAce
 local MockWoW = Helpers.MockWoW
 
---- Fire all pending jitter timers (delay <= 2s, uncancelled).
--- HandleHello's sync initiation uses 0-2s random jitter.
-local function fireJitterTimers()
-    for _, timer in ipairs(MockWoW.pendingTimers) do
-        if timer.delay and timer.delay <= 2 and not timer.cancelled and not timer.fired then
-            timer.callback()
-            timer.fired = true
-        end
-    end
-end
-
 --- Fire the pending one-shot ACK timer, and fail if there is not one.
 -- The delay comes from the caller as GBL.SYNC_ACK_TIMEOUT rather than a
 -- literal, and a miss is an error rather than a quiet no-op. Both matter: these
@@ -301,9 +290,8 @@ describe("Sync", function()
                 txCount = 50,
                 lastScanTime = 1000,
             })
-            fireJitterTimers()
 
-            -- HELLO reply + SYNC_REQUEST both sent (after jitter)
+            -- HELLO reply + SYNC_REQUEST both sent
             assert.is_true(#MockAce.sentCommMessages >= 2)
 
             -- Find the SYNC_REQUEST among sent messages
@@ -657,7 +645,6 @@ describe("Sync", function()
                 dataHash = GBL:GetDataHash(guildData) + 1,
                 lastScanTime = 2000,
             })
-            fireJitterTimers()
 
             local foundRequest = false
             for _, msg in ipairs(MockAce.sentCommMessages) do
@@ -688,7 +675,6 @@ describe("Sync", function()
                 dataHash = localHash + 1,  -- different hash
                 lastScanTime = 2000,
             })
-            fireJitterTimers()
 
             -- Should send SYNC_REQUEST despite equal counts
             local foundRequest = false
@@ -722,7 +708,6 @@ describe("Sync", function()
                 dataHash = localHash + 1,
                 lastScanTime = 2000,
             })
-            fireJitterTimers()
 
             -- Should NOT request sync — local is likely a superset
             for _, msg in ipairs(MockAce.sentCommMessages) do
@@ -762,14 +747,12 @@ describe("Sync", function()
             -- First HELLO: peer behind, reply sent, registers lastHelloReplyHash.
             hello.lastScanTime = 2000
             GBL:HandleHello("OfficerB", hello)
-            fireJitterTimers()
             MockAce.sentCommMessages = {}
 
             -- Second HELLO: hash unchanged so the normal reply is suppressed, but
             -- because the peer is behind us the superset branch re-nudges.
             hello.lastScanTime = 3000
             GBL:HandleHello("OfficerB", hello)
-            fireJitterTimers()
 
             local nudged = false
             for _, sent in ipairs(MockAce.sentCommMessages) do
@@ -809,17 +792,14 @@ describe("Sync", function()
             -- First HELLO sends a reply; second triggers the (throttled) nudge.
             hello.lastScanTime = 2000
             GBL:HandleHello("OfficerB", hello)
-            fireJitterTimers()
             hello.lastScanTime = 3000
             GBL:HandleHello("OfficerB", hello)
-            fireJitterTimers()
             MockAce.sentCommMessages = {}
 
             -- Third HELLO immediately (same server time, within the throttle):
             -- no second nudge.
             hello.lastScanTime = 4000
             GBL:HandleHello("OfficerB", hello)
-            fireJitterTimers()
 
             for _, sent in ipairs(MockAce.sentCommMessages) do
                 local ok, data = GBL:Deserialize(sent.text)
@@ -848,7 +828,6 @@ describe("Sync", function()
                 dataHash = localHash + 1,
                 lastScanTime = 2000,
             })
-            fireJitterTimers()
 
             local replyCount = 0
             for _, sent in ipairs(MockAce.sentCommMessages) do
@@ -906,7 +885,6 @@ describe("Sync", function()
                 txCount = 50,
                 lastScanTime = 2000,
             })
-            fireJitterTimers()
 
             -- Should still request sync via count comparison
             local foundRequest = false
@@ -3194,7 +3172,6 @@ describe("Sync", function()
         it("refuses a peer below the floor", function()
             GBL.version = "0.40.0"
             GBL:HandleHello("OfficerB", floorHello("0.20.0", "0.20.0"))
-            fireJitterTimers()
 
             assert.is_nil(sentTypes()["SYNC_REQUEST"])
             assert.is_true(GBL:GetSyncPeers()["OfficerB"].outdated)
@@ -3204,7 +3181,6 @@ describe("Sync", function()
             GBL.version = "0.37.0"
             -- They shipped a later break and will not accept us either.
             GBL:HandleHello("OfficerB", floorHello("0.50.0", "0.45.0"))
-            fireJitterTimers()
 
             assert.is_nil(sentTypes()["SYNC_REQUEST"])
             assert.equals("local_behind", GBL:GetSyncPeers()["OfficerB"].versionRelation)
@@ -3220,7 +3196,6 @@ describe("Sync", function()
                 txCount = 999,
                 dataHash = 4242,
             })
-            fireJitterTimers()
 
             assert.is_nil(sentTypes()["SYNC_REQUEST"])
         end)
@@ -3233,7 +3208,6 @@ describe("Sync", function()
                 txCount = 999,
                 dataHash = 4242,
             })
-            fireJitterTimers()
 
             assert.equals(1, sentTypes()["SYNC_REQUEST"] or 0)
         end)
@@ -3245,7 +3219,6 @@ describe("Sync", function()
                 txCount = 999,
                 dataHash = 4242,
             })
-            fireJitterTimers()
 
             assert.is_nil(sentTypes()["SYNC_REQUEST"])
         end)
@@ -3256,7 +3229,6 @@ describe("Sync", function()
             -- isolation DEV_BUILD exists to enforce.
             GBL.version = "0.40.0-dev.cross-version-sync"
             GBL:HandleHello("OfficerB", floorHello("0.40.0"))
-            fireJitterTimers()
 
             assert.is_nil(sentTypes()["SYNC_REQUEST"])
         end)
@@ -3264,7 +3236,6 @@ describe("Sync", function()
         it("keeps a production build isolated from an in-range dev peer", function()
             GBL.version = "0.40.0"
             GBL:HandleHello("OfficerB", floorHello("0.40.0-dev.someone-else"))
-            fireJitterTimers()
 
             assert.is_nil(sentTypes()["SYNC_REQUEST"])
         end)
@@ -3272,7 +3243,6 @@ describe("Sync", function()
         it("syncs with a matching dev build", function()
             GBL.version = "0.40.0-dev.cross-version-sync"
             GBL:HandleHello("OfficerB", floorHello("0.40.0-dev.cross-version-sync"))
-            fireJitterTimers()
 
             assert.equals(1, sentTypes()["SYNC_REQUEST"] or 0)
         end)
@@ -3398,7 +3368,6 @@ describe("Sync", function()
             it("requests from a known-compatible peer", function()
                 GBL.version = "0.40.0"
                 GBL:HandleHello("OfficerB", floorHello("0.38.0"))
-                fireJitterTimers()
                 MockAce.sentCommMessages = {}
                 GBL:ResetSyncState()
 
@@ -3776,26 +3745,27 @@ describe("Sync", function()
             MockAce.sentCommMessages = {}
 
             GBL:HandleHello("OfficerB", hello())
-            fireJitterTimers()
 
             assert.equals(0, countSent("SYNC_REQUEST", "OfficerB"))
         end)
 
-        -- There are two busy checks, and a mutation test showed each hid
-        -- the other: removing either one alone left the test above passing.
-        -- These pin them separately. The first is the fast path, which also
-        -- puts a reason in the audit trail; without it a capture shows a
-        -- HELLO arriving and simply nothing happening.
-        it("skips a busy peer without scheduling anything, and says why",
-        function()
+        -- The fast-path check needs its own pin: a mutation test showed the
+        -- test above still passed with it removed, because the check inside
+        -- the jitter callback caught the same case. That second check went
+        -- away with the jitter, so this test is what keeps the surviving one
+        -- honest. It also covers the audit line, without which a capture
+        -- shows a HELLO arriving and simply nothing happening.
+        it("skips a busy peer without requesting, and says why", function()
             MockWoW.serverTime = 100000
             GBL:HandleBusy("OfficerB", {})
-            local timersBefore = #MockWoW.pendingTimers
+            MockAce.sentCommMessages = {}
 
             GBL:HandleHello("OfficerB", hello())
 
-            assert.equals(timersBefore, #MockWoW.pendingTimers,
-                "a busy peer should not even get a jitter timer")
+            -- Counting timers used to be the discriminator here. It is not
+            -- one any more: the happy path schedules nothing either, so that
+            -- assertion would hold with the check deleted.
+            assert.equals(0, countSent("SYNC_REQUEST", "OfficerB"))
             local logged = false
             for _, entry in ipairs(GBL:GetAuditTrail()) do
                 if entry.message and entry.message:find("busy cooldown", 1, true) then
@@ -3805,20 +3775,6 @@ describe("Sync", function()
             assert.is_true(logged)
         end)
 
-        -- The second check is the race guard: the peer was fine when the
-        -- HELLO landed and told us they were busy during the jitter window.
-        it("abandons a scheduled request if BUSY arrives during the jitter",
-        function()
-            MockWoW.serverTime = 100000
-            GBL:HandleHello("OfficerB", hello())
-            MockAce.sentCommMessages = {}
-
-            GBL:HandleBusy("OfficerB", {})
-            fireJitterTimers()
-
-            assert.equals(0, countSent("SYNC_REQUEST", "OfficerB"))
-        end)
-
         it("requests from the same peer once the cooldown expires", function()
             MockWoW.serverTime = 100000
             GBL:HandleBusy("OfficerB", {})
@@ -3826,7 +3782,6 @@ describe("Sync", function()
 
             MockWoW.serverTime = 100000 + GBL.SYNC_BUSY_COOLDOWN + 1
             GBL:HandleHello("OfficerB", hello())
-            fireJitterTimers()
 
             assert.equals(1, countSent("SYNC_REQUEST", "OfficerB"))
         end)
@@ -3852,7 +3807,6 @@ describe("Sync", function()
         function()
             MockWoW.inCombat = true
             GBL:HandleHello("OfficerB", hello())
-            fireJitterTimers()
             assert.equals(0, countSent("SYNC_REQUEST", "OfficerB"))
 
             MockWoW.inCombat = false
@@ -3896,7 +3850,6 @@ describe("Sync", function()
             MockAce.sentCommMessages = {}
 
             GBL:HandleHello("OfficerC", hello({ dataHash = 555111 }))
-            fireJitterTimers()
 
             assert.equals(0, countSent("SYNC_REQUEST", "OfficerC"))
             assert.equals("OfficerB", GBL:GetSyncStatus().receiveSource)
@@ -3905,14 +3858,12 @@ describe("Sync", function()
         it("takes the next HELLO immediately once the session ends", function()
             GBL:RequestSync("OfficerB", 0)
             GBL:HandleHello("OfficerC", hello({ dataHash = 555111 }))
-            fireJitterTimers()
 
             GBL:FinishReceiving("OfficerB")
             MockAce.sentCommMessages = {}
 
             -- The peer re-advertises on its own heartbeat; we are free now.
             GBL:HandleHello("OfficerC", hello({ dataHash = 555111 }))
-            fireJitterTimers()
 
             assert.equals(1, countSent("SYNC_REQUEST", "OfficerC"))
         end)
@@ -3921,10 +3872,13 @@ describe("Sync", function()
         -- The pause guard the queue used to provide
         -----------------------------------------------------------------
 
-        -- ProcessPendingPeers checked isSyncPaused before initiating, and
-        -- the jitter callback never had to because the queue was the
-        -- deferral. With the queue gone the callback is the only path.
-        it("does not request while a zone change has sync paused", function()
+        -- ProcessPendingPeers checked isSyncPaused before initiating, and the
+        -- queue was the deferral. With both the queue and the jitter gone,
+        -- HandleHello's own skip chain is the only place left to check it.
+        -- The pause outlives its trigger by a cooldown, so this arm covers a
+        -- window the combat-lockdown check above it no longer sees.
+        it("does not request while a zone change has sync paused, and says why",
+        function()
             -- OnLoadingScreenStart only pauses a live session, so enter one
             -- and end it, which leaves zonePaused set until its cooldown.
             GBL:RequestSync("OfficerC", 0)
@@ -3932,11 +3886,23 @@ describe("Sync", function()
             GBL:FinishReceiving("OfficerC")
             assert.is_true(GBL:GetSyncStatus().zonePaused)
 
-            GBL:HandleHello("OfficerB", hello())
+            -- Clear before the HELLO, not after: once the request is issued
+            -- inline, a clear that follows HandleHello wipes the very message
+            -- this test is looking for and it passes without pinning anything.
             MockAce.sentCommMessages = {}
-            fireJitterTimers()
+            GBL:HandleHello("OfficerB", hello())
 
             assert.equals(0, countSent("SYNC_REQUEST", "OfficerB"))
+
+            -- Silence here is what made the old jitter callback's five returns
+            -- undiagnosable, so the skip has to name itself in the capture.
+            local logged = false
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message and entry.message:find("zone cooldown", 1, true) then
+                    logged = true
+                end
+            end
+            assert.is_true(logged)
         end)
     end)
 
@@ -4481,7 +4447,6 @@ describe("Sync", function()
                 -- no dataHash field
                 lastScanTime = 1000,
             })
-            fireJitterTimers()
 
             -- Should have sent SYNC_REQUEST (txCount-based fallback)
             local sentRequest = false
@@ -8836,7 +8801,6 @@ describe("Sync", function()
                 txCount = localCount,
                 dataHash = localHash,
             })
-            fireJitterTimers()
 
             assert.is_false(GBL:GetSyncStatus().receiving)
         end)
@@ -8866,7 +8830,6 @@ describe("Sync", function()
                 txCount = 20,
                 dataHash = 999,
             })
-            fireJitterTimers()
 
             assert.is_true(GBL:GetSyncStatus().sending)
             assert.is_true(GBL:GetSyncStatus().receiving)
@@ -8948,12 +8911,13 @@ describe("Sync", function()
     end)
 
     ---------------------------------------------------------------------------
-    -- Sync jitter
+    -- HELLO-driven sync initiation
     ---------------------------------------------------------------------------
 
-    describe("sync jitter", function()
-        it("jitter timer fires and initiates sync", function()
+    describe("sync initiation from HELLO", function()
+        it("requests during the HELLO, not behind a timer", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
             GBL:HandleHello("PeerA", {
                 version = GBL.version,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
@@ -8962,35 +8926,22 @@ describe("Sync", function()
                 isReply = true,
             })
 
-            -- Before firing jitter, should not be receiving
-            assert.is_false(GBL:GetSyncStatus().receiving)
-
-            -- After firing jitter, should be receiving
-            fireJitterTimers()
+            -- Asserted with no timer fired in between, which is also the guard
+            -- against the deferral coming back: anything that puts the request
+            -- behind a timer again leaves this false. The decision to sync and
+            -- the request being one event is what makes a capture readable,
+            -- since a deferred request could be dropped with nothing logged.
             assert.is_true(GBL:GetSyncStatus().receiving)
             assert.equals("PeerA", GBL:GetSyncStatus().receiveSource)
-        end)
 
-        it("drops the request if we started receiving during the jitter", function()
-            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
-            GBL:HandleHello("PeerA", {
-                version = GBL.version,
-                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
-                txCount = 50,
-                dataHash = 999,
-                isReply = true,
-            })
-
-            -- Before the jitter fires, start receiving from someone else
-            GBL:UpdatePeer("PeerB", { version = GBL.version, txCount = 10, dataHash = 123 })
-            GBL:RequestSync("PeerB", 0)
-            assert.is_true(GBL:GetSyncStatus().receiving)
-
-            -- The jitter fires into a busy client. PeerA is dropped rather
-            -- than remembered: they keep advertising, and we answer the next
-            -- one once this session is done.
-            fireJitterTimers()
-            assert.equals("PeerB", GBL:GetSyncStatus().receiveSource)
+            local requests = 0
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                if ok and data.type == "SYNC_REQUEST" and sent.target == "PeerA" then
+                    requests = requests + 1
+                end
+            end
+            assert.equals(1, requests)
         end)
     end)
 
@@ -9244,7 +9195,6 @@ describe("Sync", function()
                 dataHash = 888,
                 isReply = true,
             })
-            fireJitterTimers()
 
             local requestSent = false
             for _, msg in ipairs(MockAce.sentCommMessages) do
@@ -9966,7 +9916,6 @@ describe("Sync", function()
                 dataHash = 999,
                 isReply = true,
             })
-            fireJitterTimers()
 
             assert.equals("PeerA", GBL:GetSyncStatus().receiveSource)
         end)
@@ -9996,7 +9945,7 @@ describe("Sync", function()
     end)
 
     describe("concurrent send + receive", function()
-        it("initiates receive via HandleHello jitter while sending", function()
+        it("initiates receive via HandleHello while sending", function()
             -- Enter sending state
             table.insert(guildData.transactions, {
                 type = "deposit", player = "P1", tab = 1, itemID = 123,
@@ -10021,20 +9970,20 @@ describe("Sync", function()
                 isReply = true,
             })
 
-            -- Fire jitter timers — should initiate receive despite sending
-            fireJitterTimers()
+            -- The request goes out during the HELLO, so a send in progress
+            -- does not stop us receiving from someone else at the same time.
             assert.is_true(GBL:GetSyncStatus().sending, "should still be sending")
             assert.is_true(GBL:GetSyncStatus().receiving, "should now also be receiving")
             assert.equals("PeerY", GBL:GetSyncStatus().receiveSource)
         end)
 
-        it("jitter drops the peer if already receiving (not sending)", function()
+        it("drops the peer if already receiving (not sending)", function()
             -- Enter receiving state
             GBL:UpdatePeer("PeerB", { version = GBL.version, txCount = 10, dataHash = 123 })
             GBL:RequestSync("PeerB", 0)
             assert.is_true(GBL:GetSyncStatus().receiving)
 
-            -- HELLO from another peer triggers jitter
+            -- HELLO from another peer, refused by the outer receiving check
             GBL:HandleHello("PeerC", {
                 version = GBL.version,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
@@ -10045,7 +9994,6 @@ describe("Sync", function()
 
             -- Receiving is the one thing we cannot double up on, so PeerC is
             -- dropped. Sending is unaffected, which the test above covers.
-            fireJitterTimers()
             assert.equals("PeerB", GBL:GetSyncStatus().receiveSource)
         end)
 

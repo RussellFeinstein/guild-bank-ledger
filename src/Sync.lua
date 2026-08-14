@@ -1140,28 +1140,22 @@ function GBL:HandleHello(sender, data)
             -- back around through the usual HELLO exchange.
             syncState.helloAfterCombat = true
             self:AddAuditEntry("Deferred sync from " .. sender .. " - in combat")
+        elseif isSyncPaused() then
+            -- Combat and zone pauses outlive their triggers by a cooldown, so
+            -- this arm covers the window where the lockdown check above is
+            -- already false. It sits after that check so a HELLO arriving in
+            -- combat still takes the defer arm and sets helloAfterCombat.
+            self:AddAuditEntry("Skipped sync from " .. sender .. " ("
+                .. (syncState.zonePaused and "zone" or "combat")
+                .. " cooldown)")
         else
-            -- Add 0-2s random jitter to prevent mutual SYNC_REQUEST oscillation
-            -- when multiple peers respond to the same HELLO simultaneously
+            -- Requested inline. The deferral this used to sit behind bought
+            -- nothing BUSY does not already buy, and its callback re-checked
+            -- five conditions that could each drop the request with nothing
+            -- logged, which is invisible in a capture.
             self:AddAuditEntry("Sync triggered by " .. syncReason
-                .. " - requesting from " .. sender .. " (with jitter)")
-            local jitter = math.random() * 1
-            C_Timer.After(jitter, function()
-                -- Someone else got here first during the jitter window. Drop
-                -- it: this peer keeps advertising, and we are free again the
-                -- moment this session ends.
-                if syncState.receiving then return end
-                if not self.db.profile.sync.enabled then return end
-                -- Deferred work used to drain through a queue that checked
-                -- this before initiating. This callback is now the only
-                -- automatic initiation path, so the check belongs here.
-                if isSyncPaused() then return end
-                if self:IsPeerBusy(sender) then return end
-                local gd = self:GetGuildData()
-                if not gd then return end
-                local sinceTs = gd.syncState.lastSyncTimestamp or 0
-                self:RequestSync(sender, sinceTs)
-            end)
+                .. " - requesting from " .. sender)
+            self:RequestSync(sender, guildData.syncState.lastSyncTimestamp or 0)
         end
     else
         -- Log why we didn't sync so stalls are diagnosable
