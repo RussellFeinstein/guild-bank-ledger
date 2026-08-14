@@ -359,6 +359,237 @@ describe("Fingerprint", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- FoldBucketRange (span fingerprints for the hierarchical sync request)
+    ---------------------------------------------------------------------------
+
+    describe("FoldBucketRange", function()
+        it("folds an empty range to the djb2 seed", function()
+            assert.equals(5381, GBL:FoldBucketRange({}, 1, 100))
+            assert.equals(5381, GBL:FoldBucketRange({ [500] = 7 }, 1, 100))
+        end)
+
+        it("matches a hand-computed fold for a single bucket", function()
+            -- h = 5381; h = h*33 + key; h = h*33 + hash
+            -- 5381*33 + 10 = 177583; 177583*33 + 7 = 5860246
+            assert.equals(5860246, GBL:FoldBucketRange({ [10] = 7 }, 10, 10))
+        end)
+
+        it("ignores buckets outside the range", function()
+            local inRangeOnly = GBL:FoldBucketRange({ [10] = 7 }, 10, 10)
+            local withNeighbours = GBL:FoldBucketRange(
+                { [5] = 3, [10] = 7, [15] = 9 }, 10, 10)
+            assert.equals(inRangeOnly, withNeighbours)
+        end)
+
+        it("distinguishes bucket sets that XOR to the same value", function()
+            -- The reason the span fold is not XOR. 3 XOR 5 == 1 XOR 7 == 6, so an
+            -- XOR-of-XORs fold would call these two ranges identical and the
+            -- divergence would be invisible to sync forever.
+            local a = { [10] = 3, [11] = 5 }
+            local b = { [10] = 1, [11] = 7 }
+            assert.equals(GBL:XOR32(3, 5), GBL:XOR32(1, 7))
+            assert.are_not.equals(
+                GBL:FoldBucketRange(a, 10, 11),
+                GBL:FoldBucketRange(b, 10, 11))
+        end)
+
+        it("is order dependent across buckets", function()
+            local a = { [10] = 7, [11] = 9 }
+            local b = { [10] = 9, [11] = 7 }
+            assert.are_not.equals(
+                GBL:FoldBucketRange(a, 10, 11),
+                GBL:FoldBucketRange(b, 10, 11))
+        end)
+
+        it("does not cancel a repeated hash value", function()
+            -- Under XOR, two buckets holding the same hash fold to 0, which is
+            -- also what an empty range folds to.
+            local repeated = GBL:FoldBucketRange({ [10] = 5, [11] = 5 }, 10, 11)
+            assert.are_not.equals(5381, repeated)
+            assert.are_not.equals(0, repeated)
+        end)
+
+        it("changes when any bucket hash changes", function()
+            local base = GBL:FoldBucketRange({ [10] = 7, [11] = 9 }, 10, 11)
+            local moved = GBL:FoldBucketRange({ [10] = 7, [11] = 10 }, 10, 11)
+            assert.are_not.equals(base, moved)
+        end)
+
+        it("changes when a bucket is added inside the range", function()
+            local without = GBL:FoldBucketRange({ [10] = 7, [12] = 9 }, 10, 12)
+            local with = GBL:FoldBucketRange({ [10] = 7, [11] = 4, [12] = 9 }, 10, 12)
+            assert.are_not.equals(without, with)
+        end)
+
+        it("stays within 32-bit range", function()
+            local buckets = {}
+            for key = 1, 200 do buckets[key] = 4294967295 end
+            local h = GBL:FoldBucketRange(buckets, 1, 200)
+            assert.is_true(h >= 0)
+            assert.is_true(h < 4294967296)
+            assert.equals(math.floor(h), h)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- BuildRequestManifest (bounded SYNC_REQUEST payload)
+    ---------------------------------------------------------------------------
+
+    describe("BuildRequestManifest", function()
+        -- Build a bucket table with contiguous keys first..last.
+        local function contiguous(first, last)
+            local buckets = {}
+            for key = first, last do buckets[key] = (key * 7919) % 4294967296 end
+            return buckets
+        end
+
+        local function count(t)
+            local n = 0
+            for _ in pairs(t) do n = n + 1 end
+            return n
+        end
+
+        it("passes nil through so the request omits bucketHashes entirely", function()
+            local detail, spans = GBL:BuildRequestManifest(nil)
+            assert.is_nil(detail)
+            assert.is_nil(spans)
+        end)
+
+        it("returns an empty detail table and no spans for an empty dataset", function()
+            local detail, spans = GBL:BuildRequestManifest({})
+            assert.same({}, detail)
+            assert.is_nil(spans)
+        end)
+
+        it("sends pure detail and no spans below the detail budget", function()
+            local detail, spans = GBL:BuildRequestManifest(contiguous(1, 10))
+            assert.equals(10, count(detail))
+            assert.is_nil(spans)
+        end)
+
+        it("sends pure detail and no spans at exactly the detail budget", function()
+            local n = GBL.SYNC_REQUEST_DETAIL_BUCKETS
+            local detail, spans = GBL:BuildRequestManifest(contiguous(1, n))
+            assert.equals(n, count(detail))
+            assert.is_nil(spans)
+        end)
+
+        it("opens a single span at one bucket past the detail budget", function()
+            local n = GBL.SYNC_REQUEST_DETAIL_BUCKETS
+            local buckets = contiguous(1, n + 1)
+            local detail, spans = GBL:BuildRequestManifest(buckets)
+
+            assert.equals(n, count(detail))
+            assert.equals(1, #spans)
+            assert.equals(1, spans[1].s)
+            assert.equals(1, spans[1].e)   -- detailStart (2) - 1
+            assert.equals(GBL:FoldBucketRange(buckets, 1, 1), spans[1].h)
+        end)
+
+        it("keeps the newest buckets as detail", function()
+            local n = GBL.SYNC_REQUEST_DETAIL_BUCKETS
+            local buckets = contiguous(1, n + 20)
+            local detail = GBL:BuildRequestManifest(buckets)
+
+            assert.equals(n, count(detail))
+            for key = 21, n + 20 do
+                assert.equals(buckets[key], detail[key])
+            end
+            for key = 1, 20 do
+                assert.is_nil(detail[key])
+            end
+        end)
+
+        it("opens no more spans than there are older buckets", function()
+            local n = GBL.SYNC_REQUEST_DETAIL_BUCKETS
+            local _, spans = GBL:BuildRequestManifest(contiguous(1, n + 3))
+            assert.equals(3, #spans)
+        end)
+
+        it("caps spans at the span budget for a long history", function()
+            local buckets = contiguous(1, 300)
+            local detail, spans = GBL:BuildRequestManifest(buckets)
+
+            assert.equals(GBL.SYNC_REQUEST_DETAIL_BUCKETS, count(detail))
+            assert.equals(GBL.SYNC_REQUEST_SPAN_COUNT, #spans)
+        end)
+
+        it("tiles the older range with no gaps and no overlap", function()
+            local buckets = contiguous(1, 300)
+            local detail, spans = GBL:BuildRequestManifest(buckets)
+
+            local detailStart = math.huge
+            for key in pairs(detail) do
+                if key < detailStart then detailStart = key end
+            end
+
+            assert.equals(1, spans[1].s)
+            for i = 2, #spans do
+                assert.equals(spans[i - 1].e + 1, spans[i].s)
+            end
+            assert.equals(detailStart - 1, spans[#spans].e)
+        end)
+
+        it("spreads older buckets evenly across the spans", function()
+            local buckets = contiguous(1, 300)
+            local _, spans = GBL:BuildRequestManifest(buckets)
+
+            -- 250 older buckets over 8 spans: two of 32, six of 31.
+            local sizes = {}
+            for _, span in ipairs(spans) do
+                local n = 0
+                for key in pairs(buckets) do
+                    if key >= span.s and key <= span.e then n = n + 1 end
+                end
+                table.insert(sizes, n)
+            end
+            assert.same({ 32, 32, 31, 31, 31, 31, 31, 31 }, sizes)
+        end)
+
+        it("tiles across gaps so a bucket the requester lacks is still covered", function()
+            -- Older keys 1, 5, 100, 200 with the detail window far above them.
+            -- A peer holding a bucket at key 50, which this requester does not
+            -- have at all, must still land inside a span rather than in an
+            -- uncovered hole: that is what makes the peer's extra bucket show
+            -- up as a fold mismatch instead of being silently skipped.
+            local buckets = { [1] = 11, [5] = 22, [100] = 33, [200] = 44 }
+            for key = 1000, 1000 + GBL.SYNC_REQUEST_DETAIL_BUCKETS - 1 do
+                buckets[key] = key
+            end
+
+            local _, spans = GBL:BuildRequestManifest(buckets)
+            assert.equals(4, #spans)
+            assert.equals(1, spans[1].s)
+            assert.equals(999, spans[#spans].e)
+            for i = 2, #spans do
+                assert.equals(spans[i - 1].e + 1, spans[i].s)
+            end
+
+            local covered = false
+            for _, span in ipairs(spans) do
+                if 50 >= span.s and 50 <= span.e then covered = true end
+            end
+            assert.is_true(covered)
+        end)
+
+        it("folds each span over exactly its own declared range", function()
+            local buckets = contiguous(1, 300)
+            local _, spans = GBL:BuildRequestManifest(buckets)
+            for _, span in ipairs(spans) do
+                assert.equals(GBL:FoldBucketRange(buckets, span.s, span.e), span.h)
+            end
+        end)
+
+        it("does not mutate the bucket table it is given", function()
+            local buckets = contiguous(1, 300)
+            local before = count(buckets)
+            GBL:BuildRequestManifest(buckets)
+            assert.equals(before, count(buckets))
+            assert.equals((1 * 7919) % 4294967296, buckets[1])
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- GetDataHash (cached)
     ---------------------------------------------------------------------------
 
