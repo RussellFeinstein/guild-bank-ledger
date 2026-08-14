@@ -1926,7 +1926,7 @@ describe("Sync", function()
                 sending = true, sendTarget = "Alice", sendProgress = "2/5",
                 receiving = true, receiveSource = "Bob", receiveProgress = "3/8",
             })
-            assert.equals("Sending to Alice (2/5) | Receiving from Bob (3/8)", text)
+            assert.equals("Sending to Alice (2/5) || Receiving from Bob (3/8)", text)
         end)
 
         it("shows waiting when receive progress is 0/0", function()

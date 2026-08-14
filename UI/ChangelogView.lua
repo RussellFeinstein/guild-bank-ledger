@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.37.9
+    {"0.37.9", "2026-08-13", {
+        Fixed = {
+            "Vertical bars now show up where they are meant to. WoW treats a single bar as the start of a formatting code, so text using one as a separator could lose it, and sometimes the letter after it. This affected the peer status tags on the Sync tab, the sending and receiving status line, the separators in the Consumption and Gold summaries, several /gbl command help lines that show you the options you can type, and a handful of entries in this changelog.",
+        },
+    }},
+
     -- v0.37.8
     {"0.37.8", "2026-08-13", {
         Fixed = {
@@ -67,7 +74,7 @@ GBL.CHANGELOG_DATA = {
             "Peers remembered from a previous session kept their version but lost the compatibility range that goes with it, so until they spoke again they were treated as though they predated the sync floor. That made the addon refuse a peer it can sync with, and label them as too old in the peer list.",
         },
         Changed = {
-            "Peer status tags read 'too old | sync refused', 'newer | update to sync', 'newer | update available' and 'older | syncing'. A peer running a development build is now named as such instead of being reported as too old.",
+            "Peer status tags read 'too old || sync refused', 'newer || update to sync', 'newer || update available' and 'older || syncing'. A peer running a development build is now named as such instead of being reported as too old.",
         },
     }},
 
@@ -119,7 +126,7 @@ GBL.CHANGELOG_DATA = {
     -- v0.36.0
     {"0.36.0", "2026-07-02", {
         Added = {
-            "Diagnostic logs now persist across reloads, saved to a separate saved variable so you can hand troubleshooting data to the developer after the fact instead of copying chat mid-session. Capped per channel and rotated (10 sessions kept). Nothing is ever sent anywhere; sharing a capture stays a manual step. Manage with /gbl audit on|off|status|clear.",
+            "Diagnostic logs now persist across reloads, saved to a separate saved variable so you can hand troubleshooting data to the developer after the fact instead of copying chat mid-session. Capped per channel and rotated (10 sessions kept). Nothing is ever sent anywhere; sharing a capture stays a manual step. Manage with /gbl audit on||off||status||clear.",
             "Sync bandwidth stalls are measured in detail: each stall logs a 'CTL recovered' summary and the end-of-send stats line adds overlapped-timer and longest-stall counts. A sync that gives up while bandwidth is still starved records that last stall too, on its own 'CTL still starved at send end' line, so the longest-stall figure counts the stall that ended the sync rather than reporting zero for it. Measurement only; these numbers decide the shape of the stall fix.",
         },
         Changed = {
@@ -137,7 +144,7 @@ GBL.CHANGELOG_DATA = {
             "A 'Keep' field in the Layout editor's 'Apply to all' bulk row, so you can set the reserve for every item on a tab in one click (next to bulk Slots and Per slot). Setting it to 0 clears the reserves on that tab.",
         },
         Changed = {
-            "The Restock tab now shows a two-state stock status per item: 'Buy N' below the target, 'In stock' at or above it (the separate 'Over N' state is gone). Each row's counts read 'target N | bank M' instead of '(target N, bank M)'.",
+            "The Restock tab now shows a two-state stock status per item: 'Buy N' below the target, 'In stock' at or above it (the separate 'Over N' state is gone). Each row's counts read 'target N || bank M' instead of '(target N, bank M)'.",
             "Simplified the About tab labels: the Ko-fi and CurseForge copy boxes now read just 'Ko-fi' and 'CurseForge', and the license line reads 'MIT License'.",
         },
         Removed = {
@@ -319,8 +326,8 @@ GBL.CHANGELOG_DATA = {
             "/gbl sortlog opens a copy-pastable pop-up of the sort-channel session log.",
             "/gbl logs opens the master log: sync, sort, and system channels merged in timestamp order with [CHANNEL] [LEVEL] prefixes.",
             "/gbl logs dump [N] prints the last N master entries to chat (default 50).",
-            "/gbl logs clear sync|sort|system|all truncates a channel.",
-            "/gbl logs debug sync|sort|system on|off toggles per-channel DEBUG-to-chat mirroring.",
+            "/gbl logs clear sync||sort||system||all truncates a channel.",
+            "/gbl logs debug sync||sort||system on||off toggles per-channel DEBUG-to-chat mirroring.",
             "Open Sort Log button on the Sort tab and Open Master Log button on the Sync tab, alongside the existing Open Sync Log button. All three open the same AceGUI MultiLineEditBox pop-up the slash commands use.",
         },
         Changed = {
@@ -417,7 +424,7 @@ GBL.CHANGELOG_DATA = {
     {"0.30.2", "2026-04-27", {
         Added = {
             "Sync audit trail now records when a SYNC_DATA chunk arrives at chunk N>1 while no receive session is active - that means the receiver missed an earlier abort signal (combat with a lost BUSY, or a sender desync) and is recovering data mid-stream. Look for 'Auto-bootstrap at chunk N from <sender>' in /gbl synclog.",
-            "Sync ACK timeout retry log now appends 'target=online|offline|unknown' so future capture analysis can tell apart 'peer was already offline and we kept retrying' from 'peer was nominally online but timed out anyway' (likely true wire loss or in-instance silent abort). 'unknown' covers both 'not in roster' and 'roster not yet populated' - the latter only happens for a few seconds right after login.",
+            "Sync ACK timeout retry log now appends 'target=online||offline||unknown' so future capture analysis can tell apart 'peer was already offline and we kept retrying' from 'peer was nominally online but timed out anyway' (likely true wire loss or in-instance silent abort). 'unknown' covers both 'not in roster' and 'roster not yet populated' - the latter only happens for a few seconds right after login.",
         },
     }},
 

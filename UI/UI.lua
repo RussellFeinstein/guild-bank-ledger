@@ -1141,8 +1141,8 @@ function GBL:RenderConsumptionDashboard(container, transactions, filters)
     itemsLine:SetFullWidth(true)
     itemsLine:SetText(
         "Items:  " ..
-        colorHex(depositColor) .. totals.itemsDeposited .. " deposited|r  |  " ..
-        colorHex(withdrawColor) .. totals.itemsWithdrawn .. " withdrawn|r  |  " ..
+        colorHex(depositColor) .. totals.itemsDeposited .. " deposited|r  ||  " ..
+        colorHex(withdrawColor) .. totals.itemsWithdrawn .. " withdrawn|r  ||  " ..
         "Net: " .. colorHex(itemsNetColor) .. (totals.itemsNet >= 0 and "+" or "") .. totals.itemsNet .. "|r"
     )
     container:AddChild(itemsLine)
@@ -1153,8 +1153,8 @@ function GBL:RenderConsumptionDashboard(container, transactions, filters)
     goldLine:SetFullWidth(true)
     goldLine:SetText(
         "Gold:   " ..
-        colorHex(depositColor) .. self:FormatMoney(totals.goldDeposited) .. " in|r  |  " ..
-        colorHex(withdrawColor) .. self:FormatMoney(totals.goldWithdrawn) .. " out|r  |  " ..
+        colorHex(depositColor) .. self:FormatMoney(totals.goldDeposited) .. " in|r  ||  " ..
+        colorHex(withdrawColor) .. self:FormatMoney(totals.goldWithdrawn) .. " out|r  ||  " ..
         "Net: " .. colorHex(goldNetColor) ..
         (totals.goldNet >= 0 and "+" or "") .. self:FormatMoney(totals.goldNet) .. "|r"
     )
