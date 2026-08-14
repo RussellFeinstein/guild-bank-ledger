@@ -821,10 +821,31 @@ function GBL:OnSyncMessage(_prefix, message, distribution, sender)
     local myName = UnitName("player")
     if self:CanonicalPeerKey(sender) == myName then return end
 
+    -- Both of these used to be bare returns, which made a corrupt arrival
+    -- indistinguishable from a peer that never spoke. That matters more than it
+    -- sounds: AceComm reassembles a multipart message with no sequence numbers
+    -- and no completeness check, so losing a middle fragment does not drop the
+    -- message, it delivers a truncated one and it lands right here. The byte
+    -- count is the diagnostic. How much of a message survived says whether a
+    -- route is losing single fragments or whole bursts of them, which is the
+    -- difference between two very different fixes.
+    local rawBytes = type(message) == "string" and #message or 0
+
     local decompressed = decompressMessage(message)
-    if not decompressed then return end
+    if not decompressed then
+        self:SyncWarn("Could not decompress a %s message from %s (%d B); "
+            .. "likely a lost or corrupt fragment",
+            tostring(distribution), tostring(sender), rawBytes)
+        return
+    end
+
     local success, data = self:Deserialize(decompressed)
-    if not success or type(data) ~= "table" then return end
+    if not success or type(data) ~= "table" then
+        self:SyncWarn("Could not read a %s message from %s (%d B on the wire, "
+            .. "%d B decompressed); likely a lost or corrupt fragment",
+            tostring(distribution), tostring(sender), rawBytes, #decompressed)
+        return
+    end
 
     local msgType = data.type
 

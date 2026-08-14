@@ -2193,15 +2193,55 @@ describe("Sync", function()
             assert.equals("Test Guild", data.guild)
         end)
 
-        it("corrupted message data is silently dropped", function()
+        -- This used to assert only that a corrupt message changed nothing, and
+        -- the dropping really was silent: two bare returns at every level. That
+        -- is the shape a lost middle fragment takes, because AceComm reassembles
+        -- multipart with no sequence numbers and no completeness check, so it
+        -- hands up a truncated payload and calls it delivered. Nothing said so,
+        -- which is why a capture could not tell wire loss from a peer that never
+        -- spoke. The byte count is the useful part: it says how much of the
+        -- message survived, and therefore how the route is losing fragments.
+        it("warns when a message cannot be decoded, with its size", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Send a non-serialized string
             GBL:OnSyncMessage("GBLSync", "not-valid-data", "GUILD", "OfficerB")
 
-            -- Should not crash, should not update peers
             local peers = GBL:GetSyncPeers()
-            assert.is_nil(peers["OfficerB"])
+            assert.is_nil(peers["OfficerB"], "a corrupt message must change nothing")
+
+            local warned = false
+            for _, entry in ipairs(GBL:GetLog("sync")) do
+                if entry.level == "WARN"
+                    and entry.message:find("OfficerB", 1, true)
+                    and entry.message:find(tostring(#"not-valid-data"), 1, true) then
+                    warned = true
+                end
+            end
+            assert.is_true(warned, "the drop should be visible in a capture")
+        end)
+
+        it("warns when a message cannot be decompressed", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- The LibDeflate mock is an identity transform, so the decompress
+            -- branch is unreachable without standing in for a failure.
+            local LibDeflate = LibStub("LibDeflate")
+            local realDecode = LibDeflate.DecodeForWoWAddonChannel
+            LibDeflate.DecodeForWoWAddonChannel = function() return nil end
+
+            GBL:OnSyncMessage("GBLSync", "garbled-payload", "WHISPER", "OfficerB")
+
+            LibDeflate.DecodeForWoWAddonChannel = realDecode
+
+            local warned = false
+            for _, entry in ipairs(GBL:GetLog("sync")) do
+                if entry.level == "WARN"
+                    and entry.message:find("decompress", 1, true)
+                    and entry.message:find("OfficerB", 1, true) then
+                    warned = true
+                end
+            end
+            assert.is_true(warned, "a failed decompress should be visible too")
         end)
 
         it("SYNC_DATA with nil transaction arrays is handled", function()

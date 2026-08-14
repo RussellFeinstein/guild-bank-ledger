@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Members with a long history can ask for records again. The message your client sends to ask a guildmate what it is missing carried one entry for every six-hour window the guild had ever recorded, so it grew a little every day, and past a certain size it stopped arriving reliably. After that the member kept waiting for records that were never coming, while the guildmate on the other end saw no request at all and had nothing to act on. The request now describes recent activity in full and summarizes older history, so it stays the same small size whether the guild has a month of records or several years of them. Members who have not taken this update still sync with it normally in both directions.
 - A request that goes missing is now asked again. If nothing comes back at all, your client repeats the request up to three times before giving up, rather than asking the guildmate to resend a batch of records it never started sending. Guildmates also stop treating a repeated request as a reason to say they are busy, which used to cancel the very transfer that was underway.
 
+### Added
+- The sync log now records messages that arrive damaged. A sync message travels in pieces, and losing one in transit could leave the addon holding an unreadable fragment that it discarded without a word, so a member could look like they had gone quiet when they were talking the whole time. Those are now written to the sync log along with how many bytes made it, which is what `/gbl synclog` needs to tell a bad connection apart from an idle one.
+
 ## [0.37.10] - 2026-08-14
 
 ### Changed
