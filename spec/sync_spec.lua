@@ -4584,6 +4584,127 @@ describe("Sync", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Hierarchical request manifest (requesting side)
+    ---------------------------------------------------------------------------
+
+    describe("bounded request manifest", function()
+        local BASE = 80000
+
+        local function addRecordInBucket(key, tag)
+            local ts = key * GBL.BUCKET_SECONDS
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P" .. tag,
+                itemID = 1000, count = 1, tab = 1,
+                timestamp = ts, scanTime = ts,
+                scannedBy = "OfficerA", id = "rec_" .. tag .. ":0",
+            })
+        end
+
+        local function sentRequest()
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                if ok and data.type == "SYNC_REQUEST" then return data end
+            end
+        end
+
+        local function manifestSize(req)
+            local n = 0
+            for _ in pairs(req.bucketHashes) do n = n + 1 end
+            return n + #(req.spans or {})
+        end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+        end)
+
+        it("declares no spans when the history fits the detail window", function()
+            for i = 1, 10 do addRecordInBucket(BASE + i, "r" .. i) end
+
+            GBL:RequestSync("OfficerB", 0)
+
+            local req = sentRequest()
+            assert.is_not_nil(req)
+            assert.is_nil(req.spans)
+            assert.equals(10, manifestSize(req))
+        end)
+
+        it("declares no spans at exactly the detail window", function()
+            for i = 1, GBL.SYNC_REQUEST_DETAIL_BUCKETS do
+                addRecordInBucket(BASE + i, "r" .. i)
+            end
+
+            GBL:RequestSync("OfficerB", 0)
+
+            local req = sentRequest()
+            assert.is_nil(req.spans)
+            assert.equals(GBL.SYNC_REQUEST_DETAIL_BUCKETS, manifestSize(req))
+        end)
+
+        it("summarizes older history as spans once past the window", function()
+            for i = 1, GBL.SYNC_REQUEST_DETAIL_BUCKETS + 200 do
+                addRecordInBucket(BASE + i, "r" .. i)
+            end
+
+            GBL:RequestSync("OfficerB", 0)
+
+            local req = sentRequest()
+            local detailCount = 0
+            for _ in pairs(req.bucketHashes) do detailCount = detailCount + 1 end
+            assert.equals(GBL.SYNC_REQUEST_DETAIL_BUCKETS, detailCount)
+            assert.equals(GBL.SYNC_REQUEST_SPAN_COUNT, #req.spans)
+        end)
+
+        it("stays the same size as the history grows", function()
+            -- The whole point of #108: the request used to carry one entry per
+            -- bucket forever, so it outgrew the whisper ceiling and stopped
+            -- arriving. Ten times the history must not mean a larger request.
+            for i = 1, GBL.SYNC_REQUEST_DETAIL_BUCKETS + 50 do
+                addRecordInBucket(BASE + i, "a" .. i)
+            end
+            GBL:RequestSync("OfficerB", 0)
+            local small = manifestSize(sentRequest())
+
+            MockAce.sentCommMessages = {}
+            GBL:ResetSyncState()
+            for i = 1, 500 do addRecordInBucket(BASE - i, "b" .. i) end
+            GBL:RequestSync("OfficerB", 0)
+            local large = manifestSize(sentRequest())
+
+            assert.equals(small, large)
+            assert.equals(
+                GBL.SYNC_REQUEST_DETAIL_BUCKETS + GBL.SYNC_REQUEST_SPAN_COUNT,
+                large)
+        end)
+
+        it("still carries the version fields the serving gate reads", function()
+            for i = 1, GBL.SYNC_REQUEST_DETAIL_BUCKETS + 5 do
+                addRecordInBucket(BASE + i, "r" .. i)
+            end
+
+            GBL:RequestSync("OfficerB", 0)
+
+            local req = sentRequest()
+            assert.equals(GBL.version, req.version)
+            assert.equals(GBL.MIN_SYNC_VERSION, req.minSyncVersion)
+            assert.equals(GBL.SYNC_PROTOCOL_VERSION, req.protocolVersion)
+        end)
+
+        it("omits bucketHashes entirely when there is no guild data", function()
+            -- Preserves the serving side's sinceTimestamp fallback, which keys
+            -- off the field being absent rather than empty.
+            GBL.db.profile.guilds = {}
+            MockWoW.guild.name = nil
+
+            GBL:RequestSync("OfficerB", 0)
+
+            local req = sentRequest()
+            if req then
+                assert.is_nil(req.spans)
+            end
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Hierarchical request manifest (serving side)
     ---------------------------------------------------------------------------
 

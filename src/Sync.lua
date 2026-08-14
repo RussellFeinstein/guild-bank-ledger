@@ -1499,6 +1499,63 @@ end
 -- Sync request / response
 ------------------------------------------------------------------------
 
+--- Build and whisper one SYNC_REQUEST.
+-- Split out of RequestSync so the retry that fires when nothing comes back can
+-- put the identical payload on the wire without re-entering the receive-state
+-- setup, and so only one place knows the request's shape.
+--
+-- The manifest is what keeps this message small. It used to carry one entry per
+-- 6-hour bucket over the guild's whole history, which crossed AceComm's whisper
+-- reliability ceiling at around 230 buckets and then kept growing, so requests
+-- from a peer with a long history simply stopped arriving.
+-- @param target string Target player name
+-- @param sinceTimestamp number Only request transactions after this time
+-- @return boolean true when the whisper was handed to AceComm
+function GBL:SendSyncRequestTo(target, sinceTimestamp)
+    local guildData = self:GetGuildData()
+    local bucketHashes = guildData and self:ComputeBucketHashes(guildData) or nil
+    -- nil in, nil out: a request with no bucketHashes key at all is what puts
+    -- the serving side onto its sinceTimestamp fallback.
+    local detail, spans = self:BuildRequestManifest(bucketHashes)
+
+    local msg = self:Serialize({
+        type = "SYNC_REQUEST",
+        sinceTimestamp = sinceTimestamp,
+        bucketHashes = detail,
+        spans = spans,
+        -- The serving side gates on these: a request reaching HandleSyncRequest
+        -- never passed through HandleHello, so this is the only version signal
+        -- the holder gets before handing over records.
+        version = self.version,
+        minSyncVersion = MIN_SYNC_VERSION,
+        protocolVersion = PROTOCOL_VERSION,
+        guild = self:GetGuildName(),
+    })
+    msg = compressMessage(msg)
+
+    local msgBytes = #msg
+    if msgBytes > WHISPER_SAFE_BYTES then
+        -- The manifest is bounded, so this should never fire. If it does, the
+        -- request is back to being dropped on lossy routes with nothing to say
+        -- so, which is the failure this whole shape exists to end.
+        self:SyncWarn("SYNC_REQUEST to %s is %d B (> %d safe); the manifest "
+            .. "should have bounded this", target, msgBytes, WHISPER_SAFE_BYTES)
+    end
+
+    if not self:SendSyncWhisper(PREFIX, msg, target) then return false end
+
+    local detailCount = 0
+    if detail then
+        for _ in pairs(detail) do detailCount = detailCount + 1 end
+    end
+    self:AddAuditEntry("Requesting sync from " .. target
+        .. " (since " .. sinceTimestamp
+        .. ", " .. detailCount .. " detail bucket(s), "
+        .. (spans and #spans or 0) .. " span(s)"
+        .. ", " .. msgBytes .. " bytes)")
+    return true
+end
+
 --- Send a SYNC_REQUEST to a specific peer.
 -- @param target string Target player name
 -- @param sinceTimestamp number Only request transactions after this time
@@ -1545,38 +1602,11 @@ function GBL:RequestSync(target, sinceTimestamp)
 
     sinceTimestamp = sinceTimestamp or 0
 
-    local guildData = self:GetGuildData()
-    local bucketHashes = guildData and self:ComputeBucketHashes(guildData) or nil
-
-    local msg = self:Serialize({
-        type = "SYNC_REQUEST",
-        sinceTimestamp = sinceTimestamp,
-        bucketHashes = bucketHashes,
-        -- The serving side gates on these: a request reaching HandleSyncRequest
-        -- never passed through HandleHello, so this is the only version signal
-        -- the holder gets before handing over records.
-        version = self.version,
-        minSyncVersion = MIN_SYNC_VERSION,
-        protocolVersion = PROTOCOL_VERSION,
-        guild = self:GetGuildName(),
-    })
-    msg = compressMessage(msg)
-
-    local bucketCount = 0
-    if bucketHashes then
-        for _ in pairs(bucketHashes) do bucketCount = bucketCount + 1 end
-    end
-
-    local msgBytes = #msg
-    if not self:SendSyncWhisper(PREFIX, msg, target) then
+    if not self:SendSyncRequestTo(target, sinceTimestamp) then
         self:SyncError("Target offline, aborting sync request to " .. target)
         self:FinishReceiving(target)
         return
     end
-    self:AddAuditEntry("Requesting sync from " .. target
-        .. " (since " .. sinceTimestamp
-        .. ", " .. bucketCount .. " bucket days"
-        .. ", " .. msgBytes .. " bytes)")
     self:SendMessage("GBL_SYNC_STARTED", target)
 
     -- Request timeout — NACK with backoff, then abort after MAX_NACK_RETRIES
