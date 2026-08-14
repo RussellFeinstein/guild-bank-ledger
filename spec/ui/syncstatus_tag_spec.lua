@@ -55,7 +55,7 @@ describe("Peer version tag", function()
     it("tags a peer below the floor as refused, in warning colour", function()
         local tag = GBL:_PeerVersionTag(
             { version = belowFloor() }, belowFloor())
-        assert.is_truthy(tag:find("too old | sync refused", 1, true))
+        assert.is_truthy(tag:find("too old || sync refused", 1, true))
         assert.is_truthy(tag:find("|cffff4400", 1, true))
     end)
 
@@ -68,7 +68,7 @@ describe("Peer version tag", function()
         local info = { version = belowFloor(), rosterOnly = true }
         assert.is_nil(info.outdated)
         local tag = GBL:_PeerVersionTag(info, belowFloor())
-        assert.is_truthy(tag:find("too old | sync refused", 1, true))
+        assert.is_truthy(tag:find("too old || sync refused", 1, true))
     end)
 
     it("tags a peer whose floor is above us as needing a local update",
@@ -76,7 +76,7 @@ describe("Peer version tag", function()
         local ahead = newerVersion(GBL.version)
         local tag = GBL:_PeerVersionTag(
             { version = ahead, minSyncVersion = ahead }, ahead)
-        assert.is_truthy(tag:find("newer | update to sync", 1, true))
+        assert.is_truthy(tag:find("newer || update to sync", 1, true))
         assert.is_truthy(tag:find("|cff44aaff", 1, true))
     end)
 
@@ -84,7 +84,7 @@ describe("Peer version tag", function()
         local older = compatibleOlder()
         local tag = GBL:_PeerVersionTag(
             { version = older, minSyncVersion = GBL.MIN_SYNC_VERSION }, older)
-        assert.is_truthy(tag:find("older | syncing", 1, true))
+        assert.is_truthy(tag:find("older || syncing", 1, true))
         assert.is_nil(tag:find("a0a0a0", 1, true),
             "compatible peers must not render in the inactive grey")
     end)
@@ -93,7 +93,7 @@ describe("Peer version tag", function()
         local ahead = newerVersion(GBL.version)
         local tag = GBL:_PeerVersionTag(
             { version = ahead, minSyncVersion = GBL.MIN_SYNC_VERSION }, ahead)
-        assert.is_truthy(tag:find("newer | update available", 1, true))
+        assert.is_truthy(tag:find("newer || update available", 1, true))
         assert.is_truthy(tag:find("|cff44aaff", 1, true))
     end)
 
@@ -104,7 +104,7 @@ describe("Peer version tag", function()
     it("tags a dev-build peer as refused, in the inactive grey", function()
         local dev = GBL.version .. "-dev.branch"
         local tag = GBL:_PeerVersionTag({ version = dev }, dev)
-        assert.is_truthy(tag:find("dev build | sync refused", 1, true))
+        assert.is_truthy(tag:find("dev build || sync refused", 1, true))
         assert.is_truthy(tag:find("|cffa0a0a0", 1, true))
     end)
 
