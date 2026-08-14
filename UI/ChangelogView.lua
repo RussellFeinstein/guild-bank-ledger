@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.37.9
+    {"0.37.9", "2026-08-13", {
+        Fixed = {
+            "Vertical bars now show up where they are meant to. WoW treats a single bar as the start of a formatting code, so text using one as a separator could lose it, and sometimes the letter after it. This affected the peer status tags on the Sync tab, the sending and receiving status line, the separators in the Consumption and Gold summaries, several /gbl command help lines that show you the options you can type, and a handful of entries in this changelog.",
+        },
+    }},
+
     -- v0.37.8
     {"0.37.8", "2026-08-13", {
         Fixed = {
