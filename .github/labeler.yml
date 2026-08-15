@@ -18,6 +18,12 @@
 #          advisory; the issue carries the authoritative one. Fix by hand what
 #          the globs get wrong.
 #
+# UI/SyncStatus.lua is area: ui, not area: sync, and the same for its spec. The
+# area labels are defined by file, not by subject: area: sync is Sync.lua and
+# Fingerprint.lua (the protocol), area: ui is everything under UI/ (the frame
+# and tab plumbing). The Sync tab is a tab. #89 and #98 were backfilled that
+# way, so the rule here has to match or the record and the automation disagree.
+#
 # src/Core.lua, src/Logger.lua and src/ItemCache.lua are deliberately unmapped.
 # All three are cross-cutting, so a PR touching them almost always touches the
 # subsystem it is actually about, and that is where the area comes from. A
@@ -49,14 +55,12 @@
           - 'src/Sync.lua'
           - 'src/Fingerprint.lua'
           - 'src/AuditCapture.lua'
-          - 'UI/SyncStatus.lua'
           - 'spec/sync_spec.lua'
           - 'spec/fingerprint_spec.lua'
           - 'spec/auditcapture_spec.lua'
           - 'spec/wire_contract_spec.lua'
           - 'spec/wire_helpers.lua'
           - 'spec/fixtures/wire/**'
-          - 'spec/ui/syncstatus_tag_spec.lua'
           - 'docs/sync-logs/**'
           - 'docs/sync-bucket-analysis.md'
           - 'docs/PLAN-audit-log-upload.md'
@@ -122,9 +126,11 @@
           - 'UI/FilterBar.lua'
           - 'UI/ChangelogView.lua'
           - 'UI/AboutView.lua'
+          - 'UI/SyncStatus.lua'
           - 'src/ChatFilters.lua'
           - 'spec/about_spec.lua'
           - 'spec/chatfilters_spec.lua'
+          - 'spec/ui/syncstatus_tag_spec.lua'
           - 'spec/ui/changelog_spec.lua'
           - 'spec/ui/consumption_spec.lua'
           - 'spec/ui/filter_spec.lua'
