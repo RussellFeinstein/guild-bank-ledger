@@ -1,0 +1,46 @@
+# Apply the type: and area: labels to every PR from its branch prefix and its
+# changed paths. Rules live in .github/labeler.yml; the namespaces themselves
+# are documented in CONTRIBUTING.md for contributors and in CLAUDE.md for the
+# maintainer.
+#
+# Why this exists: labels were backfilled by hand across 42 issues and 68 PRs
+# in one pass, and a one-time snapshot starts going stale at the next PR. The
+# branch prefix already encodes the kind (CLAUDE.md Branch Workflow requires
+# it), so nothing has to be inferred to keep type: correct going forward.
+#
+# pull_request_target, not pull_request: this repo takes outside contributions
+# (#40 came from outside, and five PRs have come from forks). A pull_request
+# run for a fork PR gets a read-only token whatever the permissions block below
+# says, so the labeler would apply nothing and fail with "Resource not
+# accessible by integration". actions/labeler is one of pull_request_target's
+# few defensible uses, because it reads the changed-file list from the API and
+# never runs head code.
+#
+# NEVER add a checkout step here. Running head code is the whole reason
+# pull_request_target is dangerous, and not running it is the whole reason this
+# use of it is safe.
+#
+# Two consequences of running off the base branch, both expected rather than
+# broken. The PR that introduced this workflow could not label itself; it was
+# labelled by hand and confirmed on the next PR. And a future PR must never
+# change the action version and .github/labeler.yml together, because the run
+# reads the config from base while the action comes from the head.
+#
+# sync-labels is left at its default of false, so this only adds labels and
+# never removes one applied by hand.
+
+name: Label PRs
+
+on:
+  pull_request_target:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/labeler@v7

@@ -1,0 +1,165 @@
+# Label rules for actions/labeler (see .github/workflows/labeler.yml).
+#
+# Two namespaces, two mechanisms:
+#
+#   type:  from the branch prefix. The prefixes are the ones CLAUDE.md Branch
+#          Workflow already requires, so this is exact rather than inferred.
+#          `hotfix/` maps to type: bug alongside `fix/` because a hotfix is an
+#          urgent fix, not a separate kind of change. `toc-interface-update` is
+#          the toc-update workflow's bot branch, and a TOC Interface bump is a
+#          chore.
+#
+#          type: documentation has no rule. There is no docs/ branch prefix in
+#          this repo (doc-only work goes on chore/), so a doc-only PR arrives
+#          labelled type: chore and gets swapped by hand.
+#
+#   area:  from the paths the diff touches. A PR spanning subsystems picks up
+#          several area labels, which is intended. On a PR the area label is
+#          advisory; the issue carries the authoritative one. Fix by hand what
+#          the globs get wrong.
+#
+# src/Core.lua, src/Logger.lua and src/ItemCache.lua are deliberately unmapped.
+# All three are cross-cutting, so a PR touching them almost always touches the
+# subsystem it is actually about, and that is where the area comes from. A
+# Core-only PR (lifecycle, slash commands, access control) gets its area by
+# hand. This is the same reason no `area: core` label exists: it is added the
+# first time an issue needs it, not before.
+#
+# sync-labels is left off in the workflow, so this only ever adds labels and
+# never removes one applied by hand.
+
+"type: enhancement":
+  - head-branch: ['^feat/']
+
+"type: bug":
+  - head-branch: ['^fix/', '^hotfix/']
+
+"type: chore":
+  - head-branch: ['^chore/', '^toc-interface-update']
+
+"type: infra":
+  - head-branch: ['^infra/']
+
+"type: refactor":
+  - head-branch: ['^refactor/']
+
+"area: sync":
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/Sync.lua'
+          - 'src/Fingerprint.lua'
+          - 'src/AuditCapture.lua'
+          - 'UI/SyncStatus.lua'
+          - 'spec/sync_spec.lua'
+          - 'spec/fingerprint_spec.lua'
+          - 'spec/auditcapture_spec.lua'
+          - 'spec/wire_contract_spec.lua'
+          - 'spec/wire_helpers.lua'
+          - 'spec/fixtures/wire/**'
+          - 'spec/ui/syncstatus_tag_spec.lua'
+          - 'docs/sync-logs/**'
+          - 'docs/sync-bucket-analysis.md'
+          - 'docs/PLAN-audit-log-upload.md'
+
+"area: storage":
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/Ledger.lua'
+          - 'src/Dedup.lua'
+          - 'src/Storage.lua'
+          - 'src/Scanner.lua'
+          - 'src/Categories.lua'
+          - 'spec/ledger_spec.lua'
+          - 'spec/dedup_spec.lua'
+          - 'spec/storage_spec.lua'
+          - 'spec/scanner_spec.lua'
+          - 'spec/categories_spec.lua'
+          - 'spec/data_integrity_spec.lua'
+          - 'spec/epoch_timestamp_spec.lua'
+          - 'spec/rescan_spec.lua'
+          - 'docs/DATA-MODEL.md'
+
+"area: sort":
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/SortPlanner.lua'
+          - 'src/SortExecutor.lua'
+          - 'UI/SortView.lua'
+          - 'spec/sortplanner_spec.lua'
+          - 'spec/sortplanner_perf_spec.lua'
+          - 'spec/sortexecutor_spec.lua'
+          - 'spec/sortaccess_spec.lua'
+          - 'docs/sort-logs/**'
+          - 'docs/PLAN-phase-b-sort-hardening.md'
+          - 'docs/PLAN-overflow-stack-merge.md'
+
+"area: restock":
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/Restock.lua'
+          - 'UI/RestockView.lua'
+          - 'spec/restock_spec.lua'
+          - 'spec/restock_buy_spec.lua'
+          - 'spec/restock_search_spec.lua'
+          - 'spec/ui/restockview_spec.lua'
+          - 'docs/PLAN-restock-integration.md'
+
+"area: layout":
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/BankLayout.lua'
+          - 'UI/LayoutEditor.lua'
+          - 'spec/banklayout_spec.lua'
+          - 'spec/layout_write_access_spec.lua'
+          - 'spec/ui/layouteditor_spec.lua'
+
+"area: ui":
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'UI/UI.lua'
+          - 'UI/LedgerView.lua'
+          - 'UI/ConsumptionView.lua'
+          - 'UI/FilterBar.lua'
+          - 'UI/ChangelogView.lua'
+          - 'UI/AboutView.lua'
+          - 'src/ChatFilters.lua'
+          - 'spec/about_spec.lua'
+          - 'spec/chatfilters_spec.lua'
+          - 'spec/ui/changelog_spec.lua'
+          - 'spec/ui/consumption_spec.lua'
+          - 'spec/ui/filter_spec.lua'
+          - 'spec/ui/goldlog_sums_spec.lua'
+          - 'spec/ui/ledgerview_columns_spec.lua'
+          - 'spec/ui/persistence_spec.lua'
+          - 'spec/ui/tab_visibility_spec.lua'
+
+"area: accessibility":
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'UI/Accessibility.lua'
+          - 'spec/accessibility_spec.lua'
+          - 'spec/ascii_strings_spec.lua'
+
+"area: repo":
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**'
+          - 'scripts/**'
+          - 'spec/mock_ace.lua'
+          - 'spec/mock_wow.lua'
+          - 'spec/helpers.lua'
+          - 'spec/vendor/**'
+          - 'spec/version_spec.lua'
+          - 'spec/devbuild_spec.lua'
+          - '.busted'
+          - '.luacheckrc'
+          - '.pkgmeta'
+          - 'run_tests.sh'
+          - 'fetch-libs.sh'
+          - 'check-dev-link.sh'
+          - 'CLAUDE.md'
+          - 'CONTRIBUTING.md'
+          - 'README.md'
+          - 'docs/ROADMAP.md'
+          - 'docs/CURSEFORGE-DESCRIPTION.md'
+          - 'docs/PROMPT-quality-audit.md'
