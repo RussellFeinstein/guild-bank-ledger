@@ -6,6 +6,7 @@ Thanks for your interest in contributing! This doc covers how to get set up, wha
 
 - [Quick start](#quick-start)
 - [Development workflow](#development-workflow)
+- [Labels and milestones](#labels-and-milestones)
 - [Commit message format](#commit-message-format)
 - [Versioning policy](#versioning-policy)
 - [Changelog format](#changelog-format)
@@ -43,6 +44,35 @@ GuildBankLedger is a Lua 5.1 WoW addon tested with [busted](https://lunarmodules
 `main` is protected: direct pushes are blocked, merge is gated on CI, and the only merge style is a merge commit (so your commits are preserved on `main` with your authorship).
 
 **Maintainer note**: `main` is the only permanent branch. Maintainer work goes on single-purpose, type-prefixed branches (`feat/`, `fix/`, `chore/`, `infra/`, `hotfix/`), one PR each, deleted automatically when the PR merges. See the **Branch Workflow** section in [CLAUDE.md](CLAUDE.md) for the full set of rules (rebase cadence, hotfix path, cross-branch sequencing, version-stamp cadence). External contributors don't need to think about this; just branch from `main` and open a PR as described above.
+
+## Labels and milestones
+
+Every issue and every pull request carries labels on two axes. The rule for each label is written into that label's own description on GitHub, so you can read it from the sidebar without opening this file.
+
+**`type:` says what kind of change it is.** One per item, and it mirrors the branch prefixes above, so the label predicts the branch name:
+
+| Label | Branch prefix |
+|---|---|
+| `type: bug` | `fix/`, `hotfix/` |
+| `type: enhancement` | `feat/` |
+| `type: chore` | `chore/` |
+| `type: infra` | `infra/` |
+| `type: refactor` | `refactor/` |
+| `type: documentation` | `chore/` (there is no `docs/` prefix; the label is applied by hand) |
+
+**`area:` says what part of the addon it touches.** At least one per item: `area: sync`, `area: storage`, `area: sort`, `area: restock`, `area: layout`, `area: ui`, `area: accessibility`, `area: repo`. A second area only where the item has separate acceptance criteria in two places.
+
+This axis is the one that pays off later. Milestones are chronological arcs: they close, and a closed milestone stops working as a lookup tool. The area label is the only thing that can answer "what has this repo ever done to sync" across all of them, which is why closed issues and merged PRs carry labels too, not just open work.
+
+`good first issue`, `help wanted`, `question`, `duplicate`, `invalid` and `wontfix` are GitHub's defaults. They sit outside both axes and neither invariant applies to them.
+
+**What this means for you as a contributor:**
+
+- **You do not need to apply labels, and GitHub will not let you.** Applying labels needs triage permission on the repo, so the control is absent from the UI and `gh issue edit --add-label` returns 403. That is expected, not a misconfiguration. An unlabeled new issue is the normal starting state; the maintainer labels it during triage.
+- **Put in the body what a label would have carried.** Which part of the addon it affects, whether it is a defect or a request, and anything that blocks it.
+- **Pull requests label themselves.** [.github/workflows/labeler.yml](.github/workflows/labeler.yml) applies `type:` from your branch prefix and `area:` from the files you changed, with rules in [.github/labeler.yml](.github/labeler.yml). The path globs are coarse, so a PR spanning subsystems picks up several area labels. The maintainer corrects what the globs get wrong; you do not need to.
+
+Milestones are release arcs, and membership means the work gates that arc rather than that it is urgent. `Sort rework`, `Restock rework`, `Data model integrity`, `Sync reliability`, `Accessibility to v1.0` and `Codebase refactor` are the current set. An issue with no milestone is not neglected; it is unscheduled on purpose.
 
 ## Commit message format
 
