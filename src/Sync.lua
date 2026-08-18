@@ -2323,10 +2323,15 @@ function GBL:SendNextChunk()
         end
     end
     local gapStr = interChunkGap and string.format(", gap=%.2fs", interChunkGap) or ""
+    -- Percent OF RAW, matching chunkOutcomes.ratio and the FinishSending
+    -- summary. This line used to print percent reduction, so the same chunk
+    -- read as 31 here and 69 there; every byte budget in CLAUDE.md is derived
+    -- from the of-raw form, so that is the one convention. Do not flip either
+    -- site independently.
     local chunkMsg = "Sending chunk " .. idx .. "/" .. total
         .. " to " .. (syncState.sendTarget or "?")
         .. " (" .. chunkRecords .. " records, " .. rawLen .. "->" .. msgLen .. " bytes"
-        .. ", " .. math.floor((1 - msgLen / math.max(rawLen, 1)) * 100) .. "% compressed"
+        .. ", " .. math.floor((msgLen / math.max(rawLen, 1)) * 100) .. "% of raw"
         .. ctlAvailAtSend .. gapStr .. ")"
     -- Chat: every chunk; audit trail: 1st, every 10th, and last
     self:AddAuditEntry(chunkMsg, true)
@@ -2546,7 +2551,7 @@ function GBL:FinishSending()
         table.sort(ratios)
         local minR, maxR = ratios[1], ratios[#ratios]
         local medR = ratios[math.floor(#ratios / 2) + 1]
-        ratioSummary = string.format("%.0f%% / %.0f%% / %.0f%% (min/med/max)",
+        ratioSummary = string.format("%.0f%% / %.0f%% / %.0f%% of raw (min/med/max)",
             minR * 100, medR * 100, maxR * 100)
     end
 

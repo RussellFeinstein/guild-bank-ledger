@@ -6242,6 +6242,43 @@ describe("Sync", function()
             _G.ChatThrottleLib = nil
         end)
 
+        -- The per-chunk line used to report percent reduction while the
+        -- FinishSending summary reported compressed-over-raw, so one chunk read
+        -- as "31% compressed" in one line and 69% in the other. Both are
+        -- percent-of-raw now; a capture is unreadable if they ever diverge again.
+        it("reports compression as percent of raw in both send lines", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "ratioconv1:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+            GBL:HandleAck("OfficerB", { chunk = 1 })
+            MockWoW.fireTimers()
+
+            local trail = GBL:GetAuditTrail()
+            local chunkLine, summaryLine
+            for _, entry in ipairs(trail) do
+                if entry.message:find("Sending chunk") then
+                    chunkLine = chunkLine or entry.message
+                end
+                if entry.message:find("Compression for OfficerB") then
+                    summaryLine = summaryLine or entry.message
+                end
+            end
+
+            assert.is_truthy(chunkLine, "should emit a Sending chunk line")
+            assert.is_truthy(summaryLine, "should emit a Compression for <peer> line")
+            assert.is_truthy(chunkLine:find("% of raw", 1, true),
+                "per-chunk line should report percent of raw, got: " .. tostring(chunkLine))
+            assert.is_nil(chunkLine:find("compressed", 1, true),
+                "per-chunk line should not use the old percent-reduction wording")
+            assert.is_truthy(summaryLine:find("of raw", 1, true),
+                "summary line should name the percent-of-raw convention, got: "
+                .. tostring(summaryLine))
+        end)
+
         it("suppresses HELLO replies during sync", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
             _G.ChatThrottleLib = { avail = 5000 }
