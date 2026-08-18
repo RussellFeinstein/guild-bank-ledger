@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.37.12
+    {"0.37.12", "2026-08-18", {
+        Changed = {
+            "The sync log now reports compression the same way in every line. While a sync was sending, each chunk line said how much the data had shrunk, while the summary at the end of the send said how much of the original size was left, so one chunk could read as 31 percent in one line and 69 percent in the other. Both now report the compressed size as a percentage of the size before compression.",
+        },
+    }},
+
     -- v0.37.11
     {"0.37.11", "2026-08-14", {
         Fixed = {
