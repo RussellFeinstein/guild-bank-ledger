@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.37.14
+    {"0.37.14", "2026-08-21", {
+        Fixed = {
+            "Members with a lot of history are less likely to stall when a guildmate asks them for records. Answering that request made the addon re-measure the whole stored history several times in a row, and on a large history during a busy moment such as a raid, the game could cut the work short with a script error before any records were sent. The measurement is now reused instead of repeated. This is the first half of the fix; the remaining work to spread the job over several frames is still to come.",
+        },
+    }},
+
     -- v0.37.13
     {"0.37.13", "2026-08-21", {
         Changed = {
