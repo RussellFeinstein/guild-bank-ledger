@@ -31,6 +31,17 @@
 # hand. This is the same reason no `area: core` label exists: it is added the
 # first time an issue needs it, not before.
 #
+# UI/ChangelogView.lua and CLAUDE.md are unmapped for that same reason, and
+# more strongly (#128). Every version stamp writes the in-game changelog table
+# and the "Current:" line, so a rule naming either one fires on a strict
+# superset of the PRs it means: four releases in a row landed under area: ui
+# and area: repo having touched neither the UI nor repo tooling, and both
+# labels had to be stripped by hand each time. A PR genuinely about the
+# changelog tab, or genuinely about repo docs, almost always touches something
+# else that carries the area, and takes a hand label otherwise. Note that
+# spec/ui/changelog_spec.lua stays mapped under area: ui, because the stamp
+# never edits it: it still catches real changelog-tab work.
+#
 # sync-labels is left off in the workflow, so this only ever adds labels and
 # never removes one applied by hand.
 
@@ -124,7 +135,6 @@
           - 'UI/LedgerView.lua'
           - 'UI/ConsumptionView.lua'
           - 'UI/FilterBar.lua'
-          - 'UI/ChangelogView.lua'
           - 'UI/AboutView.lua'
           - 'UI/SyncStatus.lua'
           - 'src/ChatFilters.lua'
@@ -163,7 +173,6 @@
           - 'run_tests.sh'
           - 'fetch-libs.sh'
           - 'check-dev-link.sh'
-          - 'CLAUDE.md'
           - 'CONTRIBUTING.md'
           - 'README.md'
           - 'docs/ROADMAP.md'
