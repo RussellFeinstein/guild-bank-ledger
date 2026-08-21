@@ -188,6 +188,31 @@ function GBL:GetBucketHashes(guildData)
     return bucketCache.buckets
 end
 
+--- Return the cached bucket map if one is already built, otherwise nil.
+--
+-- The read-only companion to GetBucketHashes, for a caller that wants the map
+-- only if getting it is free. The case it exists for is HandleHello's bucket
+-- count: printing that number is worth nothing to a peer and cost a full walk
+-- over every record on every inbound HELLO, worst exactly during a receive,
+-- where the record count moves with each stored chunk so the cache misses
+-- every time and the walk lands on the busiest client in the guild.
+--
+-- Deliberately does NOT validate the record count. A bucket count is a slowly
+-- changing number and a few records out of date does not change what a reader
+-- learns from it, whereas going cold whenever the count moved would return nil
+-- for the whole of a receive, which is when the diagnostic is most wanted. The
+-- guildData identity IS checked: a stale count misreports by a few, but
+-- another guild's map is a different number about data we are not looking at.
+--
+-- Anything that needs the correct answer calls GetBucketHashes. Read-only, same
+-- as GetBucketHashes: this is the cached table itself, not a copy.
+-- @param guildData table Guild data the map must belong to
+-- @return table|nil Cached bucket map, or nil when cold or built elsewhere
+function GBL:PeekBucketHashes(guildData)
+    if not guildData or bucketCache.source ~= guildData then return nil end
+    return bucketCache.buckets
+end
+
 ------------------------------------------------------------------------
 -- Request manifest (bounded SYNC_REQUEST payload)
 ------------------------------------------------------------------------

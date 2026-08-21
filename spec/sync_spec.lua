@@ -429,10 +429,12 @@ describe("Sync", function()
             assert.is_false(foundReply, "Hash unchanged — reply should be suppressed")
         end)
 
-        it("logs a DEBUG diagnostic when a hash-unchanged reply is suppressed", function()
-            -- DEBUG entries only record when sync debug is enabled (the state a
-            -- user is in when capturing a sync log to diagnose non-convergence).
-            GBL.db.profile.sync.debugChat = true
+        -- This used to require debugChat, because the suppression was recorded
+        -- at DEBUG and nothing else. That is what #90 was about: the entry
+        -- never reached a shared capture, so a guildmate reporting a stall
+        -- could not hand over the one fact that explains it. It rides the INFO
+        -- round line now, with no setting to turn on first.
+        it("records a hash-unchanged reply suppression without debug enabled", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
             -- First HELLO establishes lastHelloReplyHash for OfficerB (reply sent).
@@ -454,17 +456,18 @@ describe("Sync", function()
                 assert.is_false(ok and data.type == "HELLO" and data.isReply == true)
             end
 
-            -- The suppression diagnostic was recorded in the sync log at DEBUG.
+            -- Recorded at INFO, which is the only level AuditCapture keeps.
             local found = false
             for _, e in ipairs(GBL:GetLog("sync")) do
-                if e.level == "DEBUG"
-                    and e.message:find("Suppressed HELLO reply to", 1, true)
-                    and e.message:find("hash unchanged since last reply", 1, true) then
+                if e.level == "INFO"
+                    and e.message:find("HELLO round OfficerB:", 1, true)
+                    and e.message:find("reply=hash-suppressed", 1, true) then
                     found = true
                     break
                 end
             end
-            assert.is_true(found, "expected hash-unchanged suppression DEBUG line")
+            assert.is_true(found,
+                "expected the round line to record the hash-gate suppression at INFO")
         end)
 
         it("advertises the sync floor on broadcast HELLO", function()
@@ -721,11 +724,11 @@ describe("Sync", function()
             -- Audit trail should explain why
             local found = false
             for _, entry in ipairs(GBL:GetAuditTrail()) do
-                if entry.message and entry.message:find("likely superset") then
+                if entry.message and entry.message:find("verdict=superset-skip", 1, true) then
                     found = true
                 end
             end
-            assert.is_true(found, "audit trail should contain 'likely superset' entry")
+            assert.is_true(found, "the round line should record the superset skip")
         end)
 
         it("re-nudges a behind peer whose reply was hash-gate suppressed", function()
@@ -960,6 +963,378 @@ describe("Sync", function()
                     assert.not_equals("SYNC_REQUEST", data.type)
                 end
             end
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- HELLO round line (issue #90)
+    --
+    -- Every processed HELLO writes exactly one INFO line saying what the round
+    -- decided and what the reply gate did. Before it, the decisions that
+    -- explain a stalled peer were DEBUG, and DEBUG never reaches a shared
+    -- capture at all: Logger drops it ahead of the capture tap, and
+    -- AuditCapture rejects it again unconditionally. A guildmate's capture of
+    -- a real stall showed HELLOs arriving and nothing else, which reads
+    -- exactly like the whisper never landing.
+    --
+    -- One line, not several, because it replaces the per-round chatter it
+    -- folds in. Promoting the three DEBUG lines instead would have pushed
+    -- per-round capture cost up against a 1000-entry cap that one large send
+    -- already eats half of.
+    ---------------------------------------------------------------------------
+
+    describe("HELLO round line", function()
+        local function hello(fields)
+            fields = fields or {}
+            return {
+                type = "HELLO",
+                version = fields.version or GBL.version,
+                minSyncVersion = fields.minSyncVersion or GBL.MIN_SYNC_VERSION,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+                txCount = fields.txCount or 0,
+                dataHash = fields.dataHash,
+                lastScanTime = fields.lastScanTime or 1000,
+                isReply = fields.isReply,
+            }
+        end
+
+        local function seed(n)
+            for i = 1, n do
+                local ts = (1000 + i) * 3600
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "P" .. i, tab = 1, itemID = 100 + i,
+                    classID = 0, subclassID = 0, count = 1,
+                    timestamp = ts, id = "round" .. i .. ":277:0",
+                    _occurrence = 0, scanTime = ts, scannedBy = "OfficerA",
+                })
+            end
+        end
+
+        -- Exactly one, every time. A round that emitted two would mean a path
+        -- fell through an exit without returning, and a round that emitted
+        -- none is the silence this issue exists to remove.
+        local function roundLine()
+            local found = {}
+            for _, e in ipairs(GBL:GetAuditTrail()) do
+                if e.message and e.message:find("HELLO round ", 1, true) then
+                    found[#found + 1] = e
+                end
+            end
+            assert.equals(1, #found,
+                "expected exactly one round line, got " .. #found)
+            assert.equals("INFO", found[1].level,
+                "the round line has to be INFO or a shared capture never sees it")
+            return found[1].message
+        end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:ClearLog("sync")
+        end)
+
+        it("reports a request with its trigger", function()
+            seed(1)
+            GBL:HandleHello("OfficerB", hello{ txCount = 99, dataHash = 12345 })
+
+            local line = roundLine()
+            assert.is_truthy(line:find("verdict=requested", 1, true))
+            assert.is_truthy(line:find("trigger=hash-mismatch", 1, true))
+            assert.is_truthy(line:find("reply=sent", 1, true))
+            assert.is_truthy(line:find("local=1tx", 1, true))
+            assert.is_truthy(line:find("remote=99tx", 1, true))
+        end)
+
+        -- The other trigger: a peer too old to advertise a hash at all, where
+        -- the only thing to compare is the record count.
+        it("reports a request triggered by count when the peer sends no hash", function()
+            seed(1)
+            GBL:HandleHello("OfficerB", hello{ txCount = 99 })
+
+            local line = roundLine()
+            assert.is_truthy(line:find("verdict=requested", 1, true))
+            assert.is_truthy(line:find("trigger=count-no-hash", 1, true))
+        end)
+
+        it("reports identical datasets", function()
+            seed(2)
+            GBL:HandleHello("OfficerB", hello{
+                txCount = 2, dataHash = GBL:GetDataHash(guildData),
+            })
+
+            assert.is_truthy(roundLine():find("verdict=identical", 1, true))
+        end)
+
+        -- The cost argument this whole change rests on. A processed round used
+        -- to write three INFO entries (the arrival, the hash compare, the
+        -- verdict), and every one lands in a 1000-entry capture buffer that a
+        -- single large send already eats about 40 percent of. Promoting the
+        -- DEBUG diagnostics on top of that would have made it four. A round
+        -- that also whispers still writes the send line, which is a record of
+        -- an outgoing action rather than of this round's reasoning.
+        it("costs one audit entry for a round that sends nothing", function()
+            seed(2)
+            GBL:HandleHello("OfficerB", hello{
+                txCount = 2, dataHash = GBL:GetDataHash(guildData), isReply = true,
+            })
+
+            assert.equals(1, #GBL:GetAuditTrail(),
+                "a round that sends nothing should write exactly one line")
+        end)
+
+        -- reply=sent is a claim about a whisper, and SendHelloReply gives up
+        -- quietly on three paths: sync disabled, no guild data, and a target
+        -- the roster says is offline. A round line asserting a reply that
+        -- never left is worse than no round line, because the whole point is
+        -- that a capture can be trusted about what this client did.
+        it("does not claim a reply was sent when the whisper was blocked", function()
+            seed(1)
+            local orig = GBL.IsGuildMemberOnline
+            GBL.IsGuildMemberOnline = function() return false end
+            local ok, err = pcall(function()
+                GBL:HandleHello("OfficerB", hello{ txCount = 99, dataHash = 12345 })
+            end)
+            GBL.IsGuildMemberOnline = orig
+            if not ok then error(err, 0) end
+
+            local line = roundLine()
+            assert.is_truthy(line:find("reply=send-failed", 1, true))
+            assert.is_nil(line:find("reply=sent", 1, true))
+        end)
+
+        it("names the peer and its version", function()
+            seed(1)
+            GBL:HandleHello("OfficerB", hello{
+                txCount = 99, dataHash = 12345, version = "0.37.99",
+            })
+
+            local line = roundLine()
+            assert.is_truthy(line:find("HELLO round OfficerB:", 1, true))
+            assert.is_truthy(line:find("peer=v0.37.99", 1, true))
+        end)
+
+        it("reports a superset skip", function()
+            seed(5)
+            GBL:HandleHello("OfficerB", hello{ txCount = 1, dataHash = 12345 })
+
+            local line = roundLine()
+            assert.is_truthy(line:find("verdict=superset-skip", 1, true))
+            assert.is_truthy(line:find("local=5tx", 1, true))
+            assert.is_truthy(line:find("remote=1tx", 1, true))
+        end)
+
+        -- The correlation the third DEBUG line existed to record: we are
+        -- ahead, our data has not moved, so the hash gate stopped telling this
+        -- peer anything and they never ask. The verdict says the nudge fired.
+        it("reports a superset nudge and the suppressed reply that caused it", function()
+            seed(5)
+            GBL:HandleHello("OfficerB", hello{ txCount = 1, dataHash = 12345 })
+            GBL:ClearLog("sync")
+
+            GBL:HandleHello("OfficerB", hello{ txCount = 1, dataHash = 12345 })
+
+            local line = roundLine()
+            assert.is_truthy(line:find("verdict=superset-nudge", 1, true))
+            assert.is_truthy(line:find("reply=hash-suppressed", 1, true))
+        end)
+
+        -- The nudge fires only when the reply gate suppressed us AND the
+        -- whisper actually leaves. A peer the roster says is offline gets the
+        -- throttle stamped anyway (retrying every heartbeat at someone we
+        -- cannot reach is what the throttle is for), but the round must not
+        -- claim a nudge that never went out.
+        it("does not claim a nudge when the whisper could not be sent", function()
+            seed(5)
+            GBL:HandleHello("OfficerB", hello{ txCount = 1, dataHash = 12345 })
+            GBL:ClearLog("sync")
+
+            local orig = GBL.IsGuildMemberOnline
+            GBL.IsGuildMemberOnline = function() return false end
+            local ok, err = pcall(function()
+                GBL:HandleHello("OfficerB", hello{ txCount = 1, dataHash = 12345 })
+            end)
+            GBL.IsGuildMemberOnline = orig
+            if not ok then error(err, 0) end
+
+            local line = roundLine()
+            assert.is_truthy(line:find("verdict=superset-skip", 1, true))
+            assert.is_nil(line:find("verdict=superset-nudge", 1, true))
+            for _, e in ipairs(GBL:GetAuditTrail()) do
+                assert.is_nil(e.message:find("Nudged behind peer", 1, true),
+                    "no nudge line for a whisper that never left")
+            end
+        end)
+
+        it("reports a version refusal", function()
+            GBL.version = "0.40.0"
+            GBL:HandleHello("OfficerB", hello{
+                version = "0.20.0", minSyncVersion = "0.20.0",
+            })
+
+            assert.is_truthy(roundLine():find("verdict=refused-version", 1, true))
+        end)
+
+        -- An incompatible peer is answered once per session and then left in
+        -- silence. The repeat rounds still have to say what they decided, or a
+        -- deliberately quiet client is indistinguishable from a broken one:
+        -- that was the whole DEBUG problem, and the repeat refusal was one of
+        -- the three lines that had it.
+        it("reports the repeat refusal as a suppressed reply", function()
+            GBL.version = "0.40.0"
+            GBL:HandleHello("OfficerB", hello{
+                version = "0.20.0", minSyncVersion = "0.20.0",
+            })
+            GBL:ClearLog("sync")
+
+            GBL:HandleHello("OfficerB", hello{
+                version = "0.20.0", minSyncVersion = "0.20.0",
+            })
+
+            local line = roundLine()
+            assert.is_truthy(line:find("verdict=refused-version", 1, true))
+            assert.is_truthy(line:find("reply=suppressed", 1, true))
+        end)
+
+        it("reports a round that found no guild data", function()
+            local orig = GBL.GetGuildData
+            GBL.GetGuildData = function() return nil end
+            local ok, err = pcall(function()
+                GBL:HandleHello("OfficerB", hello{ txCount = 99, dataHash = 12345 })
+            end)
+            GBL.GetGuildData = orig
+            if not ok then error(err, 0) end
+
+            local line = roundLine()
+            assert.is_truthy(line:find("verdict=no-guild-data", 1, true))
+            -- Truthful by structure: SendHelloReply gives up on the same
+            -- missing guild data, so the reply genuinely did not go out.
+            assert.is_truthy(line:find("reply=send-failed", 1, true))
+        end)
+
+        it("reports a sync skipped by the combat cooldown", function()
+            seed(1)
+            GBL:RequestSync("OfficerC", 0)
+            GBL:OnCombatStart()
+            GBL:ClearLog("sync")
+
+            GBL:HandleHello("OfficerB", hello{ txCount = 99, dataHash = 12345 })
+
+            assert.is_truthy(roundLine():find("verdict=paused-combat", 1, true))
+        end)
+
+        it("reports a round that needed no sync", function()
+            seed(2)
+            -- Same count, no hash advertised: nothing to compare, nothing to do.
+            GBL:HandleHello("OfficerB", hello{ txCount = 2 })
+
+            assert.is_truthy(roundLine():find("verdict=no-sync-needed", 1, true))
+        end)
+
+        it("reports a peer left alone on its busy cooldown", function()
+            seed(1)
+            GBL:HandleBusy("OfficerB", {})
+            GBL:ClearLog("sync")
+
+            GBL:HandleHello("OfficerB", hello{ txCount = 99, dataHash = 12345 })
+
+            assert.is_truthy(roundLine():find("verdict=busy-cooldown", 1, true))
+        end)
+
+        it("reports a sync deferred by combat", function()
+            seed(1)
+            local origICL = _G.InCombatLockdown
+            _G.InCombatLockdown = function() return true end
+            local ok, err = pcall(function()
+                GBL:HandleHello("OfficerB", hello{ txCount = 99, dataHash = 12345 })
+            end)
+            _G.InCombatLockdown = origICL
+            if not ok then error(err, 0) end
+
+            assert.is_truthy(roundLine():find("verdict=combat-deferred", 1, true))
+        end)
+
+        it("reports a sync skipped by the zone cooldown", function()
+            seed(1)
+            GBL:RequestSync("OfficerC", 0)
+            GBL:OnLoadingScreenStart()
+            GBL:FinishReceiving("OfficerC")
+            GBL:ClearLog("sync")
+
+            GBL:HandleHello("OfficerB", hello{ txCount = 99, dataHash = 12345 })
+
+            assert.is_truthy(roundLine():find("verdict=paused-zone", 1, true))
+        end)
+
+        -- One round, two facts: the reply gate saw a live session and stayed
+        -- quiet, and the request was dropped for the same reason.
+        it("reports a round that landed mid-receive", function()
+            seed(1)
+            GBL:RequestSync("OfficerC", 0)
+            GBL:ClearLog("sync")
+
+            GBL:HandleHello("OfficerB", hello{ txCount = 99, dataHash = 12345 })
+
+            local line = roundLine()
+            assert.is_truthy(line:find("verdict=receiving", 1, true))
+            assert.is_truthy(line:find("reply=sync-active", 1, true))
+        end)
+
+        it("reports autoSync being off", function()
+            seed(1)
+            GBL.db.profile.sync.autoSync = false
+
+            GBL:HandleHello("OfficerB", hello{ txCount = 99, dataHash = 12345 })
+
+            assert.is_truthy(roundLine():find("verdict=autosync-off", 1, true))
+        end)
+
+        it("marks the reply gate as not applicable on a reply HELLO", function()
+            seed(1)
+            GBL:HandleHello("OfficerB", hello{
+                txCount = 99, dataHash = 12345, isReply = true,
+            })
+
+            assert.is_truthy(roundLine():find("reply=n/a", 1, true))
+        end)
+
+        -- The bucket count is a diagnostic, and computing one costs a walk over
+        -- every record. It rides along only when the cache already has it.
+        it("omits the bucket count when the cache is cold", function()
+            seed(1)
+            GBL:ResetHashCache()
+
+            GBL:HandleHello("OfficerB", hello{ txCount = 99, dataHash = 12345 })
+
+            assert.is_nil(roundLine():find("buckets=", 1, true))
+        end)
+
+        it("carries the bucket count when the cache is warm", function()
+            seed(1)
+            GBL:GetBucketHashes(guildData)
+
+            GBL:HandleHello("OfficerB", hello{ txCount = 99, dataHash = 12345 })
+
+            assert.is_truthy(roundLine():find("buckets=1", 1, true))
+        end)
+
+        it("computes no bucket hashes of its own", function()
+            seed(3)
+            GBL:ResetHashCache()
+
+            local calls = 0
+            local orig = GBL.ComputeBucketHashes
+            GBL.ComputeBucketHashes = function(...)
+                calls = calls + 1
+                return orig(...)
+            end
+            local ok, err = pcall(function()
+                GBL:HandleHello("OfficerB", hello{ txCount = 1, dataHash = 12345 })
+            end)
+            GBL.ComputeBucketHashes = orig
+            if not ok then error(err, 0) end
+
+            assert.equals(0, calls,
+                "an inbound HELLO must not walk the whole history to print a count")
         end)
     end)
 
@@ -3811,7 +4186,7 @@ describe("Sync", function()
             assert.equals(0, countSent("SYNC_REQUEST", "OfficerB"))
             local logged = false
             for _, entry in ipairs(GBL:GetAuditTrail()) do
-                if entry.message and entry.message:find("busy cooldown", 1, true) then
+                if entry.message and entry.message:find("verdict=busy-cooldown", 1, true) then
                     logged = true
                 end
             end
@@ -3941,7 +4316,7 @@ describe("Sync", function()
             -- undiagnosable, so the skip has to name itself in the capture.
             local logged = false
             for _, entry in ipairs(GBL:GetAuditTrail()) do
-                if entry.message and entry.message:find("zone cooldown", 1, true) then
+                if entry.message and entry.message:find("verdict=paused-zone", 1, true) then
                     logged = true
                 end
             end
@@ -4470,11 +4845,11 @@ describe("Sync", function()
             end
             assert.is_false(sentRequest, "should skip sync when hashes match")
 
-            -- Audit trail should mention datasets identical
+            -- Audit trail should record the identical verdict
             local trail = GBL:GetAuditTrail()
             local found = false
             for _, e in ipairs(trail) do
-                if e.message:find("datasets identical") then found = true end
+                if e.message:find("verdict=identical", 1, true) then found = true end
             end
             assert.is_true(found)
         end)
@@ -6315,13 +6690,13 @@ describe("Sync", function()
             local trail = GBL:GetAuditTrail()
             local foundSuppressed = false
             for _, entry in ipairs(trail) do
-                if entry.message:find("Suppressed HELLO reply") then
+                if entry.message:find("reply=sync-active", 1, true) then
                     foundSuppressed = true
                     break
                 end
             end
             assert.is_true(foundSuppressed,
-                "Suppressed HELLO reply should be logged")
+                "the round line should record the reply suppressed by a live session")
 
             _G.ChatThrottleLib = nil
         end)
@@ -9232,6 +9607,49 @@ describe("Sync", function()
             assert.is_true(GBL:IsPeerBusy("PeerA"))
         end)
 
+        -- Why a BUSY arrived is the difference between three responses that
+        -- have nothing to do with each other: a peer already serving someone
+        -- else, a peer that just entered combat, or a peer refusing to serve
+        -- during a fight. A capture could not tell them apart, and three
+        -- sends killed by BUSY in the 2026-08-12 window are still unexplained
+        -- because of it (#97).
+        it("HandleBusy records why the peer was busy", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
+            GBL:RequestSync("PeerA", 0)
+            GBL:ClearLog("sync")
+
+            GBL:HandleBusy("PeerA", { reason = "sending:SomeoneElse" })
+
+            local found = false
+            for _, e in ipairs(GBL:GetAuditTrail()) do
+                if e.message and e.message:find("Received BUSY from PeerA", 1, true)
+                    and e.message:find("reason: sending:SomeoneElse", 1, true) then
+                    found = true
+                end
+            end
+            assert.is_true(found, "the BUSY line should carry the reason it arrived with")
+        end)
+
+        -- A peer from before the field existed sends no reason at all. The
+        -- line still has to say something, and "unknown" is honest where a
+        -- blank would read as a reason we failed to print.
+        it("HandleBusy says unknown when the peer sent no reason", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
+            GBL:RequestSync("PeerA", 0)
+            GBL:ClearLog("sync")
+
+            GBL:HandleBusy("PeerA", {})
+
+            local found = false
+            for _, e in ipairs(GBL:GetAuditTrail()) do
+                if e.message and e.message:find("Received BUSY from PeerA", 1, true)
+                    and e.message:find("reason: unknown", 1, true) then
+                    found = true
+                end
+            end
+            assert.is_true(found, "an older peer's reasonless BUSY should log unknown")
+        end)
+
         it("HandleBusy is no-op on receiving state when not receiving", function()
             GBL:HandleBusy("PeerA", {})
             assert.is_false(GBL:GetSyncStatus().receiving)
@@ -10586,11 +11004,13 @@ describe("Sync", function()
 
             local found = false
             for _, entry in ipairs(GBL:GetAuditTrail()) do
-                if entry.message and entry.message:find("already receiving", 1, true) then
+                if entry.message and entry.message:find("verdict=receiving", 1, true)
+                    and entry.message:find("from=PeerA", 1, true) then
                     found = true
                 end
             end
-            assert.is_true(found)
+            assert.is_true(found,
+                "the round line should say the round was dropped mid-receive, and by whom")
         end)
     end)
 

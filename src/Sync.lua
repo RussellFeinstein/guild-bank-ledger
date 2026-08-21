@@ -303,12 +303,23 @@ GBL._nackBackoff = nackBackoff
 -- compression ratio and would otherwise have to serialize a second time.
 
 --- Build a BUSY message, telling a peer to stop and try later.
+--
+-- The reason is required, not optional. A BUSY means completely different
+-- things depending on why it was sent (a peer already serving someone else
+-- will free up on its own schedule; one entering combat may be gone for the
+-- length of a fight), and the receiver could not tell them apart. Three sends
+-- killed by BUSY in the 2026-08-12 capture are still unexplained for that
+-- reason. Shipped values are "combat" and "sending:<peer>"; the receiver
+-- treats the field as an opaque string, so a later producer adds a value
+-- without touching the wire contract. Issue #97.
+-- @param reason string Why we are busy
 -- @return table BUSY message
-function GBL:BuildBusyMessage()
+function GBL:BuildBusyMessage(reason)
     return {
         type = "BUSY",
         protocolVersion = PROTOCOL_VERSION,
         guild = self:GetGuildName(),
+        reason = reason,
     }
 end
 
@@ -737,12 +748,19 @@ end
 --- Send a targeted HELLO reply to a specific peer via WHISPER.
 -- Used when we receive a broadcast HELLO so the sender discovers us.
 -- NOT subject to HELLO_COOLDOWN — targeted replies cannot cascade.
+--
+-- Returns whether the whisper actually went out. Three paths give up quietly
+-- (sync disabled, no guild data, target confirmed offline), and a caller that
+-- reports "reply sent" without checking is making a claim it cannot back. The
+-- HELLO round line reports reply=send-failed off this, because a round line
+-- that lies about a whisper is worse than no round line at all.
 -- @param target string Character name to reply to
+-- @return boolean true if the whisper was handed to AceComm
 function GBL:SendHelloReply(target)
-    if not self.db.profile.sync.enabled then return end
+    if not self.db.profile.sync.enabled then return false end
 
     local guildData = self:GetGuildData()
-    if not guildData then return end
+    if not guildData then return false end
 
     local txCount = #guildData.transactions + #guildData.moneyTransactions
     local dataHash = self:GetDataHash(guildData)
@@ -765,9 +783,10 @@ function GBL:SendHelloReply(target)
     })
     msg = compressMessage(msg)
 
-    if not self:SendSyncWhisper(PREFIX, msg, target) then return end
+    if not self:SendSyncWhisper(PREFIX, msg, target) then return false end
     self:AddAuditEntry("Sent HELLO reply to " .. target
         .. " (tx: " .. txCount .. ", hash: " .. dataHash .. ")")
+    return true
 end
 
 ------------------------------------------------------------------------
@@ -979,11 +998,30 @@ end
 function GBL:HandleHello(sender, data)
     self:UpdatePeer(sender, data)
 
-    self:AddAuditEntry("Received HELLO from " .. sender
-        .. " (tx: " .. (data.txCount or 0)
-        .. ", hash: " .. tostring(data.dataHash or "none")
-        .. ", v" .. tostring(data.version or "?")
-        .. ", reply=" .. tostring(data.isReply or false) .. ")")
+    -- One INFO line per processed HELLO, written at whichever exit the round
+    -- takes, replacing the arrival line, the hash-compare line and the
+    -- per-arm skip and trigger lines. It also carries the three decisions that
+    -- used to be DEBUG, which a shared capture could never see at all: Logger
+    -- drops DEBUG ahead of the capture tap and AuditCapture rejects it again
+    -- unconditionally, so a guildmate's capture of a real stall showed HELLOs
+    -- arriving and nothing else, which reads exactly like the whisper never
+    -- landing. Folding rather than promoting is what makes this affordable:
+    -- per-round cost goes from three entries to one, against a 1000-entry
+    -- capture buffer that a single large send already eats 40 percent of.
+    -- Issue #90.
+    local roundPeer = self:CanonicalPeerKey(sender)
+    local roundReply = data.isReply and "n/a" or "pending"
+    local roundStats
+    local function emitRound(verdict, extra)
+        local line = "HELLO round " .. roundPeer
+            .. ": verdict=" .. verdict
+            .. " reply=" .. roundReply
+            .. " peer=v" .. tostring(data.version or "?")
+            .. " remote=" .. (data.txCount or 0) .. "tx"
+        if roundStats then line = line .. " " .. roundStats end
+        if extra then line = line .. " " .. extra end
+        self:AddAuditEntry(line)
+    end
 
     -- Accept access control settings if the remote copy is newer
     if data.accessControl and type(data.accessControl) == "table"
@@ -1078,21 +1116,24 @@ function GBL:HandleHello(sender, data)
             syncState.incompatibleReplied[cleanSender] = true
             self:SyncWarn(explanation)
             if not data.isReply then
-                self:SendHelloReply(sender)
+                roundReply = self:SendHelloReply(sender) and "sent" or "send-failed"
             end
-        else
-            self:SyncDebug("Still refusing: %s", explanation)
+        elseif not data.isReply then
+            -- The repeat refusal. It used to be DEBUG and so invisible to a
+            -- capture, which is how a mixed-version guild looked silent rather
+            -- than deliberately quiet. The full explanation stays on the WARN
+            -- the first refusal already wrote; the round line carries the code.
+            roundReply = "suppressed"
         end
+        emitRound("refused-version", "refusal=" .. tostring(refusal))
         return
     end
 
     -- Reply to broadcast HELLOs so the sender discovers us.
     -- Hash-gated: only reply when our data changed since we last told this peer,
     -- or on first contact. Suppresses O(N²) reply traffic in large guilds.
-    -- replyDecision records what the gate did this round so the superset skip
-    -- below can log whether the behind peer got a fresh HELLO (diagnostic only;
-    -- stays nil for an isReply HELLO, which never runs the gate).
-    local replyDecision
+    -- What the gate did rides out on the round line as reply=, which is what
+    -- lets a capture correlate a suppressed reply with the superset skip below.
     if not data.isReply then
         local cleanSenderReply = self:CanonicalPeerKey(sender)
         local gd = self:GetGuildData()
@@ -1102,52 +1143,51 @@ function GBL:HandleHello(sender, data)
             if syncState.sending or syncState.receiving then
                 syncState.helloRepliesDuringSync =
                     (syncState.helloRepliesDuringSync or 0) + 1
-                self:AddAuditEntry("Suppressed HELLO reply to "
-                    .. cleanSenderReply .. " [sync active]")
-                replyDecision = "suppressed-sync-active"
+                roundReply = "sync-active"
             else
-                self:SendHelloReply(sender)
-                replyDecision = "sent"
+                roundReply = self:SendHelloReply(sender) and "sent" or "send-failed"
             end
             syncState.lastHelloReplyHash[cleanSenderReply] = currentHash
         else
-            -- Reply suppressed because our data has not changed since we last
-            -- told this peer. If the peer is behind us, this is the silent
-            -- deadlock: they get no fresh HELLO, never see we are ahead, and
-            -- never request, while our superset check below skips. Logged at
-            -- DEBUG so it only surfaces during a deliberate sync capture.
-            replyDecision = "suppressed-hash-unchanged"
-            self:SyncDebug(
-                "Suppressed HELLO reply to %s: hash unchanged since last reply "
-                .. "(their tx=%d, our tx=%d)",
-                cleanSenderReply, data.txCount or 0,
-                gd and (#gd.transactions + #gd.moneyTransactions) or 0)
+            -- Our data has not changed since we last told this peer. If they
+            -- are behind us, this is the silent deadlock: they get no fresh
+            -- HELLO, never see we are ahead, and never request, while our
+            -- superset check below skips. The nudge there reads this state.
+            roundReply = "hash-suppressed"
         end
     end
 
     local guildData = self:GetGuildData()
-    if not guildData then return end
+    if not guildData then
+        emitRound("no-guild-data")
+        return
+    end
 
     local localCount = #guildData.transactions + #guildData.moneyTransactions
     local remoteCount = data.txCount or 0
 
     local localDataHash = data.dataHash and self:GetDataHash(guildData) or nil
 
-    -- Surface bucket info so we can verify binning is working
-    local buckets = self:GetBucketHashes(guildData)
-    local bucketCount = 0
-    for _ in pairs(buckets) do bucketCount = bucketCount + 1 end
+    roundStats = "local=" .. localCount .. "tx"
+        .. " hash=" .. tostring(localDataHash or "none")
+        .. "/" .. tostring(data.dataHash or "none")
 
-    self:AddAuditEntry("Hash compare: local=" .. tostring(localDataHash or "none")
-        .. " (" .. localCount .. " tx, " .. bucketCount .. " buckets)"
-        .. ", remote=" .. tostring(data.dataHash or "none")
-        .. " (" .. remoteCount .. " tx)")
+    -- The bucket count rides along only when the map is already built. It is
+    -- a diagnostic and nothing reads it to make a decision, but computing one
+    -- walks every record, and an inbound HELLO is the worst place to pay that:
+    -- during a receive the count moves with every stored chunk, so the cache
+    -- misses every time and the walk lands on the busiest client in the guild.
+    -- That is the same recompute-per-HELLO the #115 watchdog trail ran through.
+    local warmBuckets = self:PeekBucketHashes(guildData)
+    if warmBuckets then
+        local bucketCount = 0
+        for _ in pairs(warmBuckets) do bucketCount = bucketCount + 1 end
+        roundStats = roundStats .. " buckets=" .. bucketCount
+    end
 
     -- Fast path: skip when datasets are identical (hash + count match)
     if localDataHash and data.dataHash == localDataHash and localCount == remoteCount then
-        self:AddAuditEntry("Skipped sync from " .. sender
-            .. " - datasets identical (hash: " .. localDataHash
-            .. ", tx: " .. localCount .. ")")
+        emitRound("identical")
         return
     end
 
@@ -1156,45 +1196,48 @@ function GBL:HandleHello(sender, data)
     local syncReason
     if localDataHash and data.dataHash ~= localDataHash then
         if localCount > remoteCount then
-            -- We have strictly more records — likely a superset.
-            -- Peer will request from us; bidirectional check handles edge cases.
-            self:AddAuditEntry("Skipped request from " .. sender
-                .. " - likely superset (local=" .. localCount
-                .. " > remote=" .. remoteCount .. ")")
-            -- Correlate the skip with the reply gate above: if we are ahead AND
-            -- the reply was suppressed-hash-unchanged AND no SYNC_REQUEST follows
-            -- from this peer, the silent hash-gate deadlock is confirmed.
-            self:SyncDebug(
-                "Superset skip detail for %s: replyThisRound=%s",
-                self:CanonicalPeerKey(sender), tostring(replyDecision))
-            -- Behind peer + suppressed-hash-unchanged reply is the silent
-            -- deadlock: we are ahead, our data is stable, so the hash gate
-            -- stopped telling this peer we are ahead and they never request.
-            -- Re-send the HELLO reply (throttled per peer) so their HandleHello
-            -- re-evaluates and pulls. An isReply HELLO drives their shouldSync
-            -- path, so this is a real nudge, not just discovery. Only fires for
-            -- the hash-unchanged case (replyDecision "sent" already pinged them
-            -- this round; "suppressed-sync-active" means we are mid-sync).
-            if replyDecision == "suppressed-hash-unchanged" then
+            -- We have strictly more records, so this is likely a superset and
+            -- the peer will request from us; the bidirectional check handles
+            -- the edge cases. The correlation a stall diagnosis needs is on
+            -- the round line: verdict superset-skip together with
+            -- reply=hash-suppressed, and no SYNC_REQUEST following from this
+            -- peer, is the silent hash-gate deadlock confirmed.
+            --
+            -- That pairing is also what the nudge reads. We are ahead, our
+            -- data is stable, so the hash gate stopped telling this peer we
+            -- are ahead and they never ask. Re-sending the reply (throttled
+            -- per peer) drives their shouldSync path, so it is a real pull
+            -- trigger rather than discovery. Only the hash-unchanged case
+            -- qualifies: reply=sent already pinged them this round, and
+            -- sync-active means we are mid-session anyway.
+            local nudged = false
+            if roundReply == "hash-suppressed" then
                 local nudgeKey = self:CanonicalPeerKey(sender)
                 local nudgeNow = GetServerTime()
                 if nudgeNow - (syncState.lastSupersetNudge[nudgeKey] or 0)
                         >= SUPERSET_NUDGE_THROTTLE then
-                    self:SendHelloReply(sender)
+                    -- Throttle stamps either way: a peer we could not reach is
+                    -- not worth retrying every heartbeat. The verdict and the
+                    -- audit line only claim a nudge that actually went out.
                     syncState.lastSupersetNudge[nudgeKey] = nudgeNow
-                    self:AddAuditEntry("Nudged behind peer " .. nudgeKey
-                        .. " to pull (superset, hash-gate bypass)")
+                    if self:SendHelloReply(sender) then
+                        nudged = true
+                        self:AddAuditEntry("Nudged behind peer " .. nudgeKey
+                            .. " to pull (superset, hash-gate bypass)")
+                    end
                 end
             end
+            emitRound(nudged and "superset-nudge" or "superset-skip")
             return
         end
         -- Hashes differ and peer has equal or more records — request sync
         shouldSync = true
-        syncReason = "hash mismatch"
+        -- Hyphenated because it ships inside a space-delimited key=value line.
+        syncReason = "hash-mismatch"
     elseif not data.dataHash and remoteCount > localCount then
         -- No hash support (old version) — fall back to count comparison
         shouldSync = true
-        syncReason = "count (no hash, remote has more)"
+        syncReason = "count-no-hash"
     end
 
     if shouldSync and not syncState.receiving and self.db.profile.sync.autoSync then
@@ -1202,47 +1245,40 @@ function GBL:HandleHello(sender, data)
         -- cooldown runs out. Nothing holds a retry for us; their next HELLO
         -- brings the opportunity back.
         if self:IsPeerBusy(sender) then
-            self:AddAuditEntry("Skipped sync from " .. sender
-                .. " (busy cooldown)")
+            emitRound("busy-cooldown")
         elseif InCombatLockdown and InCombatLockdown() then
             -- Defer sync if in combat to avoid FPS impact. The opportunity
             -- is not stored; combat end re-advertises and the pairing comes
             -- back around through the usual HELLO exchange.
             syncState.helloAfterCombat = true
-            self:AddAuditEntry("Deferred sync from " .. sender .. " - in combat")
+            emitRound("combat-deferred")
         elseif isSyncPaused() then
             -- Combat and zone pauses outlive their triggers by a cooldown, so
             -- this arm covers the window where the lockdown check above is
             -- already false. It sits after that check so a HELLO arriving in
             -- combat still takes the defer arm and sets helloAfterCombat.
-            self:AddAuditEntry("Skipped sync from " .. sender .. " ("
-                .. (syncState.zonePaused and "zone" or "combat")
-                .. " cooldown)")
+            emitRound(syncState.zonePaused and "paused-zone" or "paused-combat")
         else
             -- Requested inline. The deferral this used to sit behind bought
             -- nothing BUSY does not already buy, and its callback re-checked
             -- five conditions that could each drop the request with nothing
             -- logged, which is invisible in a capture.
-            self:AddAuditEntry("Sync triggered by " .. syncReason
-                .. " - requesting from " .. sender)
+            emitRound("requested", "trigger=" .. syncReason)
             self:RequestSync(sender, guildData.syncState.lastSyncTimestamp or 0)
         end
     else
-        -- Log why we didn't sync so stalls are diagnosable
-        local reason
+        local verdict
         if not shouldSync then
-            reason = "datasets match or no sync needed (local=" .. localCount
-                .. ", remote=" .. remoteCount .. ")"
+            verdict = "no-sync-needed"
         elseif syncState.receiving then
             -- Dropped rather than queued. They re-advertise on their own
             -- heartbeat, and we answer it once this session is done.
-            reason = "already receiving from " .. (syncState.receiveSource or "?")
-        elseif not self.db.profile.sync.autoSync then
-            reason = "autoSync disabled"
+            verdict = "receiving"
+        else
+            verdict = "autosync-off"
         end
-        if reason then
-            self:AddAuditEntry("Skipped sync from " .. sender .. " (" .. reason .. ")")
-        end
+        emitRound(verdict, verdict == "receiving"
+            and ("from=" .. (syncState.receiveSource or "?")) or nil)
     end
 end
 
@@ -1721,7 +1757,7 @@ function GBL:HandleSyncRequest(sender, data)
         end
         self:AddAuditEntry("Declined sync from " .. sender
             .. " (" .. why .. ") - sent BUSY")
-        local busy = compressMessage(self:Serialize(self:BuildBusyMessage()))
+        local busy = compressMessage(self:Serialize(self:BuildBusyMessage("combat")))
         self:SendSyncWhisper(PREFIX, busy, sender)
         return
     end
@@ -1742,7 +1778,8 @@ function GBL:HandleSyncRequest(sender, data)
         self:AddAuditEntry("Declined sync from " .. sender
             .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
         -- Send BUSY so requester doesn't wait 60s for data that will never come
-        local msg = compressMessage(self:Serialize(self:BuildBusyMessage()))
+        local msg = compressMessage(self:Serialize(
+            self:BuildBusyMessage("sending:" .. (syncState.sendTarget or "?"))))
         self:SendSyncWhisper(PREFIX, msg, sender)
         self:AddAuditEntry("Sent BUSY to " .. sender)
         return
@@ -3683,10 +3720,16 @@ end
 -- Clears receiving state immediately (instead of waiting 60s for NACKs to expire)
 -- and queues the peer for retry after the current sync completes.
 -- @param sender string Peer who is busy
--- @param data table Deserialized BUSY payload (unused, reserved)
-function GBL:HandleBusy(sender, data) -- luacheck: ignore 212/data
+-- @param data table Deserialized BUSY payload
+function GBL:HandleBusy(sender, data)
     local cleanSender = self:CanonicalPeerKey(sender)
-    self:AddAuditEntry("Received BUSY from " .. cleanSender)
+    -- Why they are busy decides whether waiting for them is worth anything, and
+    -- until #97 the capture could not say. A peer from before the field logs
+    -- "unknown", which is honest: a blank would read as a reason we failed to
+    -- print rather than one that was never sent.
+    local reason = (data and data.reason) or "unknown"
+    self:AddAuditEntry("Received BUSY from " .. cleanSender
+        .. " (reason: " .. tostring(reason) .. ")")
 
     -- Clear receiving state if we're waiting for this peer (even with partial data).
     -- Already-stored records are safe; next sync uses bucket hashes to avoid re-sending.
@@ -3804,8 +3847,9 @@ function GBL:OnCombatStart()
         self:FinishReceiving(receiveSource or "?")
     end
 
-    -- Notify partners via BUSY so they abort immediately
-    local busyMsg = compressMessage(self:Serialize(self:BuildBusyMessage()))
+    -- Notify partners via BUSY so they abort immediately. One message serves
+    -- both partners, and the reason is the same for each: we entered combat.
+    local busyMsg = compressMessage(self:Serialize(self:BuildBusyMessage("combat")))
 
     if sendTarget then
         self:SendSyncWhisper(PREFIX, busyMsg, sendTarget, "ALERT")

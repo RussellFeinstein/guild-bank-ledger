@@ -701,4 +701,109 @@ describe("Fingerprint", function()
             assert.is_number(otherMap[math.floor(888888 / 6)])
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- PeekBucketHashes
+    --
+    -- The read-only companion to GetBucketHashes, for a caller that wants the
+    -- map only if it is already sitting there. HandleHello prints a bucket
+    -- count on every inbound HELLO, and computing it meant a full walk over
+    -- every record per heartbeat, worst exactly during a receive: the record
+    -- count moves with each stored chunk, so the cache is invalid every time
+    -- and the walk runs on the busiest client in the guild.
+    ---------------------------------------------------------------------------
+
+    describe("PeekBucketHashes", function()
+        local function addRecord(id, timestamp)
+            table.insert(guildData.transactions, { id = id, timestamp = timestamp })
+        end
+
+        local function countingCompute(fn)
+            local calls = 0
+            local orig = GBL.ComputeBucketHashes
+            GBL.ComputeBucketHashes = function(...)
+                calls = calls + 1
+                return orig(...)
+            end
+            local ok, err = pcall(fn)
+            GBL.ComputeBucketHashes = orig
+            if not ok then error(err, 0) end
+            return calls
+        end
+
+        it("returns nil when the cache is cold", function()
+            addRecord("deposit|A|100|1|1|472222:0", 1700000000)
+            GBL:ResetHashCache()
+
+            assert.is_nil(GBL:PeekBucketHashes(guildData))
+        end)
+
+        it("computes nothing, even with records waiting", function()
+            addRecord("deposit|A|100|1|1|472222:0", 1700000000)
+            GBL:ResetHashCache()
+
+            local calls = countingCompute(function()
+                GBL:PeekBucketHashes(guildData)
+            end)
+
+            assert.equals(0, calls)
+        end)
+
+        it("hands back the same map GetBucketHashes built", function()
+            addRecord("deposit|A|100|1|1|472222:0", 1700000000)
+            local warm = GBL:GetBucketHashes(guildData)
+
+            local calls = countingCompute(function()
+                assert.equals(warm, GBL:PeekBucketHashes(guildData))
+            end)
+
+            assert.equals(0, calls)
+        end)
+
+        it("goes cold again when the cache is reset", function()
+            addRecord("deposit|A|100|1|1|472222:0", 1700000000)
+            GBL:GetBucketHashes(guildData)
+            assert.is_not_nil(GBL:PeekBucketHashes(guildData))
+
+            GBL:ResetHashCache()
+
+            assert.is_nil(GBL:PeekBucketHashes(guildData))
+        end)
+
+        -- Warm is not the same as current. The peek reports what the cache
+        -- holds and nothing more, so a count that moved since is still served.
+        -- That is the deal a diagnostic reader is getting: a bucket count is a
+        -- slowly changing number, and a few records out of date beats making
+        -- the busiest client in the guild walk its whole history to print it.
+        it("serves a map whose count has moved on", function()
+            addRecord("deposit|A|100|1|1|472222:0", 1700000000)
+            local warm = GBL:GetBucketHashes(guildData)
+            addRecord("deposit|B|200|2|2|472228:0", 1700100000)
+
+            local calls = countingCompute(function()
+                assert.equals(warm, GBL:PeekBucketHashes(guildData))
+            end)
+
+            assert.equals(0, calls)
+        end)
+
+        -- Source identity is checked even though the count is not. A stale
+        -- count misreports a diagnostic by a few; another guild's map is a
+        -- different number entirely, about data this client is not looking at.
+        it("returns nil when the cache belongs to another guild", function()
+            addRecord("deposit|A|100|1|1|472222:0", 1700000000)
+            GBL:GetBucketHashes(guildData)
+
+            local other = { transactions = {}, moneyTransactions = {} }
+
+            assert.is_nil(GBL:PeekBucketHashes(other))
+        end)
+
+        it("returns nil for nil guildData", function()
+            addRecord("deposit|A|100|1|1|472222:0", 1700000000)
+            GBL:GetBucketHashes(guildData)
+
+            assert.is_nil(GBL:PeekBucketHashes(nil))
+        end)
+    end)
 end)
