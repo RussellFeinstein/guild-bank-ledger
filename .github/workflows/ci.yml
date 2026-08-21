@@ -19,18 +19,25 @@ jobs:
             exit 1
           fi
 
-      - name: Set up Lua 5.1
-        uses: leafo/gh-actions-lua@v10
-        with:
-          luaVersion: "5.1"
+      # Installed from the runner's own apt mirrors rather than built from the
+      # lua.org tarball. Building from source put the merge gate behind one
+      # third-party website with no mirror: when lua.org was unreachable on
+      # 2026-08-07 every run failed before reaching busted, and the build cache
+      # that would have absorbed it was answering 400. Lua 5.1 is frozen, so
+      # tracking the distribution package carries no version-drift risk.
+      - name: Set up Lua 5.1 and LuaRocks
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.1 liblua5.1-0-dev luarocks
 
-      - name: Set up LuaRocks
-        uses: leafo/gh-actions-luarocks@v4
-
+      # luarocks-5.1 is the versioned entry point the distribution package ships
+      # alongside /etc/luarocks/config-5.1.lua, which already points at Lua 5.1's
+      # headers under /usr/include/lua5.1. Plain `luarocks` would build against
+      # the default interpreter instead.
       - name: Install busted and luacheck
         run: |
-          luarocks install busted
-          luarocks install luacheck
+          sudo luarocks-5.1 install busted
+          sudo luarocks-5.1 install luacheck
 
       - name: Run tests
         run: busted --verbose
