@@ -517,7 +517,13 @@ describe("Wire contract", function()
     -- site; give either HELLO builder a field the other lacks.
     --------------------------------------------------------------------
     -- Every key BUSY carries. Unconditional, unlike HELLO's optional fields.
-    local BUSY_KEYS = { "guild", "protocolVersion", "type" }
+    -- `reason` is unconditional too: it is a required argument to the builder
+    -- rather than an optional field, so a BUSY that reaches the wire without
+    -- one is a call site that forgot, not a shape variant. This list is the
+    -- maintenance cost #70 knowingly bought, and paying it is the point: an
+    -- absolute set is the only thing that catches a field dropped from the one
+    -- builder both sites now read from.
+    local BUSY_KEYS = { "guild", "protocolVersion", "reason", "type" }
 
     -- Every key SYNC_DATA always carries. eventCounts and remaining are
     -- optional and asserted separately where each is expected.
@@ -745,6 +751,16 @@ describe("Wire contract", function()
 
             -- Relative: both call sites still agree.
             assert.same(keySet(declined), keySet(aborted))
+
+            -- The reason each site passes. Key parity above cannot see this:
+            -- both sites would still agree if they passed the same wrong
+            -- value, or if one passed the other's. The values are what a
+            -- capture reads to tell a decline apart from a combat abort,
+            -- which is the whole point of the field (#97).
+            assert.equals("sending:PeerA", declined.reason,
+                "a decline names the peer we are already serving")
+            assert.equals("combat", aborted.reason,
+                "a combat abort says so")
         end)
     end)
 end)

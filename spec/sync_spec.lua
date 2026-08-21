@@ -1039,9 +1039,21 @@ describe("Sync", function()
 
             local line = roundLine()
             assert.is_truthy(line:find("verdict=requested", 1, true))
+            assert.is_truthy(line:find("trigger=hash-mismatch", 1, true))
             assert.is_truthy(line:find("reply=sent", 1, true))
             assert.is_truthy(line:find("local=1tx", 1, true))
             assert.is_truthy(line:find("remote=99tx", 1, true))
+        end)
+
+        -- The other trigger: a peer too old to advertise a hash at all, where
+        -- the only thing to compare is the record count.
+        it("reports a request triggered by count when the peer sends no hash", function()
+            seed(1)
+            GBL:HandleHello("OfficerB", hello{ txCount = 99 })
+
+            local line = roundLine()
+            assert.is_truthy(line:find("verdict=requested", 1, true))
+            assert.is_truthy(line:find("trigger=count-no-hash", 1, true))
         end)
 
         it("reports identical datasets", function()
@@ -1126,6 +1138,33 @@ describe("Sync", function()
             assert.is_truthy(line:find("reply=hash-suppressed", 1, true))
         end)
 
+        -- The nudge fires only when the reply gate suppressed us AND the
+        -- whisper actually leaves. A peer the roster says is offline gets the
+        -- throttle stamped anyway (retrying every heartbeat at someone we
+        -- cannot reach is what the throttle is for), but the round must not
+        -- claim a nudge that never went out.
+        it("does not claim a nudge when the whisper could not be sent", function()
+            seed(5)
+            GBL:HandleHello("OfficerB", hello{ txCount = 1, dataHash = 12345 })
+            GBL:ClearLog("sync")
+
+            local orig = GBL.IsGuildMemberOnline
+            GBL.IsGuildMemberOnline = function() return false end
+            local ok, err = pcall(function()
+                GBL:HandleHello("OfficerB", hello{ txCount = 1, dataHash = 12345 })
+            end)
+            GBL.IsGuildMemberOnline = orig
+            if not ok then error(err, 0) end
+
+            local line = roundLine()
+            assert.is_truthy(line:find("verdict=superset-skip", 1, true))
+            assert.is_nil(line:find("verdict=superset-nudge", 1, true))
+            for _, e in ipairs(GBL:GetAuditTrail()) do
+                assert.is_nil(e.message:find("Nudged behind peer", 1, true),
+                    "no nudge line for a whisper that never left")
+            end
+        end)
+
         it("reports a version refusal", function()
             GBL.version = "0.40.0"
             GBL:HandleHello("OfficerB", hello{
@@ -1133,6 +1172,62 @@ describe("Sync", function()
             })
 
             assert.is_truthy(roundLine():find("verdict=refused-version", 1, true))
+        end)
+
+        -- An incompatible peer is answered once per session and then left in
+        -- silence. The repeat rounds still have to say what they decided, or a
+        -- deliberately quiet client is indistinguishable from a broken one:
+        -- that was the whole DEBUG problem, and the repeat refusal was one of
+        -- the three lines that had it.
+        it("reports the repeat refusal as a suppressed reply", function()
+            GBL.version = "0.40.0"
+            GBL:HandleHello("OfficerB", hello{
+                version = "0.20.0", minSyncVersion = "0.20.0",
+            })
+            GBL:ClearLog("sync")
+
+            GBL:HandleHello("OfficerB", hello{
+                version = "0.20.0", minSyncVersion = "0.20.0",
+            })
+
+            local line = roundLine()
+            assert.is_truthy(line:find("verdict=refused-version", 1, true))
+            assert.is_truthy(line:find("reply=suppressed", 1, true))
+        end)
+
+        it("reports a round that found no guild data", function()
+            local orig = GBL.GetGuildData
+            GBL.GetGuildData = function() return nil end
+            local ok, err = pcall(function()
+                GBL:HandleHello("OfficerB", hello{ txCount = 99, dataHash = 12345 })
+            end)
+            GBL.GetGuildData = orig
+            if not ok then error(err, 0) end
+
+            local line = roundLine()
+            assert.is_truthy(line:find("verdict=no-guild-data", 1, true))
+            -- Truthful by structure: SendHelloReply gives up on the same
+            -- missing guild data, so the reply genuinely did not go out.
+            assert.is_truthy(line:find("reply=send-failed", 1, true))
+        end)
+
+        it("reports a sync skipped by the combat cooldown", function()
+            seed(1)
+            GBL:RequestSync("OfficerC", 0)
+            GBL:OnCombatStart()
+            GBL:ClearLog("sync")
+
+            GBL:HandleHello("OfficerB", hello{ txCount = 99, dataHash = 12345 })
+
+            assert.is_truthy(roundLine():find("verdict=paused-combat", 1, true))
+        end)
+
+        it("reports a round that needed no sync", function()
+            seed(2)
+            -- Same count, no hash advertised: nothing to compare, nothing to do.
+            GBL:HandleHello("OfficerB", hello{ txCount = 2 })
+
+            assert.is_truthy(roundLine():find("verdict=no-sync-needed", 1, true))
         end)
 
         it("reports a peer left alone on its busy cooldown", function()
@@ -9510,6 +9605,49 @@ describe("Sync", function()
             GBL:RequestSync("PeerA", 0)
             GBL:HandleBusy("PeerA", {})
             assert.is_true(GBL:IsPeerBusy("PeerA"))
+        end)
+
+        -- Why a BUSY arrived is the difference between three responses that
+        -- have nothing to do with each other: a peer already serving someone
+        -- else, a peer that just entered combat, or a peer refusing to serve
+        -- during a fight. A capture could not tell them apart, and three
+        -- sends killed by BUSY in the 2026-08-12 window are still unexplained
+        -- because of it (#97).
+        it("HandleBusy records why the peer was busy", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
+            GBL:RequestSync("PeerA", 0)
+            GBL:ClearLog("sync")
+
+            GBL:HandleBusy("PeerA", { reason = "sending:SomeoneElse" })
+
+            local found = false
+            for _, e in ipairs(GBL:GetAuditTrail()) do
+                if e.message and e.message:find("Received BUSY from PeerA", 1, true)
+                    and e.message:find("reason: sending:SomeoneElse", 1, true) then
+                    found = true
+                end
+            end
+            assert.is_true(found, "the BUSY line should carry the reason it arrived with")
+        end)
+
+        -- A peer from before the field existed sends no reason at all. The
+        -- line still has to say something, and "unknown" is honest where a
+        -- blank would read as a reason we failed to print.
+        it("HandleBusy says unknown when the peer sent no reason", function()
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 10, dataHash = 123 })
+            GBL:RequestSync("PeerA", 0)
+            GBL:ClearLog("sync")
+
+            GBL:HandleBusy("PeerA", {})
+
+            local found = false
+            for _, e in ipairs(GBL:GetAuditTrail()) do
+                if e.message and e.message:find("Received BUSY from PeerA", 1, true)
+                    and e.message:find("reason: unknown", 1, true) then
+                    found = true
+                end
+            end
+            assert.is_true(found, "an older peer's reasonless BUSY should log unknown")
         end)
 
         it("HandleBusy is no-op on receiving state when not receiving", function()

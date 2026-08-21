@@ -303,12 +303,23 @@ GBL._nackBackoff = nackBackoff
 -- compression ratio and would otherwise have to serialize a second time.
 
 --- Build a BUSY message, telling a peer to stop and try later.
+--
+-- The reason is required, not optional. A BUSY means completely different
+-- things depending on why it was sent (a peer already serving someone else
+-- will free up on its own schedule; one entering combat may be gone for the
+-- length of a fight), and the receiver could not tell them apart. Three sends
+-- killed by BUSY in the 2026-08-12 capture are still unexplained for that
+-- reason. Shipped values are "combat" and "sending:<peer>"; the receiver
+-- treats the field as an opaque string, so a later producer adds a value
+-- without touching the wire contract. Issue #97.
+-- @param reason string Why we are busy
 -- @return table BUSY message
-function GBL:BuildBusyMessage()
+function GBL:BuildBusyMessage(reason)
     return {
         type = "BUSY",
         protocolVersion = PROTOCOL_VERSION,
         guild = self:GetGuildName(),
+        reason = reason,
     }
 end
 
@@ -1221,11 +1232,12 @@ function GBL:HandleHello(sender, data)
         end
         -- Hashes differ and peer has equal or more records — request sync
         shouldSync = true
-        syncReason = "hash mismatch"
+        -- Hyphenated because it ships inside a space-delimited key=value line.
+        syncReason = "hash-mismatch"
     elseif not data.dataHash and remoteCount > localCount then
         -- No hash support (old version) — fall back to count comparison
         shouldSync = true
-        syncReason = "count (no hash, remote has more)"
+        syncReason = "count-no-hash"
     end
 
     if shouldSync and not syncState.receiving and self.db.profile.sync.autoSync then
@@ -1745,7 +1757,7 @@ function GBL:HandleSyncRequest(sender, data)
         end
         self:AddAuditEntry("Declined sync from " .. sender
             .. " (" .. why .. ") - sent BUSY")
-        local busy = compressMessage(self:Serialize(self:BuildBusyMessage()))
+        local busy = compressMessage(self:Serialize(self:BuildBusyMessage("combat")))
         self:SendSyncWhisper(PREFIX, busy, sender)
         return
     end
@@ -1766,7 +1778,8 @@ function GBL:HandleSyncRequest(sender, data)
         self:AddAuditEntry("Declined sync from " .. sender
             .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
         -- Send BUSY so requester doesn't wait 60s for data that will never come
-        local msg = compressMessage(self:Serialize(self:BuildBusyMessage()))
+        local msg = compressMessage(self:Serialize(
+            self:BuildBusyMessage("sending:" .. (syncState.sendTarget or "?"))))
         self:SendSyncWhisper(PREFIX, msg, sender)
         self:AddAuditEntry("Sent BUSY to " .. sender)
         return
@@ -3707,10 +3720,16 @@ end
 -- Clears receiving state immediately (instead of waiting 60s for NACKs to expire)
 -- and queues the peer for retry after the current sync completes.
 -- @param sender string Peer who is busy
--- @param data table Deserialized BUSY payload (unused, reserved)
-function GBL:HandleBusy(sender, data) -- luacheck: ignore 212/data
+-- @param data table Deserialized BUSY payload
+function GBL:HandleBusy(sender, data)
     local cleanSender = self:CanonicalPeerKey(sender)
-    self:AddAuditEntry("Received BUSY from " .. cleanSender)
+    -- Why they are busy decides whether waiting for them is worth anything, and
+    -- until #97 the capture could not say. A peer from before the field logs
+    -- "unknown", which is honest: a blank would read as a reason we failed to
+    -- print rather than one that was never sent.
+    local reason = (data and data.reason) or "unknown"
+    self:AddAuditEntry("Received BUSY from " .. cleanSender
+        .. " (reason: " .. tostring(reason) .. ")")
 
     -- Clear receiving state if we're waiting for this peer (even with partial data).
     -- Already-stored records are safe; next sync uses bucket hashes to avoid re-sending.
@@ -3828,8 +3847,9 @@ function GBL:OnCombatStart()
         self:FinishReceiving(receiveSource or "?")
     end
 
-    -- Notify partners via BUSY so they abort immediately
-    local busyMsg = compressMessage(self:Serialize(self:BuildBusyMessage()))
+    -- Notify partners via BUSY so they abort immediately. One message serves
+    -- both partners, and the reason is the same for each: we entered combat.
+    local busyMsg = compressMessage(self:Serialize(self:BuildBusyMessage("combat")))
 
     if sendTarget then
         self:SendSyncWhisper(PREFIX, busyMsg, sendTarget, "ALERT")
