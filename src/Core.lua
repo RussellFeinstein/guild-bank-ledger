@@ -5,7 +5,7 @@
 
 local ADDON_NAME = "GuildBankLedger"
 local VERSION = "0.37.15"
-local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
+local DEV_BUILD = "sync-visibility"  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
     "AceConsole-3.0",
