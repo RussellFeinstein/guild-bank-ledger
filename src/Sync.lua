@@ -1134,7 +1134,7 @@ function GBL:HandleHello(sender, data)
     local localDataHash = data.dataHash and self:GetDataHash(guildData) or nil
 
     -- Surface bucket info so we can verify binning is working
-    local buckets = self:ComputeBucketHashes(guildData)
+    local buckets = self:GetBucketHashes(guildData)
     local bucketCount = 0
     for _ in pairs(buckets) do bucketCount = bucketCount + 1 end
 
@@ -1583,7 +1583,7 @@ end
 -- @return boolean true when the whisper was handed to AceComm
 function GBL:SendSyncRequestTo(target, sinceTimestamp)
     local guildData = self:GetGuildData()
-    local bucketHashes = guildData and self:ComputeBucketHashes(guildData) or nil
+    local bucketHashes = guildData and self:GetBucketHashes(guildData) or nil
     -- nil in, nil out: a request with no bucketHashes key at all is what puts
     -- the serving side onto its sinceTimestamp fallback.
     local detail, spans = self:BuildRequestManifest(bucketHashes)
@@ -1733,7 +1733,7 @@ function GBL:HandleSyncRequest(sender, data)
     -- per-target tranche memory that keeps a capped session rotating, which
     -- would otherwise serve the same slice forever to a peer whose request
     -- carried no hashes.
-    local localBuckets = self:ComputeBucketHashes(guildData)
+    local localBuckets = self:GetBucketHashes(guildData)
 
     if data.bucketHashes then
         -- Bucket-filtered sync: only send records from buckets that differ.

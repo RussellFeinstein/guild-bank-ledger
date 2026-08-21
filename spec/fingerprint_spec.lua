@@ -621,4 +621,84 @@ describe("Fingerprint", function()
             assert.are_not.equals(hash1, hash2)
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- GetBucketHashes
+    --
+    -- The cached form of ComputeBucketHashes (#115). What is worth pinning is
+    -- not that caching is fast but that it invalidates on exactly the right
+    -- events, because a stale bucket map does not look broken: it silently
+    -- decides which records a sync offers.
+    ---------------------------------------------------------------------------
+
+    describe("GetBucketHashes", function()
+        local function addRecord(id, timestamp)
+            table.insert(guildData.transactions, { id = id, timestamp = timestamp })
+        end
+
+        it("returns an empty map for nil guildData", function()
+            assert.same({}, GBL:GetBucketHashes(nil))
+        end)
+
+        it("agrees with an uncached ComputeBucketHashes", function()
+            addRecord("deposit|A|100|1|1|472222:0", 1700000000)
+            addRecord("deposit|B|200|2|2|472228:0", 1700100000)
+
+            assert.same(GBL:ComputeBucketHashes(guildData), GBL:GetBucketHashes(guildData))
+        end)
+
+        it("recomputes when a record is added", function()
+            addRecord("deposit|A|100|1|1|472222:0", 1700000000)
+            local first = GBL:GetBucketHashes(guildData)
+            local before = {}
+            for k, v in pairs(first) do before[k] = v end
+
+            addRecord("deposit|B|200|2|2|472228:0", 1700100000)
+
+            assert.are_not.same(before, GBL:GetBucketHashes(guildData))
+            assert.same(GBL:ComputeBucketHashes(guildData), GBL:GetBucketHashes(guildData))
+        end)
+
+        -- The contract every id-rewriting caller depends on. Only record.id
+        -- feeds a bucket hash, so rewriting one in place changes the correct
+        -- answer while leaving the record count identical, and the cache cannot
+        -- see it. That is why the migrations and CleanupWithEventCounts call
+        -- ResetHashCache, and why anything added later that rewrites an id has
+        -- to do the same.
+        it("does not notice an id rewritten in place until the cache is reset", function()
+            addRecord("deposit|A|100|1|1|472222:0", 1700000000)
+            local stale = GBL:GetBucketHashes(guildData)[math.floor(472222 / 6)]
+            assert.is_number(stale)
+
+            guildData.transactions[1].id = "deposit|A|100|1|1|999999:0"
+
+            -- Same count, so the cache still answers with the old bucket.
+            assert.equals(stale, GBL:GetBucketHashes(guildData)[math.floor(472222 / 6)])
+
+            GBL:ResetHashCache()
+
+            local fresh = GBL:GetBucketHashes(guildData)
+            assert.is_nil(fresh[math.floor(472222 / 6)])
+            assert.is_number(fresh[math.floor(999999 / 6)])
+        end)
+
+        -- A count-only key would collide here: same number of records, a
+        -- different guild's data. The map decides which records get sent, so
+        -- serving the wrong one would offer the wrong records.
+        it("does not serve one guild's map for another with the same count", function()
+            addRecord("deposit|A|100|1|1|472222:0", 1700000000)
+            local first = GBL:GetBucketHashes(guildData)
+            local firstKey = math.floor(472222 / 6)
+            assert.is_number(first[firstKey])
+
+            local other = {
+                transactions = { { id = "deposit|Z|900|9|9|888888:0", timestamp = 1700200000 } },
+                moneyTransactions = {},
+            }
+
+            local otherMap = GBL:GetBucketHashes(other)
+            assert.is_nil(otherMap[firstKey])
+            assert.is_number(otherMap[math.floor(888888 / 6)])
+        end)
+    end)
 end)
