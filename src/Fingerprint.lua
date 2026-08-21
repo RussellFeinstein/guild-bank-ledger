@@ -120,6 +120,19 @@ function GBL:BucketKeyForRecord(tx)
     return bucketKeyForRecord(tx)
 end
 
+-- Session cache for ComputeBucketHashes.
+--
+-- Keyed by the guildData table itself as well as the record count. GetDataHash
+-- keys on the count alone, which is survivable for a whole-dataset hash, but
+-- this map decides which buckets a sync offers: handing one guild's map to
+-- another whose record count happened to match would offer the wrong records.
+-- Comparing the table identity costs nothing and removes the question.
+local bucketCache = {
+    source = nil,
+    txCount = -1,
+    buckets = nil,
+}
+
 --- Compute per-bucket fingerprints for delta sync.
 -- Groups records by 6-hour window derived from the timeSlot in their ID
 -- (not tx.timestamp) so that bucket placement is consistent across peers
@@ -142,6 +155,37 @@ function GBL:ComputeBucketHashes(guildData)
         end
     end
     return buckets
+end
+
+--- Get per-bucket fingerprints, recomputing only when the dataset changes.
+--
+-- ComputeBucketHashes walks every record and hashes each id, and serving one
+-- SYNC_REQUEST asked for that map three times over (the bucket diff, the
+-- request builder, and the HELLO diagnostic), on a history that grows without
+-- bound. Those repeated passes are part of what trips the script watchdog on a
+-- large history (#115).
+--
+-- Same invalidation contract as GetDataHash, and it shares ResetHashCache, so
+-- every caller that already invalidates one invalidates both. That contract
+-- holds because only `record.id` feeds a bucket hash: changing any other field
+-- on a record cannot strand this cache, while rewriting an id in place without
+-- changing the record count can, which is exactly what the migrations and
+-- CleanupWithEventCounts call ResetHashCache for.
+--
+-- Returns the cached table itself rather than a copy. Treat it as read-only:
+-- mutating it corrupts every bucket diff that follows, until something
+-- invalidates the cache. Every caller today only reads.
+-- @param guildData table Guild data from AceDB
+-- @return table Map of bucketKey (number) to bucket hash (number)
+function GBL:GetBucketHashes(guildData)
+    if not guildData then return {} end
+    local count = #guildData.transactions + #guildData.moneyTransactions
+    if bucketCache.source ~= guildData or bucketCache.txCount ~= count then
+        bucketCache.buckets = self:ComputeBucketHashes(guildData)
+        bucketCache.source = guildData
+        bucketCache.txCount = count
+    end
+    return bucketCache.buckets
 end
 
 ------------------------------------------------------------------------
@@ -247,8 +291,14 @@ function GBL:BuildRequestManifest(bucketHashes)
     return detail, spans
 end
 
---- Reset the hash cache. Exposed for testing.
+--- Reset the hash caches. Exposed for testing.
+-- Both the dataset hash and the bucket map are invalidated together: they are
+-- computed from the same record ids, so anything that strands one strands the
+-- other, and every existing caller already fires at exactly those moments.
 function GBL:ResetHashCache()
     hashCache.dataHash = 0
     hashCache.txCount = -1
+    bucketCache.source = nil
+    bucketCache.txCount = -1
+    bucketCache.buckets = nil
 end
