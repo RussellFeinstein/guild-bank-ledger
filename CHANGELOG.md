@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Your client no longer hands over its records while you are in combat. Answering that request means reading through everything the addon has stored, and on a large history that is enough work in one go that the game can cut it short with a script error, which is what happened to a member in the middle of a raid. Requests that arrive during a fight, or in the moments just after one or after a loading screen, are now turned down with a note saying to try again shortly. The guildmate asking retries on their own a little later, so nothing is lost apart from the wait.
+
 ## [0.37.14] - 2026-08-21
 
 ### Fixed

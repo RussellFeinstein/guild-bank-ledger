@@ -1701,6 +1701,31 @@ function GBL:HandleSyncRequest(sender, data)
         return
     end
 
+    -- Combat is no time to spend the main thread on a backfill, and serving
+    -- was the one door in that policy with no check on it. HandleHello defers
+    -- requesting while the lockdown reads true, and a live session entering
+    -- combat is aborted outright, but an idle client never sets combatPaused
+    -- (OnCombatStart returns early when nothing is in flight), so a raider
+    -- could be handed a full synchronous serve mid-pull. BUSY is honest here:
+    -- it means "try again shortly", and the requester's BUSY cooldown paces
+    -- the retry past the fight. The pause flags cover the transition tails,
+    -- where the live API already reads false. Sits after the version gate so
+    -- an incompatible peer keeps getting silence rather than a retry signal.
+    local inCombat = InCombatLockdown and InCombatLockdown()
+    if inCombat or isSyncPaused() then
+        local why
+        if inCombat then
+            why = "in combat"
+        else
+            why = (syncState.zonePaused and "zone" or "combat") .. " cooldown"
+        end
+        self:AddAuditEntry("Declined sync from " .. sender
+            .. " (" .. why .. ") - sent BUSY")
+        local busy = compressMessage(self:Serialize(self:BuildBusyMessage()))
+        self:SendSyncWhisper(PREFIX, busy, sender)
+        return
+    end
+
     if syncState.sending then
         -- A peer whose request went missing resends it, and the resend can
         -- arrive while we are already answering the first one. Answering that

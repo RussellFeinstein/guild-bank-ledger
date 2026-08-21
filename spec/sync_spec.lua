@@ -9513,6 +9513,147 @@ describe("Sync", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Combat serve gate (issue #126)
+    ---------------------------------------------------------------------------
+
+    -- Serving was the one door in the combat policy with no check on it.
+    -- HandleHello defers requesting while InCombatLockdown reads true, and a
+    -- live session entering combat is aborted outright, but an idle client
+    -- never sets combatPaused (OnCombatStart returns early when nothing is in
+    -- flight), so a raider could be handed a full synchronous backfill
+    -- mid-pull. That is the context of the watchdog kills in #115.
+    describe("combat serve gate", function()
+        local function sentTo(target)
+            local types = {}
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                if msg.target == target then
+                    local ok, data = GBL:Deserialize(msg.text)
+                    if ok and type(data) == "table" then
+                        types[data.type] = (types[data.type] or 0) + 1
+                    end
+                end
+            end
+            return types
+        end
+
+        local function inCombat(fn)
+            local origICL = _G.InCombatLockdown
+            _G.InCombatLockdown = function() return true end
+            local ok, err = pcall(fn)
+            _G.InCombatLockdown = origICL
+            if not ok then error(err, 0) end
+        end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            for i = 1, 3 do
+                local ts = (1000 + i) * 3600
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "Player1", tab = 1, itemID = 123,
+                    classID = 0, subclassID = 0, count = 1,
+                    timestamp = ts, id = "combatgate" .. i .. ":277:0",
+                    _occurrence = 0, scanTime = ts, scannedBy = "OfficerA",
+                })
+            end
+            MockAce.sentCommMessages = {}
+        end)
+
+        it("declines with BUSY while in combat", function()
+            inCombat(function()
+                GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            end)
+
+            local sent = sentTo("PeerA")
+            assert.equals(1, sent["BUSY"] or 0,
+                "a request arriving in combat should draw a BUSY")
+            assert.is_nil(sent["SYNC_DATA"],
+                "no records should be served during combat")
+            assert.is_false(GBL:GetSyncStatus().sending,
+                "no send session should be opened during combat")
+        end)
+
+        it("names the reason in the sync log", function()
+            inCombat(function()
+                GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            end)
+
+            -- Silence would leave a capture unable to tell this apart from a
+            -- request that never arrived, which is the whole #115 symptom.
+            local logged = false
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message
+                    and entry.message:find("Declined sync from PeerA", 1, true)
+                    and entry.message:find("combat", 1, true) then
+                    logged = true
+                end
+            end
+            assert.is_true(logged, "the decline has to name itself in the capture")
+        end)
+
+        -- InCombatLockdown reads false the instant regen returns, while a
+        -- chain pull is still going, so the flag covers the tail the live API
+        -- cannot express.
+        it("declines during the post-combat cooldown tail", function()
+            GBL:RequestSync("OfficerC", 0)
+            GBL:OnCombatStart()
+            assert.is_true(GBL:GetSyncStatus().combatPaused)
+            assert.is_false(GBL:GetSyncStatus().receiving)
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+
+            local sent = sentTo("PeerA")
+            assert.equals(1, sent["BUSY"] or 0)
+            assert.is_nil(sent["SYNC_DATA"])
+            assert.is_false(GBL:GetSyncStatus().sending)
+        end)
+
+        it("declines during the zone cooldown tail", function()
+            -- OnLoadingScreenStart only pauses a live session, so enter one
+            -- and end it, which leaves zonePaused set until its cooldown.
+            GBL:RequestSync("OfficerC", 0)
+            GBL:OnLoadingScreenStart()
+            GBL:FinishReceiving("OfficerC")
+            assert.is_true(GBL:GetSyncStatus().zonePaused)
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+
+            local sent = sentTo("PeerA")
+            assert.equals(1, sent["BUSY"] or 0)
+            assert.is_nil(sent["SYNC_DATA"])
+            assert.is_false(GBL:GetSyncStatus().sending)
+        end)
+
+        -- The version gate stays ahead of this one. BUSY reads as "try again
+        -- shortly", which would drive an incompatible peer's retry loop for as
+        -- long as it stays on the old version, in combat or out of it.
+        it("keeps refusing an incompatible requester silently in combat", function()
+            GBL.version = "0.40.0"
+
+            inCombat(function()
+                GBL:HandleSyncRequest("PeerA", request{
+                    sinceTimestamp = 0,
+                    version = "0.20.0",
+                    minSyncVersion = "0.20.0",
+                })
+            end)
+
+            local sent = sentTo("PeerA")
+            assert.is_nil(sent["BUSY"], "an incompatible peer gets silence, never BUSY")
+            assert.is_nil(sent["SYNC_DATA"])
+        end)
+
+        it("serves normally out of combat", function()
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+
+            local sent = sentTo("PeerA")
+            assert.is_true((sent["SYNC_DATA"] or 0) > 0, "an idle client should still serve")
+            assert.is_nil(sent["BUSY"])
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Combat protection (proactive abort)
     ---------------------------------------------------------------------------
 
