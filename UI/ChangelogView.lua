@@ -29,6 +29,15 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.37.16
+    {"0.37.16", "2026-08-21", {
+        Changed = {
+            "A sync log now records one line per exchange with a guildmate saying what it decided and why, instead of several lines that each said part of it. The decisions that explain a member who never catches up were only visible with debug logging turned on beforehand, so a capture sent in after the fact could never contain them. They are in the ordinary log now, and the log is shorter than it was.",
+            "When a guildmate turns down a sync request, the reply now says why: they are already sending to someone else (and to whom), or they are in combat. Turning one down used to be silent about the cause, and the three possible causes call for completely different responses.",
+            "Reading a guildmate's HELLO no longer re-measures your whole stored history to print a diagnostic number. On a large history during a busy moment that was real work being done for a line in a log, and it happened for every ping from every member.",
+        },
+    }},
+
     -- v0.37.15
     {"0.37.15", "2026-08-21", {
         Fixed = {
