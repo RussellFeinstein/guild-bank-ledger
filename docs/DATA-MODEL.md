@@ -517,15 +517,27 @@ that gap by diffing the vendored copy against `Libs/` whenever a developer has o
 
 ### One dead key found while pinning the builders
 
-HELLO, SYNC_DATA and BUSY are each built in two places, and the fixtures assert the pairs agree under
-identical state. Doing that turned up a key that can never be set. The empty-chunk SYNC_DATA builder
-writes `eventCounts = batches[1]`, but the loop just above it extends the chunk list until
-`#chunks >= #batches`, so reaching the `#chunks == 0` branch already implies `#batches == 0`. A send
-that has event counts and no records routes through the other builder instead and emits an empty chunk
-from there. Harmless, since the key simply never appears, but it means the two builders' key sets
-legitimately differ by `eventCounts` and the parity assertion has to allow for it. Folded into #70,
-which owns the duplicated builders. Note that #70's title names SYNC_DATA and BUSY only: HELLO is a
-third pair, and the floor release edits both of its builders.
+HELLO, SYNC_DATA and BUSY were each built in two places, and the fixtures assert the pairs agree under
+identical state. Doing that turned up a key that could never be set. The empty-chunk SYNC_DATA builder
+wrote `eventCounts = batches[1]`, but the loop just above it extended the chunk list until
+`#chunks >= #batches`, so reaching the `#chunks == 0` branch already implied `#batches == 0`. A send
+that has event counts and no records routes through the other path instead and emits an empty chunk
+from there. The dead write went with the packing rewrite in v0.37.3, and the branch is still reachable
+with no event counts at all, so the two call sites' key sets still legitimately differ by `eventCounts`
+and the parity assertion still has to allow for it.
+
+**SYNC_DATA and BUSY now have one builder each** (`GBL:BuildSyncDataMessage`, `GBL:BuildBusyMessage`),
+which is what #70 asked for. HELLO is untouched and remains a genuine pair, which is the part of that
+issue's concern still open: its title named SYNC_DATA and BUSY only, and the floor release edits both
+of its builders.
+
+Collapsing a pair changes what a parity test can prove, and the fixtures were reshaped for it in the
+same change. Two emitted messages compared to each other only mean something while two independent
+builders exist; once both call sites read from one, a field dropped from the builder is dropped from
+both and they still agree. That was measured rather than assumed: removing `guild` from
+`BuildBusyMessage` left all 1660 tests green. So the shared-builder types now carry a hand-written
+absolute key set, with the parity assertion kept beside it to catch a call site being re-inlined or
+handed the wrong arguments.
 
 There is a second untested boundary of the same kind, and it is the larger one. `spec/mock_ace.lua`
 models AceDB's read path (`applyDefaults`, `:52-79`) and has no `removeDefaults` at all. Default
@@ -575,7 +587,8 @@ All under the **Data model integrity** milestone.
 | 8 | Rejections counted as duplicates | closed in v0.37.0 (#68) |
 | 9 | Numeric keys and payload size untested across the wire | closed in v0.36.1 |
 | 9 | AceDB's write path unmodelled in the suite | #77 |
-| 9 | `eventCounts` is unreachable where the empty-chunk SYNC_DATA builder writes it | #70 |
+| 9 | `eventCounts` is unreachable where the empty-chunk SYNC_DATA builder writes it | dead write closed in v0.37.3 |
+| 9 | SYNC_DATA and BUSY each built in two places | closed by #70; HELLO still a pair |
 | - | Per-player category totals declared, never accumulated | #64 |
 
 The compatibility break several of these rode was #74, **and it has now been spent.** v0.37.0 shipped

@@ -486,23 +486,45 @@ describe("Wire contract", function()
     end)
 
     --------------------------------------------------------------------
-    -- Duplicated builder parity.
+    -- Message shape, at every site that emits one.
     --
-    -- HELLO, SYNC_DATA and BUSY are each built in two places (#70 names the
-    -- latter two; HELLO is a third pair the issue misses). The floor release
-    -- adds minSyncVersion to the HELLO payload, and adding it to only one
-    -- builder fails silently: a peer that only ever receives the reply would
-    -- fall back to exact-version matching and refuse to sync.
+    -- HELLO is still built in two places. SYNC_DATA and BUSY were too until
+    -- #70 gave each one builder, and that change is why these tests assert two
+    -- different things now.
     --
-    -- Strict key-set equality would be wrong even today, because sortAccess,
-    -- layoutUpdatedAt and eventCounts use the `X and Y or nil` idiom and vanish
-    -- rather than arriving nil. So the assertion is parity under identical
-    -- state, with the one documented difference named.
+    -- A parity assertion compares two emitted messages to each other, so it
+    -- only means something while two independent builders exist. Once both
+    -- call sites read from one builder, dropping a field drops it from both
+    -- and they still agree: the check passes over a message that lost `guild`.
+    -- That was verified rather than assumed, by removing `guild` from
+    -- BuildBusyMessage and watching all 1660 tests stay green.
     --
-    -- Written against the emitted message rather than the builder site, so it
-    -- survives #70: a single builder taking an isReply argument still has to
-    -- produce exactly this difference.
+    -- So the shared-builder types get an absolute key set, hand-written here,
+    -- and parity is kept beside it to catch the other direction: a call site
+    -- re-inlined or handed the wrong arguments, which an absolute pin on one
+    -- site would miss.
+    --
+    -- HELLO keeps parity alone, because strict equality would be wrong there:
+    -- sortAccess and layoutUpdatedAt use the `X and Y or nil` idiom and vanish
+    -- rather than arriving nil, so the assertion is parity under identical
+    -- state with the one documented difference named. The floor release adds
+    -- minSyncVersion to the HELLO payload, and adding it to only one builder
+    -- fails silently: a peer that only ever receives the reply would fall back
+    -- to exact-version matching and refuse to sync.
+    --
+    -- Mutations that must turn this red: remove any key from BuildBusyMessage
+    -- or BuildSyncDataMessage; stop passing eventCounts at the SendNextChunk
+    -- site; give either HELLO builder a field the other lacks.
     --------------------------------------------------------------------
+    -- Every key BUSY carries. Unconditional, unlike HELLO's optional fields.
+    local BUSY_KEYS = { "guild", "protocolVersion", "type" }
+
+    -- Every key SYNC_DATA always carries. eventCounts and remaining are
+    -- optional and asserted separately where each is expected.
+    local SYNC_DATA_REQUIRED_KEYS = {
+        "chunk", "guild", "moneyTransactions", "protocolVersion",
+        "totalChunks", "transactions", "type",
+    }
     describe("duplicated builders agree", function()
         local function configureGuild()
             local gd = GBL:GetGuildData()
@@ -598,6 +620,12 @@ describe("Wire contract", function()
                 return keySet(trimmed)
             end
 
+            -- Absolute: the shared builder still emits every required key.
+            assert.same(SYNC_DATA_REQUIRED_KEYS, keysExceptEventCounts(empty))
+            assert.same(SYNC_DATA_REQUIRED_KEYS, keysExceptEventCounts(real))
+
+            -- Relative: both call sites still agree, so neither was re-inlined
+            -- or handed a different set of arguments.
             assert.same(keysExceptEventCounts(empty), keysExceptEventCounts(real))
         end)
 
@@ -711,6 +739,11 @@ describe("Wire contract", function()
             end), "BUSY")
             assert.is_table(aborted, "OnCombatStart built no BUSY")
 
+            -- Absolute: the shared builder still emits every key BUSY carries.
+            assert.same(BUSY_KEYS, keySet(declined))
+            assert.same(BUSY_KEYS, keySet(aborted))
+
+            -- Relative: both call sites still agree.
             assert.same(keySet(declined), keySet(aborted))
         end)
     end)

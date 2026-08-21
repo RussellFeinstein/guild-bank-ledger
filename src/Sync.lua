@@ -288,6 +288,52 @@ GBL._compressMessage = compressMessage
 GBL._decompressMessage = decompressMessage
 GBL._nackBackoff = nackBackoff
 
+------------------------------------------------------------------------
+-- Message builders
+------------------------------------------------------------------------
+-- One builder per message type, so a field can only be added to a message
+-- once. SYNC_DATA and BUSY were each assembled at two call sites, and the
+-- wire format carries no schema: a receiver reads whichever fields it finds,
+-- so two copies could drift by one field and nothing would fail. The key sets
+-- matched at the time this was extracted, which is exactly what made the
+-- duplication invisible.
+--
+-- These return the message table rather than a serialized string. Callers
+-- serialize, because SendNextChunk needs the raw serialized length to report a
+-- compression ratio and would otherwise have to serialize a second time.
+
+--- Build a BUSY message, telling a peer to stop and try later.
+-- @return table BUSY message
+function GBL:BuildBusyMessage()
+    return {
+        type = "BUSY",
+        protocolVersion = PROTOCOL_VERSION,
+        guild = self:GetGuildName(),
+    }
+end
+
+--- Build a SYNC_DATA message carrying one chunk of a send.
+-- eventCounts and remaining are both optional on the wire. Passing either as
+-- nil leaves the key off the message entirely rather than sending an explicit
+-- nil, which is what keeps an uncapped session byte-identical to one built
+-- before those fields existed.
+-- @param fields table { chunk, totalChunks, transactions, moneyTransactions,
+--                       eventCounts (optional), remaining (optional) }
+-- @return table SYNC_DATA message
+function GBL:BuildSyncDataMessage(fields)
+    return {
+        type = "SYNC_DATA",
+        chunk = fields.chunk,
+        totalChunks = fields.totalChunks,
+        transactions = fields.transactions,
+        moneyTransactions = fields.moneyTransactions,
+        eventCounts = fields.eventCounts,
+        remaining = fields.remaining,
+        protocolVersion = PROTOCOL_VERSION,
+        guild = self:GetGuildName(),
+    }
+end
+
 -- Module state (session-only, not persisted)
 local syncState = {
     sending = false,
@@ -1671,12 +1717,7 @@ function GBL:HandleSyncRequest(sender, data)
         self:AddAuditEntry("Declined sync from " .. sender
             .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
         -- Send BUSY so requester doesn't wait 60s for data that will never come
-        local msg = self:Serialize({
-            type = "BUSY",
-            protocolVersion = PROTOCOL_VERSION,
-            guild = self:GetGuildName(),
-        })
-        msg = compressMessage(msg)
+        local msg = compressMessage(self:Serialize(self:BuildBusyMessage()))
         self:SendSyncWhisper(PREFIX, msg, sender)
         self:AddAuditEntry("Sent BUSY to " .. sender)
         return
@@ -1867,16 +1908,12 @@ function GBL:HandleSyncRequest(sender, data)
         -- Reaching here means no records AND no event counts: anything with
         -- event counts to share gets a carrier chunk from PrepareChunks and
         -- goes out through SendNextChunk instead.
-        local msg = self:Serialize({
-            type = "SYNC_DATA",
+        local msg = compressMessage(self:Serialize(self:BuildSyncDataMessage({
             chunk = 1,
             totalChunks = 1,
             transactions = {},
             moneyTransactions = {},
-            protocolVersion = PROTOCOL_VERSION,
-            guild = self:GetGuildName(),
-        })
-        msg = compressMessage(msg)
+        })))
         self:SendSyncWhisper(PREFIX, msg, sender)
         self:AddAuditEntry("Sent empty sync to " .. sender)
         return
@@ -2285,17 +2322,14 @@ function GBL:SendNextChunk()
         remaining = syncState.sendRemainingBuckets
     end
 
-    local serialized = self:Serialize({
-        type = "SYNC_DATA",
+    local serialized = self:Serialize(self:BuildSyncDataMessage({
         chunk = idx,
         totalChunks = #syncState.sendChunks,
         transactions = chunk.transactions,
         moneyTransactions = chunk.moneyTransactions,
         eventCounts = chunk.eventCounts,
         remaining = remaining,
-        protocolVersion = PROTOCOL_VERSION,
-        guild = self:GetGuildName(),
-    })
+    }))
     local msg = compressMessage(serialized)
     syncState.lastChunkBytes = #msg
 
@@ -3746,12 +3780,7 @@ function GBL:OnCombatStart()
     end
 
     -- Notify partners via BUSY so they abort immediately
-    local busyMsg = self:Serialize({
-        type = "BUSY",
-        protocolVersion = PROTOCOL_VERSION,
-        guild = self:GetGuildName(),
-    })
-    busyMsg = compressMessage(busyMsg)
+    local busyMsg = compressMessage(self:Serialize(self:BuildBusyMessage()))
 
     if sendTarget then
         self:SendSyncWhisper(PREFIX, busyMsg, sendTarget, "ALERT")
