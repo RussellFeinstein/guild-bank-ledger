@@ -588,7 +588,7 @@ All under the **Data model integrity** milestone.
 | 9 | Numeric keys and payload size untested across the wire | closed in v0.36.1 |
 | 9 | AceDB's write path unmodelled in the suite | #77 |
 | 9 | `eventCounts` is unreachable where the empty-chunk SYNC_DATA builder writes it | dead write closed in v0.37.3 |
-| 9 | SYNC_DATA and BUSY each built in two places | closed by #70; HELLO still a pair |
+| 9 | SYNC_DATA and BUSY each built in two places | closed in v0.37.13 (#70); HELLO still a pair |
 | - | Per-player category totals declared, never accumulated | #64 |
 
 The compatibility break several of these rode was #74, **and it has now been spent.** v0.37.0 shipped

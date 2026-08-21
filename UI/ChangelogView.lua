@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.37.13
+    {"0.37.13", "2026-08-21", {
+        Changed = {
+            "Internal cleanup, with no change to how the addon behaves. Two of the messages the addon sends while syncing, the one carrying bank records and the one saying it is busy, were each assembled in two separate places in the code. A later change could have been made to one copy and not the other, and because a receiving client simply reads whatever fields it finds, the two would have disagreed about what to send without anything reporting an error. Each message is now built in one place.",
+        },
+    }},
+
     -- v0.37.12
     {"0.37.12", "2026-08-18", {
         Changed = {
