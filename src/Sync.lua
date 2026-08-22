@@ -635,7 +635,12 @@ end
 --- Disable sync at runtime (from UI toggle).
 function GBL:DisableSync()
     self.db.profile.sync.enabled = false
+    -- Ahead of the field clears below: a preparation in flight has to be told
+    -- to stop, or it finishes on its own timer and serves a peer the user has
+    -- just switched sync off for.
+    self:_AbortSyncPrep("sync disabled")
     syncState.sending = false
+    syncState.sendTarget = nil
     syncState.receiving = false
     if syncState.sendTimer then
         syncState.sendTimer:Cancel()
@@ -1786,10 +1791,16 @@ end
 --- Abandon a preparation in flight and release the send slot.
 --
 -- One helper behind all the teardown paths, so none of them can half-clear the
--- state the way five hand-copied field lists eventually would. Bumping the
--- token is what makes any hop already scheduled from the dead chain a no-op
--- when it fires: there are no timer handles to cancel, because C_Timer.After
--- returns nothing in the real client.
+-- state the way five hand-copied field lists eventually would. Dropping the
+-- prep is what makes any hop already scheduled from the dead chain a no-op
+-- when it fires (prepStep returns on a missing prep before touching anything):
+-- there are no timer handles to cancel, because C_Timer.After returns nothing
+-- in the real client. The token bump is belt and braces on top of that.
+--
+-- It clears the whole send field set rather than just the slot, because the
+-- paths calling it are replacing hand-written clears that did, and leaving a
+-- field behind here would be a difference nobody went looking for. Mid-prep
+-- most of them are already zero; the send has not started.
 -- @param reason string Short description for the log line
 function GBL:_AbortSyncPrep(reason)
     local prep = syncState.prep
@@ -1800,6 +1811,11 @@ function GBL:_AbortSyncPrep(reason)
     syncState.sendTarget = nil
     syncState.sendChunks = {}
     syncState.sendChunkIndex = 0
+    syncState.sendRetryCount = 0
+    syncState.sendStartTime = 0
+    syncState.sendTotalRecords = 0
+    syncState.sendRemainingBuckets = 0
+    self:StopFpsMonitor()
     self:SyncDebug("Serve prep for %s abandoned: %s",
         tostring(prep.target), tostring(reason))
 end
@@ -3921,6 +3937,9 @@ end
 
 --- Reset session sync state. Exposed for testing.
 function GBL:ResetSyncState()
+    -- First, so a preparation cannot outlive the reset and then write its
+    -- results into the state this call just cleared.
+    self:_AbortSyncPrep("state reset")
     syncState.sending = false
     syncState.sendTarget = nil
     syncState.sendChunks = {}
@@ -4193,6 +4212,18 @@ function GBL:HandleBusy(sender, data)
     -- (partner entered combat or became busy while we were sending to them)
     if syncState.sending
         and self:CanonicalPeerKey(sender) == self:CanonicalPeerKey(syncState.sendTarget) then
+        -- The slot is claimed before the preparation starts, so this branch is
+        -- reached mid-prep too, and there the send it would tear down does not
+        -- exist yet. Abandoning the chain is the whole job: nothing is in
+        -- flight to tag, no timers are armed, and saying "aborting send" would
+        -- put a send in the capture that never happened.
+        if syncState.prep then
+            self:_AbortSyncPrep("BUSY from " .. cleanSender)
+            self:AddAuditEntry(cleanSender .. " busy - abandoned serve preparation")
+            syncState.peerBusyUntil[cleanSender] = GetServerTime() + BUSY_COOLDOWN
+            return
+        end
+
         -- v0.28.7: tag outcome on the chunk that was in flight when BUSY arrived
         local busyIdx = syncState.sendChunkIndex
         if busyIdx and syncState.chunkOutcomes and syncState.chunkOutcomes[busyIdx]
@@ -4273,8 +4304,16 @@ function GBL:OnCombatStart()
             syncState.chunkOutcomes[combatIdx].outcome = "combatAbort"
         end
     end
-    -- Abort active sync
-    if syncState.sending then
+    -- Abort active sync. The preparation is checked first because it implies
+    -- sending: the slot is claimed before the chain starts, so testing
+    -- `sending` first would make this arm unreachable and every existing
+    -- live-send test would still pass. FinishSending is deliberately skipped
+    -- for a preparation, because it reports on a send: running it here writes
+    -- a full "Send complete 0/0 chunks" statistics block into the capture for
+    -- a session that never put a byte on the wire.
+    if syncState.prep then
+        self:_AbortSyncPrep("combat")
+    elseif syncState.sending then
         self:FinishSending()
     end
     if syncState.receiving then
@@ -4350,6 +4389,17 @@ function GBL:OnLoadingScreenStart()
     if not syncState.sending and not syncState.receiving then return end
     syncState.zonePaused = true
     self:AddAuditEntry("Loading screen detected - sync paused")
+
+    -- Pausing is worth it for a live send, where the cooldown resumes the same
+    -- session and a 20s loading screen does not cost a minutes-long backfill.
+    -- A preparation has nothing to come back to: the resume calls
+    -- SendNextChunk against the empty chunk list the accept installed, and an
+    -- absent chunk is answered with FinishSending, which reports a completed
+    -- send of zero chunks. So a preparation is abandoned instead, and the
+    -- requester's own resend recovers the sub-second of work.
+    if syncState.prep then
+        self:_AbortSyncPrep("loading screen")
+    end
 
     -- v0.28.7: tag the in-flight chunk so the histogram attributes the gap
     -- to a zone pause, not to a successful ACK on the pre-pause chunk. The

@@ -1321,6 +1321,267 @@ describe("Sync request and serve", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Serve preparation teardown (#115)
+    --
+    -- Claiming the send slot synchronously and then working across frames means
+    -- a teardown can now land while the preparation is still running, which was
+    -- impossible when serving was one uninterrupted slice. Every path that
+    -- tears a send down has to say so to the chain as well, because the chain
+    -- is not reachable through the send state those paths clear: it lives on a
+    -- C_Timer.After(0) hop that nothing holds a handle to.
+    --
+    -- Left unwired, an orphaned chain runs to completion and commits into the
+    -- torn-down session: it stamps the peer's tranche (telling the NEXT session
+    -- these buckets were handed over when nothing was sent), logs a
+    -- "Sending N tx" line for a send that never happens, and holds the packed
+    -- chunks. The loading-screen path is worse than the others, because its
+    -- resume fires SendNextChunk against the empty chunk list the accept block
+    -- installed, and SendNextChunk answers an absent chunk with FinishSending:
+    -- a full "Send complete 0/0" statistics block for a session that never
+    -- sent a byte. That is the specific reason a mid-prep loading screen
+    -- aborts rather than pausing. Pause-and-resume earns its keep for a live
+    -- send, where there are prepared chunks to come back to; mid-preparation
+    -- there are none, and the sub-second of work lost is recovered by the
+    -- requester's own resend.
+    ---------------------------------------------------------------------------
+
+    describe("serve prep teardown", function()
+        local BASE_SLOT = 476000
+
+        local function seed(n)
+            for i = 1, n do
+                local slot = BASE_SLOT + i
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "P" .. i, itemID = 1000, count = 1,
+                    tab = 1, timestamp = slot * 3600, scanTime = slot * 3600,
+                    scannedBy = "OfficerA", id = "d|" .. slot .. ":0",
+                })
+            end
+            GBL:ResetHashCache()
+        end
+
+        local function auditHas(fragment)
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message and entry.message:find(fragment, 1, true) then
+                    return true
+                end
+            end
+            return false
+        end
+
+        --- Put a preparation in flight and hand back a clean slate to assert on.
+        -- Past one tick's budget, so the chain has genuinely yielded rather
+        -- than completed inside the accepting call.
+        local function startPrep()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "the fixture must leave a preparation actually running")
+            MockAce.sentCommMessages = {}
+            GBL:ClearLog("sync")
+        end
+
+        --- Count SYNC_DATA messages, which is what "did it serve anyway" means.
+        local function dataSent()
+            local n = 0
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "SYNC_DATA" then n = n + 1 end
+            end
+            return n
+        end
+
+        --- The shared shape of every teardown: the chain is dead, and letting
+        -- any hop it already scheduled fire changes nothing.
+        local function assertChainIsDead()
+            assert.is_false(GBL:GetSyncStatus().preparing,
+                "the preparation must not survive the teardown")
+
+            Helpers.drainZeroDelayTimers()
+
+            assert.is_false(GBL:GetSyncStatus().preparing)
+            assert.equals(0, dataSent(),
+                "an abandoned preparation must not go on to serve")
+            assert.is_false(auditHas("Sending "),
+                "nor announce a send it will never make")
+        end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+        end)
+
+        it("abandons the preparation when the peer sends BUSY", function()
+            startPrep()
+
+            GBL:HandleBusy("PeerA", { reason = "combat" })
+
+            assert.is_false(GBL:GetSyncStatus().sending,
+                "BUSY from the peer we are preparing for releases the slot")
+            assertChainIsDead()
+        end)
+
+        it("records no tranche when BUSY abandons the preparation", function()
+            startPrep()
+            GBL:HandleBusy("PeerA", { reason = "combat" })
+            Helpers.drainZeroDelayTimers()
+            GBL:ClearLog("sync")
+
+            -- Asserted through the next session rather than by reaching into
+            -- the state: with nothing recorded there is nothing to rotate
+            -- against, so the rotation line stays quiet.
+            Sync.serveRequest(GBL, "PeerA", request{ sinceTimestamp = 0 })
+
+            assert.is_false(auditHas("Tranche rotation"),
+                "buckets that were never sent must not be marked as handed over")
+        end)
+
+        it("abandons the preparation when combat starts", function()
+            startPrep()
+
+            GBL:OnCombatStart()
+
+            assert.is_false(GBL:GetSyncStatus().sending)
+            assertChainIsDead()
+        end)
+
+        it("still tells the requester it is busy when combat starts", function()
+            startPrep()
+
+            GBL:OnCombatStart()
+
+            local busy
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "BUSY" and msg.target == "PeerA" then
+                    busy = data
+                end
+            end
+            assert.is_not_nil(busy,
+                "the peer is waiting on a serve that is not coming")
+            assert.equals("combat", busy.reason)
+        end)
+
+        it("reports no send statistics for a preparation combat killed", function()
+            startPrep()
+
+            GBL:OnCombatStart()
+            Helpers.drainZeroDelayTimers()
+
+            -- FinishSending is what emits the per-session statistics block, and
+            -- running it here would report a completed send of zero chunks.
+            assert.is_false(auditHas("Send complete"),
+                "a preparation that never sent has no send to summarize")
+        end)
+
+        it("abandons the preparation when a loading screen starts", function()
+            startPrep()
+
+            GBL:OnLoadingScreenStart()
+
+            assert.is_false(GBL:GetSyncStatus().sending,
+                "the slot cannot be held across a loading screen mid-prep")
+            assertChainIsDead()
+        end)
+
+        it("resumes nothing after a loading screen that killed a preparation",
+        function()
+            startPrep()
+            GBL:OnLoadingScreenStart()
+            GBL:OnLoadingScreenEnd()
+            Helpers.drainZeroDelayTimers()
+            GBL:ClearLog("sync")
+
+            -- The zone cooldown, which is where the resume happens.
+            for _, t in ipairs(MockWoW.pendingTimers) do
+                if not t.cancelled and t.delay and t.delay > 1 and t.delay <= 10 then
+                    t.callback()
+                    break
+                end
+            end
+
+            -- Resuming a send whose chunks were never packed used to reach
+            -- SendNextChunk's absent-chunk arm, which answers with FinishSending.
+            assert.is_false(auditHas("Send complete"),
+                "there is no session left to resume")
+            assert.equals(0, dataSent())
+        end)
+
+        it("abandons the preparation when sync is disabled", function()
+            startPrep()
+
+            GBL:DisableSync()
+
+            assert.is_false(GBL:GetSyncStatus().sending)
+            assert.is_nil(GBL:GetSyncStatus().sendTarget,
+                "disabling sync leaves no peer half-claimed")
+            assertChainIsDead()
+        end)
+
+        it("abandons the preparation when sync state is reset", function()
+            startPrep()
+
+            GBL:ResetSyncState()
+
+            assert.is_false(GBL:GetSyncStatus().sending)
+            assertChainIsDead()
+        end)
+
+        it("abandons a preparation that stops making progress", function()
+            startPrep()
+
+            -- The watchdog is the only thing standing between a chain that
+            -- dies silently and a send slot held until the player reloads,
+            -- BUSYing every request in the meantime.
+            local fired = false
+            for _, t in ipairs(MockWoW.pendingTimers) do
+                if not t.cancelled and t.delay == GBL.SYNC_PREP_TIMEOUT then
+                    t.callback()
+                    fired = true
+                    break
+                end
+            end
+            assert.is_true(fired, "no prep watchdog was armed to fire")
+
+            assert.is_false(GBL:GetSyncStatus().sending,
+                "the watchdog has to release the slot, not just log")
+            assert.is_false(GBL:GetSyncStatus().preparing)
+        end)
+
+        it("serves normally after a watchdog abort", function()
+            startPrep()
+            for _, t in ipairs(MockWoW.pendingTimers) do
+                if not t.cancelled and t.delay == GBL.SYNC_PREP_TIMEOUT then
+                    t.callback()
+                    break
+                end
+            end
+            Helpers.drainZeroDelayTimers()
+            MockAce.sentCommMessages = {}
+
+            Sync.serveRequest(GBL, "PeerA", request{ sinceTimestamp = 0 })
+            Sync.drainSend(GBL, "PeerA")
+
+            assert.is_true(dataSent() > 0,
+                "an aborted preparation must not poison the next request")
+        end)
+
+        it("abandons the preparation when the guild changes under it", function()
+            startPrep()
+
+            -- Switching guild replaces the table the chain captured, so every
+            -- record it has been walking belongs to somebody else's history.
+            MockWoW.guild.name = "Other Guild"
+
+            Helpers.drainZeroDelayTimers()
+
+            assert.is_false(GBL:GetSyncStatus().preparing)
+            assert.is_false(GBL:GetSyncStatus().sending)
+            assert.equals(0, dataSent(),
+                "records gathered for one guild must not be served as another's")
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Bounded sync sessions
     --
     -- A fresh install used to pull the sender's whole history in one
