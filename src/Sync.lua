@@ -2032,6 +2032,54 @@ end
 -- Chunking
 ------------------------------------------------------------------------
 
+--- Decide which buckets one session carries, from per-bucket counts alone.
+--
+-- Split out of _SelectSessionBuckets (#115) so the sliced serving pipeline can
+-- ask the question without handing over the record lists again. By the time it
+-- reaches this decision the collect stage already knows how many records sit in
+-- each bucket, and the enclosing function's only way to be asked was to re-walk
+-- every record to rebuild exactly that.
+--
+-- Newest bucket first, except that demoted buckets sort behind everything else.
+-- A bucket larger than the whole cap still goes out whole: taken is zero on the
+-- first pass, so the first bucket is selected before the cap can refuse
+-- anything, and refusing it would mean never sending that bucket at all.
+--
+-- The key order is derived from the counts table and then sorted, so no caller
+-- has to preserve a traversal order to get a stable answer. The comparator is a
+-- strict total order over distinct numeric keys, which is what makes the result
+-- independent of whatever order pairs() happens to hand them back.
+-- @param counts table bucketKey -> how many records that bucket holds
+-- @param cap number Target record count before bucket rounding
+-- @param demoteSet table|nil bucketKey -> true, buckets to try last
+-- @return table bucketKey -> true for the buckets this session carries
+-- @return number how many buckets were held back
+function GBL:_SelectBucketsByCount(counts, cap, demoteSet)
+    local order = {}
+    for key in pairs(counts) do order[#order + 1] = key end
+    if #order == 0 then return {}, 0 end
+
+    table.sort(order, function(a, b)
+        local aDemoted = (demoteSet and demoteSet[a]) and 1 or 0
+        local bDemoted = (demoteSet and demoteSet[b]) and 1 or 0
+        if aDemoted ~= bDemoted then return aDemoted < bDemoted end
+        return a > b
+    end)
+
+    local selected = {}
+    local taken = 0
+    local remaining = 0
+    for _, key in ipairs(order) do
+        if taken < cap then
+            selected[key] = true
+            taken = taken + counts[key]
+        else
+            remaining = remaining + 1
+        end
+    end
+    return selected, remaining
+end
+
 --- Cut a send list down to one session's worth of whole buckets.
 --
 -- Whole buckets, never a partial one. A half-sent bucket hashes differently
@@ -2048,6 +2096,10 @@ end
 -- older differing buckets starve. Buckets we already sent to this peer whose
 -- contents have not changed since are exactly the ones to try last.
 --
+-- The selection itself lives in _SelectBucketsByCount; this counts the records
+-- per bucket, asks it, and applies the answer. Note that the filter preserves
+-- the caller's list order rather than the selection's bucket order: the demote
+-- set decides which buckets go, never in what order their records leave.
 -- @param txList table Item records, already newest-first
 -- @param moneyList table Money records, already newest-first
 -- @param cap number Target record count before bucket rounding
@@ -2058,44 +2110,16 @@ end
 -- @return number how many buckets were held back
 function GBL:_SelectSessionBuckets(txList, moneyList, cap, demoteSet)
     local counts = {}
-    local order = {}
     local function tally(list)
         for _, rec in ipairs(list) do
             local key = self:BucketKeyForRecord(rec)
-            if not counts[key] then
-                counts[key] = 0
-                order[#order + 1] = key
-            end
-            counts[key] = counts[key] + 1
+            counts[key] = (counts[key] or 0) + 1
         end
     end
     tally(txList)
     tally(moneyList)
 
-    if #order == 0 then return {}, {}, {}, 0 end
-
-    table.sort(order, function(a, b)
-        local aDemoted = (demoteSet and demoteSet[a]) and 1 or 0
-        local bDemoted = (demoteSet and demoteSet[b]) and 1 or 0
-        if aDemoted ~= bDemoted then return aDemoted < bDemoted end
-        return a > b
-    end)
-
-    -- A bucket larger than the whole cap still goes out whole. Nothing here
-    -- special-cases it: taken is zero on the first pass, so the first bucket
-    -- is selected before the cap can refuse anything, and refusing it would
-    -- mean never sending that bucket at all.
-    local selected = {}
-    local taken = 0
-    local remaining = 0
-    for _, key in ipairs(order) do
-        if taken < cap then
-            selected[key] = true
-            taken = taken + counts[key]
-        else
-            remaining = remaining + 1
-        end
-    end
+    local selected, remaining = self:_SelectBucketsByCount(counts, cap, demoteSet)
 
     local function filter(list)
         local out = {}

@@ -1153,6 +1153,65 @@ describe("Sync request and serve", function()
             return seen
         end
 
+        -- The selection core, called with counts instead of records (#115).
+        -- The sliced serving pipeline reaches this decision already knowing how
+        -- many records sit in each bucket, so asking it through
+        -- _SelectSessionBuckets would mean re-walking every record to rebuild
+        -- exactly that. Same rules either way; these pin them at the level the
+        -- chain uses, so a change there cannot quietly rely on the wrapper.
+        describe("_SelectBucketsByCount", function()
+            it("takes whole buckets newest first until the cap is met", function()
+                local selected, remaining =
+                    GBL:_SelectBucketsByCount({ [90] = 2, [89] = 2, [88] = 2 }, 3)
+
+                assert.is_true(selected[90])
+                assert.is_true(selected[89])
+                assert.is_nil(selected[88])
+                assert.equals(1, remaining)
+            end)
+
+            it("always takes the first bucket, even when it exceeds the cap",
+            function()
+                local selected, remaining =
+                    GBL:_SelectBucketsByCount({ [90] = 10 }, 3)
+
+                assert.is_true(selected[90])
+                assert.equals(0, remaining)
+            end)
+
+            it("sorts demoted buckets behind everything else", function()
+                -- 90 is the newest but was already sent unchanged, so the older
+                -- 89 goes first and 90 is what waits.
+                local selected, remaining = GBL:_SelectBucketsByCount(
+                    { [90] = 2, [89] = 2 }, 1, { [90] = true })
+
+                assert.is_true(selected[89])
+                assert.is_nil(selected[90])
+                assert.equals(1, remaining)
+            end)
+
+            it("is unmoved by the order the counts table iterates in", function()
+                -- The key list is derived from the table and sorted, so the
+                -- answer cannot depend on what pairs() happens to hand back.
+                local first = GBL:_SelectBucketsByCount(
+                    { [90] = 1, [89] = 1, [88] = 1, [87] = 1 }, 2)
+                local second = GBL:_SelectBucketsByCount(
+                    { [87] = 1, [88] = 1, [89] = 1, [90] = 1 }, 2)
+
+                assert.same(first, second)
+                assert.is_true(first[90])
+                assert.is_true(first[89])
+            end)
+
+            it("returns nothing to send and nothing waiting for empty counts",
+            function()
+                local selected, remaining = GBL:_SelectBucketsByCount({}, 300)
+
+                assert.same({}, selected)
+                assert.equals(0, remaining)
+            end)
+        end)
+
         describe("_SelectSessionBuckets", function()
             it("takes whole buckets newest first until the cap is met", function()
                 local newest = recordsInBucket(475100, 2, "a")
