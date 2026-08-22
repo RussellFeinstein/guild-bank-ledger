@@ -1267,6 +1267,78 @@ describe("Dedup", function()
         end)
     end)
 
+    -- The per-entry decision, pulled out of CollectEventCountsForBuckets so the
+    -- sliced serving pipeline (#115) can walk the same table across frames and
+    -- still apply exactly this rule. Two implementations of one filter is how
+    -- the labeler config and its backfill drifted apart in #112: each was
+    -- internally consistent and only a direct comparison found the
+    -- disagreement. One function, two callers, no comparison needed.
+    describe("EventCountRidesWithBuckets", function()
+        it("keeps every entry when there is no bucket filter", function()
+            assert.is_true(GBL:EventCountRidesWithBuckets(
+                "withdraw|Thrall|12345|5|1|100", nil))
+        end)
+
+        it("keeps an entry whose slot lands in a listed bucket", function()
+            -- slot 100 -> bucket 16
+            assert.is_true(GBL:EventCountRidesWithBuckets(
+                "withdraw|Thrall|12345|5|1|100", { [16] = true }))
+        end)
+
+        it("drops an entry whose bucket is not listed", function()
+            -- slot 200 -> bucket 33
+            assert.is_false(GBL:EventCountRidesWithBuckets(
+                "deposit|Jaina|99999|5|2|200", { [16] = true }))
+        end)
+
+        it("drops an entry whose base hash carries no slot", function()
+            assert.is_false(GBL:EventCountRidesWithBuckets("nodigits", { [16] = true }))
+        end)
+
+        it("drops a nil base hash rather than throwing", function()
+            assert.is_false(GBL:EventCountRidesWithBuckets(nil, { [16] = true }))
+        end)
+
+        -- The filtering function must be this predicate and nothing else, or
+        -- the sliced walk and the synchronous one can disagree while both look
+        -- right on their own.
+        it("agrees with CollectEventCountsForBuckets entry for entry", function()
+            guildData.eventCounts = {
+                ["withdraw|Thrall|12345|5|1|100"] = { count = 2, asOf = 1000 },
+                ["deposit|Jaina|99999|5|2|200"] = { count = 1, asOf = 2000 },
+                ["deposit|Sylvanas|1|1|1|101"] = { count = 3, asOf = 3000 },
+            }
+            local diffBuckets = { [16] = true }
+            local collected = GBL:CollectEventCountsForBuckets(guildData, diffBuckets)
+
+            for baseHash in pairs(guildData.eventCounts) do
+                assert.equals(
+                    GBL:EventCountRidesWithBuckets(baseHash, diffBuckets),
+                    collected[baseHash] ~= nil,
+                    "predicate and collector disagreed on " .. baseHash)
+            end
+        end)
+    end)
+
+    -- The slot-to-bucket conversion had been written out by hand here, six
+    -- hours per bucket spelled as a literal 6, while Fingerprint.lua held the
+    -- same number as a named constant. One name now.
+    describe("BucketKeyForTimeSlot", function()
+        it("folds six hourly slots into one bucket", function()
+            assert.equals(GBL:BucketKeyForTimeSlot(96), GBL:BucketKeyForTimeSlot(101))
+            assert.are_not.equals(
+                GBL:BucketKeyForTimeSlot(101), GBL:BucketKeyForTimeSlot(102))
+        end)
+
+        it("agrees with the bucket key a record with that slot would get",
+        function()
+            local slot = 472222
+            local record = { id = "deposit|A|100|1|1|" .. slot .. ":0" }
+            assert.equals(
+                GBL:BucketKeyForRecord(record), GBL:BucketKeyForTimeSlot(slot))
+        end)
+    end)
+
     describe("PruneSeenHashes", function()
         it("removes old entries and preserves recent", function()
             local now = Helpers.MockWoW.serverTime

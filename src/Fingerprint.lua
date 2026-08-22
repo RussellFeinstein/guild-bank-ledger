@@ -120,6 +120,18 @@ function GBL:BucketKeyForRecord(tx)
     return bucketKeyForRecord(tx)
 end
 
+--- Convert an hourly time slot to the 6-hour bucket that contains it.
+--
+-- The same arithmetic bucketKeyForRecord applies once it has parsed a slot out
+-- of a record id, exposed for callers that already hold the slot. Dedup.lua
+-- gets there from a base hash rather than from a record, and had been spelling
+-- the six out as a literal, so the bucket width lived in two places.
+-- @param slot number Hours since epoch, as embedded in a record id
+-- @return number Bucket key
+function GBL:BucketKeyForTimeSlot(slot)
+    return math.floor(slot / BUCKET_HOURS)
+end
+
 -- Session cache for ComputeBucketHashes.
 --
 -- Keyed by the guildData table itself as well as the record count. GetDataHash
