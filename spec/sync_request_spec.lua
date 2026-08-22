@@ -1110,6 +1110,217 @@ describe("Sync request and serve", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Sliced serve preparation (#115)
+    --
+    -- Serving used to do every pass between accepting a request and the first
+    -- chunk in one execution slice, which WoW's script watchdog killed outright
+    -- on a large history. It killed before any chunk went out, so the
+    -- requester's retry died the same way and the client was not a slow server
+    -- but a permanently silent one.
+    --
+    -- What is worth pinning here is the shape of the fix rather than its speed:
+    -- the slot is claimed synchronously so two peers cannot both be accepted,
+    -- the work genuinely spans ticks once it exceeds a budget, and everything
+    -- the old synchronous version guaranteed still holds at the far end.
+    ---------------------------------------------------------------------------
+
+    describe("sliced serve preparation", function()
+        local BASE_SLOT = 475000
+
+        -- Records spread thinly over many buckets, so the session cap is not
+        -- what decides the outcome here.
+        local function seed(n)
+            for i = 1, n do
+                local slot = BASE_SLOT + i
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "P" .. i, itemID = 1000, count = 1,
+                    tab = 1, timestamp = slot * 3600, scanTime = slot * 3600,
+                    scannedBy = "OfficerA", id = "d|" .. slot .. ":0",
+                })
+            end
+            GBL:ResetHashCache()
+        end
+
+        local function auditHas(fragment)
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message and entry.message:find(fragment, 1, true) then
+                    return true
+                end
+            end
+            return false
+        end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+        end)
+
+        it("claims the send slot synchronously, before any work is done",
+        function()
+            -- Enough records that the preparation cannot possibly finish in
+            -- the accepting call, so this is really asking about the claim.
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+
+            assert.is_true(GBL:GetSyncStatus().sending,
+                "the slot must be taken before the chain yields")
+            assert.is_true(GBL:GetSyncStatus().preparing)
+            assert.equals("PeerA", GBL:GetSyncStatus().sendTarget)
+        end)
+
+        it("finishes a small request inside the accepting call", function()
+            -- The reason the great majority of this suite needed no changes:
+            -- a dataset that fits one tick's budget still completes and sends
+            -- synchronously, exactly as it did before the pipeline was sliced.
+            seed(5)
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+
+            assert.is_false(GBL:GetSyncStatus().preparing,
+                "a small preparation should not still be running")
+            assert.is_true(#MockAce.sentCommMessages > 0,
+                "the first chunk should already have left")
+        end)
+
+        it("spans more than one tick once the budget is exceeded", function()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "a dataset past the budget must not finish in one tick")
+
+            local rounds = Helpers.drainZeroDelayTimers()
+            assert.is_true(rounds >= 1, "the chain has to have advanced on a timer")
+            assert.is_false(GBL:GetSyncStatus().preparing)
+        end)
+
+        it("serves the same records whether or not it needed several ticks",
+        function()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+            local held = #guildData.transactions
+
+            Sync.serveRequest(GBL, "PeerA", request{ sinceTimestamp = 0 })
+            Sync.drainSend(GBL, "PeerA")
+
+            local sent = 0
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "SYNC_DATA" then
+                    sent = sent + #(data.transactions or {})
+                end
+            end
+            -- The session cap bounds this, so the assertion is that records
+            -- flowed at all and none were invented, not that all of them went.
+            assert.is_true(sent > 0, "a multi-tick preparation must still send")
+            assert.is_true(sent <= held)
+        end)
+
+        it("records what it did in the capture", function()
+            seed(20)
+
+            Sync.serveRequest(GBL, "PeerA", request{ sinceTimestamp = 0 })
+
+            assert.is_true(auditHas("Prep complete for PeerA"),
+                "a capture has to be able to see the preparation finish")
+        end)
+
+        -- The whole point of claiming the slot up front.
+        it("declines a second peer arriving mid-preparation", function()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
+
+            local busy
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "BUSY" and msg.target == "PeerB" then
+                    busy = data
+                end
+            end
+            assert.is_not_nil(busy, "the second peer should be told to wait")
+            -- A preparation is sub-second and a send is minutes. Without the
+            -- distinction a capture cannot tell which wait a declined peer was
+            -- queued behind.
+            assert.equals("preparing:PeerA", busy.reason)
+        end)
+
+        it("ignores a repeat request from the peer being prepared for",
+        function()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+
+            -- Answering this with BUSY would tear down the receive we are
+            -- about to feed.
+            assert.equals(0, #MockAce.sentCommMessages)
+            assert.is_true(GBL:GetSyncStatus().preparing)
+        end)
+
+        -- The stamp used to happen before the chunks were packed, so a serve
+        -- that died partway still told the next session it had handed these
+        -- buckets over, and they would sort last for nothing. Asserted through
+        -- what the next session does rather than by reaching into the state:
+        -- with no tranche recorded there is nothing to rotate against, so the
+        -- rotation line stays quiet. Read against the test above it, where a
+        -- serve that did complete makes the same line appear.
+        it("leaves no tranche behind when the preparation is abandoned",
+        function()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().preparing)
+
+            GBL:_AbortSyncPrep("abandoned by the test")
+            assert.is_false(GBL:GetSyncStatus().sending,
+                "abandoning must release the slot")
+            GBL:ClearLog("sync")
+
+            Sync.serveRequest(GBL, "PeerA", request{ sinceTimestamp = 0 })
+
+            assert.is_false(auditHas("Tranche rotation"),
+                "an abandoned preparation must not have recorded a tranche")
+        end)
+
+        it("answers an empty diff by releasing the slot, not holding it",
+        function()
+            -- No records at all, so there is nothing to offer.
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            Helpers.drainZeroDelayTimers()
+
+            assert.is_false(GBL:GetSyncStatus().sending,
+                "an empty diff must not leave the slot claimed")
+            assert.is_false(GBL:GetSyncStatus().preparing)
+            assert.is_true(auditHas("Sent empty sync to PeerA"))
+        end)
+
+        -- Rotation shipped on a structural argument and has never been seen
+        -- working in a capture. The line is its falsification instrument, so it
+        -- has to appear when there is a prior tranche and stay quiet when there
+        -- is not, or a reader cannot tell "did not fire" from "not reported".
+        it("says nothing about rotation on a peer's first session", function()
+            seed(20)
+
+            Sync.serveRequest(GBL, "PeerA", request{ sinceTimestamp = 0 })
+
+            assert.is_false(auditHas("Tranche rotation"),
+                "there is no previous tranche to rotate against")
+        end)
+
+        it("reports rotation once the peer has a previous tranche", function()
+            seed(20)
+            Sync.serveRequest(GBL, "PeerA", request{ sinceTimestamp = 0 })
+            Sync.drainSend(GBL, "PeerA")
+
+            Sync.serveRequest(GBL, "PeerA", request{ sinceTimestamp = 0 })
+
+            assert.is_true(auditHas("Tranche rotation for PeerA"))
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Bounded sync sessions
     --
     -- A fresh install used to pull the sender's whole history in one
@@ -1364,7 +1575,7 @@ describe("Sync request and serve", function()
                 seedOverCap()
                 local held = #guildData.transactions
 
-                GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+                Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
                 drainSend("OfficerB")
 
                 local sent = recordsSent()
@@ -1386,7 +1597,7 @@ describe("Sync request and serve", function()
             -- wire at all.
             it("puts remaining on the final chunk only", function()
                 seedOverCap()
-                GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+                Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
                 drainSend("OfficerB")
 
                 local chunks = sentChunks()
@@ -1403,7 +1614,7 @@ describe("Sync request and serve", function()
                 guildData.seenTxHashes["small:475100:1"] = 475100 * BUCKET + 1
                 GBL:ResetHashCache()
 
-                GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+                Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
                 drainSend("OfficerB")
 
                 for _, chunk in ipairs(sentChunks()) do
@@ -1415,7 +1626,7 @@ describe("Sync request and serve", function()
             -- same tranche forever.
             it("serves the deferred buckets on the next request", function()
                 seedOverCap()
-                GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+                Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
                 drainSend("OfficerB")
                 local firstPass = {}
                 for _, chunk in ipairs(sentChunks()) do
@@ -1426,7 +1637,7 @@ describe("Sync request and serve", function()
 
                 MockAce.sentCommMessages = {}
                 GBL:FinishSending()
-                GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+                Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
                 drainSend("OfficerB")
 
                 local secondPassHasNew = false

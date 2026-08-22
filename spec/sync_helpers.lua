@@ -89,6 +89,25 @@ function M.fireNextChunkDelay()
     error("no pending inter-chunk delay timer to fire", 2)
 end
 
+--- Deliver a SYNC_REQUEST and let the serve preparation finish.
+--
+-- Preparing a serve runs across frames on a zero-delay chain (#115), so a
+-- large enough dataset does not reach the first chunk inside the call. Small
+-- ones still do: the whole preparation fits in one tick's budget and completes
+-- synchronously, which is why the great majority of the specs in this suite
+-- call HandleSyncRequest directly and are none the wiser.
+--
+-- Use this wherever a test seeds more records than SYNC_PREP_RECORDS_PER_TICK
+-- covers, or asserts on something only the finished preparation produces.
+-- Draining when there was nothing to drain is harmless.
+-- @param GBL table The addon object
+-- @param sender string The requesting peer
+-- @param payload table The SYNC_REQUEST payload
+function M.serveRequest(GBL, sender, payload)
+    GBL:HandleSyncRequest(sender, payload)
+    Helpers.drainZeroDelayTimers()
+end
+
 --- ACK every chunk and fire the inter-chunk gap until the send finishes.
 --
 -- Only the first chunk leaves synchronously, so any assertion about what a
