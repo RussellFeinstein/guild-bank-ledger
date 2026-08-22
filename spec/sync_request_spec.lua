@@ -880,6 +880,236 @@ describe("Sync request and serve", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Wire-order characterization (#115)
+    --
+    -- The order records reach the wire in, pinned while serving is still one
+    -- synchronous pass, so that slicing it across frames has something to be
+    -- byte-identical against. The risk being guarded is narrow and real: the
+    -- sliced pipeline stops sorting one flat list and instead materializes the
+    -- send list by walking selected buckets, and a walk over the wrong array
+    -- reorders the wire without breaking anything that would fail loudly.
+    --
+    -- Expectations below are hand-derived from the comparators, never pasted
+    -- from a run. A characterization built out of what the code prints can only
+    -- ever agree with the code; the wire fixtures follow the same rule and for
+    -- the same reason.
+    --
+    -- The contract, in the order the pipeline applies it:
+    --   1. Collect walks guildData in array order, keeping records whose bucket
+    --      differs. Order here does not survive step 2, so it is not pinned.
+    --   2. SortSendListNewestFirst sorts by (bucket key DESC, id DESC). Items
+    --      and money are sorted as two SEPARATE lists.
+    --   3. _SelectSessionBuckets filters both lists and preserves list order.
+    --      The demote set decides which buckets are picked when the cap binds.
+    --      It never reorders the records that were picked, which is why a
+    --      second request from the same peer must produce the same sequence.
+    --   4. PrepareChunks packs items first and then money, in list order, and
+    --      keeps filling the chunk it is on when it crosses from one list to
+    --      the other. So flattening every chunk reproduces the two sorted
+    --      lists concatenated, items entirely ahead of money.
+    ---------------------------------------------------------------------------
+
+    describe("wire order", function()
+        -- WoW-era seconds. Bucket key comes from the timeSlot inside the id
+        -- (hours since epoch, floor-divided by 6), so the ids and the
+        -- timestamps are built from one number to keep them consistent.
+        local SLOTS = { 480000, 480006, 480012, 480018, 480024 }
+        local ITEMS_PER_BUCKET = 5
+        local MONEY_PER_BUCKET = 3
+
+        -- Ids are fixed width, so the id DESC tiebreak is a plain string
+        -- compare over the trailing occurrence digit.
+        local function itemId(slot, occ) return "i|" .. slot .. ":" .. occ end
+        local function moneyId(slot, occ) return "m|" .. slot .. ":" .. occ end
+
+        -- Inserted deliberately shuffled: buckets interleaved and occurrences
+        -- out of order, so array order cannot accidentally match wire order.
+        local function seed()
+            local slotOrder = { 3, 1, 5, 2, 4 }
+            local occOrder = { 2, 0, 4, 1, 3 }
+            for _, si in ipairs(slotOrder) do
+                local slot = SLOTS[si]
+                for _, occ in ipairs(occOrder) do
+                    if occ < ITEMS_PER_BUCKET then
+                        table.insert(guildData.transactions, {
+                            type = "deposit", player = "P" .. occ,
+                            itemID = 1000 + occ, count = 1, tab = 1,
+                            timestamp = slot * 3600 + occ,
+                            scanTime = slot * 3600 + occ,
+                            scannedBy = "OfficerA",
+                            id = itemId(slot, occ),
+                        })
+                    end
+                    if occ < MONEY_PER_BUCKET then
+                        table.insert(guildData.moneyTransactions, {
+                            type = "deposit", player = "M" .. occ,
+                            amount = 100 + occ,
+                            timestamp = slot * 3600 + occ,
+                            scanTime = slot * 3600 + occ,
+                            scannedBy = "OfficerA",
+                            id = moneyId(slot, occ),
+                        })
+                    end
+                end
+            end
+        end
+
+        -- Bucket DESC (newest slot first), then id DESC (highest occurrence
+        -- first) inside each bucket. Built by hand from the comparator, not
+        -- by running the sort.
+        local function expectedItems()
+            local out = {}
+            for si = #SLOTS, 1, -1 do
+                for occ = ITEMS_PER_BUCKET - 1, 0, -1 do
+                    out[#out + 1] = itemId(SLOTS[si], occ)
+                end
+            end
+            return out
+        end
+
+        local function expectedMoney()
+            local out = {}
+            for si = #SLOTS, 1, -1 do
+                for occ = MONEY_PER_BUCKET - 1, 0, -1 do
+                    out[#out + 1] = moneyId(SLOTS[si], occ)
+                end
+            end
+            return out
+        end
+
+        -- Every SYNC_DATA chunk this session put on the wire, in send order.
+        local function sentChunks()
+            local out = {}
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                if ok and data.type == "SYNC_DATA" then out[#out + 1] = data end
+            end
+            return out
+        end
+
+        -- Flatten the chunks back into the two lists the packer was handed.
+        local function flatten(chunks)
+            local items, money = {}, {}
+            for _, chunk in ipairs(chunks) do
+                for _, tx in ipairs(chunk.transactions or {}) do
+                    items[#items + 1] = tx.id
+                end
+                for _, tx in ipairs(chunk.moneyTransactions or {}) do
+                    money[#money + 1] = tx.id
+                end
+            end
+            return items, money
+        end
+
+        local function serve()
+            MockAce.sentCommMessages = {}
+            -- Empty bucketHashes: every local bucket differs, so the whole
+            -- fixture is offered and nothing is filtered out from under the
+            -- ordering being pinned.
+            GBL:HandleSyncRequest("OfficerB",
+                request{ sinceTimestamp = 0, bucketHashes = {} })
+            Sync.drainSend(GBL, "OfficerB")
+            return flatten(sentChunks())
+        end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            seed()
+        end)
+
+        it("sends items newest bucket first, id descending inside a bucket",
+        function()
+            local items = serve()
+            assert.same(expectedItems(), items)
+        end)
+
+        it("sends money in the same order, entirely after the items", function()
+            local _, money = serve()
+            assert.same(expectedMoney(), money)
+        end)
+
+        it("carries every seeded record exactly once", function()
+            local items, money = serve()
+            assert.equals(#SLOTS * ITEMS_PER_BUCKET, #items)
+            assert.equals(#SLOTS * MONEY_PER_BUCKET, #money)
+        end)
+
+        -- A repeat request with nothing changed demotes every bucket at once,
+        -- and a uniform demotion is no demotion: the comparator falls straight
+        -- through to the newest-first tiebreak. Worth one test that the repeat
+        -- is stable, but do not mistake it for cover of the demote path. It was
+        -- written as that cover first, and the mutation below walked through it.
+        it("puts an unchanged repeat request on the wire in the same order",
+        function()
+            local firstItems, firstMoney = serve()
+            local secondItems, secondMoney = serve()
+            assert.same(firstItems, secondItems)
+            assert.same(firstMoney, secondMoney)
+        end)
+
+        -- This is the one that guards the restructure. The sliced pipeline
+        -- stops sorting a flat list and materializes the send list by walking
+        -- selected buckets, and the obvious array to walk is the one
+        -- _SelectSessionBuckets already sorted. That array is demote-sorted:
+        -- it decides which buckets a capped session picks and nothing else,
+        -- while the records handed back keep newest-first list order.
+        --
+        -- Telling the two apart needs a demotion that CONTRADICTS newest-first,
+        -- so the fixture changes the oldest bucket only. Its hash no longer
+        -- matches what the first session stamped, making it the single bucket
+        -- not demoted, so it sorts to the front of the demote-sorted array
+        -- while newest-first still wants it last.
+        it("keeps newest-first when a repeat request demotes only some buckets",
+        function()
+            serve()  -- stamps the tranche for this peer
+
+            local oldest = SLOTS[1]
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "Late", itemID = 999, count = 1,
+                tab = 1, timestamp = oldest * 3600 + 9,
+                scanTime = oldest * 3600 + 9, scannedBy = "OfficerA",
+                id = itemId(oldest, 9),
+            })
+
+            local items = serve()
+
+            -- Newest buckets unchanged, then the oldest bucket last, with the
+            -- late record at its head because id DESC puts 9 ahead of 4.
+            local expected = {}
+            for si = #SLOTS, 2, -1 do
+                for occ = ITEMS_PER_BUCKET - 1, 0, -1 do
+                    expected[#expected + 1] = itemId(SLOTS[si], occ)
+                end
+            end
+            expected[#expected + 1] = itemId(oldest, 9)
+            for occ = ITEMS_PER_BUCKET - 1, 0, -1 do
+                expected[#expected + 1] = itemId(oldest, occ)
+            end
+
+            assert.same(expected, items)
+        end)
+
+        it("packs chunks as contiguous slices of the flattened order", function()
+            serve()
+            local chunks = sentChunks()
+            assert.is_true(#chunks > 1,
+                "fixture must span several chunks for this to mean anything")
+
+            -- Walk the expected sequence with a single moving cursor: any
+            -- chunk that reordered or repeated a record breaks the walk.
+            local expected = expectedItems()
+            local cursor = 0
+            for _, chunk in ipairs(chunks) do
+                for _, tx in ipairs(chunk.transactions or {}) do
+                    cursor = cursor + 1
+                    assert.equals(expected[cursor], tx.id)
+                end
+            end
+            assert.equals(#expected, cursor)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Bounded sync sessions
     --
     -- A fresh install used to pull the sender's whole history in one

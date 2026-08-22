@@ -89,6 +89,39 @@ function M.fireNextChunkDelay()
     error("no pending inter-chunk delay timer to fire", 2)
 end
 
+--- ACK every chunk and fire the inter-chunk gap until the send finishes.
+--
+-- Only the first chunk leaves synchronously, so any assertion about what a
+-- session actually offered has to drive the rest the way a healthy peer would.
+-- The clock has to move as well: SendNextChunk enforces a wall-clock gap floor
+-- between issues, and against a frozen GetTime it just reschedules itself and
+-- the send never leaves chunk one.
+--
+-- Bounded rather than looping until done, so a send that stops making progress
+-- ends the test instead of hanging it.
+-- @param GBL table The addon object
+-- @param target string The peer being served
+function M.drainSend(GBL, target)
+    for _ = 1, 4000 do
+        if not GBL:GetSyncStatus().sending then break end
+        local idx = tonumber(GBL:GetSyncStatus().sendProgress:match("^(%d+)"))
+        GBL:HandleAck(target, { chunk = idx })
+        MockWoW.serverTime = MockWoW.serverTime + 2
+        local fired = false
+        for i = #MockWoW.pendingTimers, 1, -1 do
+            local t = MockWoW.pendingTimers[i]
+            if not t.cancelled and not t.fired and t.delay
+                and t.delay > 0 and t.delay <= 2.0 then
+                t.fired = true
+                t.callback()
+                fired = true
+                break
+            end
+        end
+        if not fired then break end
+    end
+end
+
 --- Fire the latest uncancelled receive timeout timer (any delay).
 -- With NACK backoff, delays change (20→30→45), so we can't match on exact delay.
 -- Finds the last (newest) uncancelled ticker and fires it.
