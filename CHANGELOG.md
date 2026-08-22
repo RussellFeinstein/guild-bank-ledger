@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Members with a lot of history can hand over their records again. This is the second half of the fix started in v0.37.14, and the part that finishes it. Answering a guildmate's request meant reading through the whole stored history in one go, and on a large history the game could cut that work short with a script error before a single record went out. Because it failed at the same point every time, the guildmate's retry failed the same way, so the member was not a slow source of records but a permanently silent one, with nothing in either player's log to say so. The work is now spread across frames, a slice at a time, so it finishes no matter how much history is stored and the game stays responsive while it happens. Small histories are unaffected: they still complete instantly, exactly as before.
+- Cancelling a sync now also stops the preparation behind it. Entering combat, changing zones, being told a guildmate is busy, or switching sync off could each leave the preparation running invisibly, and it would go on to finish and record that it had handed over records it never sent. The next sync then skipped those records as already delivered. A loading screen was the worst case, writing a completed transfer into the log for a sync that never sent anything.
+
+### Changed
+- The sync log now records what preparing a sync actually did: how much history was examined, how much was selected to send, and how long it took. This is what a capture needs to confirm the fix above is working on a real client rather than only in tests.
+- A guildmate who turns down a request because they are still preparing one now says so, rather than reporting it the same way as a transfer already in progress. Preparing takes under a second and a transfer takes minutes, so the two mean very different things to whoever is waiting.
+
 ## [0.37.16] - 2026-08-21
 
 ### Changed
