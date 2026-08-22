@@ -213,6 +213,95 @@ function GBL:PeekBucketHashes(guildData)
     return bucketCache.buckets
 end
 
+--- Return the cached bucket map only when it is current, otherwise nil.
+--
+-- The difference from PeekBucketHashes is the record-count check: this one
+-- answers "can I use this as the truth" rather than "is there something to
+-- print". The sliced serving pipeline asks it first, and only builds a scan
+-- when the answer is nil, so a warm cache still costs one comparison.
+-- Read-only, same as the other two accessors.
+-- @param guildData table Guild data the map must belong to
+-- @return table|nil The cached map when it is current, otherwise nil
+function GBL:_FreshBucketHashes(guildData)
+    if not guildData then return nil end
+    local count = #guildData.transactions + #guildData.moneyTransactions
+    if bucketCache.source == guildData and bucketCache.txCount == count then
+        return bucketCache.buckets
+    end
+    return nil
+end
+
+--- Begin a bucket-hash computation that can be advanced a slice at a time.
+--
+-- ComputeBucketHashes does the whole walk in one execution slice, which is one
+-- of the passes that trips the script watchdog when a large-history client
+-- serves a SYNC_REQUEST (#115). This is the same computation, resumable.
+--
+-- The array lengths are captured here and never re-read, so a record appended
+-- while the scan is in flight is simply not walked. That is what keeps the
+-- cursor's meaning stable: re-reading #transactions mid-scan would shift the
+-- boundary between the two arrays and make one cursor value point at a
+-- different record than it did on the previous step.
+-- @param guildData table Guild data from AceDB
+-- @return table Scan state to hand back to StepBucketHashScan
+function GBL:StartBucketHashScan(guildData)
+    local nTx, nMoney = 0, 0
+    if guildData then
+        nTx = #guildData.transactions
+        nMoney = #guildData.moneyTransactions
+    end
+    return { buckets = {}, cursor = 0, nTx = nTx, total = nTx + nMoney }
+end
+
+--- Advance a bucket-hash scan by at most `budget` records.
+--
+-- On the step that finishes the walk, the completed map is stamped into the
+-- same cache GetBucketHashes uses, so the work is not thrown away.
+--
+-- The stamp carries the count captured at scan start rather than the count
+-- now. Anything appended mid-scan is missing from the map, and a stamp
+-- claiming the current count would hand the next reader a map quietly short of
+-- records; reporting the starting count makes the next read see a mismatch and
+-- recompute instead. Wrong in the direction that costs a walk, not the
+-- direction that loses records.
+-- @param guildData table Guild data from AceDB
+-- @param scan table State from StartBucketHashScan
+-- @param budget number Maximum records to walk on this step
+-- @return number How many records were walked
+-- @return boolean True when the scan is complete and the cache is stamped
+function GBL:StepBucketHashScan(guildData, scan, budget)
+    if not guildData or not scan then return 0, true end
+
+    local tx = guildData.transactions
+    local money = guildData.moneyTransactions
+    local spent = 0
+
+    while spent < budget and scan.cursor < scan.total do
+        scan.cursor = scan.cursor + 1
+        local rec
+        if scan.cursor <= scan.nTx then
+            rec = tx[scan.cursor]
+        else
+            rec = money[scan.cursor - scan.nTx]
+        end
+        -- A record can be missing if something removed one mid-scan; skipping
+        -- it is correct, and the stale stamp already forces a recompute.
+        if rec and rec.id then
+            local key = bucketKeyForRecord(rec)
+            scan.buckets[key] = xor32(scan.buckets[key] or 0, self:HashString(rec.id))
+        end
+        spent = spent + 1
+    end
+
+    if scan.cursor >= scan.total then
+        bucketCache.buckets = scan.buckets
+        bucketCache.source = guildData
+        bucketCache.txCount = scan.total
+        return spent, true
+    end
+    return spent, false
+end
+
 ------------------------------------------------------------------------
 -- Request manifest (bounded SYNC_REQUEST payload)
 ------------------------------------------------------------------------
