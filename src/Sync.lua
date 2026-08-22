@@ -95,6 +95,26 @@ local FORCED_HELLO_COOLDOWN = 10
 -- finished rather than because it ran out of time. Expect it to halve in
 -- duration if the chunk budget rises to fill both wire fragments (#96).
 local SESSION_RECORD_CAP = 300
+
+-- How many records one tick of the sliced serve preparation walks (#115).
+--
+-- Measured rather than estimated, on rex-desktop against 12,000 synthetic
+-- records shaped like real ones: 1.25 us for a bucket key, 4.00 us to hash an
+-- id, 2.08 us to strip a record. The heaviest stage does a bucket key and a
+-- hash for every record, so 5.25 us each, which puts a full tick at 7.9 ms and
+-- a 12k cold start at 8 ticks. Two orders of magnitude under the watchdog, and
+-- the whole preparation lands well inside the requester's 10s zero-chunk
+-- resend budget with room for a client several times slower than this one.
+--
+-- Raising it trades frame smoothness for fewer ticks and buys nothing that
+-- matters: the preparation is already far quicker than the send it feeds.
+local SYNC_PREP_RECORDS_PER_TICK = 1500
+
+-- A hung preparation would hold the send slot forever and block all serving
+-- until a reload, which is worse than the crash this replaces. This repo has
+-- form here: the op-88 hang is why SortExecutor grew a stall watchdog.
+local SYNC_PREP_TIMEOUT = 30
+
 local LAYOUT_REQUEST_THROTTLE = 30  -- min seconds between bank-layout pull requests
 local WHISPER_TRACK_EXPIRE = 30
 local MAX_RECEIVE_DURATION = 1800  -- 30 minutes absolute maximum receive time
@@ -117,6 +137,8 @@ GBL.SYNC_MAX_RECEIVE_DURATION = MAX_RECEIVE_DURATION
 GBL.SYNC_FORCED_HELLO_COOLDOWN = FORCED_HELLO_COOLDOWN
 GBL.SYNC_SUPERSET_NUDGE_THROTTLE = SUPERSET_NUDGE_THROTTLE
 GBL.SYNC_SESSION_RECORD_CAP = SESSION_RECORD_CAP
+GBL.SYNC_PREP_RECORDS_PER_TICK = SYNC_PREP_RECORDS_PER_TICK
+GBL.SYNC_PREP_TIMEOUT = SYNC_PREP_TIMEOUT
 GBL.SYNC_LAYOUT_REQUEST_THROTTLE = LAYOUT_REQUEST_THROTTLE
 GBL.SYNC_COMBAT_COOLDOWN = COMBAT_COOLDOWN
 GBL.SYNC_INTER_CHUNK_GAP_FLOOR = INTER_CHUNK_GAP_FLOOR
@@ -613,7 +635,12 @@ end
 --- Disable sync at runtime (from UI toggle).
 function GBL:DisableSync()
     self.db.profile.sync.enabled = false
+    -- Ahead of the field clears below: a preparation in flight has to be told
+    -- to stop, or it finishes on its own timer and serves a peer the user has
+    -- just switched sync off for.
+    self:_AbortSyncPrep("sync disabled")
     syncState.sending = false
+    syncState.sendTarget = nil
     syncState.receiving = false
     if syncState.sendTimer then
         syncState.sendTimer:Cancel()
@@ -1721,249 +1748,485 @@ function GBL:RequestSync(target, sinceTimestamp)
     self:ScheduleReceiveTimeout()
 end
 
---- Handle an incoming SYNC_REQUEST — gather and send matching transactions.
--- @param sender string Requester name
--- @param data table Deserialized request payload
-function GBL:HandleSyncRequest(sender, data)
-    -- The serving half of the version gate. A request can arrive without ever
-    -- passing through HandleHello (RequestSync whispers directly), so refusing
-    -- only there would let an incompatible peer help itself to our records.
-    -- Silence rather than BUSY: BUSY means "try again shortly", which would
-    -- keep them retrying for as long as they stay on the old version.
-    local compatible, reason = self:IsVersionCompatible(data.version, data.minSyncVersion)
-    if not compatible then
-        self:SyncWarn("Ignoring SYNC_REQUEST. " .. self:DescribeVersionRefusal(
-            self:CanonicalPeerKey(sender), reason, data.version, data.minSyncVersion))
-        return
-    end
+------------------------------------------------------------------------
+-- Sliced serve preparation (#115)
+------------------------------------------------------------------------
 
-    -- Combat is no time to spend the main thread on a backfill, and serving
-    -- was the one door in that policy with no check on it. HandleHello defers
-    -- requesting while the lockdown reads true, and a live session entering
-    -- combat is aborted outright, but an idle client never sets combatPaused
-    -- (OnCombatStart returns early when nothing is in flight), so a raider
-    -- could be handed a full synchronous serve mid-pull. BUSY is honest here:
-    -- it means "try again shortly", and the requester's BUSY cooldown paces
-    -- the retry past the fight. The pause flags cover the transition tails,
-    -- where the live API already reads false. Sits after the version gate so
-    -- an incompatible peer keeps getting silence rather than a retry signal.
-    local inCombat = InCombatLockdown and InCombatLockdown()
-    if inCombat or isSyncPaused() then
-        local why
-        if inCombat then
-            why = "in combat"
-        else
-            why = (syncState.zonePaused and "zone" or "combat") .. " cooldown"
+-- Answering a SYNC_REQUEST used to do everything between accepting it and the
+-- first chunk in a single execution slice: bucket hashes over the whole
+-- history, the manifest diff, a collect that copied every matching record, two
+-- sorts over those copies, a walk across every eventCounts entry, then chunk
+-- packing. On a client with a five-figure history that is enough work for WoW's
+-- script watchdog to kill the call outright, and it dies before any chunk goes
+-- out, so the requester's retry dies the same way. The client is not slow at
+-- serving, it is permanently incapable of it, and silently.
+--
+-- The same work now runs across frames on a zero-delay timer chain with a
+-- per-tick record budget. What reaches the wire is unchanged, including the
+-- order records leave in, which is pinned by a characterization spec written
+-- against the synchronous version before any of this moved.
+--
+-- Mutation tolerance: rescan and intake append at the array tail, so a walk
+-- holding a cursor can miss a late arrival, and a receive finishing mid-prep
+-- can rewrite record ids underneath it. Neither can lose data or diverge,
+-- because the receiver dedups by id: the worst case is a record riding the
+-- next session instead of this one, or a redundant one the far side drops. No
+-- locking, and none needed.
+
+local prepStages = {}
+local prepStep  -- forward declaration; the watchdog and the accept both call it
+
+--- Cancel a preparation's watchdog and drop its state, leaving the send alone.
+-- Used when the preparation succeeded and handed off to SendNextChunk, where
+-- clearing `sending` would abort the very send that just started.
+function GBL:_ClearSyncPrep()
+    local prep = syncState.prep
+    if not prep then return end
+    if prep.watchdog and prep.watchdog.Cancel then
+        prep.watchdog:Cancel(prep.watchdog)
+    end
+    syncState.prep = nil
+end
+
+--- Abandon a preparation in flight and release the send slot.
+--
+-- One helper behind all the teardown paths, so none of them can half-clear the
+-- state the way five hand-copied field lists eventually would. Dropping the
+-- prep is what makes any hop already scheduled from the dead chain a no-op
+-- when it fires (prepStep returns on a missing prep before touching anything):
+-- there are no timer handles to cancel, because C_Timer.After returns nothing
+-- in the real client. The token bump is belt and braces on top of that.
+--
+-- It clears the whole send field set rather than just the slot, because the
+-- paths calling it are replacing hand-written clears that did, and leaving a
+-- field behind here would be a difference nobody went looking for. Mid-prep
+-- most of them are already zero; the send has not started.
+-- @param reason string Short description for the log line
+function GBL:_AbortSyncPrep(reason)
+    local prep = syncState.prep
+    if not prep then return end
+    syncState.prepToken = (syncState.prepToken or 0) + 1
+    self:_ClearSyncPrep()
+    syncState.sending = false
+    syncState.sendTarget = nil
+    syncState.sendChunks = {}
+    syncState.sendChunkIndex = 0
+    syncState.sendRetryCount = 0
+    syncState.sendStartTime = 0
+    syncState.sendTotalRecords = 0
+    syncState.sendRemainingBuckets = 0
+    self:StopFpsMonitor()
+    self:SyncDebug("Serve prep for %s abandoned: %s",
+        tostring(prep.target), tostring(reason))
+end
+
+-- 1. Bucket hashes. Free when the cache is already current, otherwise the same
+--    walk ComputeBucketHashes does, a slice at a time, stamping the cache on
+--    the way past so the work is not thrown away.
+prepStages[1] = function(self, prep, budget)
+    if prep.localBuckets then return 0, true end
+
+    if not prep.bucketScan then
+        local fresh = self:_FreshBucketHashes(prep.guildData)
+        if fresh then
+            prep.localBuckets = fresh
+            return 0, true
         end
-        self:AddAuditEntry("Declined sync from " .. sender
-            .. " (" .. why .. ") - sent BUSY")
-        local busy = compressMessage(self:Serialize(self:BuildBusyMessage("combat")))
-        self:SendSyncWhisper(PREFIX, busy, sender)
-        return
+        prep.bucketScan = self:StartBucketHashScan(prep.guildData)
     end
 
-    if syncState.sending then
-        -- A peer whose request went missing resends it, and the resend can
-        -- arrive while we are already answering the first one. Answering that
-        -- with BUSY would make it abort the receive we are feeding right now
-        -- (HandleBusy tears down the receive it names), so a duplicate from
-        -- the peer we are already serving is simply ignored. BUSY still goes
-        -- to anyone else, who genuinely does need to try later.
-        if self:CanonicalPeerKey(sender) == self:CanonicalPeerKey(syncState.sendTarget) then
-            self:SyncDebug("Ignoring repeat SYNC_REQUEST from %s, already sending to them",
-                self:CanonicalPeerKey(sender))
-            return
+    local spent, done =
+        self:StepBucketHashScan(prep.guildData, prep.bucketScan, budget)
+    if done then
+        prep.localBuckets = prep.bucketScan.buckets
+        prep.bucketScan = nil
+    end
+    return spent, done
+end
+
+-- 2. Manifest diff and span folds. Bounded by the manifest rather than by the
+--    history: 50 detail buckets and 8 spans however far back the records go,
+--    so this is one tick's work at any depth.
+prepStages[2] = function(self, prep, _budget)
+    local data = prep.data
+    local localBuckets = prep.localBuckets
+
+    if not data.bucketHashes then
+        -- Fallback: old-style sinceTimestamp filtering (no bucket hashes from
+        -- the requester). diffDays stays nil, which the collect reads as
+        -- "filter by time instead".
+        local sinceTimestamp = data.sinceTimestamp or 0
+        local gd = prep.guildData
+        local totalLocal = #gd.transactions + #gd.moneyTransactions
+        self:AddAuditEntry("No bucket hashes in request - falling back to sinceTimestamp="
+            .. sinceTimestamp .. " (local has " .. totalLocal .. " total tx)")
+        return 1, true
+    end
+
+    -- Bucket-filtered sync: only send records from buckets that differ. Since
+    -- the hierarchical manifest, a request describes its recent window bucket
+    -- by bucket and everything older as a handful of coarse spans, so a bucket
+    -- is judged by whichever of the two covers it.
+    local diffDays = {}
+    local totalLocalDays = 0
+    local totalRemoteDays = 0
+    local matchingDays = 0
+
+    for _ in pairs(localBuckets) do totalLocalDays = totalLocalDays + 1 end
+    for _ in pairs(data.bucketHashes) do totalRemoteDays = totalRemoteDays + 1 end
+
+    -- Fold our own buckets over each declared span once, up front. A span that
+    -- matches clears every bucket inside it in one comparison; a span that
+    -- differs offers all of them, because the fold says something in the range
+    -- moved but not what (drilling down would cost a round trip, and the
+    -- session cap already bounds what one session hands over).
+    local spans = {}
+    local differingSpans = 0
+    if type(data.spans) == "table" then
+        for _, span in ipairs(data.spans) do
+            if type(span) == "table" and type(span.s) == "number"
+                and type(span.e) == "number" and type(span.h) == "number" then
+                local differs =
+                    self:FoldBucketRange(localBuckets, span.s, span.e) ~= span.h
+                if differs then differingSpans = differingSpans + 1 end
+                spans[#spans + 1] = { s = span.s, e = span.e, differs = differs }
+            end
         end
-
-        self:AddAuditEntry("Declined sync from " .. sender
-            .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
-        -- Send BUSY so requester doesn't wait 60s for data that will never come
-        local msg = compressMessage(self:Serialize(
-            self:BuildBusyMessage("sending:" .. (syncState.sendTarget or "?"))))
-        self:SendSyncWhisper(PREFIX, msg, sender)
-        self:AddAuditEntry("Sent BUSY to " .. sender)
-        return
     end
 
-    local guildData = self:GetGuildData()
-    if not guildData then return end
-
-    local txToSend = {}
-    local moneyToSend = {}
-    local diffDays  -- bucket keys that differ (nil = send all)
-    -- Computed on both paths. The bucket diff below needs it, and so does the
-    -- per-target tranche memory that keeps a capped session rotating, which
-    -- would otherwise serve the same slice forever to a peer whose request
-    -- carried no hashes.
-    local localBuckets = self:GetBucketHashes(guildData)
-
-    if data.bucketHashes then
-        -- Bucket-filtered sync: only send records from buckets that differ.
-        -- Since the hierarchical manifest, a request describes its recent
-        -- window bucket by bucket and everything older as a handful of coarse
-        -- spans, so a bucket is judged by whichever of the two covers it.
-        diffDays = {}
-        local totalLocalDays = 0
-        local totalRemoteDays = 0
-        local matchingDays = 0
-
-        for _ in pairs(localBuckets) do totalLocalDays = totalLocalDays + 1 end
-        for _ in pairs(data.bucketHashes) do totalRemoteDays = totalRemoteDays + 1 end
-
-        -- Fold our own buckets over each declared span once, up front. A span
-        -- that matches clears every bucket inside it in one comparison; a span
-        -- that differs offers all of them, because the fold says something in
-        -- the range moved but not what (drilling down would cost a round trip,
-        -- and the session cap already bounds what one session hands over).
-        local spans = {}
-        local differingSpans = 0
-        if type(data.spans) == "table" then
-            for _, span in ipairs(data.spans) do
-                if type(span) == "table" and type(span.s) == "number"
-                    and type(span.e) == "number" and type(span.h) == "number" then
-                    local differs =
-                        self:FoldBucketRange(localBuckets, span.s, span.e) ~= span.h
-                    if differs then differingSpans = differingSpans + 1 end
-                    spans[#spans + 1] = { s = span.s, e = span.e, differs = differs }
-                end
+    for dayKey, localHash in pairs(localBuckets) do
+        local covering
+        for i = 1, #spans do
+            if dayKey >= spans[i].s and dayKey <= spans[i].e then
+                covering = spans[i]
+                break
             end
         end
 
-        for dayKey, localHash in pairs(localBuckets) do
-            local covering
-            for i = 1, #spans do
-                if dayKey >= spans[i].s and dayKey <= spans[i].e then
-                    covering = spans[i]
-                    break
-                end
-            end
-
-            if covering then
-                if covering.differs then
-                    diffDays[dayKey] = true
-                else
-                    matchingDays = matchingDays + 1
-                end
-            elseif localHash ~= (data.bucketHashes[dayKey] or 0) then
-                -- Not covered by any span, so it is either in the requester's
-                -- detail window or older than anything it declared. Both cases
-                -- take the comparison this line has always made: a bucket the
-                -- requester never mentioned reads as hash 0 and is offered.
+        if covering then
+            if covering.differs then
                 diffDays[dayKey] = true
             else
                 matchingDays = matchingDays + 1
             end
+        elseif localHash ~= (data.bucketHashes[dayKey] or 0) then
+            -- Not covered by any span, so it is either in the requester's
+            -- detail window or older than anything it declared. Both cases
+            -- take the comparison this line has always made: a bucket the
+            -- requester never mentioned reads as hash 0 and is offered.
+            diffDays[dayKey] = true
+        else
+            matchingDays = matchingDays + 1
+        end
+    end
+
+    prep.diffDays = diffDays
+
+    -- Build human-readable date list for differing buckets
+    local diffCount = 0
+    local diffDateList = {}
+    for dayKey in pairs(diffDays) do
+        diffCount = diffCount + 1
+        -- Bucket key = floor(timeSlot / 6), so timestamp = key * 6 * 3600
+        local ts = dayKey * 6 * 3600
+        diffDateList[#diffDateList + 1] = date("%Y-%m-%d %H:00", ts)
+    end
+    table.sort(diffDateList)
+
+    local spanNote = ""
+    if #spans > 0 then
+        spanNote = ", " .. #spans .. " span(s) (" .. differingSpans .. " differing)"
+    end
+    self:AddAuditEntry("Bucket filter: " .. totalLocalDays .. " local bucket(s), "
+        .. totalRemoteDays .. " remote detail bucket(s)" .. spanNote .. ", "
+        .. matchingDays .. " matching, " .. diffCount .. " differing")
+    if diffCount > 0 then
+        self:AddAuditEntry("Differing dates: " .. table.concat(diffDateList, ", "))
+    end
+
+    return totalLocalDays, true
+end
+
+-- 3. Collect. The walk that used to copy every matching record now only groups
+--    references by bucket. The copies happen in stage 5, over the few hundred
+--    records this session will actually send, instead of over every record the
+--    diff turned up.
+--
+--    The array lengths are captured on the first tick and never re-read, for
+--    the same reason the bucket scan captures them: the cursor crosses from
+--    items into money at a fixed boundary, and moving that boundary mid-walk
+--    would change which record a cursor value means.
+prepStages[3] = function(self, prep, budget)
+    local gd = prep.guildData
+    if not prep.groups then
+        prep.groups = {}
+        prep.counts = {}
+        prep.collectCursor = 0
+        prep.collectNTx = #gd.transactions
+        prep.collectTotal = prep.collectNTx + #gd.moneyTransactions
+    end
+
+    local diffDays = prep.diffDays
+    local since = prep.data.sinceTimestamp or 0
+    local spent = 0
+
+    while spent < budget and prep.collectCursor < prep.collectTotal do
+        prep.collectCursor = prep.collectCursor + 1
+        local isMoney = prep.collectCursor > prep.collectNTx
+        local rec
+        if isMoney then
+            rec = gd.moneyTransactions[prep.collectCursor - prep.collectNTx]
+        else
+            rec = gd.transactions[prep.collectCursor]
         end
 
-        -- Build human-readable date list for differing buckets
-        local diffCount = 0
-        local diffDateList = {}
-        for dayKey in pairs(diffDays) do
-            diffCount = diffCount + 1
-            -- Bucket key = floor(timeSlot / 6), so timestamp = key * 6 * 3600
-            local ts = dayKey * 6 * 3600
-            diffDateList[#diffDateList + 1] = date("%Y-%m-%d %H:00", ts)
-        end
-        table.sort(diffDateList)
+        if rec then
+            local keep, key
+            if diffDays then
+                key = self:BucketKeyForRecord(rec)
+                keep = diffDays[key] and true or false
+            else
+                local when = rec.scanTime or rec.timestamp or 0
+                keep = when > since
+                if keep then key = self:BucketKeyForRecord(rec) end
+            end
 
-        for _, tx in ipairs(guildData.transactions) do
-            local dayKey = self:BucketKeyForRecord(tx)
-            if diffDays[dayKey] then
-                txToSend[#txToSend + 1] = stripForSync(tx)
+            if keep then
+                local group = prep.groups[key]
+                if not group then
+                    group = { tx = {}, money = {} }
+                    prep.groups[key] = group
+                    prep.counts[key] = 0
+                end
+                local list = isMoney and group.money or group.tx
+                list[#list + 1] = rec
+                prep.counts[key] = prep.counts[key] + 1
             end
         end
-        for _, tx in ipairs(guildData.moneyTransactions) do
-            local dayKey = self:BucketKeyForRecord(tx)
-            if diffDays[dayKey] then
-                moneyToSend[#moneyToSend + 1] = stripForSync(tx)
-            end
-        end
+        spent = spent + 1
+    end
 
-        local spanNote = ""
-        if #spans > 0 then
-            spanNote = ", " .. #spans .. " span(s) (" .. differingSpans .. " differing)"
-        end
-        self:AddAuditEntry("Bucket filter: " .. totalLocalDays .. " local bucket(s), "
-            .. totalRemoteDays .. " remote detail bucket(s)" .. spanNote .. ", "
-            .. matchingDays .. " matching, " .. diffCount .. " differing")
-        if diffCount > 0 then
-            self:AddAuditEntry("Differing dates: " .. table.concat(diffDateList, ", "))
-        end
-        self:AddAuditEntry("Sending " .. #txToSend .. " item tx + "
-            .. #moneyToSend .. " money tx from differing days")
+    prep.examined = prep.collectCursor
+    if prep.collectCursor < prep.collectTotal then return spent, false end
+
+    local nTx, nMoney = 0, 0
+    for _, group in pairs(prep.groups) do
+        nTx = nTx + #group.tx
+        nMoney = nMoney + #group.money
+    end
+    if diffDays then
+        self:AddAuditEntry("Sending " .. nTx .. " item tx + "
+            .. nMoney .. " money tx from differing days")
     else
-        -- Fallback: old-style sinceTimestamp filtering (no bucket hashes from requester)
-        local sinceTimestamp = data.sinceTimestamp or 0
-        local totalLocal = #guildData.transactions + #guildData.moneyTransactions
-        self:AddAuditEntry("No bucket hashes in request - falling back to sinceTimestamp="
-            .. sinceTimestamp .. " (local has " .. totalLocal .. " total tx)")
-        for _, tx in ipairs(guildData.transactions) do
-            local when = tx.scanTime or tx.timestamp or 0
-            if when > sinceTimestamp then
-                txToSend[#txToSend + 1] = stripForSync(tx)
-            end
-        end
-        for _, tx in ipairs(guildData.moneyTransactions) do
-            local when = tx.scanTime or tx.timestamp or 0
-            if when > sinceTimestamp then
-                moneyToSend[#moneyToSend + 1] = stripForSync(tx)
-            end
-        end
-        self:AddAuditEntry("sinceTimestamp filter: sending " .. #txToSend
-            .. " item tx + " .. #moneyToSend .. " money tx")
+        self:AddAuditEntry("sinceTimestamp filter: sending " .. nTx
+            .. " item tx + " .. nMoney .. " money tx")
     end
+    return spent, true
+end
 
-    -- Send the most recent buckets first. A far-behind peer needs current
-    -- activity, which lives in the newest buckets; routing those into the
-    -- early chunks means an aborted sync (combat/zone/disconnect/ACK timeout)
-    -- still delivers useful records instead of front-loading old history the
-    -- peer already has. The receiver dedups by record id, so merge order never
-    -- changes the stored result (see the order-independence spec).
-    self:SortSendListNewestFirst(txToSend)
-    self:SortSendListNewestFirst(moneyToSend)
-    if #txToSend > 0 or #moneyToSend > 0 then
-        local newestRec = txToSend[1] or moneyToSend[1]
-        local oldestRec = txToSend[#txToSend] or moneyToSend[#moneyToSend]
-        local newestTs = self:BucketKeyForRecord(newestRec) * 6 * 3600
-        local oldestTs = self:BucketKeyForRecord(oldestRec) * 6 * 3600
-        self:AddAuditEntry("Send order newest-first: "
-            .. date("%Y-%m-%d %H:00", newestTs) .. " back to "
-            .. date("%Y-%m-%d %H:00", oldestTs))
-    end
+-- 4. Selection, then materialize the send lists in wire order.
+--
+--    Per-bucket counts come free from stage 3, so the cap decision costs
+--    nothing extra. The lists are then built by walking selected buckets newest
+--    first and sorting each bucket's records by id descending, which is the
+--    same total order SortSendListNewestFirst produces over one flat list,
+--    reached without sorting the whole history to get it.
+prepStages[4] = function(self, prep, _budget)
+    local sendTarget = prep.target
 
-    -- Cap the session to whole buckets. The peer gets the rest next time they
-    -- ask, and both of us are back in the gossip pool in minutes rather than
-    -- hours. Buckets already sent to this peer whose local hash has not moved
-    -- since sort last, so a receiver-superset diff cannot pin us to the same
-    -- tranche forever (see _SelectSessionBuckets).
-    local sendTarget = self:CanonicalPeerKey(sender)
+    -- Buckets already sent to this peer whose contents have not moved since
+    -- sort last, so a receiver-superset diff cannot pin us to the same tranche
+    -- forever (see _SelectSessionBuckets).
     local demoteSet
+    local demoted, stillSelected = 0, 0
     local lastTranche = syncState.capLastTranche[sendTarget]
     if lastTranche then
         demoteSet = {}
         for key, hashWhenSent in pairs(lastTranche) do
-            if localBuckets[key] == hashWhenSent then demoteSet[key] = true end
+            if prep.localBuckets[key] == hashWhenSent then
+                demoteSet[key] = true
+                demoted = demoted + 1
+            end
         end
     end
 
-    local sentBuckets, deferredBuckets
-    txToSend, moneyToSend, sentBuckets, deferredBuckets =
-        self:_SelectSessionBuckets(txToSend, moneyToSend, SESSION_RECORD_CAP, demoteSet)
+    local selected, deferred =
+        self:_SelectBucketsByCount(prep.counts, SESSION_RECORD_CAP, demoteSet)
+    prep.sentBuckets = selected
+    prep.deferredBuckets = deferred
 
+    -- Rotation is the one mechanism here that shipped on a structural argument
+    -- and has never been seen working in a capture. This line is what would
+    -- falsify it: if the demoted count is always zero across captures, the
+    -- mechanism is dead weight and should go. Suppressed on a peer's first
+    -- session, where there is no tranche memory and nothing to report. Note it
+    -- is emitted at selection, so an abandoned prep can log a rotation that
+    -- never sent; a capture reader must not count those.
+    if lastTranche then
+        for key in pairs(demoteSet or {}) do
+            if selected[key] then stillSelected = stillSelected + 1 end
+        end
+        local inLast = 0
+        for _ in pairs(lastTranche) do inLast = inLast + 1 end
+        self:AddAuditEntry("Tranche rotation for " .. sendTarget .. ": "
+            .. inLast .. " in last tranche, " .. demoted
+            .. " unchanged (demoted), " .. stillSelected .. " still selected")
+    end
+
+    local keys = {}
+    for key in pairs(selected) do keys[#keys + 1] = key end
+    table.sort(keys, function(a, b) return a > b end)
+
+    local function byIdDesc(a, b) return (a.id or "") > (b.id or "") end
+    local txSel, moneySel = {}, {}
+    for _, key in ipairs(keys) do
+        local group = prep.groups[key]
+        if group then
+            table.sort(group.tx, byIdDesc)
+            table.sort(group.money, byIdDesc)
+            for _, rec in ipairs(group.tx) do txSel[#txSel + 1] = rec end
+            for _, rec in ipairs(group.money) do moneySel[#moneySel + 1] = rec end
+        end
+    end
+    prep.txSelected = txSel
+    prep.moneySelected = moneySel
+
+    -- Send the most recent buckets first. A far-behind peer needs current
+    -- activity, which lives in the newest buckets; routing those into the early
+    -- chunks means an aborted sync (combat/zone/disconnect/ACK timeout) still
+    -- delivers useful records instead of front-loading old history the peer
+    -- already has. The receiver dedups by record id, so merge order never
+    -- changes the stored result (see the order-independence spec).
+    --
+    -- Reported over everything the diff turned up rather than the capped slice,
+    -- which is what this line has always meant.
+    local function span(field)
+        local hi, lo
+        for key, group in pairs(prep.groups) do
+            if #group[field] > 0 then
+                if not hi or key > hi then hi = key end
+                if not lo or key < lo then lo = key end
+            end
+        end
+        return hi, lo
+    end
+    local newestKey, oldestKey = span("tx")
+    if not newestKey then newestKey, oldestKey = span("money") end
+    if newestKey then
+        self:AddAuditEntry("Send order newest-first: "
+            .. date("%Y-%m-%d %H:00", newestKey * 6 * 3600) .. " back to "
+            .. date("%Y-%m-%d %H:00", oldestKey * 6 * 3600))
+    end
+
+    return #txSel + #moneySel, true
+end
+
+-- 5. Strip the selected records for the wire. This is the pass that used to run
+--    over every record the diff matched, up to the whole history on a first
+--    backfill; it now runs over one session's worth.
+prepStages[5] = function(self, prep, budget)
+    if not prep.txToSend then
+        prep.txToSend = {}
+        prep.moneyToSend = {}
+        prep.stripCursor = 0
+    end
+
+    local nTx = #prep.txSelected
+    local total = nTx + #prep.moneySelected
+    local spent = 0
+
+    while spent < budget and prep.stripCursor < total do
+        prep.stripCursor = prep.stripCursor + 1
+        if prep.stripCursor <= nTx then
+            prep.txToSend[#prep.txToSend + 1] =
+                stripForSync(prep.txSelected[prep.stripCursor])
+        else
+            prep.moneyToSend[#prep.moneyToSend + 1] =
+                stripForSync(prep.moneySelected[prep.stripCursor - nTx])
+        end
+        spent = spent + 1
+    end
+
+    return spent, prep.stripCursor >= total
+end
+
+-- 6. Event counts for the buckets being sent. On the bucket path that is the
+--    capped set, so counts ride only with the records they describe. On the
+--    fallback path there are no bucket keys to filter by, so everything rides,
+--    which is what the carrier-chunk path from #92 already expects.
+prepStages[6] = function(self, prep, budget)
+    local counts = prep.guildData.eventCounts
+    if not counts then
+        prep.sendEventCounts = {}
+        return 0, true
+    end
+
+    -- Snapshot the keys before walking them. Resuming a pairs() traversal
+    -- across a rehash is undefined in Lua 5.1, and intake can add entries while
+    -- this chain is in flight. Charged to the budget and returned immediately,
+    -- so a large table does not pay for the snapshot and a full tick of
+    -- filtering in the same slice.
+    if not prep.countKeys then
+        local keys = {}
+        for baseHash in pairs(counts) do keys[#keys + 1] = baseHash end
+        prep.countKeys = keys
+        prep.countCursor = 0
+        prep.sendEventCounts = {}
+        return #keys, #keys == 0
+    end
+
+    local filter = prep.diffDays and prep.sentBuckets or nil
+    local total = #prep.countKeys
+    local spent = 0
+
+    while spent < budget and prep.countCursor < total do
+        prep.countCursor = prep.countCursor + 1
+        local baseHash = prep.countKeys[prep.countCursor]
+        local entry = counts[baseHash]
+        -- A key that vanished since the snapshot is simply skipped.
+        if entry ~= nil and self:EventCountRidesWithBuckets(baseHash, filter) then
+            prep.sendEventCounts[baseHash] = entry
+        end
+        spent = spent + 1
+    end
+
+    return spent, prep.countCursor >= total
+end
+
+-- 7. Commit: pack the chunks and hand off to the send, or answer an empty diff.
+prepStages[7] = function(self, prep, _budget)
+    -- The chain spans frames, which opens a window the synchronous handler
+    -- never had: the player can leave or change guild while it runs, and the
+    -- records collected belong to a guild we are no longer in.
+    if self:GetGuildData() ~= prep.guildData then
+        self:_AbortSyncPrep("guild data changed during prep")
+        return 0, false
+    end
+
+    local txToSend = prep.txToSend or {}
+    local moneyToSend = prep.moneyToSend or {}
+    local chunks = self:PrepareChunks(txToSend, moneyToSend, prep.sendEventCounts)
+
+    -- Stamped only now that the preparation has finished. It used to be
+    -- stamped before the packing, so a serve that died partway still told the
+    -- next session it had already handed these buckets over. Every path that
+    -- gets here stamps, the empty one included, which is what keeps an empty
+    -- diff clearing the demote memory the way it always has.
     local tranche = {}
-    for key in pairs(sentBuckets) do tranche[key] = localBuckets[key] end
-    syncState.capLastTranche[sendTarget] = tranche
+    for key in pairs(prep.sentBuckets or {}) do
+        tranche[key] = prep.localBuckets[key]
+    end
+    syncState.capLastTranche[prep.target] = tranche
 
-    -- Collect eventCounts for the buckets we're sending. On the bucket path
-    -- that is the capped set, so counts ride only with the records they
-    -- describe. On the fallback path there are no bucket keys to filter by,
-    -- so it stays nil (send all) and the carrier-chunk path from #92 is
-    -- unchanged.
-    local countBuckets = diffDays and sentBuckets or nil
-    local sendEventCounts = self:CollectEventCountsForBuckets(guildData, countBuckets)
+    local sender = prep.sender
+    local elapsed = GetTime() - (prep.startedAt or GetTime())
+    self:AddAuditEntry(string.format(
+        "Prep complete for %s: %d examined, %d selected, %d tick(s), %.2fs",
+        tostring(prep.target), prep.examined or 0,
+        #txToSend + #moneyToSend, prep.ticks or 0, elapsed))
 
-    -- Prepare and send chunks
-    local chunks = self:PrepareChunks(txToSend, moneyToSend, sendEventCounts)
+    local deferredBuckets = prep.deferredBuckets or 0
+    self:_ClearSyncPrep()
 
     if #chunks == 0 then
         -- Nothing to send — send an empty chunk so receiver finishes cleanly.
@@ -1978,21 +2241,21 @@ function GBL:HandleSyncRequest(sender, data)
         })))
         self:SendSyncWhisper(PREFIX, msg, sender)
         self:AddAuditEntry("Sent empty sync to " .. sender)
-        return
+        syncState.sending = false
+        syncState.sendTarget = nil
+        return 0, true
     end
 
-    syncState.sending = true
-    syncState.sendTarget = self:CanonicalPeerKey(sender)
     syncState.sendChunks = chunks
     syncState.sendChunkIndex = 0
     syncState.sendStartTime = GetServerTime()
     syncState.sendTotalRecords = #txToSend + #moneyToSend
-    syncState.sendRemainingBuckets = deferredBuckets or 0
+    syncState.sendRemainingBuckets = deferredBuckets
     self:StartFpsMonitor()
 
     local totalTx = #txToSend + #moneyToSend
     local capNote = ""
-    if (deferredBuckets or 0) > 0 then
+    if deferredBuckets > 0 then
         capNote = ", capped: " .. deferredBuckets .. " bucket(s) deferred"
     end
     self:AddAuditEntry("Sending " .. totalTx
@@ -2026,11 +2289,218 @@ function GBL:HandleSyncRequest(sender, data)
     syncState.nacksForCurrentChunk = 0
     syncState.chunkOutcomes = {}
     self:SendNextChunk()
+    return 0, true
+end
+
+--- Advance the preparation by one tick's worth of work.
+--
+-- A stage that finishes with budget to spare hands the rest to the next one in
+-- the same tick, so the bounded stages do not each cost a frame. That is also
+-- what keeps a small dataset behaving exactly as it did before this change:
+-- the whole preparation fits in the first budget and completes inside the
+-- original call, with the first chunk still leaving synchronously.
+-- @param self table The addon
+-- @param token number The prep token this chain was started with
+prepStep = function(self, token)
+    local prep = syncState.prep
+    if not prep or prep.token ~= token then return end
+
+    prep.ticks = (prep.ticks or 0) + 1
+    local budget = SYNC_PREP_RECORDS_PER_TICK
+
+    while budget > 0 do
+        local stage = prepStages[prep.stage]
+        if not stage then break end
+
+        local spent, done = stage(self, prep, budget)
+        -- A stage can abandon the preparation (guild changed) or finish it and
+        -- hand off to the send. Either way this chain is over.
+        if syncState.prep ~= prep then return end
+
+        budget = budget - (spent or 0)
+        if done then
+            prep.stage = prep.stage + 1
+        elseif (spent or 0) <= 0 then
+            -- No progress and not finished: yield rather than spin.
+            break
+        end
+    end
+
+    if syncState.prep ~= prep then return end
+    C_Timer.After(0, function() prepStep(self, token) end)
+end
+
+--- Handle an incoming SYNC_REQUEST — gather and send matching transactions.
+-- @param sender string Requester name
+-- @param data table Deserialized request payload
+function GBL:HandleSyncRequest(sender, data)
+    -- The serving half of the version gate. A request can arrive without ever
+    -- passing through HandleHello (RequestSync whispers directly), so refusing
+    -- only there would let an incompatible peer help itself to our records.
+    -- Silence rather than BUSY: BUSY means "try again shortly", which would
+    -- keep them retrying for as long as they stay on the old version.
+    local compatible, reason = self:IsVersionCompatible(data.version, data.minSyncVersion)
+    if not compatible then
+        self:SyncWarn("Ignoring SYNC_REQUEST. " .. self:DescribeVersionRefusal(
+            self:CanonicalPeerKey(sender), reason, data.version, data.minSyncVersion))
+        return
+    end
+
+    -- Combat is no time to spend the main thread on a backfill, and serving
+    -- was the one door in that policy with no check on it. HandleHello defers
+    -- requesting while the lockdown reads true, and a live session entering
+    -- combat is aborted outright, but an idle client never sets combatPaused
+    -- (OnCombatStart returns early when nothing is in flight), so a raider
+    -- could be handed a full synchronous serve mid-pull. BUSY is honest here:
+    -- it means "try again shortly", and the requester's BUSY cooldown paces
+    -- the retry past the fight. The pause flags cover the transition tails,
+    -- where the live API already reads false. Sits after the version gate so
+    -- an incompatible peer keeps getting silence rather than a retry signal,
+    -- and ahead of every piece of prep state so a refused request allocates
+    -- nothing.
+    local inCombat = InCombatLockdown and InCombatLockdown()
+    if inCombat or isSyncPaused() then
+        local why
+        if inCombat then
+            why = "in combat"
+        else
+            why = (syncState.zonePaused and "zone" or "combat") .. " cooldown"
+        end
+        self:AddAuditEntry("Declined sync from " .. sender
+            .. " (" .. why .. ") - sent BUSY")
+        local busy = compressMessage(self:Serialize(self:BuildBusyMessage("combat")))
+        self:SendSyncWhisper(PREFIX, busy, sender)
+        return
+    end
+
+    if syncState.sending then
+        -- A peer whose request went missing resends it, and the resend can
+        -- arrive while we are already answering the first one. Answering that
+        -- with BUSY would make it abort the receive we are feeding right now
+        -- (HandleBusy tears down the receive it names), so a duplicate from
+        -- the peer we are already serving is simply ignored. BUSY still goes
+        -- to anyone else, who genuinely does need to try later.
+        if self:CanonicalPeerKey(sender) == self:CanonicalPeerKey(syncState.sendTarget) then
+            self:SyncDebug("Ignoring repeat SYNC_REQUEST from %s, already sending to them",
+                self:CanonicalPeerKey(sender))
+            return
+        end
+
+        self:AddAuditEntry("Declined sync from " .. sender
+            .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
+        -- Send BUSY so requester doesn't wait 60s for data that will never come.
+        -- The reason distinguishes the two waits: a preparation is sub-second,
+        -- a send is minutes, and a capture reader cannot otherwise tell which
+        -- one a declined peer was queued behind.
+        local why = syncState.prep and "preparing:" or "sending:"
+        local msg = compressMessage(self:Serialize(
+            self:BuildBusyMessage(why .. (syncState.sendTarget or "?"))))
+        self:SendSyncWhisper(PREFIX, msg, sender)
+        self:AddAuditEntry("Sent BUSY to " .. sender)
+        return
+    end
+
+    local guildData = self:GetGuildData()
+    if not guildData then return end
+
+    -- Claim the send slot synchronously, before the chain yields. This is
+    -- load-bearing: two peers requesting in the same frame must not both be
+    -- accepted, and it keeps every caller that asks GetSyncStatus().sending
+    -- straight after this call asking a real question.
+    syncState.sending = true
+    syncState.sendTarget = self:CanonicalPeerKey(sender)
+    -- The teardown paths read these, and a teardown can now land while the
+    -- preparation is still running. FinishSending in particular takes
+    -- #syncState.sendChunks, which throws on nil.
+    syncState.sendChunks = {}
+    syncState.sendChunkIndex = 0
+    syncState.sendStartTime = GetServerTime()
+    syncState.sendTotalRecords = 0
+    syncState.sendRemainingBuckets = 0
+    syncState.chunkOutcomes = {}
+
+    syncState.prepToken = (syncState.prepToken or 0) + 1
+    local token = syncState.prepToken
+    local prep = {
+        token = token,
+        sender = sender,
+        target = syncState.sendTarget,
+        guildData = guildData,
+        data = data,
+        stage = 1,
+        ticks = 0,
+        examined = 0,
+        startedAt = GetTime(),
+    }
+    syncState.prep = prep
+
+    -- A chain that dies silently would hold the send slot until a reload, and
+    -- block every subsequent request with BUSY while doing it. The one-shot
+    -- ticker is the repo's cancellable-timer idiom, and its positive delay
+    -- keeps it out of the way of anything driving zero-delay timers.
+    prep.watchdog = C_Timer.NewTicker(SYNC_PREP_TIMEOUT, function()
+        local current = syncState.prep
+        if current and current.token == token then
+            self:SyncWarn("Serve prep for %s timed out after %ds",
+                tostring(current.target), SYNC_PREP_TIMEOUT)
+            self:_AbortSyncPrep("prep timeout")
+        end
+    end, 1)
+
+    prepStep(self, token)
 end
 
 ------------------------------------------------------------------------
 -- Chunking
 ------------------------------------------------------------------------
+
+--- Decide which buckets one session carries, from per-bucket counts alone.
+--
+-- Split out of _SelectSessionBuckets (#115) so the sliced serving pipeline can
+-- ask the question without handing over the record lists again. By the time it
+-- reaches this decision the collect stage already knows how many records sit in
+-- each bucket, and the enclosing function's only way to be asked was to re-walk
+-- every record to rebuild exactly that.
+--
+-- Newest bucket first, except that demoted buckets sort behind everything else.
+-- A bucket larger than the whole cap still goes out whole: taken is zero on the
+-- first pass, so the first bucket is selected before the cap can refuse
+-- anything, and refusing it would mean never sending that bucket at all.
+--
+-- The key order is derived from the counts table and then sorted, so no caller
+-- has to preserve a traversal order to get a stable answer. The comparator is a
+-- strict total order over distinct numeric keys, which is what makes the result
+-- independent of whatever order pairs() happens to hand them back.
+-- @param counts table bucketKey -> how many records that bucket holds
+-- @param cap number Target record count before bucket rounding
+-- @param demoteSet table|nil bucketKey -> true, buckets to try last
+-- @return table bucketKey -> true for the buckets this session carries
+-- @return number how many buckets were held back
+function GBL:_SelectBucketsByCount(counts, cap, demoteSet)
+    local order = {}
+    for key in pairs(counts) do order[#order + 1] = key end
+    if #order == 0 then return {}, 0 end
+
+    table.sort(order, function(a, b)
+        local aDemoted = (demoteSet and demoteSet[a]) and 1 or 0
+        local bDemoted = (demoteSet and demoteSet[b]) and 1 or 0
+        if aDemoted ~= bDemoted then return aDemoted < bDemoted end
+        return a > b
+    end)
+
+    local selected = {}
+    local taken = 0
+    local remaining = 0
+    for _, key in ipairs(order) do
+        if taken < cap then
+            selected[key] = true
+            taken = taken + counts[key]
+        else
+            remaining = remaining + 1
+        end
+    end
+    return selected, remaining
+end
 
 --- Cut a send list down to one session's worth of whole buckets.
 --
@@ -2048,6 +2518,10 @@ end
 -- older differing buckets starve. Buckets we already sent to this peer whose
 -- contents have not changed since are exactly the ones to try last.
 --
+-- The selection itself lives in _SelectBucketsByCount; this counts the records
+-- per bucket, asks it, and applies the answer. Note that the filter preserves
+-- the caller's list order rather than the selection's bucket order: the demote
+-- set decides which buckets go, never in what order their records leave.
 -- @param txList table Item records, already newest-first
 -- @param moneyList table Money records, already newest-first
 -- @param cap number Target record count before bucket rounding
@@ -2058,44 +2532,16 @@ end
 -- @return number how many buckets were held back
 function GBL:_SelectSessionBuckets(txList, moneyList, cap, demoteSet)
     local counts = {}
-    local order = {}
     local function tally(list)
         for _, rec in ipairs(list) do
             local key = self:BucketKeyForRecord(rec)
-            if not counts[key] then
-                counts[key] = 0
-                order[#order + 1] = key
-            end
-            counts[key] = counts[key] + 1
+            counts[key] = (counts[key] or 0) + 1
         end
     end
     tally(txList)
     tally(moneyList)
 
-    if #order == 0 then return {}, {}, {}, 0 end
-
-    table.sort(order, function(a, b)
-        local aDemoted = (demoteSet and demoteSet[a]) and 1 or 0
-        local bDemoted = (demoteSet and demoteSet[b]) and 1 or 0
-        if aDemoted ~= bDemoted then return aDemoted < bDemoted end
-        return a > b
-    end)
-
-    -- A bucket larger than the whole cap still goes out whole. Nothing here
-    -- special-cases it: taken is zero on the first pass, so the first bucket
-    -- is selected before the cap can refuse anything, and refusing it would
-    -- mean never sending that bucket at all.
-    local selected = {}
-    local taken = 0
-    local remaining = 0
-    for _, key in ipairs(order) do
-        if taken < cap then
-            selected[key] = true
-            taken = taken + counts[key]
-        else
-            remaining = remaining + 1
-        end
-    end
+    local selected, remaining = self:_SelectBucketsByCount(counts, cap, demoteSet)
 
     local function filter(list)
         local out = {}
@@ -3379,6 +3825,10 @@ function GBL:GetSyncStatus()
     return {
         enabled = self.db.profile.sync.enabled,
         sending = syncState.sending,
+        -- A send that has claimed the slot but is still working out what to
+        -- put in it (#115). Always implies sending; additive, so nothing that
+        -- only reads `sending` had to change.
+        preparing = syncState.prep ~= nil,
         receiving = syncState.receiving,
         sendTarget = syncState.sendTarget,
         receiveSource = syncState.receiveSource,
@@ -3487,6 +3937,9 @@ end
 
 --- Reset session sync state. Exposed for testing.
 function GBL:ResetSyncState()
+    -- First, so a preparation cannot outlive the reset and then write its
+    -- results into the state this call just cleared.
+    self:_AbortSyncPrep("state reset")
     syncState.sending = false
     syncState.sendTarget = nil
     syncState.sendChunks = {}
@@ -3759,6 +4212,18 @@ function GBL:HandleBusy(sender, data)
     -- (partner entered combat or became busy while we were sending to them)
     if syncState.sending
         and self:CanonicalPeerKey(sender) == self:CanonicalPeerKey(syncState.sendTarget) then
+        -- The slot is claimed before the preparation starts, so this branch is
+        -- reached mid-prep too, and there the send it would tear down does not
+        -- exist yet. Abandoning the chain is the whole job: nothing is in
+        -- flight to tag, no timers are armed, and saying "aborting send" would
+        -- put a send in the capture that never happened.
+        if syncState.prep then
+            self:_AbortSyncPrep("BUSY from " .. cleanSender)
+            self:AddAuditEntry(cleanSender .. " busy - abandoned serve preparation")
+            syncState.peerBusyUntil[cleanSender] = GetServerTime() + BUSY_COOLDOWN
+            return
+        end
+
         -- v0.28.7: tag outcome on the chunk that was in flight when BUSY arrived
         local busyIdx = syncState.sendChunkIndex
         if busyIdx and syncState.chunkOutcomes and syncState.chunkOutcomes[busyIdx]
@@ -3839,8 +4304,16 @@ function GBL:OnCombatStart()
             syncState.chunkOutcomes[combatIdx].outcome = "combatAbort"
         end
     end
-    -- Abort active sync
-    if syncState.sending then
+    -- Abort active sync. The preparation is checked first because it implies
+    -- sending: the slot is claimed before the chain starts, so testing
+    -- `sending` first would make this arm unreachable and every existing
+    -- live-send test would still pass. FinishSending is deliberately skipped
+    -- for a preparation, because it reports on a send: running it here writes
+    -- a full "Send complete 0/0 chunks" statistics block into the capture for
+    -- a session that never put a byte on the wire.
+    if syncState.prep then
+        self:_AbortSyncPrep("combat")
+    elseif syncState.sending then
         self:FinishSending()
     end
     if syncState.receiving then
@@ -3916,6 +4389,17 @@ function GBL:OnLoadingScreenStart()
     if not syncState.sending and not syncState.receiving then return end
     syncState.zonePaused = true
     self:AddAuditEntry("Loading screen detected - sync paused")
+
+    -- Pausing is worth it for a live send, where the cooldown resumes the same
+    -- session and a 20s loading screen does not cost a minutes-long backfill.
+    -- A preparation has nothing to come back to: the resume calls
+    -- SendNextChunk against the empty chunk list the accept installed, and an
+    -- absent chunk is answered with FinishSending, which reports a completed
+    -- send of zero chunks. So a preparation is abandoned instead, and the
+    -- requester's own resend recovers the sub-second of work.
+    if syncState.prep then
+        self:_AbortSyncPrep("loading screen")
+    end
 
     -- v0.28.7: tag the in-flight chunk so the histogram attributes the gap
     -- to a zone pause, not to a successful ACK on the pre-pause chunk. The

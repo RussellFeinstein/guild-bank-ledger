@@ -806,4 +806,201 @@ describe("Fingerprint", function()
             assert.is_nil(GBL:PeekBucketHashes(nil))
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- Sliced bucket hashing
+    --
+    -- ComputeBucketHashes walks every record and hashes every id in one go.
+    -- That is the first of the passes that trips the script watchdog when a
+    -- large-history client serves a SYNC_REQUEST (#115), so the serving
+    -- pipeline needs to do the same work a slice at a time across frames.
+    --
+    -- The scan lives here rather than in Sync.lua because the hashing, the
+    -- bucket key derivation and the cache it stamps are all file-local to this
+    -- module. Handing those out to be driven from elsewhere would mean
+    -- exporting three internals to save one.
+    ---------------------------------------------------------------------------
+
+    -- The third accessor. PeekBucketHashes answers "is there something to
+    -- print" and ignores the count on purpose; this one answers "can I use
+    -- this as the truth" and does not. The serving pipeline asks it first, so
+    -- getting the distinction wrong would mean serving off a stale map, which
+    -- decides which records a peer is offered.
+    describe("_FreshBucketHashes", function()
+        local function addRecord(id, timestamp)
+            table.insert(guildData.transactions, { id = id, timestamp = timestamp })
+        end
+
+        it("returns nil when the cache is cold", function()
+            addRecord("deposit|A|100|1|1|472222:0", 1700000000)
+            GBL:ResetHashCache()
+
+            assert.is_nil(GBL:_FreshBucketHashes(guildData))
+        end)
+
+        it("hands back the warm map when the count still matches", function()
+            addRecord("deposit|A|100|1|1|472222:0", 1700000000)
+            local warm = GBL:GetBucketHashes(guildData)
+
+            assert.equals(warm, GBL:_FreshBucketHashes(guildData))
+        end)
+
+        -- The whole point of the separate accessor: PeekBucketHashes still
+        -- returns a map here, and this one must not.
+        it("returns nil once the record count has moved", function()
+            addRecord("deposit|A|100|1|1|472222:0", 1700000000)
+            GBL:GetBucketHashes(guildData)
+            addRecord("deposit|B|200|2|2|472228:0", 1700100000)
+
+            assert.is_not_nil(GBL:PeekBucketHashes(guildData))
+            assert.is_nil(GBL:_FreshBucketHashes(guildData))
+        end)
+
+        it("returns nil when the cache belongs to another guild", function()
+            addRecord("deposit|A|100|1|1|472222:0", 1700000000)
+            GBL:GetBucketHashes(guildData)
+
+            assert.is_nil(GBL:_FreshBucketHashes(
+                { transactions = {}, moneyTransactions = {} }))
+        end)
+
+        it("returns nil for nil guildData", function()
+            assert.is_nil(GBL:_FreshBucketHashes(nil))
+        end)
+    end)
+
+    describe("sliced bucket hashing", function()
+        local function addRecord(id, timestamp)
+            table.insert(guildData.transactions, { id = id, timestamp = timestamp })
+        end
+
+        local function addMoney(id, timestamp)
+            table.insert(guildData.moneyTransactions, { id = id, timestamp = timestamp })
+        end
+
+        -- Drive a scan to completion, returning how many steps it took.
+        local function runScan(budget)
+            local scan = GBL:StartBucketHashScan(guildData)
+            local steps, done = 0, false
+            while not done do
+                local _, finished = GBL:StepBucketHashScan(guildData, scan, budget)
+                done = finished
+                steps = steps + 1
+                if steps > 500 then error("scan did not finish") end
+            end
+            return scan, steps
+        end
+
+        local function seed(n)
+            for i = 1, n do
+                addRecord("deposit|P" .. i .. "|100|1|1|" .. (472200 + i) .. ":0",
+                    1700000000 + i)
+            end
+        end
+
+        it("agrees with an uncached ComputeBucketHashes", function()
+            seed(10)
+            addMoney("withdrawal|M|500|1|1|472222:0", 1700000000)
+            local expected = GBL:ComputeBucketHashes(guildData)
+            GBL:ResetHashCache()
+
+            local scan = runScan(3)
+
+            assert.same(expected, scan.buckets)
+        end)
+
+        it("needs more than one step when the record count exceeds the budget",
+        function()
+            seed(10)
+            GBL:ResetHashCache()
+
+            local _, steps = runScan(3)
+
+            assert.is_true(steps > 1,
+                "a 10-record dataset on a budget of 3 must take several steps")
+        end)
+
+        it("spends no more than the budget on one step", function()
+            seed(10)
+            GBL:ResetHashCache()
+
+            local scan = GBL:StartBucketHashScan(guildData)
+            local spent = GBL:StepBucketHashScan(guildData, scan, 4)
+
+            assert.is_true(spent <= 4, "a step must respect its budget")
+        end)
+
+        it("warms the cache when it completes", function()
+            seed(4)
+            GBL:ResetHashCache()
+            assert.is_nil(GBL:PeekBucketHashes(guildData))
+
+            local scan = runScan(2)
+
+            assert.equals(scan.buckets, GBL:PeekBucketHashes(guildData))
+        end)
+
+        -- The stamp records the count captured when the walk started, not the
+        -- count now. A record appended mid-scan is not in the map, so a stamp
+        -- claiming the current count would hand the next reader a map that is
+        -- quietly missing records. Reporting the old count makes the next read
+        -- see a mismatch and recompute, which is the safe direction to be wrong.
+        -- Money records are what give this test teeth. The scan walks items
+        -- then money through one cursor, so the boundary between them is a
+        -- captured length. Re-reading it mid-scan would slide the boundary: the
+        -- appended item would be walked as if it had always been there and the
+        -- last money record would fall off the end, and with items only there
+        -- is no boundary to slide and the bug is invisible.
+        it("does not fold in a record appended mid-scan", function()
+            seed(3)
+            addMoney("withdrawal|M1|500|1|1|472240:0", 1700200000)
+            addMoney("withdrawal|M2|600|1|1|472246:0", 1700300000)
+            local expected = GBL:ComputeBucketHashes(guildData)
+            GBL:ResetHashCache()
+
+            local scan = GBL:StartBucketHashScan(guildData)
+            GBL:StepBucketHashScan(guildData, scan, 2)
+            addRecord("deposit|LATE|999|1|1|472299:0", 1700900000)
+
+            local done = false
+            while not done do
+                local _, finished = GBL:StepBucketHashScan(guildData, scan, 2)
+                done = finished
+            end
+
+            -- Exactly the map the dataset had when the scan started: both money
+            -- records in, the late item out.
+            assert.same(expected, scan.buckets)
+            assert.is_nil(scan.buckets[math.floor(472299 / 6)],
+                "a record appended mid-scan must not appear in this map")
+            assert.is_not_nil(scan.buckets[math.floor(472246 / 6)],
+                "the last money record must still have been walked")
+
+            -- And the stamp must not claim the map is current: the next read
+            -- recomputes and the late record shows up.
+            assert.is_not_nil(GBL:GetBucketHashes(guildData)[math.floor(472299 / 6)])
+        end)
+
+        it("completes immediately on an empty dataset", function()
+            GBL:ResetHashCache()
+
+            local scan = GBL:StartBucketHashScan(guildData)
+            local _, done = GBL:StepBucketHashScan(guildData, scan, 100)
+
+            assert.is_true(done)
+            assert.same({}, scan.buckets)
+        end)
+
+        it("covers money records as well as items", function()
+            addRecord("deposit|A|100|1|1|472222:0", 1700000000)
+            addMoney("withdrawal|M|500|1|1|472240:0", 1700200000)
+            local expected = GBL:ComputeBucketHashes(guildData)
+            GBL:ResetHashCache()
+
+            local scan = runScan(1)
+
+            assert.same(expected, scan.buckets)
+            assert.is_not_nil(scan.buckets[math.floor(472240 / 6)])
+        end)
+    end)
 end)

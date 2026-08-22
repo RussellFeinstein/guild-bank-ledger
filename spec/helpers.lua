@@ -243,4 +243,43 @@ end
 Helpers.MockWoW = MockWoW
 Helpers.MockAce = MockAce
 
+--- Fire pending zero-delay timers until none are left, one round at a time.
+--
+-- For driving a C_Timer.After(0) work chain, where each hop schedules the next
+-- (the sliced serve preparation in src/Sync.lua is the one this was written
+-- for). Three things it deliberately does NOT do, each learned from the mock:
+--
+--   MockWoW.fireTimers is not usable here. It empties the whole queue, so it
+--   would also fire the 120s send hard timer and the HELLO heartbeat, aborting
+--   the very thing the test is driving. This keeps every other timer in place.
+--
+--   It snapshots before firing, so a callback that schedules the next hop
+--   lands in the queue the NEXT round reads. One round advances a chain by
+--   exactly one hop, which is what makes "how many rounds did that take" a
+--   meaningful assertion about slicing.
+--
+--   It stops when a round fires nothing, rather than looping to a fixed count,
+--   and errors at the cap instead of returning quietly. A chain that stops
+--   advancing is a bug worth failing on, not a test that silently passes.
+-- @param maxRounds number|nil Safety cap (default 200)
+-- @return number How many rounds actually fired something
+function Helpers.drainZeroDelayTimers(maxRounds)
+    maxRounds = maxRounds or 200
+    for round = 1, maxRounds do
+        local keep, toFire = {}, {}
+        for _, t in ipairs(MockWoW.pendingTimers) do
+            if not t.cancelled and t.delay == 0 then
+                toFire[#toFire + 1] = t
+            else
+                keep[#keep + 1] = t
+            end
+        end
+        MockWoW.pendingTimers = keep
+        if #toFire == 0 then return round - 1 end
+        for _, t in ipairs(toFire) do t.callback() end
+    end
+    error("drainZeroDelayTimers hit its cap of " .. maxRounds
+        .. " rounds; the chain is not finishing", 2)
+end
+
 return Helpers

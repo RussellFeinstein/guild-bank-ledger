@@ -89,6 +89,58 @@ function M.fireNextChunkDelay()
     error("no pending inter-chunk delay timer to fire", 2)
 end
 
+--- Deliver a SYNC_REQUEST and let the serve preparation finish.
+--
+-- Preparing a serve runs across frames on a zero-delay chain (#115), so a
+-- large enough dataset does not reach the first chunk inside the call. Small
+-- ones still do: the whole preparation fits in one tick's budget and completes
+-- synchronously, which is why the great majority of the specs in this suite
+-- call HandleSyncRequest directly and are none the wiser.
+--
+-- Use this wherever a test seeds more records than SYNC_PREP_RECORDS_PER_TICK
+-- covers, or asserts on something only the finished preparation produces.
+-- Draining when there was nothing to drain is harmless.
+-- @param GBL table The addon object
+-- @param sender string The requesting peer
+-- @param payload table The SYNC_REQUEST payload
+function M.serveRequest(GBL, sender, payload)
+    GBL:HandleSyncRequest(sender, payload)
+    Helpers.drainZeroDelayTimers()
+end
+
+--- ACK every chunk and fire the inter-chunk gap until the send finishes.
+--
+-- Only the first chunk leaves synchronously, so any assertion about what a
+-- session actually offered has to drive the rest the way a healthy peer would.
+-- The clock has to move as well: SendNextChunk enforces a wall-clock gap floor
+-- between issues, and against a frozen GetTime it just reschedules itself and
+-- the send never leaves chunk one.
+--
+-- Bounded rather than looping until done, so a send that stops making progress
+-- ends the test instead of hanging it.
+-- @param GBL table The addon object
+-- @param target string The peer being served
+function M.drainSend(GBL, target)
+    for _ = 1, 4000 do
+        if not GBL:GetSyncStatus().sending then break end
+        local idx = tonumber(GBL:GetSyncStatus().sendProgress:match("^(%d+)"))
+        GBL:HandleAck(target, { chunk = idx })
+        MockWoW.serverTime = MockWoW.serverTime + 2
+        local fired = false
+        for i = #MockWoW.pendingTimers, 1, -1 do
+            local t = MockWoW.pendingTimers[i]
+            if not t.cancelled and not t.fired and t.delay
+                and t.delay > 0 and t.delay <= 2.0 then
+                t.fired = true
+                t.callback()
+                fired = true
+                break
+            end
+        end
+        if not fired then break end
+    end
+end
+
 --- Fire the latest uncancelled receive timeout timer (any delay).
 -- With NACK backoff, delays change (20→30→45), so we can't match on exact delay.
 -- Finds the last (newest) uncancelled ticker and fires it.

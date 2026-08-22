@@ -434,6 +434,27 @@ function GBL:PruneEventCounts(maxAgeDays, guildData)
     end
 end
 
+--- Does this eventCounts entry belong with the buckets a session is sending?
+--
+-- The per-entry rule, on its own so that more than one walk can apply it. The
+-- sliced serving pipeline (#115) crosses this table a few hundred entries at a
+-- time across frames and cannot reuse the loop below, so without this it would
+-- carry its own copy of the rule. Two implementations of one filter is exactly
+-- the shape that let a labeler config and its backfill disagree in #112: both
+-- were internally consistent, and only comparing them directly found it.
+--
+-- A nil filter means send everything, which is the fallback path where there
+-- are no bucket keys to compare against.
+-- @param baseHash string An eventCounts key (record id prefix plus time slot)
+-- @param diffBuckets table|nil Set of 6-hour bucket keys; nil = everything rides
+-- @return boolean True when the entry should ride along
+function GBL:EventCountRidesWithBuckets(baseHash, diffBuckets)
+    if not diffBuckets then return true end
+    local _, slot = self:SplitBaseHash(baseHash)
+    if not slot then return false end
+    return diffBuckets[self:BucketKeyForTimeSlot(slot)] and true or false
+end
+
 --- Collect eventCounts entries matching a set of fingerprint bucket keys.
 -- Used by sync to include only relevant counts in the payload.
 -- @param guildData table Guild data from AceDB
@@ -443,17 +464,8 @@ function GBL:CollectEventCountsForBuckets(guildData, diffBuckets)
     if not guildData or not guildData.eventCounts then return {} end
     local result = {}
     for baseHash, entry in pairs(guildData.eventCounts) do
-        if not diffBuckets then
-            -- No filter: send all
+        if self:EventCountRidesWithBuckets(baseHash, diffBuckets) then
             result[baseHash] = entry
-        else
-            local _, slot = self:SplitBaseHash(baseHash)
-            if slot then
-                local bucketKey = math.floor(slot / 6)
-                if diffBuckets[bucketKey] then
-                    result[baseHash] = entry
-                end
-            end
         end
     end
     return result

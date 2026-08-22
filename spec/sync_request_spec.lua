@@ -880,6 +880,708 @@ describe("Sync request and serve", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Wire-order characterization (#115)
+    --
+    -- The order records reach the wire in, pinned while serving is still one
+    -- synchronous pass, so that slicing it across frames has something to be
+    -- byte-identical against. The risk being guarded is narrow and real: the
+    -- sliced pipeline stops sorting one flat list and instead materializes the
+    -- send list by walking selected buckets, and a walk over the wrong array
+    -- reorders the wire without breaking anything that would fail loudly.
+    --
+    -- Expectations below are hand-derived from the comparators, never pasted
+    -- from a run. A characterization built out of what the code prints can only
+    -- ever agree with the code; the wire fixtures follow the same rule and for
+    -- the same reason.
+    --
+    -- The contract, in the order the pipeline applies it:
+    --   1. Collect walks guildData in array order, keeping records whose bucket
+    --      differs. Order here does not survive step 2, so it is not pinned.
+    --   2. SortSendListNewestFirst sorts by (bucket key DESC, id DESC). Items
+    --      and money are sorted as two SEPARATE lists.
+    --   3. _SelectSessionBuckets filters both lists and preserves list order.
+    --      The demote set decides which buckets are picked when the cap binds.
+    --      It never reorders the records that were picked, which is why a
+    --      second request from the same peer must produce the same sequence.
+    --   4. PrepareChunks packs items first and then money, in list order, and
+    --      keeps filling the chunk it is on when it crosses from one list to
+    --      the other. So flattening every chunk reproduces the two sorted
+    --      lists concatenated, items entirely ahead of money.
+    ---------------------------------------------------------------------------
+
+    describe("wire order", function()
+        -- WoW-era seconds. Bucket key comes from the timeSlot inside the id
+        -- (hours since epoch, floor-divided by 6), so the ids and the
+        -- timestamps are built from one number to keep them consistent.
+        local SLOTS = { 480000, 480006, 480012, 480018, 480024 }
+        local ITEMS_PER_BUCKET = 5
+        local MONEY_PER_BUCKET = 3
+
+        -- Ids are fixed width, so the id DESC tiebreak is a plain string
+        -- compare over the trailing occurrence digit.
+        local function itemId(slot, occ) return "i|" .. slot .. ":" .. occ end
+        local function moneyId(slot, occ) return "m|" .. slot .. ":" .. occ end
+
+        -- Inserted deliberately shuffled: buckets interleaved and occurrences
+        -- out of order, so array order cannot accidentally match wire order.
+        local function seed()
+            local slotOrder = { 3, 1, 5, 2, 4 }
+            local occOrder = { 2, 0, 4, 1, 3 }
+            for _, si in ipairs(slotOrder) do
+                local slot = SLOTS[si]
+                for _, occ in ipairs(occOrder) do
+                    if occ < ITEMS_PER_BUCKET then
+                        table.insert(guildData.transactions, {
+                            type = "deposit", player = "P" .. occ,
+                            itemID = 1000 + occ, count = 1, tab = 1,
+                            timestamp = slot * 3600 + occ,
+                            scanTime = slot * 3600 + occ,
+                            scannedBy = "OfficerA",
+                            id = itemId(slot, occ),
+                        })
+                    end
+                    if occ < MONEY_PER_BUCKET then
+                        table.insert(guildData.moneyTransactions, {
+                            type = "deposit", player = "M" .. occ,
+                            amount = 100 + occ,
+                            timestamp = slot * 3600 + occ,
+                            scanTime = slot * 3600 + occ,
+                            scannedBy = "OfficerA",
+                            id = moneyId(slot, occ),
+                        })
+                    end
+                end
+            end
+        end
+
+        -- Bucket DESC (newest slot first), then id DESC (highest occurrence
+        -- first) inside each bucket. Built by hand from the comparator, not
+        -- by running the sort.
+        local function expectedItems()
+            local out = {}
+            for si = #SLOTS, 1, -1 do
+                for occ = ITEMS_PER_BUCKET - 1, 0, -1 do
+                    out[#out + 1] = itemId(SLOTS[si], occ)
+                end
+            end
+            return out
+        end
+
+        local function expectedMoney()
+            local out = {}
+            for si = #SLOTS, 1, -1 do
+                for occ = MONEY_PER_BUCKET - 1, 0, -1 do
+                    out[#out + 1] = moneyId(SLOTS[si], occ)
+                end
+            end
+            return out
+        end
+
+        -- Every SYNC_DATA chunk this session put on the wire, in send order.
+        local function sentChunks()
+            local out = {}
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                if ok and data.type == "SYNC_DATA" then out[#out + 1] = data end
+            end
+            return out
+        end
+
+        -- Flatten the chunks back into the two lists the packer was handed.
+        local function flatten(chunks)
+            local items, money = {}, {}
+            for _, chunk in ipairs(chunks) do
+                for _, tx in ipairs(chunk.transactions or {}) do
+                    items[#items + 1] = tx.id
+                end
+                for _, tx in ipairs(chunk.moneyTransactions or {}) do
+                    money[#money + 1] = tx.id
+                end
+            end
+            return items, money
+        end
+
+        local function serve()
+            MockAce.sentCommMessages = {}
+            -- Empty bucketHashes: every local bucket differs, so the whole
+            -- fixture is offered and nothing is filtered out from under the
+            -- ordering being pinned.
+            GBL:HandleSyncRequest("OfficerB",
+                request{ sinceTimestamp = 0, bucketHashes = {} })
+            Sync.drainSend(GBL, "OfficerB")
+            return flatten(sentChunks())
+        end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            seed()
+        end)
+
+        it("sends items newest bucket first, id descending inside a bucket",
+        function()
+            local items = serve()
+            assert.same(expectedItems(), items)
+        end)
+
+        it("sends money in the same order, entirely after the items", function()
+            local _, money = serve()
+            assert.same(expectedMoney(), money)
+        end)
+
+        it("carries every seeded record exactly once", function()
+            local items, money = serve()
+            assert.equals(#SLOTS * ITEMS_PER_BUCKET, #items)
+            assert.equals(#SLOTS * MONEY_PER_BUCKET, #money)
+        end)
+
+        -- A repeat request with nothing changed demotes every bucket at once,
+        -- and a uniform demotion is no demotion: the comparator falls straight
+        -- through to the newest-first tiebreak. Worth one test that the repeat
+        -- is stable, but do not mistake it for cover of the demote path. It was
+        -- written as that cover first, and the mutation below walked through it.
+        it("puts an unchanged repeat request on the wire in the same order",
+        function()
+            local firstItems, firstMoney = serve()
+            local secondItems, secondMoney = serve()
+            assert.same(firstItems, secondItems)
+            assert.same(firstMoney, secondMoney)
+        end)
+
+        -- This is the one that guards the restructure. The sliced pipeline
+        -- stops sorting a flat list and materializes the send list by walking
+        -- selected buckets, and the obvious array to walk is the one
+        -- _SelectSessionBuckets already sorted. That array is demote-sorted:
+        -- it decides which buckets a capped session picks and nothing else,
+        -- while the records handed back keep newest-first list order.
+        --
+        -- Telling the two apart needs a demotion that CONTRADICTS newest-first,
+        -- so the fixture changes the oldest bucket only. Its hash no longer
+        -- matches what the first session stamped, making it the single bucket
+        -- not demoted, so it sorts to the front of the demote-sorted array
+        -- while newest-first still wants it last.
+        it("keeps newest-first when a repeat request demotes only some buckets",
+        function()
+            serve()  -- stamps the tranche for this peer
+
+            local oldest = SLOTS[1]
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "Late", itemID = 999, count = 1,
+                tab = 1, timestamp = oldest * 3600 + 9,
+                scanTime = oldest * 3600 + 9, scannedBy = "OfficerA",
+                id = itemId(oldest, 9),
+            })
+
+            local items = serve()
+
+            -- Newest buckets unchanged, then the oldest bucket last, with the
+            -- late record at its head because id DESC puts 9 ahead of 4.
+            local expected = {}
+            for si = #SLOTS, 2, -1 do
+                for occ = ITEMS_PER_BUCKET - 1, 0, -1 do
+                    expected[#expected + 1] = itemId(SLOTS[si], occ)
+                end
+            end
+            expected[#expected + 1] = itemId(oldest, 9)
+            for occ = ITEMS_PER_BUCKET - 1, 0, -1 do
+                expected[#expected + 1] = itemId(oldest, occ)
+            end
+
+            assert.same(expected, items)
+        end)
+
+        it("packs chunks as contiguous slices of the flattened order", function()
+            serve()
+            local chunks = sentChunks()
+            assert.is_true(#chunks > 1,
+                "fixture must span several chunks for this to mean anything")
+
+            -- Walk the expected sequence with a single moving cursor: any
+            -- chunk that reordered or repeated a record breaks the walk.
+            local expected = expectedItems()
+            local cursor = 0
+            for _, chunk in ipairs(chunks) do
+                for _, tx in ipairs(chunk.transactions or {}) do
+                    cursor = cursor + 1
+                    assert.equals(expected[cursor], tx.id)
+                end
+            end
+            assert.equals(#expected, cursor)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Sliced serve preparation (#115)
+    --
+    -- Serving used to do every pass between accepting a request and the first
+    -- chunk in one execution slice, which WoW's script watchdog killed outright
+    -- on a large history. It killed before any chunk went out, so the
+    -- requester's retry died the same way and the client was not a slow server
+    -- but a permanently silent one.
+    --
+    -- What is worth pinning here is the shape of the fix rather than its speed:
+    -- the slot is claimed synchronously so two peers cannot both be accepted,
+    -- the work genuinely spans ticks once it exceeds a budget, and everything
+    -- the old synchronous version guaranteed still holds at the far end.
+    ---------------------------------------------------------------------------
+
+    describe("sliced serve preparation", function()
+        local BASE_SLOT = 475000
+
+        -- Records spread thinly over many buckets, so the session cap is not
+        -- what decides the outcome here.
+        local function seed(n)
+            for i = 1, n do
+                local slot = BASE_SLOT + i
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "P" .. i, itemID = 1000, count = 1,
+                    tab = 1, timestamp = slot * 3600, scanTime = slot * 3600,
+                    scannedBy = "OfficerA", id = "d|" .. slot .. ":0",
+                })
+            end
+            GBL:ResetHashCache()
+        end
+
+        local function auditHas(fragment)
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message and entry.message:find(fragment, 1, true) then
+                    return true
+                end
+            end
+            return false
+        end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+        end)
+
+        it("claims the send slot synchronously, before any work is done",
+        function()
+            -- Enough records that the preparation cannot possibly finish in
+            -- the accepting call, so this is really asking about the claim.
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+
+            assert.is_true(GBL:GetSyncStatus().sending,
+                "the slot must be taken before the chain yields")
+            assert.is_true(GBL:GetSyncStatus().preparing)
+            assert.equals("PeerA", GBL:GetSyncStatus().sendTarget)
+        end)
+
+        it("finishes a small request inside the accepting call", function()
+            -- The reason the great majority of this suite needed no changes:
+            -- a dataset that fits one tick's budget still completes and sends
+            -- synchronously, exactly as it did before the pipeline was sliced.
+            seed(5)
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+
+            assert.is_false(GBL:GetSyncStatus().preparing,
+                "a small preparation should not still be running")
+            assert.is_true(#MockAce.sentCommMessages > 0,
+                "the first chunk should already have left")
+        end)
+
+        it("spans more than one tick once the budget is exceeded", function()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "a dataset past the budget must not finish in one tick")
+
+            local rounds = Helpers.drainZeroDelayTimers()
+            assert.is_true(rounds >= 1, "the chain has to have advanced on a timer")
+            assert.is_false(GBL:GetSyncStatus().preparing)
+        end)
+
+        it("serves the same records whether or not it needed several ticks",
+        function()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+            local held = #guildData.transactions
+
+            Sync.serveRequest(GBL, "PeerA", request{ sinceTimestamp = 0 })
+            Sync.drainSend(GBL, "PeerA")
+
+            local sent = 0
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "SYNC_DATA" then
+                    sent = sent + #(data.transactions or {})
+                end
+            end
+            -- The session cap bounds this, so the assertion is that records
+            -- flowed at all and none were invented, not that all of them went.
+            assert.is_true(sent > 0, "a multi-tick preparation must still send")
+            assert.is_true(sent <= held)
+        end)
+
+        it("records what it did in the capture", function()
+            seed(20)
+
+            Sync.serveRequest(GBL, "PeerA", request{ sinceTimestamp = 0 })
+
+            assert.is_true(auditHas("Prep complete for PeerA"),
+                "a capture has to be able to see the preparation finish")
+        end)
+
+        -- The whole point of claiming the slot up front.
+        it("declines a second peer arriving mid-preparation", function()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
+
+            local busy
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "BUSY" and msg.target == "PeerB" then
+                    busy = data
+                end
+            end
+            assert.is_not_nil(busy, "the second peer should be told to wait")
+            -- A preparation is sub-second and a send is minutes. Without the
+            -- distinction a capture cannot tell which wait a declined peer was
+            -- queued behind.
+            assert.equals("preparing:PeerA", busy.reason)
+        end)
+
+        it("ignores a repeat request from the peer being prepared for",
+        function()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+
+            -- Answering this with BUSY would tear down the receive we are
+            -- about to feed.
+            assert.equals(0, #MockAce.sentCommMessages)
+            assert.is_true(GBL:GetSyncStatus().preparing)
+        end)
+
+        -- The stamp used to happen before the chunks were packed, so a serve
+        -- that died partway still told the next session it had handed these
+        -- buckets over, and they would sort last for nothing. Asserted through
+        -- what the next session does rather than by reaching into the state:
+        -- with no tranche recorded there is nothing to rotate against, so the
+        -- rotation line stays quiet. Read against the test above it, where a
+        -- serve that did complete makes the same line appear.
+        it("leaves no tranche behind when the preparation is abandoned",
+        function()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().preparing)
+
+            GBL:_AbortSyncPrep("abandoned by the test")
+            assert.is_false(GBL:GetSyncStatus().sending,
+                "abandoning must release the slot")
+            GBL:ClearLog("sync")
+
+            Sync.serveRequest(GBL, "PeerA", request{ sinceTimestamp = 0 })
+
+            assert.is_false(auditHas("Tranche rotation"),
+                "an abandoned preparation must not have recorded a tranche")
+        end)
+
+        it("answers an empty diff by releasing the slot, not holding it",
+        function()
+            -- No records at all, so there is nothing to offer.
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            Helpers.drainZeroDelayTimers()
+
+            assert.is_false(GBL:GetSyncStatus().sending,
+                "an empty diff must not leave the slot claimed")
+            assert.is_false(GBL:GetSyncStatus().preparing)
+            assert.is_true(auditHas("Sent empty sync to PeerA"))
+        end)
+
+        -- Rotation shipped on a structural argument and has never been seen
+        -- working in a capture. The line is its falsification instrument, so it
+        -- has to appear when there is a prior tranche and stay quiet when there
+        -- is not, or a reader cannot tell "did not fire" from "not reported".
+        it("says nothing about rotation on a peer's first session", function()
+            seed(20)
+
+            Sync.serveRequest(GBL, "PeerA", request{ sinceTimestamp = 0 })
+
+            assert.is_false(auditHas("Tranche rotation"),
+                "there is no previous tranche to rotate against")
+        end)
+
+        it("reports rotation once the peer has a previous tranche", function()
+            seed(20)
+            Sync.serveRequest(GBL, "PeerA", request{ sinceTimestamp = 0 })
+            Sync.drainSend(GBL, "PeerA")
+
+            Sync.serveRequest(GBL, "PeerA", request{ sinceTimestamp = 0 })
+
+            assert.is_true(auditHas("Tranche rotation for PeerA"))
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Serve preparation teardown (#115)
+    --
+    -- Claiming the send slot synchronously and then working across frames means
+    -- a teardown can now land while the preparation is still running, which was
+    -- impossible when serving was one uninterrupted slice. Every path that
+    -- tears a send down has to say so to the chain as well, because the chain
+    -- is not reachable through the send state those paths clear: it lives on a
+    -- C_Timer.After(0) hop that nothing holds a handle to.
+    --
+    -- Left unwired, an orphaned chain runs to completion and commits into the
+    -- torn-down session: it stamps the peer's tranche (telling the NEXT session
+    -- these buckets were handed over when nothing was sent), logs a
+    -- "Sending N tx" line for a send that never happens, and holds the packed
+    -- chunks. The loading-screen path is worse than the others, because its
+    -- resume fires SendNextChunk against the empty chunk list the accept block
+    -- installed, and SendNextChunk answers an absent chunk with FinishSending:
+    -- a full "Send complete 0/0" statistics block for a session that never
+    -- sent a byte. That is the specific reason a mid-prep loading screen
+    -- aborts rather than pausing. Pause-and-resume earns its keep for a live
+    -- send, where there are prepared chunks to come back to; mid-preparation
+    -- there are none, and the sub-second of work lost is recovered by the
+    -- requester's own resend.
+    ---------------------------------------------------------------------------
+
+    describe("serve prep teardown", function()
+        local BASE_SLOT = 476000
+
+        local function seed(n)
+            for i = 1, n do
+                local slot = BASE_SLOT + i
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "P" .. i, itemID = 1000, count = 1,
+                    tab = 1, timestamp = slot * 3600, scanTime = slot * 3600,
+                    scannedBy = "OfficerA", id = "d|" .. slot .. ":0",
+                })
+            end
+            GBL:ResetHashCache()
+        end
+
+        local function auditHas(fragment)
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message and entry.message:find(fragment, 1, true) then
+                    return true
+                end
+            end
+            return false
+        end
+
+        --- Put a preparation in flight and hand back a clean slate to assert on.
+        -- Past one tick's budget, so the chain has genuinely yielded rather
+        -- than completed inside the accepting call.
+        local function startPrep()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "the fixture must leave a preparation actually running")
+            MockAce.sentCommMessages = {}
+            GBL:ClearLog("sync")
+        end
+
+        --- Count SYNC_DATA messages, which is what "did it serve anyway" means.
+        local function dataSent()
+            local n = 0
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "SYNC_DATA" then n = n + 1 end
+            end
+            return n
+        end
+
+        --- The shared shape of every teardown: the chain is dead, and letting
+        -- any hop it already scheduled fire changes nothing.
+        local function assertChainIsDead()
+            assert.is_false(GBL:GetSyncStatus().preparing,
+                "the preparation must not survive the teardown")
+
+            Helpers.drainZeroDelayTimers()
+
+            assert.is_false(GBL:GetSyncStatus().preparing)
+            assert.equals(0, dataSent(),
+                "an abandoned preparation must not go on to serve")
+            assert.is_false(auditHas("Sending "),
+                "nor announce a send it will never make")
+        end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+        end)
+
+        it("abandons the preparation when the peer sends BUSY", function()
+            startPrep()
+
+            GBL:HandleBusy("PeerA", { reason = "combat" })
+
+            assert.is_false(GBL:GetSyncStatus().sending,
+                "BUSY from the peer we are preparing for releases the slot")
+            assertChainIsDead()
+        end)
+
+        it("records no tranche when BUSY abandons the preparation", function()
+            startPrep()
+            GBL:HandleBusy("PeerA", { reason = "combat" })
+            Helpers.drainZeroDelayTimers()
+            GBL:ClearLog("sync")
+
+            -- Asserted through the next session rather than by reaching into
+            -- the state: with nothing recorded there is nothing to rotate
+            -- against, so the rotation line stays quiet.
+            Sync.serveRequest(GBL, "PeerA", request{ sinceTimestamp = 0 })
+
+            assert.is_false(auditHas("Tranche rotation"),
+                "buckets that were never sent must not be marked as handed over")
+        end)
+
+        it("abandons the preparation when combat starts", function()
+            startPrep()
+
+            GBL:OnCombatStart()
+
+            assert.is_false(GBL:GetSyncStatus().sending)
+            assertChainIsDead()
+        end)
+
+        it("still tells the requester it is busy when combat starts", function()
+            startPrep()
+
+            GBL:OnCombatStart()
+
+            local busy
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "BUSY" and msg.target == "PeerA" then
+                    busy = data
+                end
+            end
+            assert.is_not_nil(busy,
+                "the peer is waiting on a serve that is not coming")
+            assert.equals("combat", busy.reason)
+        end)
+
+        it("reports no send statistics for a preparation combat killed", function()
+            startPrep()
+
+            GBL:OnCombatStart()
+            Helpers.drainZeroDelayTimers()
+
+            -- FinishSending is what emits the per-session statistics block, and
+            -- running it here would report a completed send of zero chunks.
+            assert.is_false(auditHas("Send complete"),
+                "a preparation that never sent has no send to summarize")
+        end)
+
+        it("abandons the preparation when a loading screen starts", function()
+            startPrep()
+
+            GBL:OnLoadingScreenStart()
+
+            assert.is_false(GBL:GetSyncStatus().sending,
+                "the slot cannot be held across a loading screen mid-prep")
+            assertChainIsDead()
+        end)
+
+        it("resumes nothing after a loading screen that killed a preparation",
+        function()
+            startPrep()
+            GBL:OnLoadingScreenStart()
+            GBL:OnLoadingScreenEnd()
+            Helpers.drainZeroDelayTimers()
+            GBL:ClearLog("sync")
+
+            -- The zone cooldown, which is where the resume happens.
+            for _, t in ipairs(MockWoW.pendingTimers) do
+                if not t.cancelled and t.delay and t.delay > 1 and t.delay <= 10 then
+                    t.callback()
+                    break
+                end
+            end
+
+            -- Resuming a send whose chunks were never packed used to reach
+            -- SendNextChunk's absent-chunk arm, which answers with FinishSending.
+            assert.is_false(auditHas("Send complete"),
+                "there is no session left to resume")
+            assert.equals(0, dataSent())
+        end)
+
+        it("abandons the preparation when sync is disabled", function()
+            startPrep()
+
+            GBL:DisableSync()
+
+            assert.is_false(GBL:GetSyncStatus().sending)
+            assert.is_nil(GBL:GetSyncStatus().sendTarget,
+                "disabling sync leaves no peer half-claimed")
+            assertChainIsDead()
+        end)
+
+        it("abandons the preparation when sync state is reset", function()
+            startPrep()
+
+            GBL:ResetSyncState()
+
+            assert.is_false(GBL:GetSyncStatus().sending)
+            assertChainIsDead()
+        end)
+
+        it("abandons a preparation that stops making progress", function()
+            startPrep()
+
+            -- The watchdog is the only thing standing between a chain that
+            -- dies silently and a send slot held until the player reloads,
+            -- BUSYing every request in the meantime.
+            local fired = false
+            for _, t in ipairs(MockWoW.pendingTimers) do
+                if not t.cancelled and t.delay == GBL.SYNC_PREP_TIMEOUT then
+                    t.callback()
+                    fired = true
+                    break
+                end
+            end
+            assert.is_true(fired, "no prep watchdog was armed to fire")
+
+            assert.is_false(GBL:GetSyncStatus().sending,
+                "the watchdog has to release the slot, not just log")
+            assert.is_false(GBL:GetSyncStatus().preparing)
+        end)
+
+        it("serves normally after a watchdog abort", function()
+            startPrep()
+            for _, t in ipairs(MockWoW.pendingTimers) do
+                if not t.cancelled and t.delay == GBL.SYNC_PREP_TIMEOUT then
+                    t.callback()
+                    break
+                end
+            end
+            Helpers.drainZeroDelayTimers()
+            MockAce.sentCommMessages = {}
+
+            Sync.serveRequest(GBL, "PeerA", request{ sinceTimestamp = 0 })
+            Sync.drainSend(GBL, "PeerA")
+
+            assert.is_true(dataSent() > 0,
+                "an aborted preparation must not poison the next request")
+        end)
+
+        it("abandons the preparation when the guild changes under it", function()
+            startPrep()
+
+            -- Switching guild replaces the table the chain captured, so every
+            -- record it has been walking belongs to somebody else's history.
+            MockWoW.guild.name = "Other Guild"
+
+            Helpers.drainZeroDelayTimers()
+
+            assert.is_false(GBL:GetSyncStatus().preparing)
+            assert.is_false(GBL:GetSyncStatus().sending)
+            assert.equals(0, dataSent(),
+                "records gathered for one guild must not be served as another's")
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Bounded sync sessions
     --
     -- A fresh install used to pull the sender's whole history in one
@@ -922,6 +1624,65 @@ describe("Sync request and serve", function()
             end
             return seen
         end
+
+        -- The selection core, called with counts instead of records (#115).
+        -- The sliced serving pipeline reaches this decision already knowing how
+        -- many records sit in each bucket, so asking it through
+        -- _SelectSessionBuckets would mean re-walking every record to rebuild
+        -- exactly that. Same rules either way; these pin them at the level the
+        -- chain uses, so a change there cannot quietly rely on the wrapper.
+        describe("_SelectBucketsByCount", function()
+            it("takes whole buckets newest first until the cap is met", function()
+                local selected, remaining =
+                    GBL:_SelectBucketsByCount({ [90] = 2, [89] = 2, [88] = 2 }, 3)
+
+                assert.is_true(selected[90])
+                assert.is_true(selected[89])
+                assert.is_nil(selected[88])
+                assert.equals(1, remaining)
+            end)
+
+            it("always takes the first bucket, even when it exceeds the cap",
+            function()
+                local selected, remaining =
+                    GBL:_SelectBucketsByCount({ [90] = 10 }, 3)
+
+                assert.is_true(selected[90])
+                assert.equals(0, remaining)
+            end)
+
+            it("sorts demoted buckets behind everything else", function()
+                -- 90 is the newest but was already sent unchanged, so the older
+                -- 89 goes first and 90 is what waits.
+                local selected, remaining = GBL:_SelectBucketsByCount(
+                    { [90] = 2, [89] = 2 }, 1, { [90] = true })
+
+                assert.is_true(selected[89])
+                assert.is_nil(selected[90])
+                assert.equals(1, remaining)
+            end)
+
+            it("is unmoved by the order the counts table iterates in", function()
+                -- The key list is derived from the table and sorted, so the
+                -- answer cannot depend on what pairs() happens to hand back.
+                local first = GBL:_SelectBucketsByCount(
+                    { [90] = 1, [89] = 1, [88] = 1, [87] = 1 }, 2)
+                local second = GBL:_SelectBucketsByCount(
+                    { [87] = 1, [88] = 1, [89] = 1, [90] = 1 }, 2)
+
+                assert.same(first, second)
+                assert.is_true(first[90])
+                assert.is_true(first[89])
+            end)
+
+            it("returns nothing to send and nothing waiting for empty counts",
+            function()
+                local selected, remaining = GBL:_SelectBucketsByCount({}, 300)
+
+                assert.same({}, selected)
+                assert.equals(0, remaining)
+            end)
+        end)
 
         describe("_SelectSessionBuckets", function()
             it("takes whole buckets newest first until the cap is met", function()
@@ -1075,7 +1836,7 @@ describe("Sync request and serve", function()
                 seedOverCap()
                 local held = #guildData.transactions
 
-                GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+                Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
                 drainSend("OfficerB")
 
                 local sent = recordsSent()
@@ -1097,7 +1858,7 @@ describe("Sync request and serve", function()
             -- wire at all.
             it("puts remaining on the final chunk only", function()
                 seedOverCap()
-                GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+                Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
                 drainSend("OfficerB")
 
                 local chunks = sentChunks()
@@ -1114,7 +1875,7 @@ describe("Sync request and serve", function()
                 guildData.seenTxHashes["small:475100:1"] = 475100 * BUCKET + 1
                 GBL:ResetHashCache()
 
-                GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+                Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
                 drainSend("OfficerB")
 
                 for _, chunk in ipairs(sentChunks()) do
@@ -1126,7 +1887,7 @@ describe("Sync request and serve", function()
             -- same tranche forever.
             it("serves the deferred buckets on the next request", function()
                 seedOverCap()
-                GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+                Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
                 drainSend("OfficerB")
                 local firstPass = {}
                 for _, chunk in ipairs(sentChunks()) do
@@ -1137,7 +1898,7 @@ describe("Sync request and serve", function()
 
                 MockAce.sentCommMessages = {}
                 GBL:FinishSending()
-                GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+                Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
                 drainSend("OfficerB")
 
                 local secondPassHasNew = false
