@@ -5,83 +5,20 @@
 local Helpers = require("spec.helpers")
 local MockAce = Helpers.MockAce
 local MockWoW = Helpers.MockWoW
+local Sync = require("spec.sync_helpers")
 
---- Fire the pending one-shot ACK timer, and fail if there is not one.
--- The delay comes from the caller as GBL.SYNC_ACK_TIMEOUT rather than a
--- literal, and a miss is an error rather than a quiet no-op. Both matter: these
--- sites used to match a hardcoded 8, so when ACK_TIMEOUT became 3 they would
--- have matched nothing, and the tests that assert "still sending" after a
--- timeout would have passed without ever firing one.
--- @param delay number The production ACK_TIMEOUT
-local function fireAckTimeout(delay)
-    for _, timer in ipairs(MockWoW.pendingTimers) do
-        if timer.delay == delay and not timer.cancelled then
-            timer.callback()
-            return
-        end
-    end
-    error(("no pending ACK timer at %ss to fire"):format(tostring(delay)), 2)
-end
-
---- Fire the adaptive inter-chunk delay that HandleAck schedules the next chunk
--- on (INTER_CHUNK_DELAY_NORMAL 0.1s, or 0.5s once FPS adaptation kicks in).
--- HandleAck does not send inline, so without this there is no chunk in flight
--- and no ACK timer behind it. Takes the newest match, which is the one the ACK
--- just scheduled, and fails rather than no-op when there is none.
-local function fireNextChunkDelay()
-    for i = #MockWoW.pendingTimers, 1, -1 do
-        local timer = MockWoW.pendingTimers[i]
-        if not timer.cancelled and timer.delay
-            and timer.delay > 0.05 and timer.delay <= 1.0 then
-            timer.callback()
-            return timer.delay
-        end
-    end
-    error("no pending inter-chunk delay timer to fire", 2)
-end
-
---- Fire the latest uncancelled receive timeout timer (any delay).
--- With NACK backoff, delays change (20→30→45), so we can't match on exact delay.
--- Finds the last (newest) uncancelled ticker and fires it.
-local function fireReceiveTimeout()
-    for i = #MockWoW.pendingTimers, 1, -1 do
-        local timer = MockWoW.pendingTimers[i]
-        if not timer.cancelled and timer.delay and timer.delay >= 10 then
-            timer.callback()
-            return true
-        end
-    end
-    return false
-end
+local fireAckTimeout = Sync.fireAckTimeout
+local fireNextChunkDelay = Sync.fireNextChunkDelay
+local fireReceiveTimeout = Sync.fireReceiveTimeout
 
 describe("Sync", function()
     local GBL
     local guildData
 
-    --- A SYNC_REQUEST payload from a peer running our own version.
-    -- Since v0.37.0 the serving side gates on the request's version fields, so
-    -- a payload without them is read as a pre-floor peer and refused. Tests
-    -- that are not about the gate say "same version as us" through this.
-    local function request(fields)
-        fields = fields or {}
-        if fields.version == nil then fields.version = GBL.version end
-        return fields
-    end
+    local function request(fields) return Sync.request(GBL, fields) end
 
     before_each(function()
-        Helpers.setupMocks()
-        MockWoW.guild.name = "Test Guild"
-        MockWoW.player.name = "OfficerA"
-        GBL = Helpers.loadAddon()
-        GBL:OnInitialize()
-        GBL.db.profile.sync.enabled = true
-        GBL.db.profile.sync.autoSync = true
-        guildData = GBL:GetGuildData()
-        -- Reset sync session state
-        GBL:ResetSyncState()
-        -- Clear sent messages from initialization
-        MockAce.sentCommMessages = {}
-        MockAce.sentMessages = {}
+        GBL, guildData = Sync.setup()
     end)
 
     ---------------------------------------------------------------------------
