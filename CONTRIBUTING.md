@@ -119,7 +119,7 @@ In-addon mirror: `UI/ChangelogView.lua`'s `GBL.CHANGELOG_DATA` table shows the s
 - **Every code PR needs tests.** New modules get a new spec file in `spec/`. New features get specs for core logic, edge cases, and error paths. Bug fixes get a regression test that fails without the fix and passes with it.
 - **Mocks**: `spec/mock_wow.lua` provides WoW API stubs, `spec/mock_ace.lua` provides Ace3 / AceGUI stubs. Extend them if you need a new API. Do not introduce WoW API calls in tests directly.
 - **Test helper**: `spec/helpers.lua` has shared utilities (print capture, timestamp helpers, etc.).
-- **Naming**: `spec/foo_spec.lua` tests `Foo.lua`.
+- **Naming**: `spec/foo_spec.lua` tests `Foo.lua`. A module with a large suite splits by topic into `spec/foo_*_spec.lua`, with any shared setup in `spec/foo_helpers.lua` (no `_spec`, so busted does not collect it as a test file). `Sync.lua`, `Restock.lua` and `SortPlanner.lua` are the three that do this today.
 
 If you're touching a module that has no existing spec, adding coverage as part of your PR is strongly preferred over following "I'll test it next time."
 

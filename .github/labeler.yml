@@ -66,7 +66,8 @@
           - 'src/Sync.lua'
           - 'src/Fingerprint.lua'
           - 'src/AuditCapture.lua'
-          - 'spec/sync_spec.lua'
+          # The sync suite is nine topic files plus sync_helpers.lua (#116).
+          - 'spec/sync_*.lua'
           - 'spec/fingerprint_spec.lua'
           - 'spec/auditcapture_spec.lua'
           - 'spec/wire_contract_spec.lua'
