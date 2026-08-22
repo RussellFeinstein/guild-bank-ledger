@@ -1,5 +1,8 @@
 ------------------------------------------------------------------------
--- spec/sync_spec.lua — Tests for Sync.lua (M5)
+-- spec/sync_convergence_spec.lua — Sync convergence
+--
+-- Split out of spec/sync_spec.lua (#116). Shared plumbing lives in
+-- spec/sync_helpers.lua.
 ------------------------------------------------------------------------
 
 local Helpers = require("spec.helpers")
@@ -7,11 +10,7 @@ local MockAce = Helpers.MockAce
 local MockWoW = Helpers.MockWoW
 local Sync = require("spec.sync_helpers")
 
-local fireAckTimeout = Sync.fireAckTimeout
-local fireNextChunkDelay = Sync.fireNextChunkDelay
-local fireReceiveTimeout = Sync.fireReceiveTimeout
-
-describe("Sync", function()
+describe("Sync convergence", function()
     local GBL
     local guildData
 
@@ -148,82 +147,257 @@ describe("Sync", function()
     end)
 
     ---------------------------------------------------------------------------
-    -- Mixed outcomes in same bucket (I14)
+    -- Bidirectional sync after FinishSending
     ---------------------------------------------------------------------------
 
-    describe("mixed outcomes in same bucket", function()
-        it("handles normalize + exact dup + new in same bucket correctly", function()
-            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+    describe("bidirectional sync", function()
+        it("schedules bidirectional check after FinishSending", function()
+            -- Set up a send to PeerA
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P1", tab = 1, itemID = 123,
+                classID = 0, subclassID = 0, count = 1,
+                timestamp = 1000 * 3600, id = "bidir:277:0", _occurrence = 0,
+                scanTime = 1000 * 3600, scannedBy = "OfficerA",
+            })
+            guildData.seenTxHashes["bidir:277:0"] = 1000 * 3600
+            GBL:HandleSyncRequest("PeerA", request{
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            assert.is_true(GBL:GetSyncStatus().sending)
+            MockWoW.pendingTimers = {}
 
-            -- All in bucket = floor(480001/6) = 80000
-            local localTx1 = {
-                type = "deposit", player = "Thrall-TestRealm", itemID = 12345,
-                classID = 0, subclassID = 5,
-                count = 5, tab = 1, timestamp = 3600 * 480001 + 1800,
-                id = "deposit|Thrall-TestRealm|12345|5|1|480001:0", _occurrence = 0,
-            }
-            local localTx2 = {
-                type = "deposit", player = "Jaina-TestRealm", itemID = 99999,
-                classID = 0, subclassID = 1,
-                count = 10, tab = 2, timestamp = 3600 * 480002,
-                id = "deposit|Jaina-TestRealm|99999|10|2|480002:0", _occurrence = 0,
-            }
-            table.insert(guildData.transactions, localTx1)
-            table.insert(guildData.transactions, localTx2)
-            guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|480001:0"] = 3600 * 480001 + 1800
-            guildData.seenTxHashes["deposit|Jaina-TestRealm|99999|10|2|480002:0"] = 3600 * 480002
+            GBL:FinishSending()
 
-            GBL:HandleSyncData("OfficerB", {
-                chunk = 1,
-                totalChunks = 1,
-                transactions = {
-                    -- 1. Fuzzy match for localTx1 (normalizes)
-                    {
-                        type = "deposit", player = "Thrall",
-                        itemID = 12345, classID = 0, subclassID = 5,
-                        count = 5, tab = 1,
-                        timestamp = 3600 * 480000 + 2400,
-                        id = "deposit|Thrall-TestRealm|12345|5|1|480000:0",
-                        _occurrence = 0,
-                    },
-                    -- 2. Exact match for localTx2 (deduped)
-                    {
-                        type = "deposit", player = "Jaina",
-                        itemID = 99999, classID = 0, subclassID = 1,
-                        count = 10, tab = 2,
-                        timestamp = 3600 * 480002,
-                        id = "deposit|Jaina-TestRealm|99999|10|2|480002:0",
-                        _occurrence = 0,
-                    },
-                    -- 3. New record
-                    {
-                        type = "withdraw", player = "Arthas",
-                        itemID = 55555, classID = 0, subclassID = 1,
-                        count = 3, tab = 2,
-                        timestamp = 3600 * 480003,
-                        id = "withdraw|Arthas-TestRealm|55555|3|2|480003:0",
-                        _occurrence = 0,
-                    },
-                },
-                moneyTransactions = {},
+            -- Check that a 0.5s timer was scheduled
+            local found = false
+            for _, timer in ipairs(MockWoW.pendingTimers) do
+                if timer.delay == 0.5 and not timer.cancelled then
+                    found = true
+                end
+            end
+            assert.is_true(found, "Bidirectional check timer should be scheduled (0.5s)")
+        end)
+
+        it("requests sync when hashes differ after sending", function()
+            -- Set peer info with different hash
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 20, dataHash = 999 })
+
+            -- Enter and finish sending state
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P1", tab = 1, itemID = 123,
+                classID = 0, subclassID = 0, count = 1,
+                timestamp = 1000 * 3600, id = "bidir2:277:0", _occurrence = 0,
+                scanTime = 1000 * 3600, scannedBy = "OfficerA",
+            })
+            guildData.seenTxHashes["bidir2:277:0"] = 1000 * 3600
+            GBL:HandleSyncRequest("PeerA", request{
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            GBL:FinishSending()
+
+            -- Fire the 0.5s bidirectional check timer
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if t.delay == 0.5 and not t.cancelled then
+                    t.callback()
+                    break
+                end
+            end
+
+            -- Should now be receiving from PeerA
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            assert.equals("PeerA", GBL:GetSyncStatus().receiveSource)
+        end)
+
+        it("starts nothing when hashes match", function()
+            -- Set peer info with matching hash
+            local localHash = GBL:GetDataHash(guildData)
+            local localCount = #guildData.transactions + #guildData.moneyTransactions
+            GBL:UpdatePeer("PeerA", {
+                version = GBL.version, txCount = localCount, dataHash = localHash,
             })
 
-            -- localTx1 normalized, localTx2 unchanged, new record added
-            assert.equals("deposit|Thrall-TestRealm|12345|5|1|480000:0", localTx1.id)
-            assert.equals("deposit|Jaina-TestRealm|99999|10|2|480002:0", localTx2.id)
-            assert.equals(3, #guildData.transactions)
+            -- Enter and finish sending to PeerA
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "P1", tab = 1, itemID = 123,
+                classID = 0, subclassID = 0, count = 1,
+                timestamp = 1000 * 3600, id = "bidir3:277:0", _occurrence = 0,
+                scanTime = 1000 * 3600, scannedBy = "OfficerA",
+            })
+            guildData.seenTxHashes["bidir3:277:0"] = 1000 * 3600
+            GBL:HandleSyncRequest("PeerA", request{
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            -- Update peer hash to match after we added data
+            local newHash = GBL:GetDataHash(guildData)
+            local newCount = #guildData.transactions + #guildData.moneyTransactions
+            GBL:UpdatePeer("PeerA", {
+                version = GBL.version, txCount = newCount, dataHash = newHash,
+            })
 
-            -- Verify bucket hash = XOR of all three final record IDs
-            GBL:ResetHashCache()
-            local buckets = GBL:ComputeBucketHashes(guildData)
-            local expected = GBL:XOR32(
-                GBL:XOR32(
-                    GBL:HashString("deposit|Thrall-TestRealm|12345|5|1|480000:0"),
-                    GBL:HashString("deposit|Jaina-TestRealm|99999|10|2|480002:0")
-                ),
-                GBL:HashString("withdraw|Arthas-TestRealm|55555|3|2|480003:0")
-            )
-            assert.equals(expected, buckets[80000])
+            GBL:FinishSending()
+
+            -- Fire the 0.5s bidirectional check timer
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if t.delay == 0.5 and not t.cancelled then
+                    t.callback()
+                    break
+                end
+            end
+
+            -- Converged, so there is nothing to ask anyone for. We are free
+            -- and the next HELLO decides what happens next.
+            assert.is_false(GBL:GetSyncStatus().receiving)
+        end)
+
+        it("skips request when local has more than peer (superset skip)", function()
+            -- Add several local transactions so local count > peer count
+            for i = 1, 10 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "P1", tab = 1, itemID = 100 + i,
+                    classID = 0, subclassID = 0, count = 1,
+                    timestamp = 1000 * 3600 + i, id = "bidir_ss" .. i .. ":277:0",
+                    _occurrence = 0, scanTime = 1000 * 3600 + i, scannedBy = "OfficerA",
+                })
+                guildData.seenTxHashes["bidir_ss" .. i .. ":277:0"] = 1000 * 3600 + i
+            end
+
+            -- Peer has fewer records and a different hash
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 3, dataHash = 999 })
+
+            -- Enter and finish sending to PeerA
+            GBL:HandleSyncRequest("PeerA", request{
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            GBL:FinishSending()
+
+            -- Fire the 0.5s bidirectional check timer
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if t.delay == 0.5 and not t.cancelled then
+                    t.callback()
+                    break
+                end
+            end
+
+            -- Should NOT be requesting from PeerA: we already hold more than
+            -- they do, so pulling from them would cost a session and teach
+            -- us nothing. The nudge in the next test is what they get instead.
+            assert.is_false(GBL:GetSyncStatus().receiving,
+                "should not request from a peer holding fewer records")
+        end)
+
+        it("re-nudges the behind peer on a bidirectional superset skip", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            -- Local holds more records than the peer.
+            for i = 1, 10 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "P1", tab = 1, itemID = 100 + i,
+                    classID = 0, subclassID = 0, count = 1,
+                    timestamp = 1000 * 3600 + i, id = "bidir_nudge" .. i .. ":277:0",
+                    _occurrence = 0, scanTime = 1000 * 3600 + i, scannedBy = "OfficerA",
+                })
+                guildData.seenTxHashes["bidir_nudge" .. i .. ":277:0"] = 1000 * 3600 + i
+            end
+
+            -- Peer is behind: fewer records, different hash.
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 3, dataHash = 999 })
+
+            GBL:HandleSyncRequest("PeerA", request{
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            GBL:FinishSending()
+            MockAce.sentCommMessages = {}
+
+            -- Fire the 0.5s bidirectional check timer.
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if t.delay == 0.5 and not t.cancelled then
+                    t.callback()
+                    break
+                end
+            end
+
+            -- The behind peer should be re-nudged with an isReply HELLO whisper.
+            local expectedKey = GBL:CanonicalPeerKey("PeerA")
+            local nudged = false
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                if ok and data.type == "HELLO" and data.isReply
+                    and sent.distribution == "WHISPER"
+                    and GBL:CanonicalPeerKey(sent.target) == expectedKey then
+                    nudged = true
+                end
+            end
+            assert.is_true(nudged,
+                "behind peer should be re-nudged after a bidirectional superset skip")
+
+            local audited = false
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message
+                    and entry.message:find("bidirectional hash-gate bypass", 1, true) then
+                    audited = true
+                end
+            end
+            assert.is_true(audited, "audit trail should record the bidirectional nudge")
+        end)
+
+        it("throttles the bidirectional superset nudge to one per window per peer", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            for i = 1, 10 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "P1", tab = 1, itemID = 100 + i,
+                    classID = 0, subclassID = 0, count = 1,
+                    timestamp = 1000 * 3600 + i, id = "bidir_thr" .. i .. ":277:0",
+                    _occurrence = 0, scanTime = 1000 * 3600 + i, scannedBy = "OfficerA",
+                })
+                guildData.seenTxHashes["bidir_thr" .. i .. ":277:0"] = 1000 * 3600 + i
+            end
+            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 3, dataHash = 999 })
+
+            -- First skip sets lastSupersetNudge for the peer.
+            GBL:HandleSyncRequest("PeerA", request{
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            MockWoW.pendingTimers = {}
+            GBL:FinishSending()
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if t.delay == 0.5 and not t.cancelled then t.callback() break end
+            end
+            MockAce.sentCommMessages = {}
+
+            -- Second skip at the same server time is inside the throttle window.
+            GBL:HandleSyncRequest("PeerA", request{
+                sinceTimestamp = 0,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            MockWoW.pendingTimers = {}
+            GBL:FinishSending()
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if t.delay == 0.5 and not t.cancelled then t.callback() break end
+            end
+
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                assert.is_false(ok and data.type == "HELLO" and data.isReply == true,
+                    "no second bidirectional nudge within the throttle window")
+            end
         end)
     end)
 
@@ -427,6 +601,86 @@ describe("Sync", function()
                 assert.equals(aHash, bFinalBuckets[key],
                     "bucket " .. key .. " hash mismatch (A-only key)")
             end
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Mixed outcomes in same bucket (I14)
+    ---------------------------------------------------------------------------
+
+    describe("mixed outcomes in same bucket", function()
+        it("handles normalize + exact dup + new in same bucket correctly", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- All in bucket = floor(480001/6) = 80000
+            local localTx1 = {
+                type = "deposit", player = "Thrall-TestRealm", itemID = 12345,
+                classID = 0, subclassID = 5,
+                count = 5, tab = 1, timestamp = 3600 * 480001 + 1800,
+                id = "deposit|Thrall-TestRealm|12345|5|1|480001:0", _occurrence = 0,
+            }
+            local localTx2 = {
+                type = "deposit", player = "Jaina-TestRealm", itemID = 99999,
+                classID = 0, subclassID = 1,
+                count = 10, tab = 2, timestamp = 3600 * 480002,
+                id = "deposit|Jaina-TestRealm|99999|10|2|480002:0", _occurrence = 0,
+            }
+            table.insert(guildData.transactions, localTx1)
+            table.insert(guildData.transactions, localTx2)
+            guildData.seenTxHashes["deposit|Thrall-TestRealm|12345|5|1|480001:0"] = 3600 * 480001 + 1800
+            guildData.seenTxHashes["deposit|Jaina-TestRealm|99999|10|2|480002:0"] = 3600 * 480002
+
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1,
+                totalChunks = 1,
+                transactions = {
+                    -- 1. Fuzzy match for localTx1 (normalizes)
+                    {
+                        type = "deposit", player = "Thrall",
+                        itemID = 12345, classID = 0, subclassID = 5,
+                        count = 5, tab = 1,
+                        timestamp = 3600 * 480000 + 2400,
+                        id = "deposit|Thrall-TestRealm|12345|5|1|480000:0",
+                        _occurrence = 0,
+                    },
+                    -- 2. Exact match for localTx2 (deduped)
+                    {
+                        type = "deposit", player = "Jaina",
+                        itemID = 99999, classID = 0, subclassID = 1,
+                        count = 10, tab = 2,
+                        timestamp = 3600 * 480002,
+                        id = "deposit|Jaina-TestRealm|99999|10|2|480002:0",
+                        _occurrence = 0,
+                    },
+                    -- 3. New record
+                    {
+                        type = "withdraw", player = "Arthas",
+                        itemID = 55555, classID = 0, subclassID = 1,
+                        count = 3, tab = 2,
+                        timestamp = 3600 * 480003,
+                        id = "withdraw|Arthas-TestRealm|55555|3|2|480003:0",
+                        _occurrence = 0,
+                    },
+                },
+                moneyTransactions = {},
+            })
+
+            -- localTx1 normalized, localTx2 unchanged, new record added
+            assert.equals("deposit|Thrall-TestRealm|12345|5|1|480000:0", localTx1.id)
+            assert.equals("deposit|Jaina-TestRealm|99999|10|2|480002:0", localTx2.id)
+            assert.equals(3, #guildData.transactions)
+
+            -- Verify bucket hash = XOR of all three final record IDs
+            GBL:ResetHashCache()
+            local buckets = GBL:ComputeBucketHashes(guildData)
+            local expected = GBL:XOR32(
+                GBL:XOR32(
+                    GBL:HashString("deposit|Thrall-TestRealm|12345|5|1|480000:0"),
+                    GBL:HashString("deposit|Jaina-TestRealm|99999|10|2|480002:0")
+                ),
+                GBL:HashString("withdraw|Arthas-TestRealm|55555|3|2|480003:0")
+            )
+            assert.equals(expected, buckets[80000])
         end)
     end)
 
@@ -748,261 +1002,6 @@ describe("Sync", function()
             })
             -- max(3, 2) = 3 — stays at 3
             assert.equals(3, guildData.eventCounts[baseHash].count)
-        end)
-    end)
-
-    ---------------------------------------------------------------------------
-    -- Bidirectional sync after FinishSending
-    ---------------------------------------------------------------------------
-
-    describe("bidirectional sync", function()
-        it("schedules bidirectional check after FinishSending", function()
-            -- Set up a send to PeerA
-            table.insert(guildData.transactions, {
-                type = "deposit", player = "P1", tab = 1, itemID = 123,
-                classID = 0, subclassID = 0, count = 1,
-                timestamp = 1000 * 3600, id = "bidir:277:0", _occurrence = 0,
-                scanTime = 1000 * 3600, scannedBy = "OfficerA",
-            })
-            guildData.seenTxHashes["bidir:277:0"] = 1000 * 3600
-            GBL:HandleSyncRequest("PeerA", request{
-                sinceTimestamp = 0,
-                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
-                guild = "Test Guild",
-            })
-            assert.is_true(GBL:GetSyncStatus().sending)
-            MockWoW.pendingTimers = {}
-
-            GBL:FinishSending()
-
-            -- Check that a 0.5s timer was scheduled
-            local found = false
-            for _, timer in ipairs(MockWoW.pendingTimers) do
-                if timer.delay == 0.5 and not timer.cancelled then
-                    found = true
-                end
-            end
-            assert.is_true(found, "Bidirectional check timer should be scheduled (0.5s)")
-        end)
-
-        it("requests sync when hashes differ after sending", function()
-            -- Set peer info with different hash
-            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 20, dataHash = 999 })
-
-            -- Enter and finish sending state
-            table.insert(guildData.transactions, {
-                type = "deposit", player = "P1", tab = 1, itemID = 123,
-                classID = 0, subclassID = 0, count = 1,
-                timestamp = 1000 * 3600, id = "bidir2:277:0", _occurrence = 0,
-                scanTime = 1000 * 3600, scannedBy = "OfficerA",
-            })
-            guildData.seenTxHashes["bidir2:277:0"] = 1000 * 3600
-            GBL:HandleSyncRequest("PeerA", request{
-                sinceTimestamp = 0,
-                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
-                guild = "Test Guild",
-            })
-            GBL:FinishSending()
-
-            -- Fire the 0.5s bidirectional check timer
-            for i = #MockWoW.pendingTimers, 1, -1 do
-                local t = MockWoW.pendingTimers[i]
-                if t.delay == 0.5 and not t.cancelled then
-                    t.callback()
-                    break
-                end
-            end
-
-            -- Should now be receiving from PeerA
-            assert.is_true(GBL:GetSyncStatus().receiving)
-            assert.equals("PeerA", GBL:GetSyncStatus().receiveSource)
-        end)
-
-        it("starts nothing when hashes match", function()
-            -- Set peer info with matching hash
-            local localHash = GBL:GetDataHash(guildData)
-            local localCount = #guildData.transactions + #guildData.moneyTransactions
-            GBL:UpdatePeer("PeerA", {
-                version = GBL.version, txCount = localCount, dataHash = localHash,
-            })
-
-            -- Enter and finish sending to PeerA
-            table.insert(guildData.transactions, {
-                type = "deposit", player = "P1", tab = 1, itemID = 123,
-                classID = 0, subclassID = 0, count = 1,
-                timestamp = 1000 * 3600, id = "bidir3:277:0", _occurrence = 0,
-                scanTime = 1000 * 3600, scannedBy = "OfficerA",
-            })
-            guildData.seenTxHashes["bidir3:277:0"] = 1000 * 3600
-            GBL:HandleSyncRequest("PeerA", request{
-                sinceTimestamp = 0,
-                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
-                guild = "Test Guild",
-            })
-            -- Update peer hash to match after we added data
-            local newHash = GBL:GetDataHash(guildData)
-            local newCount = #guildData.transactions + #guildData.moneyTransactions
-            GBL:UpdatePeer("PeerA", {
-                version = GBL.version, txCount = newCount, dataHash = newHash,
-            })
-
-            GBL:FinishSending()
-
-            -- Fire the 0.5s bidirectional check timer
-            for i = #MockWoW.pendingTimers, 1, -1 do
-                local t = MockWoW.pendingTimers[i]
-                if t.delay == 0.5 and not t.cancelled then
-                    t.callback()
-                    break
-                end
-            end
-
-            -- Converged, so there is nothing to ask anyone for. We are free
-            -- and the next HELLO decides what happens next.
-            assert.is_false(GBL:GetSyncStatus().receiving)
-        end)
-
-        it("skips request when local has more than peer (superset skip)", function()
-            -- Add several local transactions so local count > peer count
-            for i = 1, 10 do
-                table.insert(guildData.transactions, {
-                    type = "deposit", player = "P1", tab = 1, itemID = 100 + i,
-                    classID = 0, subclassID = 0, count = 1,
-                    timestamp = 1000 * 3600 + i, id = "bidir_ss" .. i .. ":277:0",
-                    _occurrence = 0, scanTime = 1000 * 3600 + i, scannedBy = "OfficerA",
-                })
-                guildData.seenTxHashes["bidir_ss" .. i .. ":277:0"] = 1000 * 3600 + i
-            end
-
-            -- Peer has fewer records and a different hash
-            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 3, dataHash = 999 })
-
-            -- Enter and finish sending to PeerA
-            GBL:HandleSyncRequest("PeerA", request{
-                sinceTimestamp = 0,
-                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
-                guild = "Test Guild",
-            })
-            GBL:FinishSending()
-
-            -- Fire the 0.5s bidirectional check timer
-            for i = #MockWoW.pendingTimers, 1, -1 do
-                local t = MockWoW.pendingTimers[i]
-                if t.delay == 0.5 and not t.cancelled then
-                    t.callback()
-                    break
-                end
-            end
-
-            -- Should NOT be requesting from PeerA: we already hold more than
-            -- they do, so pulling from them would cost a session and teach
-            -- us nothing. The nudge in the next test is what they get instead.
-            assert.is_false(GBL:GetSyncStatus().receiving,
-                "should not request from a peer holding fewer records")
-        end)
-
-        it("re-nudges the behind peer on a bidirectional superset skip", function()
-            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
-            -- Local holds more records than the peer.
-            for i = 1, 10 do
-                table.insert(guildData.transactions, {
-                    type = "deposit", player = "P1", tab = 1, itemID = 100 + i,
-                    classID = 0, subclassID = 0, count = 1,
-                    timestamp = 1000 * 3600 + i, id = "bidir_nudge" .. i .. ":277:0",
-                    _occurrence = 0, scanTime = 1000 * 3600 + i, scannedBy = "OfficerA",
-                })
-                guildData.seenTxHashes["bidir_nudge" .. i .. ":277:0"] = 1000 * 3600 + i
-            end
-
-            -- Peer is behind: fewer records, different hash.
-            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 3, dataHash = 999 })
-
-            GBL:HandleSyncRequest("PeerA", request{
-                sinceTimestamp = 0,
-                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
-                guild = "Test Guild",
-            })
-            GBL:FinishSending()
-            MockAce.sentCommMessages = {}
-
-            -- Fire the 0.5s bidirectional check timer.
-            for i = #MockWoW.pendingTimers, 1, -1 do
-                local t = MockWoW.pendingTimers[i]
-                if t.delay == 0.5 and not t.cancelled then
-                    t.callback()
-                    break
-                end
-            end
-
-            -- The behind peer should be re-nudged with an isReply HELLO whisper.
-            local expectedKey = GBL:CanonicalPeerKey("PeerA")
-            local nudged = false
-            for _, sent in ipairs(MockAce.sentCommMessages) do
-                local ok, data = GBL:Deserialize(sent.text)
-                if ok and data.type == "HELLO" and data.isReply
-                    and sent.distribution == "WHISPER"
-                    and GBL:CanonicalPeerKey(sent.target) == expectedKey then
-                    nudged = true
-                end
-            end
-            assert.is_true(nudged,
-                "behind peer should be re-nudged after a bidirectional superset skip")
-
-            local audited = false
-            for _, entry in ipairs(GBL:GetAuditTrail()) do
-                if entry.message
-                    and entry.message:find("bidirectional hash-gate bypass", 1, true) then
-                    audited = true
-                end
-            end
-            assert.is_true(audited, "audit trail should record the bidirectional nudge")
-        end)
-
-        it("throttles the bidirectional superset nudge to one per window per peer", function()
-            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
-            for i = 1, 10 do
-                table.insert(guildData.transactions, {
-                    type = "deposit", player = "P1", tab = 1, itemID = 100 + i,
-                    classID = 0, subclassID = 0, count = 1,
-                    timestamp = 1000 * 3600 + i, id = "bidir_thr" .. i .. ":277:0",
-                    _occurrence = 0, scanTime = 1000 * 3600 + i, scannedBy = "OfficerA",
-                })
-                guildData.seenTxHashes["bidir_thr" .. i .. ":277:0"] = 1000 * 3600 + i
-            end
-            GBL:UpdatePeer("PeerA", { version = GBL.version, txCount = 3, dataHash = 999 })
-
-            -- First skip sets lastSupersetNudge for the peer.
-            GBL:HandleSyncRequest("PeerA", request{
-                sinceTimestamp = 0,
-                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
-                guild = "Test Guild",
-            })
-            MockWoW.pendingTimers = {}
-            GBL:FinishSending()
-            for i = #MockWoW.pendingTimers, 1, -1 do
-                local t = MockWoW.pendingTimers[i]
-                if t.delay == 0.5 and not t.cancelled then t.callback() break end
-            end
-            MockAce.sentCommMessages = {}
-
-            -- Second skip at the same server time is inside the throttle window.
-            GBL:HandleSyncRequest("PeerA", request{
-                sinceTimestamp = 0,
-                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
-                guild = "Test Guild",
-            })
-            MockWoW.pendingTimers = {}
-            GBL:FinishSending()
-            for i = #MockWoW.pendingTimers, 1, -1 do
-                local t = MockWoW.pendingTimers[i]
-                if t.delay == 0.5 and not t.cancelled then t.callback() break end
-            end
-
-            for _, sent in ipairs(MockAce.sentCommMessages) do
-                local ok, data = GBL:Deserialize(sent.text)
-                assert.is_false(ok and data.type == "HELLO" and data.isReply == true,
-                    "no second bidirectional nudge within the throttle window")
-            end
         end)
     end)
 end)
