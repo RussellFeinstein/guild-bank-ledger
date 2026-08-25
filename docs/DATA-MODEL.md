@@ -68,11 +68,12 @@ AceDB strips any value equal to its default before the SavedVariables file is wr
 modified therefore leaves no trace on disk. **Absence from the file means "never diverged from the
 default", not "missing".** At runtime the key is present, because `copyDefaults` puts it back.
 
-Seven declared keys are absent from the live file for that reason:
+Five declared keys are absent from the live file for that reason (`dailySummaries` and
+`weeklySummaries` left this list when #62 removed their declarations along with the tiered
+storage module):
 
 | Key | Status |
 |---|---|
-| `dailySummaries`, `weeklySummaries` | Tiered-storage compaction never ran. Being retired, issue #62 |
 | `snapshots` | Never written by any code path. Remove or annotate as reserved, issue #71 |
 | `teams` | Never written by any code path. Remove or annotate as reserved, issue #71 |
 | `altLinks` | Alt linking is designed but unbuilt, issue #52 |
@@ -257,11 +258,11 @@ id ever stored.
 **Verdict: correct as it stands, and not cosmetic.** The differing record shapes do not make the
 string cosmetic, because nothing downstream reads the shape before reading the type. Every consumer
 matches the stored string exactly and not one of them accepts both spellings: player stats
-(`src/Ledger.lua:229`, `:238`), daily summaries (`src/Storage.lua:101`, `:111`), six sites in
+(`src/Ledger.lua:229`, `:238`), six sites in
 `UI/ConsumptionView.lua` (`:92`, `:101`, `:118`, `:192`, `:356`, `:420`), both type dropdowns
 (`UI/UI.lua:623`, `:1441`), and the filter equality test (`UI/FilterBar.lua:105`). An
-un-normalized record therefore contributes 0 to every money total, matches no filter, and is
-deleted at day 30 by compaction with nothing folded into the summary first. That silent zeroing is
+un-normalized record therefore contributes 0 to every money total and matches no filter. That
+silent zeroing is
 the v0.4.1 bug the normalization fixed, and it is why a spec pins the builder as well as the read
 path (`spec/ledger_spec.lua`).
 
@@ -572,7 +573,7 @@ All under the **Data model integrity** milestone.
 
 | Section | Disagreement | Issue |
 |---|---|---|
-| 2 | `dailySummaries`, `weeklySummaries` declared, never written | #62 |
+| 2 | `dailySummaries`, `weeklySummaries` declared, never written | closed (#62): keys and module removed |
 | 2 | `snapshots`, `teams` declared, never written | #71 |
 | 2 | `altLinks` declared, never written | #52 |
 | 2 | `eventCounts` written, never declared | #71 |
@@ -600,5 +601,5 @@ identity-affecting idea in this document as costing a forced guild-wide update f
 What that leaves open, in rough order of how much it still hurts: #75 (the 223 damaged records
 already on disk, which #68 stops growing but does not repair, and which can now reuse
 `GBL:RepairSyncRecordItemFields`), #69 (the same itemID-less shape produced by local scans rather
-than by sync, still unscheduled), #62, #71, #72, #76, #77 and #64. None of those touch record
+than by sync, still unscheduled), #71, #72, #76, #77 and #64. None of those touch record
 identity, so none of them cost a floor raise.

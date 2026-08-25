@@ -8,7 +8,7 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 - Automatic scanning, transaction recording, item categorization
 - Occurrence-based deduplication with event count metadata
 - Money tracking (deposits, withdrawals, repairs, tab purchases)
-- Per-player statistics, tiered storage with compaction (shipped, but compaction has never actually run: issue #62)
+- Per-player statistics (the tiered storage that once shipped beside them never ran and was removed: issue #62)
 - Periodic re-scan every 5 seconds while the bank is open
 - Tab recording for deposits and withdrawals (v0.37.0): every item transaction now stores the tab it happened in; previously only moves carried one
 
@@ -79,7 +79,7 @@ Per-area status:
 - **Mature**: recording, categorization, deduplication.
 - **Active** (in guild use, improvements queued): sync (rate limiting pending), UI (sort/filter polish, pagination layout, window resize), sort + layout (confirmation-speed tuning, the overflow-pack full-stack-merge edge case, layout editor slot visibility, refresh flicker). Restock (new in v0.34.0): layout-driven targets and Auctionator buying are in initial use, with a UI polish pass and the reserve-targets producer queued.
 - **Under audit**: accessibility. Palettes, contrast, triple encoding, and font scaling are wired; keyboard-navigation primitives exist but are not threaded through all UI widgets. An independent audit pass is the next planned milestone and is a v1.0 release gate.
-- **Under audit**: the storage layer. `docs/DATA-MODEL.md` measured the declared schema against a live 12,310-record file and found the defaults block, the record builders and the stored data all disagreeing. Tiered storage is being retired rather than repaired, because compaction has never once run (issue #62). Schema migrations work but nothing pins the entry point of the ladder, and roughly 12% of everything ever received via sync arrived with mangled field names. Intake validation and repair shipped in v0.37.0, so new arrivals are checked before they land; the corrupted backlog already on disk is issue #75. Tracked under the Data model integrity milestone and a v1.0 release gate.
+- **Under audit**: the storage layer. `docs/DATA-MODEL.md` measured the declared schema against a live 12,310-record file and found the defaults block, the record builders and the stored data all disagreeing. Tiered storage was removed rather than repaired, because compaction never once ran (issue #62). Schema migrations work but nothing pins the entry point of the ladder, and roughly 12% of everything ever received via sync arrived with mangled field names. Intake validation and repair shipped in v0.37.0, so new arrivals are checked before they land; the corrupted backlog already on disk is issue #75. Tracked under the Data model integrity milestone and a v1.0 release gate.
 
 ---
 
@@ -88,7 +88,7 @@ Per-area status:
 Items below block the v1.0 release.
 
 - **Accessibility audit and keyboard-nav completion**: wire `RegisterFocusable` into every AceGUI widget, hook Tab/Shift+Tab via a key handler, verify focus indicators advance correctly across all tabs and modal dialogs, screen-reader audit, palette validation against WCAG AAA contrast targets. The v0.3.0-v0.32.x infrastructure-without-wiring miss surfaced during the May 2026 doc sweep is the reason this is a release gate, not a Post-1.0 polish item.
-- **Data model integrity** (milestone): converge the declared schema, the record builders and the stored data. The MIN_SYNC_VERSION floor (#74) shipped in v0.37.0 carrying the milestone's two id-adjacent items, sync intake validation (#68) and the tab deposits and withdrawals never recorded (#67), because that release was the last compatibility break available cheaply. What remains lands as ordinary releases at no guild cost: repairing the corrupted records already on disk (#75), the defaults block (#71), the `peers` collision (#72), retiring tiered storage (#62), the AceDB write-path test net (#77), the guard against raising the schemaVersion default (#76), and the per-player category totals that are declared but never accumulated (#64).
+- **Data model integrity** (milestone): converge the declared schema, the record builders and the stored data. The MIN_SYNC_VERSION floor (#74) shipped in v0.37.0 carrying the milestone's two id-adjacent items, sync intake validation (#68) and the tab deposits and withdrawals never recorded (#67), because that release was the last compatibility break available cheaply. What remains lands as ordinary releases at no guild cost: repairing the corrupted records already on disk (#75), the defaults block (#71), the `peers` collision (#72), the AceDB write-path test net (#77), the guard against raising the schemaVersion default (#76), and the per-player category totals that are declared but never accumulated (#64).
 - **Sync rate limiting**: per-peer bandwidth budgeting layered on top of the current adaptive CTL backoff work.
 - **Performance audit**: SavedVariables size profile and a UI debouncing pass on the heavy tabs. Compaction verification came off this list when compaction itself was retired.
 - **Community feedback iteration**: address reports from active guild testers before the production-readiness signal.
