@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.18] - 2026-08-25
+
 ### Added
 - A test now bans the os and io standard libraries from shipped code. WoW's sandbox provides neither, but the test suite runs where both exist, which is how the crash below stayed invisible to a green suite for five months.
 
