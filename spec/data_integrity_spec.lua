@@ -151,36 +151,6 @@ describe("Data integrity", function()
             assert.equals("Alice-Wyrmrest", guildData.transactions[2].player)
         end)
 
-        it("normalizes daily summary player sets", function()
-            guildData.dailySummaries = {
-                ["2024-01-01"] = {
-                    players = { Alice = true, Bob = true },
-                    totalWithdrawn = 10,
-                },
-            }
-
-            GBL:MigrateSchemaV2ToV3(guildData)
-
-            local summary = guildData.dailySummaries["2024-01-01"]
-            assert.is_true(summary.players["Alice-TestRealm"])
-            assert.is_true(summary.players["Bob-TestRealm"])
-            assert.is_nil(summary.players["Alice"])
-        end)
-
-        it("normalizes weekly summary player sets", function()
-            guildData.weeklySummaries = {
-                ["2024-W01"] = {
-                    players = { Charlie = true },
-                    totalWithdrawn = 5,
-                },
-            }
-
-            GBL:MigrateSchemaV2ToV3(guildData)
-
-            local summary = guildData.weeklySummaries["2024-W01"]
-            assert.is_true(summary.players["Charlie-TestRealm"])
-        end)
-
         it("rebuilds seenTxHashes", function()
             table.insert(guildData.transactions, {
                 type = "deposit", player = "Alice",

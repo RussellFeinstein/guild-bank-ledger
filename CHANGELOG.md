@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.18] - 2026-08-25
+
+### Added
+- A test now bans the os and io standard libraries from shipped code. WoW's sandbox provides neither, but the test suite runs where both exist, which is how the crash below stayed invisible to a green suite for five months.
+
+### Fixed
+- Members whose guild rank cannot see any bank tab no longer hit a script error after opening the guild bank. The error lived on a dead code path and quietly stopped duplicate cleanup and the periodic re-scan from starting for exactly those members.
+
+### Removed
+- The tiered storage layer. It was meant to fold records older than 30 days into daily summaries and older than 90 days into weekly ones, and it never ran once: its entry point lost a race with the bank scan on every bank open. It is also incompatible with sync (a member who compacted would look far behind to everyone else, who would push the old records straight back), and keeping every transaction in full is the intended design. Nothing about what the addon shows or stores day to day changes.
+
 ## [0.37.17] - 2026-08-22
 
 ### Fixed

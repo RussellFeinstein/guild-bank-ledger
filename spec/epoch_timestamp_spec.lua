@@ -286,49 +286,6 @@ describe("Epoch-0 timestamp fixes", function()
             assert.equals(0, guildData.transactions[1].timestamp)
         end)
 
-        it("cleans up 1970-01-01 daily summaries", function()
-            guildData.schemaVersion = 7
-            guildData.dailySummaries = {
-                ["1970-01-01"] = { withdrawCount = 5 },
-                ["2024-03-15"] = { withdrawCount = 10 },
-            }
-            -- Need at least one bad record to trigger repair
-            table.insert(guildData.transactions, {
-                type = "withdraw", player = "Thrall",
-                itemID = 12345, count = 5, tab = 1,
-                timestamp = 0, id = "withdraw|Thrall|12345|5|1|0:0",
-                _occurrence = 0,
-            })
-            guildData.seenTxHashes["withdraw|Thrall|12345|5|1|0:0"] = 0
-
-            GBL:MigrateRepairEpochTimestamps(guildData)
-
-            assert.is_nil(guildData.dailySummaries["1970-01-01"])
-            assert.is_not_nil(guildData.dailySummaries["2024-03-15"])
-        end)
-
-        it("cleans up 1970-* weekly summaries", function()
-            guildData.schemaVersion = 7
-            guildData.weeklySummaries = {
-                ["1970-W01"] = { withdrawCount = 3 },
-                ["1970-W52"] = { withdrawCount = 2 },
-                ["2024-W11"] = { withdrawCount = 8 },
-            }
-            table.insert(guildData.transactions, {
-                type = "withdraw", player = "Thrall",
-                itemID = 12345, count = 5, tab = 1,
-                timestamp = 0, id = "withdraw|Thrall|12345|5|1|0:0",
-                _occurrence = 0,
-            })
-            guildData.seenTxHashes["withdraw|Thrall|12345|5|1|0:0"] = 0
-
-            GBL:MigrateRepairEpochTimestamps(guildData)
-
-            assert.is_nil(guildData.weeklySummaries["1970-W01"])
-            assert.is_nil(guildData.weeklySummaries["1970-W52"])
-            assert.is_not_nil(guildData.weeklySummaries["2024-W11"])
-        end)
-
         it("repairs money transactions too", function()
             guildData.schemaVersion = 7
             table.insert(guildData.moneyTransactions, {

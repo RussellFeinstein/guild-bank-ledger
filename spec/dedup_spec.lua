@@ -1183,50 +1183,6 @@ describe("Dedup", function()
         end)
     end)
 
-    describe("PruneEventCounts", function()
-        it("removes old entries and preserves recent", function()
-            local now = Helpers.MockWoW.serverTime
-            guildData.eventCounts = {
-                ["withdraw|Thrall|12345|5|1|100"] = { count = 2, asOf = now - (91 * 86400) },
-                ["withdraw|Jaina|99999|5|1|200"] = { count = 1, asOf = now - (10 * 86400) },
-            }
-            GBL:PruneEventCounts(90, guildData)
-
-            assert.is_nil(guildData.eventCounts["withdraw|Thrall|12345|5|1|100"])
-            assert.is_not_nil(guildData.eventCounts["withdraw|Jaina|99999|5|1|200"])
-        end)
-
-        it("handles corrupted entries (non-table)", function()
-            local now = Helpers.MockWoW.serverTime
-            guildData.eventCounts = {
-                ["bad_entry"] = "garbage",
-                ["good_entry"] = { count = 1, asOf = now },
-            }
-            GBL:PruneEventCounts(90, guildData)
-
-            assert.is_nil(guildData.eventCounts["bad_entry"])
-            assert.is_not_nil(guildData.eventCounts["good_entry"])
-        end)
-
-        it("uses default 90 days when nil passed", function()
-            local now = Helpers.MockWoW.serverTime
-            guildData.eventCounts = {
-                ["old"] = { count = 1, asOf = now - (91 * 86400) },
-                ["recent"] = { count = 1, asOf = now - (89 * 86400) },
-            }
-            GBL:PruneEventCounts(nil, guildData)
-
-            assert.is_nil(guildData.eventCounts["old"])
-            assert.is_not_nil(guildData.eventCounts["recent"])
-        end)
-
-        it("handles nil guildData gracefully", function()
-            -- Should not error
-            GBL:PruneEventCounts(90, nil)
-            GBL:PruneEventCounts(90, {})
-        end)
-    end)
-
     describe("CollectEventCountsForBuckets", function()
         it("returns all when no filter provided", function()
             guildData.eventCounts = {
@@ -1339,27 +1295,4 @@ describe("Dedup", function()
         end)
     end)
 
-    describe("PruneSeenHashes", function()
-        it("removes old entries and preserves recent", function()
-            local now = Helpers.MockWoW.serverTime
-            guildData.seenTxHashes["old_hash"] = now - (91 * 86400)   -- 91 days ago
-            guildData.seenTxHashes["recent_hash"] = now - (10 * 86400)  -- 10 days ago
-
-            GBL:PruneSeenHashes(90, guildData)
-
-            assert.is_nil(guildData.seenTxHashes["old_hash"])
-            assert.is_not_nil(guildData.seenTxHashes["recent_hash"])
-        end)
-
-        it("handles table format entries during pruning", function()
-            local now = Helpers.MockWoW.serverTime
-            guildData.seenTxHashes["old_table"] = { count = 2, timestamp = now - (91 * 86400) }
-            guildData.seenTxHashes["recent_table"] = { count = 1, timestamp = now - (10 * 86400) }
-
-            GBL:PruneSeenHashes(90, guildData)
-
-            assert.is_nil(guildData.seenTxHashes["old_table"])
-            assert.is_not_nil(guildData.seenTxHashes["recent_table"])
-        end)
-    end)
 end)
