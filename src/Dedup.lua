@@ -419,21 +419,6 @@ end
 -- Maintenance
 ------------------------------------------------------------------------
 
---- Remove eventCounts entries older than maxAge days.
--- Mirrors PruneSeenHashes lifecycle.
--- @param maxAgeDays number Maximum age in days (default 90)
--- @param guildData table Guild data table
-function GBL:PruneEventCounts(maxAgeDays, guildData)
-    if not guildData or not guildData.eventCounts then return end
-    maxAgeDays = maxAgeDays or 90
-    local cutoff = GetServerTime() - (maxAgeDays * 86400)
-    for baseHash, entry in pairs(guildData.eventCounts) do
-        if type(entry) ~= "table" or (entry.asOf or 0) < cutoff then
-            guildData.eventCounts[baseHash] = nil
-        end
-    end
-end
-
 --- Does this eventCounts entry belong with the buckets a session is sending?
 --
 -- The per-entry rule, on its own so that more than one walk can apply it. The
@@ -469,22 +454,4 @@ function GBL:CollectEventCountsForBuckets(guildData, diffBuckets)
         end
     end
     return result
-end
-
---- Remove seen hashes older than maxAge days.
--- Handles both old format (number) and new format with occurrence suffix.
--- @param maxAgeDays number Maximum age in days (default 90)
--- @param guildData table Guild data table
-function GBL:PruneSeenHashes(maxAgeDays, guildData)
-    if not guildData or not guildData.seenTxHashes then return end
-
-    maxAgeDays = maxAgeDays or 90
-    local cutoff = GetServerTime() - (maxAgeDays * 86400)
-
-    for hash, entry in pairs(guildData.seenTxHashes) do
-        local timestamp = type(entry) == "table" and (entry.timestamp or 0) or entry
-        if timestamp < cutoff then
-            guildData.seenTxHashes[hash] = nil
-        end
-    end
 end

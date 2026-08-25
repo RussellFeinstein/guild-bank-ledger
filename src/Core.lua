@@ -74,8 +74,6 @@ local defaults = {
             ["*"] = {
                 transactions = {},
                 moneyTransactions = {},
-                dailySummaries = {},
-                weeklySummaries = {},
                 snapshots = {},
                 playerStats = {
                     ["*"] = {
@@ -629,27 +627,7 @@ function GBL:MigrateSchemaV2ToV3(guildData)
         end
     end
 
-    -- Step 4: Normalize daily/weekly summary player sets
-    for _, summary in pairs(guildData.dailySummaries or {}) do
-        if summary.players then
-            local newPlayers = {}
-            for name in pairs(summary.players) do
-                newPlayers[resolve(name)] = true
-            end
-            summary.players = newPlayers
-        end
-    end
-    for _, summary in pairs(guildData.weeklySummaries or {}) do
-        if summary.players then
-            local newPlayers = {}
-            for name in pairs(summary.players) do
-                newPlayers[resolve(name)] = true
-            end
-            summary.players = newPlayers
-        end
-    end
-
-    -- Step 5: Recompute all record IDs (player name is in the hash prefix)
+    -- Step 4: Recompute all record IDs (player name is in the hash prefix)
     local newAllRecords = {}
     for _, tx in ipairs(guildData.transactions) do
         newAllRecords[#newAllRecords + 1] = tx
@@ -682,7 +660,7 @@ function GBL:MigrateSchemaV2ToV3(guildData)
         end
     end
 
-    -- Step 6: Rebuild seenTxHashes from scratch
+    -- Step 5: Rebuild seenTxHashes from scratch
     for k in pairs(guildData.seenTxHashes) do
         guildData.seenTxHashes[k] = nil
     end
@@ -692,7 +670,7 @@ function GBL:MigrateSchemaV2ToV3(guildData)
         end
     end
 
-    -- Step 7: Merge playerStats
+    -- Step 6: Merge playerStats
     local newStats = {}
     for name, stats in pairs(guildData.playerStats) do
         local resolved = resolve(name)
@@ -1216,7 +1194,6 @@ end
 --- Repair records with epoch-0 timestamps (schema 7 → 8).
 -- Scans all transactions for invalid timestamps, attempts recovery from
 -- the timeSlot encoded in the record ID, then falls back to GetServerTime().
--- Also cleans up compacted summaries attributed to 1970-01-01.
 function GBL:MigrateRepairEpochTimestamps(guildData)
     if not guildData or (guildData.schemaVersion or 0) >= 8 then return end
 
@@ -1250,18 +1227,6 @@ function GBL:MigrateRepairEpochTimestamps(guildData)
 
     repairRecords(guildData.transactions)
     repairRecords(guildData.moneyTransactions)
-
-    -- Clean up compacted data attributed to epoch-0 dates
-    if guildData.dailySummaries then
-        guildData.dailySummaries["1970-01-01"] = nil
-    end
-    if guildData.weeklySummaries then
-        for key in pairs(guildData.weeklySummaries) do
-            if key:find("^1970%-") then
-                guildData.weeklySummaries[key] = nil
-            end
-        end
-    end
 
     -- Rebuild seenTxHashes from corrected records
     if repaired > 0 then
@@ -1704,26 +1669,6 @@ function GBL:RepairPlayerNames()
         guildData.playerStats[k] = v
     end
 
-    -- Normalize summary player sets
-    for _, summary in pairs(guildData.dailySummaries or {}) do
-        if summary.players then
-            local newPlayers = {}
-            for name in pairs(summary.players) do
-                newPlayers[resolve(name)] = true
-            end
-            summary.players = newPlayers
-        end
-    end
-    for _, summary in pairs(guildData.weeklySummaries or {}) do
-        if summary.players then
-            local newPlayers = {}
-            for name in pairs(summary.players) do
-                newPlayers[resolve(name)] = true
-            end
-            summary.players = newPlayers
-        end
-    end
-
     self:ResetHashCache()
     self:SystemInfo("Repaired " .. fixed .. " player names after roster load")
 end
@@ -1833,7 +1778,7 @@ function GBL:OnBankOpened()
         -- Backfill tab names on old records while bank is open
         self:BackfillTabNames()
 
-        -- Defer transaction scan and compaction so the bank frame renders first
+        -- Defer the transaction scan so the bank frame renders first
         C_Timer.After(0, function()
             if not self.bankOpen then return end
             self:ScanTransactions(function(newCount)
@@ -1844,7 +1789,6 @@ function GBL:OnBankOpened()
                     if not self.bankOpen then return end
                     local guildData = self:GetGuildData()
                     if guildData then
-                        self:RunCompaction(guildData)
                         -- Post-scan dedup: eventCounts was refreshed by
                         -- StoreBatchRecords during scanning, so
                         -- CleanupWithEventCounts now has fresh API ground

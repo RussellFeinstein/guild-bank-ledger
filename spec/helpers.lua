@@ -72,7 +72,6 @@ function Helpers.resetAll()
     package.loaded["Categories"] = nil
     package.loaded["Dedup"] = nil
     package.loaded["Ledger"] = nil
-    package.loaded["Storage"] = nil
     package.loaded["Fingerprint"] = nil
     package.loaded["Sync"] = nil
     package.loaded["UI.Accessibility"] = nil
@@ -108,7 +107,6 @@ function Helpers.loadAddon()
     package.loaded["Categories"] = nil
     package.loaded["Dedup"] = nil
     package.loaded["Ledger"] = nil
-    package.loaded["Storage"] = nil
     package.loaded["Sync"] = nil
     dofile("src/Core.lua")
     dofile("src/Logger.lua")
@@ -118,7 +116,6 @@ function Helpers.loadAddon()
     safeDofile("src/ChatFilters.lua")
     safeDofile("src/Dedup.lua")
     safeDofile("src/Ledger.lua")
-    safeDofile("src/Storage.lua")
     safeDofile("src/Fingerprint.lua")
     safeDofile("src/ItemCache.lua")
     safeDofile("src/Sync.lua")

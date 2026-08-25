@@ -199,25 +199,40 @@ describe("Periodic Rescan", function()
         end)
     end)
 
-    describe("periodic tick behavior", function()
-        it("does NOT run compaction", function()
+    describe("post-scan chain", function()
+        -- Pins the deferred block at the end of OnBankOpened: after the
+        -- transaction scan it must run the dedup pass, mark the initial
+        -- scan complete, and start the periodic rescan. This chain used
+        -- to open with a RunCompaction call whose os.date crash on the
+        -- no-viewable-tabs path could unwind all three (#62); the pin
+        -- keeps the survivors wired now that the call is gone.
+        it("runs dedup, marks scan complete, starts the rescan", function()
             MockWoW.guildBank.numTabs = 1
-            Helpers.addMoneyTransactions({
-                Helpers.makeMoneyTransaction("repair", "Raider1", 50000, 0),
-            })
+            GBL.bankOpen = false
+            GBL._initialScanComplete = false
+            GBL._rescanActive = false
 
-            local compactionCalled = false
-            local origCompaction = GBL.RunCompaction
-            GBL.RunCompaction = function() compactionCalled = true end
+            local dedupCalls = 0
+            local origDedup = GBL.DeduplicateRecords
+            GBL.DeduplicateRecords = function()
+                dedupCalls = dedupCalls + 1
+                return 0
+            end
 
-            GBL:StartPeriodicRescan()
-            MockWoW.fireTimers()  -- interval tick
-            MockWoW.fireTimers()  -- 0.5s delay
+            GBL:OnBankOpened()
+            -- Each round fires the queue snapshot; the chain is three
+            -- deferrals deep (outer After(0), scan completion, inner
+            -- After(0)), plus one round of slack.
+            for _ = 1, 4 do MockWoW.fireTimers() end
 
-            GBL.RunCompaction = origCompaction
-            assert.is_false(compactionCalled)
+            GBL.DeduplicateRecords = origDedup
+            assert.equals(1, dedupCalls)
+            assert.is_true(GBL._initialScanComplete)
+            assert.is_true(GBL._rescanActive)
         end)
+    end)
 
+    describe("periodic tick behavior", function()
         it("refreshes UI only when new transactions found", function()
             MockWoW.guildBank.numTabs = 1
 

@@ -3239,7 +3239,8 @@ function GBL:NormalizeRecordId(incomingRecord, matchedKey, guildData, idIndex)
         -- Normalize timestamp for consistent bucket hash placement
         localRecord.timestamp = newTs
     end
-    -- If record compacted/pruned: only seenTxHashes updated (harmless)
+    -- If the record itself is absent (removed by dedup cleanup):
+    -- only seenTxHashes updated (harmless)
 
     -- Atomic seenTxHashes update: add new FIRST, then remove old
     guildData.seenTxHashes[incomingId] = newTs
@@ -3273,8 +3274,6 @@ function GBL:HandleSyncData(sender, data)
             .. " (receiving from " .. (syncState.receiveSource or "?") .. ")")
         return
     end
-
-    self._syncReceiving = true
 
     local guildData = self:GetGuildData()
     if not guildData then return end
@@ -3621,7 +3620,6 @@ function GBL:FinishReceiving(sender)
     syncState.receiveStartTime = 0
     syncState.receiveNackCount = 0
     syncState.receiveSinceTimestamp = 0
-    self._syncReceiving = false
 
     self:SendMessage("GBL_SYNC_COMPLETE", sender, totalStored)
 
@@ -4203,7 +4201,6 @@ function GBL:HandleBusy(sender, data)
         syncState.receiveStartTime = 0
         syncState.receiveNackCount = 0
         syncState.receiveSinceTimestamp = 0
-        self._syncReceiving = false
 
         self:AddAuditEntry(cleanSender .. " busy - cleared receive state, will retry later")
     end

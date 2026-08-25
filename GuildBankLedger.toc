@@ -35,7 +35,6 @@ src\Categories.lua
 src\ChatFilters.lua
 src\Dedup.lua
 src\Ledger.lua
-src\Storage.lua
 src\Fingerprint.lua
 src\ItemCache.lua
 src\Sync.lua
