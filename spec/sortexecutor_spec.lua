@@ -406,4 +406,270 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.is_string(result.reason)
         end)
     end)
+
+    ------------------------------------------------------------------
+    -- Bag deposits (#139)
+    --
+    -- An op whose srcTab is negative sources from a player bag. The
+    -- pickup half switches to C_Container; the destination half is an
+    -- ordinary guild bank pickup and does not change at all.
+    ------------------------------------------------------------------
+    describe("bag deposits", function()
+        --- Count items of itemID across a mock bag.
+        local function countBagItem(bagID, itemID)
+            local bag = MockWoW.bags[bagID]
+            if not bag then return 0 end
+            local total = 0
+            for _, slot in pairs(bag.slots) do
+                if slot.itemID == itemID then total = total + slot.stackCount end
+            end
+            return total
+        end
+
+        --- A layout the executor can re-plan against between passes.
+        local function layoutWithDemand(perSlot)
+            return {
+                tabs = {
+                    [1] = { mode = "display",
+                            items = { [100] = { slots = 1, perSlot = perSlot } },
+                            slotOrder = { [1] = 100 } },
+                    [2] = { mode = "overflow" },
+                },
+            }
+        end
+
+        it("deposits a whole bag stack into the bank", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = -1, srcSlot = 1,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
+            }, function(r) result = r end, { includeBags = true })
+            drainTimers()
+
+            assert.is_not_nil(result)
+            assert.is_true(result.ok, result.reason)
+            assert.equals(0, countBagItem(0, 100))
+            assert.equals(20, countItem(1, 100))
+            assert.equals(1, result.bagOpsIssued)
+            assert.equals(0, result.bagOpsSkipped)
+        end)
+
+        it("splits a partial stack out of a bag", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 50 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "split", srcTab = -1, srcSlot = 1,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
+            }, function(r) result = r end, { includeBags = true })
+            drainTimers()
+
+            assert.is_true(result.ok, result.reason)
+            assert.equals(30, countBagItem(0, 100))
+            assert.equals(20, countItem(1, 100))
+        end)
+
+        it("threads includeBags into the run state", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = -1, srcSlot = 1,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
+            }, function() end, { includeBags = true })
+
+            local info = GBL:_sortExecutorGetPumpInfo()
+            assert.is_true(info.includeBags)
+            GBL:CancelSortExecution()
+            drainTimers()
+        end)
+
+        -- ExecuteSortPlan stored only opts.layout and endOfPass re-planned
+        -- with no third argument, so pass 2 would quietly go back to being
+        -- bank-only and strand whatever was still in the bags. The snapshot
+        -- has to be re-read, not cached, or it would still show the stack
+        -- this pass just deposited.
+        it("re-reads the bags for the end-of-pass replan", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local seen, called = nil, false
+            local realPlanSort = GBL.PlanSort
+            GBL.PlanSort = function(selfRef, snapshot, layout, opts)
+                seen, called = opts, true
+                return realPlanSort(selfRef, snapshot, layout, opts)
+            end
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = -1, srcSlot = 1,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
+            }, function() end, { includeBags = true, layout = layoutWithDemand(20) })
+            drainTimers()
+            GBL.PlanSort = realPlanSort
+
+            assert.is_true(called, "endOfPass should re-plan")
+            assert.is_not_nil(seen, "replan passed no opts at all")
+            assert.is_not_nil(seen.bagSnapshot, "replan lost the bag snapshot")
+            -- Freshness: the deposit already happened, so a re-read shows an
+            -- empty backpack. A snapshot cached at run start would still
+            -- carry the 20 and the planner would re-plan a move of nothing.
+            local backpack = seen.bagSnapshot[-1]
+            assert.is_true(backpack == nil or backpack.itemCount == 0,
+                "replan used a stale bag snapshot")
+        end)
+
+        it("omits the bag snapshot when includeBags is off", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 20 } })
+            local seen, called = nil, false
+            local realPlanSort = GBL.PlanSort
+            GBL.PlanSort = function(selfRef, snapshot, layout, opts)
+                seen, called = opts, true
+                return realPlanSort(selfRef, snapshot, layout, opts)
+            end
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 20 } },
+            }, function() end, { layout = layoutWithDemand(20) })
+            drainTimers()
+            GBL.PlanSort = realPlanSort
+
+            assert.is_true(called, "endOfPass should re-plan")
+            assert.is_nil(seen and seen.bagSnapshot)
+        end)
+
+        -- The dst pickup is the dangerous half: with an empty cursor it does
+        -- not place, it PICKS UP whatever sits in the destination. So a
+        -- refused src must return before it, never fall through.
+        it("skips a locked bag slot without touching the destination", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20, locked = true },
+            })
+            Helpers.populateTab(1, { [1] = { itemID = 777, name = "Bystander", count = 3 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = -1, srcSlot = 1,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
+            }, function(r) result = r end, { includeBags = true })
+            drainTimers()
+
+            assert.is_not_nil(result)
+            assert.equals(20, countBagItem(0, 100))
+            assert.equals(3, countItem(1, 777))
+            assert.equals(0, result.bagOpsIssued)
+            assert.equals(1, result.bagOpsSkipped)
+        end)
+
+        it("skips a bag slot whose item no longer matches the op", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 999, name = "Something Else", count = 4 },
+            })
+            Helpers.populateTab(1, { [1] = { itemID = 777, name = "Bystander", count = 3 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = -1, srcSlot = 1,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
+            }, function(r) result = r end, { includeBags = true })
+            drainTimers()
+
+            assert.equals(4, countBagItem(0, 999))
+            assert.equals(3, countItem(1, 777))
+            assert.equals(1, result.bagOpsSkipped)
+        end)
+
+        it("skips an empty bag slot", function()
+            Helpers.populateBag(0, {})
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = -1, srcSlot = 4,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
+            }, function(r) result = r end, { includeBags = true })
+            drainTimers()
+
+            assert.equals(1, result.bagOpsSkipped)
+            assert.equals(0, countItem(1, 100))
+        end)
+
+        it("carries on with later ops after a skip", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20, locked = true },
+                [2] = { itemID = 100, name = "Flask", count = 15 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = -1, srcSlot = 1,
+                      dstTab = 1, dstSlot = 1, itemID = 100, count = 20 },
+                    { op = "move", srcTab = -1, srcSlot = 2,
+                      dstTab = 1, dstSlot = 2, itemID = 100, count = 15 },
+                },
+            }, function(r) result = r end, { includeBags = true })
+            drainTimers()
+
+            assert.equals(1, result.bagOpsIssued)
+            assert.equals(1, result.bagOpsSkipped)
+            assert.equals(15, countItem(1, 100))
+        end)
+
+        it("counts bank ops separately from bag ops", function()
+            Helpers.populateTab(1, { [1] = { itemID = 200, name = "Ore", count = 10 } })
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 200, count = 10 },
+                    { op = "move", srcTab = -1, srcSlot = 1,
+                      dstTab = 1, dstSlot = 1, itemID = 100, count = 20 },
+                },
+            }, function(r) result = r end, { includeBags = true })
+            drainTimers()
+
+            assert.equals(2, result.done)
+            assert.equals(1, result.bagOpsIssued)
+            assert.equals(0, result.bagOpsSkipped)
+        end)
+
+        it("logs a bag source as BagN/S and never as a negative tab", function()
+            Helpers.populateBag(0, {
+                [3] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = -1, srcSlot = 3,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
+            }, function() end, { includeBags = true })
+            drainTimers()
+
+            local blob = {}
+            for _, e in ipairs(GBL:GetLog("sort") or {}) do
+                blob[#blob + 1] = e.message or ""
+            end
+            blob = table.concat(blob, "\n")
+            assert.is_truthy(blob:find("Bag0/3", 1, true))
+            assert.is_nil(blob:find("T-", 1, true))
+        end)
+
+        -- Every op refused means the bank never changes, so the replan
+        -- returns the same op count and convergence has to stop the run.
+        -- The cap on drainTimers is what would expose a loop.
+        it("finishes rather than looping when every bag op is refused", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20, locked = true },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = -1, srcSlot = 1,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
+            }, function(r) result = r end,
+               { includeBags = true, layout = layoutWithDemand(20) })
+            drainTimers()
+
+            assert.is_not_nil(result, "run never finished")
+            assert.equals(1, result.bagOpsSkipped)
+        end)
+    end)
 end)
