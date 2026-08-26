@@ -572,9 +572,14 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.is_truthy(blob:find("Bag0/1", 1, true))
         end)
 
+        -- The wrong item has to be present in SUFFICIENT quantity, or the
+        -- count check refuses first and this says nothing about the itemID
+        -- check. Mutation testing caught exactly that: a 4-count decoy left
+        -- the identity check unpinned. Depositing the wrong item into a
+        -- layout slot is the failure being guarded against.
         it("skips a bag slot whose item no longer matches the op", function()
             Helpers.populateBag(0, {
-                [1] = { itemID = 999, name = "Something Else", count = 4 },
+                [1] = { itemID = 999, name = "Something Else", count = 50 },
             })
             Helpers.populateTab(1, { [1] = { itemID = 777, name = "Bystander", count = 3 } })
             local result
@@ -584,7 +589,8 @@ describe("SortExecutor (fire-and-forget pump)", function()
             }, function(r) result = r end, { includeBags = true })
             drainTimers()
 
-            assert.equals(4, countBagItem(0, 999))
+            assert.equals(50, countBagItem(0, 999))
+            assert.equals(0, countItem(1, 999))
             assert.equals(3, countItem(1, 777))
             assert.equals(1, result.bagOpsSkipped)
         end)
