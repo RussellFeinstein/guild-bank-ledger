@@ -282,7 +282,7 @@ return {
     -- trip and that the round-tripped layout passes the relaxed Validate.
     {
         name = "LAYOUT_DATA with two overflow tabs, one prioritized",
-        serialized = "",
+        serialized = "^1^T^Stype^SLAYOUT_DATA^Sguild^STest~`Guild^Schunk^N1^SbankLayout^T^Stabs^T^N1^T^Sitems^T^N191318^T^Sslots^N2^SperSlot^N20^t^t^Smode^Sdisplay^SslotOrder^T^N1^N191318^t^t^N2^T^Smode^Soverflow^t^N5^T^SoverflowPriority^N1^Smode^Soverflow^t^t^SupdatedAt^N1775300000^Sversion^N4^SupdatedBy^SGuildMaster-Stormrage^t^Snchunks^N1^SstockReserves^T^N191318^N40^t^t^^",
         decoded = {
             type = "LAYOUT_DATA",
             guild = "Test Guild",
