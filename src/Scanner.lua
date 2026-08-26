@@ -275,12 +275,18 @@ function GBL:BagIDFromTab(tab)
     if type(tab) ~= "number" or tab >= 0 then return nil end
     local bagID = -tab - 1
     if bagID < BAG_ID_MIN or bagID > BAG_ID_MAX then return nil end
+    -- A fractional tab lands inside the range check and decodes to a
+    -- fractional bagID, which C_Container would take as a bag index.
+    -- Nothing produces one today; this is the boundary that keeps it
+    -- that way, so it refuses rather than rounds.
+    if bagID ~= math.floor(bagID) then return nil end
     return bagID
 end
 
 --- Render a slot reference for logs and UI: "T3/12" for bank tabs,
---- "Bag0/5" for bag pseudo-tabs. Every sort-side render site routes
---- through this so a negative tab can never surface as "T-1".
+--- "Bag0/5" for bag pseudo-tabs. Sort-side render sites route through
+--- this rather than formatting a tab index themselves, which is what
+--- keeps a negative tab from ever surfacing as "T-1".
 function GBL:FormatSlotRef(tab, slot)
     local bagID = self:BagIDFromTab(tab)
     if bagID then
@@ -306,13 +312,28 @@ function GBL:ScanBags()
         return results
     end
 
-    -- Resolved at call time: Scanner loads before BankLayout in the .toc.
+    -- Scanner loads before BankLayout in the .toc, so ExtractItemID is
+    -- resolved at call time and can legitimately be absent. SortPlanner
+    -- and Restock carry the same inline fallback; without it every bag
+    -- slot counts as noLink and the sort sees empty bags.
     local BankLayout = self.BankLayout
     local extract = BankLayout and BankLayout.ExtractItemID
+    if not extract then
+        extract = function(itemLink)
+            if type(itemLink) ~= "string" then return nil end
+            local id = itemLink:match("Hitem:(%d+)")
+            return id and tonumber(id) or nil
+        end
+    end
 
     local bagIDs = { 0, 1, 2, 3, 4 }
-    if Enum and Enum.BagIndex and Enum.BagIndex.ReagentBag then
-        table.insert(bagIDs, Enum.BagIndex.ReagentBag)
+    -- The reagent bag index comes from the client. Admit it only if it
+    -- round-trips through the pseudo-tab encoding: a value outside 0-5
+    -- would encode to a tab BagIDFromTab cannot decode, so the executor
+    -- could never turn the resulting op back into a bag slot.
+    local reagent = Enum and Enum.BagIndex and Enum.BagIndex.ReagentBag
+    if reagent and self:BagIDFromTab(self:TabFromBagID(reagent)) == reagent then
+        table.insert(bagIDs, reagent)
     end
 
     local warmed = {}
@@ -344,11 +365,14 @@ function GBL:ScanBags()
                             itemID = itemID,
                         }
                         tabResult.itemCount = tabResult.itemCount + 1
-                        if not warmed[itemID] then
+                        if not warmed[itemID] and self.GetMaxStack then
                             warmed[itemID] = true
                             -- Kick the async stack-size load now so the
                             -- planner's maxStack lookups are warm by sort
-                            -- time rather than the follow-up sort.
+                            -- time rather than the follow-up sort. Guarded
+                            -- for the same load-order reason as extract
+                            -- above: warming is an optimisation and must
+                            -- not take the scan down with it.
                             self:GetMaxStack(itemID)
                         end
                     end

@@ -73,8 +73,21 @@
 --       Per-item max stack override used by tests. When absent, the
 --       planner reads max stack via GBL:GetMaxStack(itemID).
 --
+--   opts.bagSnapshot :: { [pseudoTab] = tabResult } | nil   (#139)
+--       The player's bags, from GBL:ScanBags(), keyed by NEGATIVE
+--       pseudo-tab (bagID N is tab -(N+1)). Deliberately a separate arg
+--       rather than part of `snapshot`: tab classification, the
+--       perTabOccupied breakdown and BankLayout.Validate must never see
+--       a negative tab, and Validate rejects tabIndex < 1 outright.
+--       Only items named by some display tab's `items` table are taken
+--       in; everything else stays in the player's bags untouched.
+--
 -- Invariants:
 --   * Ignore tabs are never read as source nor written as destination.
+--   * Bags are a SOURCE ONLY. No op may target a pseudo-tab, and none
+--     can: findPivot walks the blocked tab plus overflow tabs, Phase 3
+--     sweeps display tabs, and Phase 4 packs overflow tabs, so a
+--     negative key is never a candidate destination in any of them.
 --   * Keep-slots (slot matching its own demand exactly) are never harvested.
 --   * Unplaced entries never duplicate (their source slot is flagged so
 --     Phase 3 skips it).
@@ -92,6 +105,17 @@ local BankLayout = GBL.BankLayout
 local REASON_OVERFLOW_FULL       = "overflow-full"
 local REASON_CYCLE_NO_PIVOT      = "cycle-no-pivot"
 local REASON_NO_OVERFLOW_DEFINED = "no-overflow-defined"
+
+--- Render one slot reference. Routes through GBL:FormatSlotRef (Scanner.lua,
+--- loaded ahead of this file) so a bag pseudo-tab prints "Bag0/5" instead of
+--- the "T-1/5" a bare format would produce. The fallback only matters for a
+--- partial test setup that loads the planner without the scanner.
+local function slotRef(self, tabIndex, slotIndex)
+    if self and self.FormatSlotRef then
+        return self:FormatSlotRef(tabIndex, slotIndex)
+    end
+    return string.format("T%d/%d", tabIndex, slotIndex)
+end
 
 ------------------------------------------------------------------------
 -- Helpers
@@ -238,6 +262,11 @@ function GBL:PlanSort(snapshot, layout, opts)
         phase4PositionShifts = 0,
         demandPinned = 0, demandExtendRight = 0,
         demandExtendLeft = 0, demandFirstEmpty = 0,
+        -- #139 bag sourcing: supplies admitted from bags, how many filled
+        -- a display demand, and how many spilled to overflow. A run with
+        -- bagSupplies > 0 and both others 0 means the layout named the
+        -- items but had nowhere to put them.
+        bagSupplies = 0, bagDemandFills = 0, bagSpills = 0,
     }
 
     -- v0.32.8 B4a: Phase 2 instrumentation. SortDebug emissions are
@@ -302,6 +331,51 @@ function GBL:PlanSort(snapshot, layout, opts)
     end
     for _, ovTab in ipairs(overflowTabsOrdered) do
         if not bank[ovTab] then bank[ovTab] = {} end
+    end
+
+    -- --------------------------------------------------------------
+    -- Bags (#139): admit opts.bagSnapshot under its negative pseudo-tabs.
+    --
+    -- This must land after the overflow ensure loop and before the state
+    -- deep copy below, which is `bank`'s only consumer: nothing else
+    -- reads it, so a pseudo-tab cannot leak past `state` from here. The
+    -- classification and perTabOccupied passes ran off `snapshot`, which
+    -- bags never enter, so they are already past.
+    --
+    -- Only items some display tab's template names are taken. A
+    -- slotOrder entry without an items entry produces no demand, so the
+    -- items keys are exactly the demand-capable set; anything else in
+    -- the player's bags is none of the sort's business.
+    -- --------------------------------------------------------------
+    local bagTabs = {}
+    if opts and type(opts.bagSnapshot) == "table" then
+        local layoutItems = {}
+        for _, entry in ipairs(displayTabs) do
+            for itemID in pairs(entry.tab.items or {}) do
+                layoutItems[tonumber(itemID) or itemID] = true
+            end
+        end
+        for tabIndex, tabResult in pairs(opts.bagSnapshot) do
+            if type(tabIndex) == "number" and tabIndex < 0 then
+                local held = {}
+                local any = false
+                for slotIndex, slot in pairs((tabResult or {}).slots or {}) do
+                    local itemID = slot.itemID or extractItemID(slot.itemLink)
+                    if itemID and layoutItems[itemID] then
+                        held[slotIndex] = { itemID = itemID, count = slot.count or 1 }
+                        any = true
+                        diag.bagSupplies = diag.bagSupplies + 1
+                    end
+                end
+                if any then
+                    bank[tabIndex] = held
+                    table.insert(bagTabs, tabIndex)
+                end
+            end
+        end
+        -- Descending, so bag 0 leads: the pseudo-tabs run -1, -2, ... in
+        -- bagID order, and supply order has to be stable across replans.
+        table.sort(bagTabs, function(a, b) return a > b end)
     end
 
     -- --------------------------------------------------------------
@@ -609,6 +683,31 @@ function GBL:PlanSort(snapshot, layout, opts)
         end
     end
 
+    -- Bag supplies (#139) are appended AFTER the tabOrder walk rather than
+    -- joining tabOrder, for two reasons. tabOrder is numerically sorted, so
+    -- a negative key would sort to the front and put bags ahead of every
+    -- bank tab in Phase 1B, which is backwards: bank leftovers should claim
+    -- overflow before a deposit does. And keeping the sort key positive
+    -- leaves the existing ordering contract untouched.
+    for _, bagTab in ipairs(bagTabs) do
+        local tab = state[bagTab]
+        if tab then
+            for slotIndex = 1, MAX_SLOTS do
+                local slot = tab[slotIndex]
+                if slot then
+                    table.insert(supplies, {
+                        tabIndex = bagTab, slotIndex = slotIndex,
+                        itemID = slot.itemID, count = slot.count,
+                        available = slot.count,
+                        isOverflow = false,
+                        isBag = true,
+                        isKeep = false,
+                    })
+                end
+            end
+        end
+    end
+
     -- Keep-slot identification: reserve perSlot against the matching demand.
     -- An oversize keep-slot retains identity but exposes its excess as
     -- `available` supply for other demands of the same item.
@@ -624,12 +723,25 @@ function GBL:PlanSort(snapshot, layout, opts)
 
     -- Phase 1A — fill demands from the best source.
     local function findBestSource(dem)
-        local best, bestP, bestAvail, bestTab, bestSlot = nil, 4, -1, math.huge, math.huge
+        -- bestP starts one past the lowest tier so every tier is reached
+        -- through the `p < bestP` branch. It sits above tier 4 rather than
+        -- on it: a first candidate is admitted either way, because
+        -- bestAvail's -1 sentinel loses to any positive `available`, but
+        -- an init equal to the lowest tier reads as if bags were the
+        -- sentinel and breaks the moment a tier 5 is added.
+        local best, bestP, bestAvail, bestTab, bestSlot = nil, 5, -1, math.huge, math.huge
         for _, sup in ipairs(supplies) do
             if sup.itemID == dem.itemID and sup.available > 0
                and not (sup.tabIndex == dem.tabIndex and sup.slotIndex == dem.slotIndex) then
+                -- Tier order is the cost of the move. Bags are last (#139):
+                -- shuffling stock already inside the bank is free, while
+                -- pulling from a bag spends a deposit, so bank stock always
+                -- wins even when a bag holds far more of the item. Without
+                -- this tier a bag lands at 3 and beats a bank tab twice
+                -- over, on `available` and again on the negative tabIndex.
                 local p
-                if sup.tabIndex == dem.tabIndex then p = 1
+                if sup.isBag then p = 4
+                elseif sup.tabIndex == dem.tabIndex then p = 1
                 elseif sup.isOverflow then p = 2
                 else p = 3 end
                 local pick = false
@@ -673,6 +785,9 @@ function GBL:PlanSort(snapshot, layout, opts)
             sup.available = sup.available - take
             dem.filled = dem.filled + take
             diag.phase1aAssignments = diag.phase1aAssignments + 1
+            if sup.isBag then
+                diag.bagDemandFills = diag.bagDemandFills + 1
+            end
         end
     end
 
@@ -817,6 +932,9 @@ function GBL:PlanSort(snapshot, layout, opts)
                         dstTab = ovTab, dstSlot = ovSlot,
                         itemID = sup.itemID, count = take,
                     })
+                    if sup.isBag then
+                        diag.bagSpills = diag.bagSpills + 1
+                    end
                     notePlacement(ovTab, ovSlot, sup.itemID, take)
                     sup.available = sup.available - take
                 end
@@ -1215,11 +1333,19 @@ function GBL:PlanSort(snapshot, layout, opts)
             table.insert(breakdownParts,
                 string.format("T%d:%d", tabIndex, perTabOccupied[tabIndex]))
         end
+        -- The breakdown is built from perTabOccupied, which was filled from
+        -- `snapshot` before bags were admitted, so it stays bank-only and no
+        -- "T-1:N" can appear here. Bag input is reported as its own term.
+        local bagsPart = ""
+        if diag.bagSupplies > 0 then
+            bagsPart = string.format(" bags:%d(fill=%d,spill=%d)",
+                diag.bagSupplies, diag.bagDemandFills, diag.bagSpills)
+        end
         self:SortInfo(string.format(
             "Sort plan: %.1fms, %d ops, %d deficits, %d unplaced "
-            .. "(input: %d slots / %d tabs) [%s]",
+            .. "(input: %d slots / %d tabs)%s [%s]",
             elapsed, #plan.ops, deficitCount, #plan.unplaced,
-            inputSlots, inputTabs, table.concat(breakdownParts, " ")))
+            inputSlots, inputTabs, bagsPart, table.concat(breakdownParts, " ")))
 
         local totalDemands = diag.demandPinned + diag.demandExtendRight
             + diag.demandExtendLeft + diag.demandFirstEmpty
@@ -1274,16 +1400,22 @@ function GBL:SummarizeSortPlan(plan)
             suffix = "  (dst " .. dstDem.origin .. ")"
         end
         table.insert(lines, string.format(
-            "%s %d x item:%d  T%d/%d -> T%d/%d%s",
+            "%s %d x item:%d  %s -> %s%s",
             op.op, op.count, op.itemID,
-            op.srcTab, op.srcSlot, op.dstTab, op.dstSlot, suffix))
+            slotRef(self, op.srcTab, op.srcSlot),
+            slotRef(self, op.dstTab, op.dstSlot), suffix))
     end
     for itemID, count in pairs(plan.deficits or {}) do
         table.insert(lines, string.format("deficit: %d x item:%d (need more)", count, itemID))
     end
     for _, u in ipairs(plan.unplaced or {}) do
-        table.insert(lines, string.format("unplaced: %d x item:%d at T%d/%d",
-            u.count, u.itemID, u.tabIndex, u.slotIndex))
+        -- A bag-origin entry says what actually happens to the items rather
+        -- than only naming the slot: nothing moved, so they are still in the
+        -- player's bags and the sort is not going to come back for them.
+        local tail = (type(u.tabIndex) == "number" and u.tabIndex < 0)
+            and " (stays in bags)" or ""
+        table.insert(lines, string.format("unplaced: %d x item:%d at %s%s",
+            u.count, u.itemID, slotRef(self, u.tabIndex, u.slotIndex), tail))
     end
     if #lines == 0 then
         table.insert(lines, "Bank already matches layout; no moves needed.")

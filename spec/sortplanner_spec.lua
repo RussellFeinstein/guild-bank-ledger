@@ -2818,8 +2818,11 @@ describe("SortPlanner", function()
             end
             assert.equals(5, byDst[1])
             assert.equals(20, byDst[2])
+            -- The remainder extends the item's existing group rather than
+            -- opening a first-empty: T2/1 already holds item 100, so T2/2
+            -- is a right-extension of that run.
             assert.equals(1, plan.diag.phase1bTopup)
-            assert.equals(1, plan.diag.phase1bFirstEmpty)
+            assert.equals(1, plan.diag.phase1bExtendRight)
         end)
 
         it("spills bank leftovers before bag surplus", function()
@@ -2904,10 +2907,18 @@ describe("SortPlanner", function()
 
             assert.equals(0, plan.diag.phase1bTopup)
             assert.equals(0, #plan.unplaced)
+
+            -- Assert the total rather than the slots. The bag stack opens a
+            -- new slot instead of merging, then Phase 4 packs the tab, so
+            -- which slot holds what is packing's business; what this test
+            -- owns is that nothing was dropped and nothing over-stacked.
             local final = applyPlan(snap, plan, bags)
-            assert.is_not_nil(final[2] and final[2][2],
-                "expected the bag stack to open a fresh overflow slot")
-            assert.equals(12, final[2][2].count)
+            local inOverflow = 0
+            for _, s in pairs(final[2] or {}) do
+                assert.equals(100, s.itemID)
+                inOverflow = inOverflow + s.count
+            end
+            assert.equals(17, inOverflow)
         end)
 
         it("is idempotent: re-planning the applied result with empty bags is a no-op", function()

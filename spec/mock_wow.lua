@@ -373,8 +373,16 @@ function MockWoW.install()
     -- Cursor + guild bank movement (M-sort-2).
     --
     -- Simplified model:
-    --   * MockWoW.cursor holds { itemLink, itemID, count, src = {tabIndex, slotIndex} } or nil.
+    --   * MockWoW.cursor holds { itemLink, itemID, count, src } or nil, where
+    --     src is { tabIndex, slotIndex } for a guild bank slot or
+    --     { bagID, slotIndex } for a player bag slot (#139). The two forms
+    --     are told apart by which key is present, and the bounce-back path
+    --     below has to check bagID first so a bag-sourced item is returned to
+    --     the bag rather than written into a guild bank tab.
     --   * PickupGuildBankItem / SplitGuildBankItem pick items up into cursor.
+    --     C_Container.PickupContainerItem / SplitContainerItem do the same
+    --     from bags, sharing this one cursor so a bag pickup can drop into
+    --     a bank slot, which is the whole point of the sort's bag support.
     --   * PickupGuildBankItem with a filled cursor drops the cursor onto the slot.
     --   * If the dest is empty → place. If dest has the same item → merge (capped for realism).
     --   * If dest has a different item → swap: cursor gets dest's old contents, src gets nothing.
