@@ -461,6 +461,21 @@ describe("Scanner bag scanning", function()
             assert.equals(1, result[-1].lockedSkips)
         end)
 
+        -- A bound item sitting in a transiently locked slot hits both skip
+        -- branches. It must count as bound: locked is a retry-and-it-clears
+        -- state, bound is permanent, so reporting the transient reason tells
+        -- the user to retry a deposit the server will refuse every time.
+        it("counts a slot that is both bound and locked as bound", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Warbound Ore", count = 5,
+                        isBound = true, locked = true },
+            })
+            local result = GBL:ScanBags()
+            assert.is_nil(result[-1].slots[1])
+            assert.equals(1, result[-1].boundSkips)
+            assert.equals(0, result[-1].lockedSkips)
+        end)
+
         it("skips bag 5 when Enum.BagIndex is absent", function()
             Helpers.populateBag(5, {
                 [1] = { itemID = 200, name = "Chromatic Dust", count = 1 },
