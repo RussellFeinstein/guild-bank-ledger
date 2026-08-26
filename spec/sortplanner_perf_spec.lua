@@ -66,4 +66,53 @@ describe("SortPlanner performance", function()
         assert.is_true(elapsed < 0.250,
             string.format("PlanSort took %.3fs, expected < 0.250s", elapsed))
     end)
+
+    it("plans a worst-case bank with two overflow tabs within the same budget", function()
+        -- Same worst-case snapshot as above; the layout swaps one ignore
+        -- tab for a second overflow tab (with a priority, so the ordered
+        -- routing path runs). Guards the cost of the tab-nested overflow
+        -- scans added for #57: pickOverflowSlot walks every overflow tab,
+        -- and Phase 0 / Phase 4 run per tab.
+        local snap = {}
+        for t = 1, 8 do
+            snap[t] = { slots = {}, itemCount = 0 }
+            for s = 1, 98 do
+                local itemID = 100 + ((t - 1) * 98 + s) % 120
+                snap[t].slots[s] = {
+                    itemLink = Helpers.makeItemLink(itemID, "I" .. itemID, 1),
+                    count = 10,
+                    slotIndex = s, tabIndex = t,
+                }
+                snap[t].itemCount = snap[t].itemCount + 1
+            end
+        end
+
+        local layout = { tabs = {} }
+        for t = 1, 3 do
+            local items, slotOrder = {}, {}
+            for s = 1, 30 do
+                local itemID = 100 + (t - 1) * 30 + s - 1
+                items[itemID] = { slots = 1, perSlot = 10 }
+                slotOrder[s] = itemID
+            end
+            layout.tabs[t] = {
+                mode = "display", items = items, slotOrder = slotOrder,
+            }
+        end
+        layout.tabs[4] = { mode = "overflow" }
+        layout.tabs[5] = { mode = "overflow", overflowPriority = 1 }
+        for t = 6, 8 do
+            layout.tabs[t] = { mode = "ignore" }
+        end
+
+        local start = os.clock()
+        local plan = GBL:PlanSort(snap, layout)
+        local elapsed = os.clock() - start
+
+        assert.is_not_nil(plan)
+        assert.is_table(plan.ops)
+        assert.same({ 5, 4 }, plan.overflowTabs)
+        assert.is_true(elapsed < 0.250,
+            string.format("PlanSort took %.3fs, expected < 0.250s", elapsed))
+    end)
 end)
