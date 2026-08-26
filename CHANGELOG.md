@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- A bank layout can now declare more than one overflow tab. Stock fills overflow tabs in tab order by default, and an optional per-tab routing priority (lower fills first) overrides that order for cases like keeping a nearly-full tab first or holding a tab for a raid team. At least one overflow tab is still required.
+
 ## [0.37.18] - 2026-08-25
 
 ### Added

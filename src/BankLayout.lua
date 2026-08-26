@@ -11,7 +11,11 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 local MAX_SLOTS = MAX_GUILDBANK_SLOTS_PER_TAB or 98
 local MAX_TABS = MAX_GUILDBANK_TABS or 8
 
-local LAYOUT_SCHEMA_VERSION = 1
+-- Shape history: 1 = original (mode/name/items/slotOrder, exactly one
+-- overflow tab); 2 = optional overflowPriority on overflow-mode tabs.
+-- Nothing reads this constant yet; it records the shape so future migration
+-- or compatibility code has a correct starting point.
+local LAYOUT_SCHEMA_VERSION = 2
 
 ------------------------------------------------------------------------
 -- Helpers
@@ -25,6 +29,27 @@ end
 
 local function emptyTable(t)
     for k in pairs(t) do t[k] = nil end
+end
+
+--- Whitelist deep copy of one tab record. The single copy shared by
+-- GetBankLayout, SaveBankLayout, and AdoptRemoteBankLayout: unknown fields
+-- are dropped deliberately (this is storage, not the tolerant record-sync
+-- intake), so a new tab field is one edit here plus its roundtrip specs.
+local function copyTab(tab)
+    local copy = { mode = tab.mode, name = tab.name }
+    if tab.mode == "overflow" then
+        copy.overflowPriority = tab.overflowPriority
+    elseif tab.mode == "display" then
+        copy.items = {}
+        for itemID, row in pairs(tab.items or {}) do
+            copy.items[itemID] = { slots = row.slots, perSlot = row.perSlot }
+        end
+        copy.slotOrder = {}
+        for slotIndex, itemID in pairs(tab.slotOrder or {}) do
+            copy.slotOrder[slotIndex] = itemID
+        end
+    end
+    return copy
 end
 
 --- Get the guild-scoped storage table, backfilling missing layout/reserve fields.
@@ -51,6 +76,35 @@ local BankLayout = GBL.BankLayout
 --- Schema version constant exposed for tests and migrations.
 BankLayout.SCHEMA_VERSION = LAYOUT_SCHEMA_VERSION
 
+--- Return the overflow tab indices in routing (fill) order.
+-- Sort key is (overflowPriority or tabIndex) with ascending tabIndex as the
+-- tiebreak, so priority literally defaults to the tab index: an unconfigured
+-- layout fills in tab order with no setup. Lower fills first.
+-- Total on any input (nil, drafts, remote payloads): malformed input yields
+-- {}, and a non-number or NaN priority falls back to the tab index because
+-- unvalidated editor drafts reach this before Validate runs.
+-- @return array of tabIndex, possibly empty
+function BankLayout.OrderedOverflowTabs(layout)
+    local out = {}
+    if type(layout) ~= "table" or type(layout.tabs) ~= "table" then return out end
+    for tabIndex, tab in pairs(layout.tabs) do
+        if type(tabIndex) == "number" and type(tab) == "table" and tab.mode == "overflow" then
+            table.insert(out, tabIndex)
+        end
+    end
+    local function sortKey(tabIndex)
+        local p = layout.tabs[tabIndex].overflowPriority
+        if type(p) == "number" and p == p then return p end
+        return tabIndex
+    end
+    table.sort(out, function(a, b)
+        local ka, kb = sortKey(a), sortKey(b)
+        if ka ~= kb then return ka < kb end
+        return a < b
+    end)
+    return out
+end
+
 --- Return a deep copy of the current layout (never the live reference).
 -- @return table { version, updatedBy, updatedAt, tabs = { [tabIndex] = {...} } }
 function GBL:GetBankLayout()
@@ -62,18 +116,7 @@ function GBL:GetBankLayout()
     local src = guild.bankLayout
     local tabs = {}
     for tabIndex, tab in pairs(src.tabs or {}) do
-        local copy = { mode = tab.mode, name = tab.name }
-        if tab.mode == "display" then
-            copy.items = {}
-            for itemID, row in pairs(tab.items or {}) do
-                copy.items[itemID] = { slots = row.slots, perSlot = row.perSlot }
-            end
-            copy.slotOrder = {}
-            for slotIndex, itemID in pairs(tab.slotOrder or {}) do
-                copy.slotOrder[slotIndex] = itemID
-            end
-        end
-        tabs[tabIndex] = copy
+        tabs[tabIndex] = copyTab(tab)
     end
     return {
         version = src.version or 0,
@@ -114,6 +157,11 @@ function BankLayout.Validate(layout)
         local mode = tab.mode
         if mode == "overflow" then
             overflowCount = overflowCount + 1
+            local p = tab.overflowPriority
+            -- NaN is type "number" but breaks sort determinism, so p == p.
+            if p ~= nil and (type(p) ~= "number" or p ~= p) then
+                return false, "tab " .. tabIndex .. " overflowPriority must be a number"
+            end
         elseif mode == "display" then
             if type(tab.items) ~= "table" then
                 return false, "display tab " .. tabIndex .. " missing items"
@@ -183,18 +231,7 @@ function GBL:SaveBankLayout(layout, updatedBy)
     local store = { version = nextVersion, tabs = {}, updatedAt = GetServerTime(),
                     updatedBy = updatedBy or (UnitName and UnitName("player")) or nil }
     for tabIndex, tab in pairs(layout.tabs) do
-        local copy = { mode = tab.mode, name = tab.name }
-        if tab.mode == "display" then
-            copy.items = {}
-            for itemID, row in pairs(tab.items or {}) do
-                copy.items[itemID] = { slots = row.slots, perSlot = row.perSlot }
-            end
-            copy.slotOrder = {}
-            for slotIndex, itemID in pairs(tab.slotOrder or {}) do
-                copy.slotOrder[slotIndex] = itemID
-            end
-        end
-        store.tabs[tabIndex] = copy
+        store.tabs[tabIndex] = copyTab(tab)
     end
     guild.bankLayout = store
 
@@ -258,18 +295,7 @@ function GBL:AdoptRemoteBankLayout(payload, _fromPeer)
         tabs = {},
     }
     for tabIndex, tab in pairs(incoming.tabs or {}) do
-        local copy = { mode = tab.mode, name = tab.name }
-        if tab.mode == "display" then
-            copy.items = {}
-            for itemID, row in pairs(tab.items or {}) do
-                copy.items[itemID] = { slots = row.slots, perSlot = row.perSlot }
-            end
-            copy.slotOrder = {}
-            for slotIndex, itemID in pairs(tab.slotOrder or {}) do
-                copy.slotOrder[slotIndex] = itemID
-            end
-        end
-        store.tabs[tabIndex] = copy
+        store.tabs[tabIndex] = copyTab(tab)
     end
     guild.bankLayout = store
 
