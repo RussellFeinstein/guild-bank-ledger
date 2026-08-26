@@ -450,6 +450,21 @@ function MockWoW.install()
         return id and tonumber(id) or nil
     end
 
+    --- A max-stack bounce merges the cursor back into its source slot.
+    --- That is only ever the same item in practice: a full pickup nils the
+    --- source so the restore branch runs instead, and a split leaves the
+    --- remainder behind. Merging blindly would inflate a foreign item's
+    --- count and lose the cursor item, so refuse loudly rather than let a
+    --- future arrangement corrupt counts in silence.
+    local function assertSameItemOnBounce(srcItemID, cursorItemID, kind, container, slotIndex)
+        if srcItemID ~= nil and cursorItemID ~= nil and srcItemID ~= cursorItemID then
+            error(("bounce: %s %s slot %s holds item %s but the cursor carries %s. "
+                .. "Merging them would inflate one count and lose the other.")
+                :format(kind, tostring(container), tostring(slotIndex),
+                    tostring(srcItemID), tostring(cursorItemID)))
+        end
+    end
+
     --- Pick up the full stack in (tabIndex, slotIndex) or drop cursor onto it.
     _G.PickupGuildBankItem = function(tabIndex, slotIndex)
         local tab = MockWoW.guildBank.tabs[tabIndex]
@@ -502,9 +517,11 @@ function MockWoW.install()
                     -- but in practice the cursor was picked up from src so
                     -- src had room for it before).
                     local srcRef = cur.src
+                    local bouncedToBag = false
                     if srcRef and srcRef.bagID ~= nil then
                         -- #139: cursor was lifted from a player bag, so the
                         -- bounce restores into MockWoW.bags, not the bank.
+                        bouncedToBag = true
                         local bag = MockWoW.bags[srcRef.bagID]
                         if bag then
                             local srcSlot = bag.slots[srcRef.slotIndex]
@@ -519,6 +536,8 @@ function MockWoW.install()
                                     itemID = cur.itemID,
                                 }
                             else
+                                assertSameItemOnBounce(srcSlot.itemID, cur.itemID,
+                                    "bag", srcRef.bagID, srcRef.slotIndex)
                                 srcSlot.stackCount = srcSlot.stackCount + cur.count
                             end
                         end
@@ -537,12 +556,24 @@ function MockWoW.install()
                                     itemID = cur.itemID,
                                 }
                             else
+                                assertSameItemOnBounce(extractItemID(srcSlot.itemLink),
+                                    cur.itemID, "tab", srcRef.tabIndex, srcRef.slotIndex)
                                 srcSlot.count = srcSlot.count + cur.count
                             end
                         end
                     end
                     MockWoW.cursor = nil
-                    fireBankEvent()
+                    if bouncedToBag then
+                        -- The drop was refused and the item went back to a
+                        -- bag, so no guild bank slot changed. Firing here
+                        -- would claim one did. Clear _lastMutatedTab by hand
+                        -- since fireBankEvent is what normally consumes it,
+                        -- or the next generic fire inherits a stale tab and
+                        -- gets gated away under viewGatedReads.
+                        MockWoW.guildBank._lastMutatedTab = nil
+                    else
+                        fireBankEvent()
+                    end
                 else
                     slot.count = slot.count + cur.count
                     MockWoW.cursor = nil
@@ -609,14 +640,22 @@ function MockWoW.install()
             return bag and bag.numSlots or 0
         end,
 
+        --- Retail builds a fresh table per call, so a caller can neither
+        --- write through into the bag nor watch a captured table change.
+        --- Copy rather than returning the live slot: every field is a
+        --- scalar, so a shallow copy is faithful.
         GetContainerItemInfo = function(bagID, slotIndex)
             local bag = MockWoW.bags[bagID]
-            return bag and bag.slots[slotIndex] or nil
+            local slot = bag and bag.slots[slotIndex]
+            if not slot then return nil end
+            local info = {}
+            for k, v in pairs(slot) do info[k] = v end
+            return info
         end,
 
-        --- Pick up the full stack in (bagID, slotIndex), or drop the cursor
-        --- into that bag slot. Locked slots refuse the pickup, as the real
-        --- client does while an item is in use.
+        --- Pick up the full stack in (bagID, slotIndex). Locked slots refuse
+        --- the pickup, as the real client does while an item is in use.
+        --- Dropping a filled cursor into a bag raises: see below.
         PickupContainerItem = function(bagID, slotIndex)
             local bag = MockWoW.bags[bagID]
             if not bag then return end
@@ -633,43 +672,17 @@ function MockWoW.install()
                 }
                 bag.slots[slotIndex] = nil
             else
-                -- Drop into the bag. The sort pipeline never targets bags,
-                -- but the mock stays coherent for any test that does.
-                local cur = MockWoW.cursor
-                if not slot then
-                    bag.slots[slotIndex] = {
-                        hyperlink = cur.itemLink,
-                        iconFileID = cur.texture,
-                        stackCount = cur.count,
-                        quality = cur.quality,
-                        isLocked = false,
-                        isBound = false,
-                        itemID = cur.itemID,
-                    }
-                    MockWoW.cursor = nil
-                elseif slot.itemID == cur.itemID then
-                    slot.stackCount = slot.stackCount + cur.count
-                    MockWoW.cursor = nil
-                else
-                    local prev = slot
-                    bag.slots[slotIndex] = {
-                        hyperlink = cur.itemLink,
-                        iconFileID = cur.texture,
-                        stackCount = cur.count,
-                        quality = cur.quality,
-                        isLocked = false,
-                        isBound = false,
-                        itemID = cur.itemID,
-                    }
-                    MockWoW.cursor = {
-                        itemLink = prev.hyperlink,
-                        itemID = prev.itemID,
-                        count = prev.stackCount,
-                        src = { bagID = bagID, slotIndex = slotIndex },
-                        texture = prev.iconFileID,
-                        quality = prev.quality,
-                    }
-                end
+                -- Bags are a sort SOURCE only (#139): findPivot walks the
+                -- blocked tab plus overflow tabs, Phase 3 sweeps display
+                -- tabs, Phase 4 packs overflow tabs. The planner side is
+                -- pinned by applyPlan's dstTab >= 1 assertion, but executor
+                -- specs never route through applyPlan, so refusing here is
+                -- the only thing that turns a regression which targeted a
+                -- bag into a red test rather than a silently accepted move.
+                error(("PickupContainerItem: refusing to drop into bag %s slot %s. "
+                    .. "Bags are a sort source only; an op with a bag destination "
+                    .. "is a bug in whatever produced it.")
+                    :format(tostring(bagID), tostring(slotIndex)))
             end
         end,
 

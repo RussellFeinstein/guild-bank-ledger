@@ -303,6 +303,11 @@ end
 --- Skipped with per-bag counters: bound items (the server refuses them
 --- at the guild bank), locked slots, and slots without a parseable item
 --- link (caged pets, item data not yet streamed).
+--- Slot entries carry an itemID field that bank slots from ScanTab do
+--- NOT: the scan already resolved it for the noLink check, so emitting
+--- it saves the planner a pattern match per bag slot. SortPlanner reads
+--- `slot.itemID or extractItemID(slot.itemLink)` and so takes either
+--- shape. Do not assume a bank snapshot slot has the field.
 -- @return table { [pseudoTab] = { slots, itemCount, boundSkips,
 --   lockedSkips, noLink } }, empty when C_Container is unavailable
 function GBL:ScanBags()
