@@ -220,8 +220,9 @@ function BankLayout.Validate(layout)
     -- schema 2 on (#57), filled in OrderedOverflowTabs order. Mixed-version
     -- note: a pre-#57 peer receiving a multi-overflow LAYOUT_DATA rejects it
     -- at this gate, keeps its last valid layout, and re-requests on the
-    -- LAYOUT_REQUEST throttle until it updates. Stale layout and bounded
-    -- chatter, never corruption, which is why the change takes no
+    -- LAYOUT_REQUEST throttle until it updates. Stale layout and rate-limited
+    -- chatter (one re-request per throttle window, repeating until the peer
+    -- upgrades), never corruption, which is why the change takes no
     -- MIN_SYNC_VERSION raise.
     if overflowCount < 1 then
         return false, "at least one tab must be mode=overflow (found " .. overflowCount .. ")"
