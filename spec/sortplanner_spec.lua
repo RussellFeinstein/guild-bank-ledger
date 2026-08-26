@@ -3051,6 +3051,85 @@ describe("SortPlanner", function()
             assert.equals(1, plan.diag.bagSpills)
         end)
 
+        -- The three below all needed more than one bag, or a bank spill
+        -- alongside a bag one. Mutation testing found the gap: reversing the
+        -- bag walk and counting every spill as a bag spill both left the
+        -- suite green, because every other fixture here uses bag 0 alone and
+        -- has nothing but bag surplus to route.
+        it("fills a demand from the lowest bagID when two bags tie", function()
+            local snap = snapshot({ [1] = {}, [2] = {} })
+            local bags = bagSnapshot({
+                [0] = { [1] = { itemID = 100, count = 10 } },
+                [1] = { [1] = { itemID = 100, count = 10 } },
+            })
+            local plan = GBL:PlanSort(snap, oneDemandLayout(10), {
+                bagSnapshot = bags,
+                maxStackByItem = { [100] = 20 },
+            })
+
+            local fill
+            for _, op in ipairs(plan.ops) do
+                if op.dstTab == 1 and op.dstSlot == 1 then fill = op end
+            end
+            assert.is_not_nil(fill)
+            -- Equal counts, so this lands on the (tab, slot) tiebreak. A raw
+            -- tabIndex compare picks -2 over -1, which is bag 1 beating the
+            -- backpack and contradicts the spill order.
+            assert.equals(-1, fill.srcTab)
+        end)
+
+        it("spills bags in bagID order", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 10 } },
+                [2] = {},
+            })
+            local bags = bagSnapshot({
+                [0] = { [1] = { itemID = 100, count = 20 } },
+                [1] = { [1] = { itemID = 100, count = 20 } },
+            })
+            local plan = GBL:PlanSort(snap, oneDemandLayout(10), {
+                bagSnapshot = bags,
+                maxStackByItem = { [100] = 20 },
+            })
+
+            -- Each stack fills a slot exactly, so the destination slot is a
+            -- direct readout of which bag the walk reached first.
+            local srcOf = {}
+            for _, op in ipairs(plan.ops) do
+                if op.dstTab == 2 and op.srcTab < 0 then srcOf[op.dstSlot] = op.srcTab end
+            end
+            assert.equals(-1, srcOf[1])
+            assert.equals(-2, srcOf[2])
+        end)
+
+        it("counts only bag-sourced spills in diag.bagSpills", function()
+            -- T3's leftover and the bag stack both spill. bagSpills has to
+            -- separate them, which is invisible unless a bank spill is
+            -- present to be miscounted.
+            local snap = snapshot({
+                [1] = {},
+                [2] = {},
+                [3] = { [1] = { itemID = 100, count = 30 } },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({ [100] = { slots = 1, perSlot = 10 } },
+                        { [1] = 100 }),
+                    [2] = overflow(),
+                    [3] = displayTab({}, {}),
+                },
+            }
+            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 15 } } })
+            local plan = GBL:PlanSort(snap, layout, {
+                bagSnapshot = bags,
+                maxStackByItem = { [100] = 100 },
+            })
+
+            assert.equals(1, plan.diag.bagSupplies)
+            assert.equals(0, plan.diag.bagDemandFills)
+            assert.equals(1, plan.diag.bagSpills)
+        end)
+
         it("plans identically with no opts, an empty bagSnapshot, and no bags", function()
             local snap = snapshot({
                 [1] = { [2] = { itemID = 100, count = 5 } },

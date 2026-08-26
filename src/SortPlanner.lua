@@ -744,6 +744,14 @@ function GBL:PlanSort(snapshot, layout, opts)
                 elseif sup.tabIndex == dem.tabIndex then p = 1
                 elseif sup.isOverflow then p = 2
                 else p = 3 end
+                -- Tiebreak position. A bag's pseudo-tab is negative, so a
+                -- raw compare ranks the reagent bag ahead of the backpack
+                -- and disagrees with the spill walk below, which takes bags
+                -- in bagID order. Mapping bags onto an ascending key makes
+                -- both paths agree that bag 0 goes first. Bags are the only
+                -- tier-4 supplies, so they never tiebreak against a bank
+                -- tab and this cannot reorder bank sources.
+                local supPos = sup.isBag and -sup.tabIndex or sup.tabIndex
                 local pick = false
                 if p < bestP then
                     pick = true
@@ -751,15 +759,15 @@ function GBL:PlanSort(snapshot, layout, opts)
                     if sup.available > bestAvail then
                         pick = true
                     elseif sup.available == bestAvail then
-                        if sup.tabIndex < bestTab
-                           or (sup.tabIndex == bestTab and sup.slotIndex < bestSlot) then
+                        if supPos < bestTab
+                           or (supPos == bestTab and sup.slotIndex < bestSlot) then
                             pick = true
                         end
                     end
                 end
                 if pick then
                     best, bestP, bestAvail = sup, p, sup.available
-                    bestTab, bestSlot = sup.tabIndex, sup.slotIndex
+                    bestTab, bestSlot = supPos, sup.slotIndex
                 end
             end
         end
