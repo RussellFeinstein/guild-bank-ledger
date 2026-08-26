@@ -285,6 +285,12 @@ function MockAce.install()
     local function createMockWidget(widgetType)
         local widget = {
             _type = widgetType,
+            -- Real AceGUI widgets carry the type on `type` (each widget's
+            -- Constructor sets self.type = Type), and production code
+            -- branches on it to tell a CheckBox from a Button. The mock's
+            -- own `_type` predates that and existing specs read it, so both
+            -- are set rather than renaming one.
+            type = widgetType,
             _callbacks = {},
             _children = {},
             _text = "",

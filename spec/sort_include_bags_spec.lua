@@ -225,40 +225,67 @@ describe("Include bags in sort", function()
     end)
 
     describe("Sort tab keyboard navigation", function()
-        local b1, b2
+        -- THREE buttons, not two. With two, forward from index 1 and
+        -- backward from index 1 both land on 2, so Shift-TAB would be
+        -- indistinguishable from TAB and the direction argument unpinned.
+        -- Mutation testing found exactly that.
+        local b1, b2, b3, cb
 
         before_each(function()
             local AceGUI = LibStub("AceGUI-3.0")
             b1 = AceGUI:Create("Button")
             b2 = AceGUI:Create("Button")
+            b3 = AceGUI:Create("Button")
+            cb = AceGUI:Create("CheckBox")
             GBL:ClearFocusOrder()
             GBL:RegisterFocusable(b1, 1)
             GBL:RegisterFocusable(b2, 2)
+            GBL:RegisterFocusable(b3, 3)
+            GBL:RegisterFocusable(cb, 4)
             GBL.A11Y.focusIndex = 0
         end)
 
         it("TAB advances focus and wraps", function()
-            GBL:_SortView_NavKey("TAB", false)
-            assert.equals(1, GBL.A11Y.focusIndex)
-            GBL:_SortView_NavKey("TAB", false)
-            assert.equals(2, GBL.A11Y.focusIndex)
-            GBL:_SortView_NavKey("TAB", false)
-            assert.equals(1, GBL.A11Y.focusIndex)
+            for _, expected in ipairs({ 1, 2, 3, 4, 1 }) do
+                GBL:_SortView_NavKey("TAB", false)
+                assert.equals(expected, GBL.A11Y.focusIndex)
+            end
         end)
 
         it("Shift-TAB reverses and wraps", function()
-            GBL.A11Y.focusIndex = 1
+            GBL.A11Y.focusIndex = 3
             GBL:_SortView_NavKey("TAB", true)
             assert.equals(2, GBL.A11Y.focusIndex)
+            GBL:_SortView_NavKey("TAB", true)
+            assert.equals(1, GBL.A11Y.focusIndex)
+            GBL:_SortView_NavKey("TAB", true)  -- wraps to last
+            assert.equals(4, GBL.A11Y.focusIndex)
         end)
 
-        it("ENTER activates the focused widget", function()
+        it("ENTER activates a focused button", function()
             local fired = false
-            b2.frame = b2.frame or {}
             b2:SetCallback("OnClick", function() fired = true end)
             GBL.A11Y.focusIndex = 2
-            GBL:_SortView_ActivateFocused()
+            assert.is_true(GBL:_SortView_ActivateFocused())
             assert.is_true(fired)
+        end)
+
+        -- A CheckBox ignores OnClick, so activating one by firing OnClick
+        -- would leave the key reading as dead. The Include bags toggle is a
+        -- CheckBox, so this is the path that matters on this tab.
+        it("ENTER toggles a focused checkbox", function()
+            local seen
+            cb:SetValue(false)
+            cb:SetCallback("OnValueChanged", function(_w, _e, value) seen = value end)
+            GBL.A11Y.focusIndex = 4
+
+            assert.is_true(GBL:_SortView_ActivateFocused())
+            assert.is_true(cb:GetValue())
+            assert.is_true(seen)
+
+            assert.is_true(GBL:_SortView_ActivateFocused())
+            assert.is_false(cb:GetValue())
+            assert.is_false(seen)
         end)
 
         it("ignores keys it does not handle", function()
