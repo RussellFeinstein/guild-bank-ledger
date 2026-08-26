@@ -40,15 +40,14 @@ describe("BankLayout", function()
             assert.matches("overflow", err)
         end)
 
-        it("rejects a layout with two overflow tabs", function()
+        it("accepts a layout with two overflow tabs", function()
             local ok, err = BankLayout.Validate({
                 tabs = {
                     [1] = { mode = "overflow" },
                     [2] = { mode = "overflow" },
                 },
             })
-            assert.is_false(ok)
-            assert.matches("overflow", err)
+            assert.is_true(ok, err)
         end)
 
         it("rejects duplicate items across display tabs", function()
@@ -430,6 +429,25 @@ describe("BankLayout", function()
                 -- Older cursor: no overwrite.
                 assert.is_false(GBL:AdoptRemoteBankLayout(remotePayload(ts - 100, 2)))
                 assert.equals(9, GBL:GetBankLayout().tabs[1].items[100].perSlot)
+            end)
+
+            it("adopts a remote layout with two prioritized overflow tabs", function()
+                local changed, err = GBL:AdoptRemoteBankLayout({
+                    bankLayout = {
+                        version = 7,
+                        updatedAt = MockWoW.serverTime + 500,
+                        updatedBy = "RemoteGM-Realm",
+                        tabs = {
+                            [2] = { mode = "overflow" },
+                            [5] = { mode = "overflow", overflowPriority = 1 },
+                        },
+                    },
+                    stockReserves = {},
+                })
+                assert.is_true(changed, err)
+                -- The adopted copy must carry both tabs and their fill order.
+                assert.same({ 5, 2 },
+                    GBL.BankLayout.OrderedOverflowTabs(GBL:GetBankLayout()))
             end)
 
             it("adopts without local write access (sync intake bypasses the gate)", function()
