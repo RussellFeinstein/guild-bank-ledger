@@ -671,12 +671,13 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- Phase 1B — route leftover non-overflow supply to overflow.
     --
     -- Capacity-aware virtual overflow: starts from POST-Phase-0 state
-    -- and tracks {itemID, count, capacity} per slot. pickOverflowSlot
-    -- prefers (1) topping up an existing same-item partial with
-    -- remaining capacity, then (2) right-extend, (3) left-extend,
-    -- (4) first-empty. The supply loop iterates while sup.available
-    -- > 0 so a single supply can split across a partial-target plus
-    -- a fresh slot when the partial doesn't fully absorb it.
+    -- and tracks {itemID, count, capacity} per overflow tab per slot.
+    -- Within one tab the preference is (1) top up an existing same-item
+    -- partial with remaining capacity, then (2) right-extend,
+    -- (3) left-extend, (4) first-empty. The supply loop iterates while
+    -- sup.available > 0 so a single supply can split across a
+    -- partial-target plus a fresh slot (possibly in the next overflow
+    -- tab) when one destination doesn't fully absorb it.
     --
     -- capacity = max(0, maxStack - count) when maxStack is known;
     -- 0 (treated as full, can't top up) when maxStack is unknown
@@ -684,50 +685,84 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- sort after the item info loads will route through the top-up
     -- branch instead of always extending.
     local overflowSlotInfo = {}
-    if overflowTab then
+    for _, ovTab in ipairs(overflowTabsOrdered) do
+        local tabInfo = {}
         for s = 1, MAX_SLOTS do
-            local slot = state[overflowTab] and state[overflowTab][s]
+            local slot = state[ovTab] and state[ovTab][s]
             if slot then
                 local m = getMaxStack(slot.itemID)
-                overflowSlotInfo[s] = {
+                tabInfo[s] = {
                     itemID = slot.itemID,
                     count = slot.count,
                     capacity = m and math.max(0, m - slot.count) or 0,
                 }
             end
         end
+        overflowSlotInfo[ovTab] = tabInfo
     end
 
-    local function pickOverflowSlot(itemID, want)
-        if not overflowTab then return nil end
+    -- The four-tier preference within ONE overflow tab.
+    local function pickOverflowSlotInTab(ovTab, itemID, want)
+        local info = overflowSlotInfo[ovTab]
         -- 1. Top up an existing same-item partial with capacity.
         for s = 1, MAX_SLOTS do
-            local info = overflowSlotInfo[s]
-            if info and info.itemID == itemID and info.capacity > 0 then
-                return s, math.min(want, info.capacity), "topup"
+            local slot = info[s]
+            if slot and slot.itemID == itemID and slot.capacity > 0 then
+                return s, math.min(want, slot.capacity), "topup"
             end
         end
         -- 2. Right-extend an existing same-item group.
         for s = 2, MAX_SLOTS do
-            local prev = overflowSlotInfo[s - 1]
-            if not overflowSlotInfo[s] and prev and prev.itemID == itemID then
+            local prev = info[s - 1]
+            if not info[s] and prev and prev.itemID == itemID then
                 return s, want, "extend-right"
             end
         end
         -- 3. Left-extend if no right-extension is possible.
         for s = MAX_SLOTS - 1, 1, -1 do
-            local nextInfo = overflowSlotInfo[s + 1]
-            if not overflowSlotInfo[s] and nextInfo and nextInfo.itemID == itemID then
+            local nextInfo = info[s + 1]
+            if not info[s] and nextInfo and nextInfo.itemID == itemID then
                 return s, want, "extend-left"
             end
         end
-        -- 4. First empty slot (new item in overflow).
+        -- 4. First empty slot (new item in this tab).
         for s = 1, MAX_SLOTS do
-            if not overflowSlotInfo[s] then
+            if not info[s] then
                 return s, want, "first-empty"
             end
         end
         return nil
+    end
+
+    -- Tab-major walk in routing order: all four tiers in one tab before
+    -- any tier in the next. Deliberate (#57): priority means "fill this
+    -- tab first", so a first-empty in tab A beats topping up a same-item
+    -- partial sitting in tab B, even though that can leave a partial in
+    -- each of two tabs. Do not "fix" this into a cross-tab topup-first
+    -- scan; the tab order is the contract the layout editor shows.
+    local function pickOverflowSlot(itemID, want)
+        for _, ovTab in ipairs(overflowTabsOrdered) do
+            local s, take, mode = pickOverflowSlotInTab(ovTab, itemID, want)
+            if s then return ovTab, s, take, mode end
+        end
+        return nil
+    end
+
+    -- Mirror a placement into overflowSlotInfo so the next pick sees
+    -- the new capacity. Required for split-across-multiple-destinations;
+    -- shared by Phase 1B and the Phase 3 sweep.
+    local function notePlacement(ovTab, ovSlot, itemID, take)
+        local info = overflowSlotInfo[ovTab][ovSlot]
+        if info then
+            info.count    = info.count + take
+            info.capacity = math.max(0, info.capacity - take)
+        else
+            local m = getMaxStack(itemID)
+            overflowSlotInfo[ovTab][ovSlot] = {
+                itemID = itemID, count = take,
+                capacity = m and math.max(0, m - take) or 0,
+            }
+        end
     end
 
     local unplacedSlots = {}  -- unplacedSlots[t][s] = true
@@ -742,14 +777,15 @@ function GBL:PlanSort(snapshot, layout, opts)
 
     for _, sup in ipairs(supplies) do
         if sup.available > 0 and not sup.isOverflow then
-            if not overflowTab then
+            if #overflowTabsOrdered == 0 then
                 recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
                     sup.available, REASON_NO_OVERFLOW_DEFINED)
                 diag.phase1bUnplaced = diag.phase1bUnplaced + 1
             else
                 while sup.available > 0 do
-                    local ovSlot, take, mode = pickOverflowSlot(sup.itemID, sup.available)
-                    if not ovSlot or not take or take <= 0 then
+                    local ovTab, ovSlot, take, mode =
+                        pickOverflowSlot(sup.itemID, sup.available)
+                    if not ovTab or not take or take <= 0 then
                         recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
                             sup.available, REASON_OVERFLOW_FULL)
                         diag.phase1bUnplaced = diag.phase1bUnplaced + 1
@@ -767,22 +803,10 @@ function GBL:PlanSort(snapshot, layout, opts)
                     end
                     table.insert(assignments, {
                         srcTab = sup.tabIndex, srcSlot = sup.slotIndex,
-                        dstTab = overflowTab, dstSlot = ovSlot,
+                        dstTab = ovTab, dstSlot = ovSlot,
                         itemID = sup.itemID, count = take,
                     })
-                    -- Update overflowSlotInfo so the next pick sees the new
-                    -- capacity. Required for split-across-multiple-slots.
-                    local info = overflowSlotInfo[ovSlot]
-                    if info then
-                        info.count    = info.count + take
-                        info.capacity = math.max(0, info.capacity - take)
-                    else
-                        local m = getMaxStack(sup.itemID)
-                        overflowSlotInfo[ovSlot] = {
-                            itemID = sup.itemID, count = take,
-                            capacity = m and math.max(0, m - take) or 0,
-                        }
-                    end
+                    notePlacement(ovTab, ovSlot, sup.itemID, take)
                     sup.available = sup.available - take
                 end
             end
@@ -999,14 +1023,15 @@ function GBL:PlanSort(snapshot, layout, opts)
                     and demandOfSlot[tabIndex][slotIndex]
                 local fits = (dem and dem.itemID == slot.itemID)
                 if not fits then
-                    if not overflowTab then
+                    if #overflowTabsOrdered == 0 then
                         recordUnplaced(tabIndex, slotIndex, slot.itemID, slot.count,
                             REASON_NO_OVERFLOW_DEFINED)
                     else
                         local remaining_ = slot.count
                         while remaining_ > 0 do
-                            local ovSlot, take = pickOverflowSlot(slot.itemID, remaining_)
-                            if not ovSlot or not take or take <= 0 then
+                            local ovTab, ovSlot, take =
+                                pickOverflowSlot(slot.itemID, remaining_)
+                            if not ovTab or not take or take <= 0 then
                                 recordUnplaced(tabIndex, slotIndex, slot.itemID,
                                     remaining_, REASON_OVERFLOW_FULL)
                                 break
@@ -1014,28 +1039,15 @@ function GBL:PlanSort(snapshot, layout, opts)
                             local sweepOp = {
                                 op = "move",
                                 srcTab = tabIndex, srcSlot = slotIndex,
-                                dstTab = overflowTab, dstSlot = ovSlot,
+                                dstTab = ovTab, dstSlot = ovSlot,
                                 itemID = slot.itemID, count = take,
                                 plannerSrcAt = snapshotSlot(tabIndex, slotIndex),
-                                plannerDstAt = snapshotSlot(overflowTab, ovSlot),
+                                plannerDstAt = snapshotSlot(ovTab, ovSlot),
                             }
                             table.insert(plan.ops, sweepOp)
                             applyOpToState(state, sweepOp, getMaxStack)
                             diag.phase3Sweeps = diag.phase3Sweeps + 1
-                            -- Mirror the placement into overflowSlotInfo so
-                            -- a follow-up pick (later supply or sweep) sees
-                            -- updated capacity.
-                            local info = overflowSlotInfo[ovSlot]
-                            if info then
-                                info.count    = info.count + take
-                                info.capacity = math.max(0, info.capacity - take)
-                            else
-                                local m = getMaxStack(slot.itemID)
-                                overflowSlotInfo[ovSlot] = {
-                                    itemID = slot.itemID, count = take,
-                                    capacity = m and math.max(0, m - take) or 0,
-                                }
-                            end
+                            notePlacement(ovTab, ovSlot, slot.itemID, take)
                             remaining_ = remaining_ - take
                         end
                     end
