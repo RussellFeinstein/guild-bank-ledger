@@ -5,10 +5,10 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.38.0] - 2026-08-26
 
 ### Added
-- A bank layout can now declare more than one overflow tab. Stock fills overflow tabs in tab order by default, and an optional per-tab routing priority (lower fills first) overrides that order for cases like keeping a nearly-full tab first or holding a tab for a raid team. At least one overflow tab is still required.
+- A bank layout can now declare more than one overflow tab. Stock fills overflow tabs in tab order by default, and an optional per-tab routing priority (lower fills first) overrides that order for cases like keeping a nearly-full tab first or holding a tab for a raid team. At least one overflow tab is still required. The Layout editor gains a Routing priority field and a fill-order readout on overflow tabs, and the sort preview lists every overflow tab in fill order.
 
 ## [0.37.18] - 2026-08-25
 

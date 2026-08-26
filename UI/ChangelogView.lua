@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.38.0
+    {"0.38.0", "2026-08-26", {
+        Added = {
+            "A bank layout can now declare more than one overflow tab. Stock fills overflow tabs in tab order by default, and an optional per-tab routing priority (lower fills first) overrides that order. At least one overflow tab is still required. The Layout editor gains a Routing priority field and a fill-order readout on overflow tabs, and the sort preview lists every overflow tab in fill order.",
+        },
+    }},
+
     -- v0.37.18
     {"0.37.18", "2026-08-25", {
         Added = {
