@@ -216,8 +216,15 @@ function BankLayout.Validate(layout)
         end
     end
 
-    if overflowCount ~= 1 then
-        return false, "exactly one tab must be mode=overflow (found " .. overflowCount .. ")"
+    -- At least one overflow tab is required; more than one is legal from
+    -- schema 2 on (#57), filled in OrderedOverflowTabs order. Mixed-version
+    -- note: a pre-#57 peer receiving a multi-overflow LAYOUT_DATA rejects it
+    -- at this gate, keeps its last valid layout, and re-requests on the
+    -- LAYOUT_REQUEST throttle until it updates. Stale layout and bounded
+    -- chatter, never corruption, which is why the change takes no
+    -- MIN_SYNC_VERSION raise.
+    if overflowCount < 1 then
+        return false, "at least one tab must be mode=overflow (found " .. overflowCount .. ")"
     end
 
     return true, nil
