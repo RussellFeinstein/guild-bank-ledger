@@ -165,6 +165,54 @@ end
 -- Expose the pure helper for the spec suite.
 GBL._layoutEditorApplyBulkReserve = applyBulkReserve
 
+--- Parse the Routing priority EditBox text.
+--
+-- Pure function. Returns ok, value: ok=false rejects the input outright
+-- (junk, NaN, non-string), ok=true with nil clears the priority (blank
+-- input), ok=true with a number sets it. Any real number is legal,
+-- fractional and negative included: the sort key is (priority or
+-- tabIndex), so the only thing that must never get through is NaN,
+-- which breaks sort determinism. Lua 5.1's tonumber goes through
+-- strtod, which on some platforms accepts "nan", so the n ~= n check
+-- is not dead code.
+local function parseOverflowPriority(text)
+    if type(text) ~= "string" then return false, nil end
+    local trimmed = text:match("^%s*(.-)%s*$")
+    if trimmed == "" then return true, nil end
+    local n = tonumber(trimmed)
+    if not n or n ~= n then return false, nil end
+    return true, n
+end
+
+-- Expose the pure helper for the spec suite.
+GBL._layoutEditorParseOverflowPriority = parseOverflowPriority
+
+--- Fill-order summary for the overflow section, in index form.
+--
+-- Pure function over a draft's `tabs` table, e.g.
+-- "Tab 5 (priority 1), Tab 2". Ordering comes from the same
+-- BankLayout.OrderedOverflowTabs the planner routes with, so this label
+-- cannot drift from actual sort behavior. Index form rather than
+-- player-authored tab names: a lone "|" in a display string is the WoW
+-- escape introducer.
+local function overflowOrderSummary(tabs)
+    local order = GBL.BankLayout.OrderedOverflowTabs({ tabs = tabs })
+    if #order == 0 then return "none" end
+    local parts = {}
+    for _, t in ipairs(order) do
+        local p = tabs[t] and tabs[t].overflowPriority
+        if p ~= nil then
+            table.insert(parts, format("Tab %d (priority %s)", t, tostring(p)))
+        else
+            table.insert(parts, "Tab " .. t)
+        end
+    end
+    return table.concat(parts, ", ")
+end
+
+-- Expose the pure helper for the spec suite.
+GBL._layoutEditorOverflowOrderSummary = overflowOrderSummary
+
 --- Validate and apply a bulk edit (slots / perSlot / keep) to every item on a
 -- display tab. Orchestrates the working drafts: applyBulkToItems mutates the
 -- layout draft, applyBulkReserve writes the reserve draft. Does no rendering and
@@ -567,7 +615,57 @@ function GBL:_LayoutEditor_RenderSingleTab(parent, tabIndex, writable)
 
     if tab.mode == "display" then
         self:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
+    elseif tab.mode == "overflow" then
+        self:_LayoutEditor_RenderOverflowDetails(parent, tabIndex, writable)
     end
+end
+
+--- Render the overflow-tab details: routing priority + current fill order.
+--
+-- Keyboard path matches the sibling Slots/Keep EditBoxes: focus the
+-- field, type, Enter commits, Escape drops focus. A rejected value is
+-- reported as plain chat text and the field reverts; the fill order is
+-- a plain-text label, so nothing here is carried by color or position.
+function GBL:_LayoutEditor_RenderOverflowDetails(parent, tabIndex, writable)
+    local AceGUI = LibStub("AceGUI-3.0")
+    local draft = self._layoutDraft
+    local tab = draft.tabs[tabIndex]
+
+    local desc = AceGUI:Create("Label")
+    desc:SetFullWidth(true)
+    desc:SetFontObject(GameFontNormalSmall)
+    desc:SetText("Overflow tabs hold the bulk stock the sort routes out of " ..
+        "display tabs. With more than one, stock fills them in the order " ..
+        "below. Routing priority is optional: lower fills first, and a tab " ..
+        "without one uses its tab number.")
+    parent:AddChild(desc)
+
+    local current = tab.overflowPriority
+    local prioInput = AceGUI:Create("EditBox")
+    prioInput:SetLabel("Routing priority")
+    prioInput:SetWidth(140)
+    prioInput:SetText(current ~= nil and tostring(current) or "")
+    prioInput:SetDisabled(not writable)
+    prioInput:DisableButton(true)
+    prioInput:SetCallback("OnEnterPressed", function(w, _e, value)
+        local ok, n = parseOverflowPriority(value)
+        if not ok then
+            self:Print("|cffff5555Routing priority must be a number " ..
+                "(blank clears it).|r")
+            w:SetText(current ~= nil and tostring(current) or "")
+            return
+        end
+        tab.overflowPriority = n
+        self._layoutDirty = true
+        self:RefreshLayoutTab()
+    end)
+    parent:AddChild(prioInput)
+
+    local orderLabel = AceGUI:Create("Label")
+    orderLabel:SetFullWidth(true)
+    orderLabel:SetFontObject(GameFontNormalSmall)
+    orderLabel:SetText("Current fill order: " .. overflowOrderSummary(draft.tabs))
+    parent:AddChild(orderLabel)
 end
 
 function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)

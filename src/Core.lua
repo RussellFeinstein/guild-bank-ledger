@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.37.18"
+local VERSION = "0.38.0"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -2443,8 +2443,10 @@ function GBL:PrintSortPreview()
         return
     end
 
-    -- Layout breakdown.
-    local displayTabs, overflowTab, ignoreTabs = {}, nil, {}
+    -- Layout breakdown. Overflow tabs come from the shared helper so the
+    -- fill order shown here matches what the planner actually routes to.
+    local overflowTabsOrdered = self.BankLayout.OrderedOverflowTabs(layout)
+    local displayTabs, ignoreTabs = {}, {}
     local totalDemands = 0
     for tabIndex, tab in pairs(layout.tabs) do
         if tab.mode == "display" then
@@ -2460,8 +2462,6 @@ function GBL:PrintSortPreview()
             end
             totalDemands = totalDemands + dCount
             table.insert(displayTabs, { tabIndex = tabIndex, demands = dCount })
-        elseif tab.mode == "overflow" then
-            overflowTab = tabIndex
         elseif tab.mode == "ignore" then
             table.insert(ignoreTabs, tabIndex)
         end
@@ -2498,7 +2498,21 @@ function GBL:PrintSortPreview()
     end
     self:Print(format("  Display tabs: [%s] (%d demands total)",
         table.concat(displaySummary, ", "), totalDemands))
-    self:Print(format("  Overflow tab: %s", tostring(overflowTab or "none")))
+    if #overflowTabsOrdered == 0 then
+        self:Print("  Overflow tabs: none")
+    else
+        -- In fill order; a tab shows its priority only when one is set.
+        local ovSummary = {}
+        for _, t in ipairs(overflowTabsOrdered) do
+            local p = layout.tabs[t] and layout.tabs[t].overflowPriority
+            if p ~= nil then
+                table.insert(ovSummary, format("%d (prio %s)", t, tostring(p)))
+            else
+                table.insert(ovSummary, tostring(t))
+            end
+        end
+        self:Print(format("  Overflow tabs: [%s]", table.concat(ovSummary, ", ")))
+    end
     if #ignoreTabs > 0 then
         self:Print(format("  Ignore tabs: [%s]",
             table.concat(ignoreTabs, ", ")))

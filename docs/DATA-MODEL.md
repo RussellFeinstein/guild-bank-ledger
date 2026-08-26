@@ -57,7 +57,7 @@ Thirteen keys reach disk:
 | `syncState` | `{lastSyncTimestamp, syncVersion, peers}`. See the name collision in section 3 |
 | `accessControl` | `{rankThreshold, restrictedMode, configuredBy, configuredAt}` |
 | `sortAccess` | `{rankThreshold, delegates, updatedBy, updatedAt}`. Two-tier sort policy |
-| `bankLayout` | `{version, updatedBy, updatedAt, tabs}`. Tabs keyed by index, items keyed by itemID |
+| `bankLayout` | `{version, updatedBy, updatedAt, tabs}`. Tabs keyed by index, items keyed by itemID. Overflow-mode tabs may carry an optional numeric `overflowPriority` (fill order, lower first; layout schema 2, #57) |
 | `stockReserves` | `[itemID] = count` |
 | `schemaVersion` | Integer. See section 7 |
 

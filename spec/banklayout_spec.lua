@@ -40,15 +40,14 @@ describe("BankLayout", function()
             assert.matches("overflow", err)
         end)
 
-        it("rejects a layout with two overflow tabs", function()
+        it("accepts a layout with two overflow tabs", function()
             local ok, err = BankLayout.Validate({
                 tabs = {
                     [1] = { mode = "overflow" },
                     [2] = { mode = "overflow" },
                 },
             })
-            assert.is_false(ok)
-            assert.matches("overflow", err)
+            assert.is_true(ok, err)
         end)
 
         it("rejects duplicate items across display tabs", function()
@@ -105,6 +104,177 @@ describe("BankLayout", function()
                 },
             })
             assert.is_true(ok, err)
+        end)
+
+        it("accepts a numeric overflowPriority on an overflow tab", function()
+            local ok, err = BankLayout.Validate({
+                tabs = {
+                    [1] = { mode = "overflow", overflowPriority = 3 },
+                },
+            })
+            assert.is_true(ok, err)
+        end)
+
+        it("rejects a non-number overflowPriority", function()
+            for _, bad in ipairs({ "first", {}, true }) do
+                local ok, err = BankLayout.Validate({
+                    tabs = {
+                        [1] = { mode = "overflow", overflowPriority = bad },
+                    },
+                })
+                assert.is_false(ok, "expected rejection for " .. type(bad))
+                assert.matches("overflowPriority", err)
+            end
+        end)
+
+        it("rejects a NaN overflowPriority", function()
+            local ok, err = BankLayout.Validate({
+                tabs = {
+                    [1] = { mode = "overflow", overflowPriority = 0 / 0 },
+                },
+            })
+            assert.is_false(ok)
+            assert.matches("overflowPriority", err)
+        end)
+    end)
+
+    describe("OrderedOverflowTabs", function()
+        local BankLayout
+
+        before_each(function()
+            BankLayout = GBL.BankLayout
+        end)
+
+        it("returns overflow tabs in tab order when no priorities are set", function()
+            local order = BankLayout.OrderedOverflowTabs({
+                tabs = {
+                    [1] = { mode = "display", items = {} },
+                    [2] = { mode = "overflow" },
+                    [5] = { mode = "overflow" },
+                    [7] = { mode = "ignore" },
+                },
+            })
+            assert.same({ 2, 5 }, order)
+        end)
+
+        it("puts a prioritized tab ahead of default-ordered tabs", function()
+            local order = BankLayout.OrderedOverflowTabs({
+                tabs = {
+                    [2] = { mode = "overflow" },
+                    [5] = { mode = "overflow", overflowPriority = 1 },
+                },
+            })
+            assert.same({ 5, 2 }, order)
+        end)
+
+        it("interleaves priorities with tab-index defaults on one scale", function()
+            -- Priority defaults to the tab index, so keys here are 7->1, 3->3, 5->5.
+            local order = BankLayout.OrderedOverflowTabs({
+                tabs = {
+                    [3] = { mode = "overflow" },
+                    [5] = { mode = "overflow" },
+                    [7] = { mode = "overflow", overflowPriority = 1 },
+                },
+            })
+            assert.same({ 7, 3, 5 }, order)
+            -- A priority above another tab's index sorts behind it: keys 3->3, 2->5.
+            local order2 = BankLayout.OrderedOverflowTabs({
+                tabs = {
+                    [2] = { mode = "overflow", overflowPriority = 5 },
+                    [3] = { mode = "overflow" },
+                },
+            })
+            assert.same({ 3, 2 }, order2)
+        end)
+
+        it("breaks priority ties by tab index", function()
+            local order = BankLayout.OrderedOverflowTabs({
+                tabs = {
+                    [5] = { mode = "overflow", overflowPriority = 2 },
+                    [2] = { mode = "overflow", overflowPriority = 2 },
+                },
+            })
+            assert.same({ 2, 5 }, order)
+        end)
+
+        it("returns a single overflow tab as a one-entry list", function()
+            local order = BankLayout.OrderedOverflowTabs({
+                tabs = { [4] = { mode = "overflow" } },
+            })
+            assert.same({ 4 }, order)
+        end)
+
+        it("returns an empty list for nil, malformed, or overflow-free input", function()
+            assert.same({}, BankLayout.OrderedOverflowTabs(nil))
+            assert.same({}, BankLayout.OrderedOverflowTabs({}))
+            assert.same({}, BankLayout.OrderedOverflowTabs({ tabs = {} }))
+            assert.same({}, BankLayout.OrderedOverflowTabs({
+                tabs = { [1] = { mode = "display", items = {} } },
+            }))
+        end)
+
+        it("treats a NaN priority as unset rather than crashing the sort", function()
+            -- Validate rejects NaN, but the helper also runs on unvalidated
+            -- editor drafts, so it must stay total.
+            local order = BankLayout.OrderedOverflowTabs({
+                tabs = {
+                    [2] = { mode = "overflow" },
+                    [5] = { mode = "overflow", overflowPriority = 0 / 0 },
+                },
+            })
+            assert.same({ 2, 5 }, order)
+        end)
+    end)
+
+    describe("overflowPriority persistence (the three copy loops)", function()
+        local prioritizedLayout = {
+            tabs = {
+                [1] = {
+                    mode = "display",
+                    items = { [100] = { slots = 2, perSlot = 5 } },
+                    slotOrder = { [1] = 100, [2] = 100 },
+                },
+                [2] = { mode = "overflow", overflowPriority = 4 },
+            },
+        }
+
+        it("SCHEMA_VERSION is 2 (overflowPriority added)", function()
+            assert.equals(2, GBL.BankLayout.SCHEMA_VERSION)
+        end)
+
+        it("SaveBankLayout writes the priority into the store", function()
+            local ok, err = GBL:SaveBankLayout(prioritizedLayout, "GM")
+            assert.is_true(ok, err)
+            local raw = GBL:GetGuildData().bankLayout
+            assert.equals(4, raw.tabs[2].overflowPriority)
+        end)
+
+        it("GetBankLayout copies the priority out of the store", function()
+            GBL:SaveBankLayout(prioritizedLayout, "GM")
+            -- Write the raw store directly so this pins GetBankLayout's own
+            -- copy loop rather than re-testing SaveBankLayout's.
+            GBL:GetGuildData().bankLayout.tabs[2].overflowPriority = 6
+            local got = GBL:GetBankLayout()
+            assert.equals(6, got.tabs[2].overflowPriority)
+            -- And the payload rides the same copy.
+            assert.equals(6, GBL:BuildLayoutPayload().bankLayout.tabs[2].overflowPriority)
+        end)
+
+        it("AdoptRemoteBankLayout preserves the priority into the store", function()
+            local changed, err = GBL:AdoptRemoteBankLayout({
+                bankLayout = {
+                    version = 3,
+                    updatedAt = MockWoW.serverTime + 100,
+                    updatedBy = "RemoteGM",
+                    tabs = {
+                        [2] = { mode = "overflow", overflowPriority = 2 },
+                    },
+                },
+                stockReserves = {},
+            })
+            assert.is_true(changed, err)
+            local raw = GBL:GetGuildData().bankLayout
+            assert.equals(2, raw.tabs[2].overflowPriority)
         end)
     end)
 
@@ -259,6 +429,25 @@ describe("BankLayout", function()
                 -- Older cursor: no overwrite.
                 assert.is_false(GBL:AdoptRemoteBankLayout(remotePayload(ts - 100, 2)))
                 assert.equals(9, GBL:GetBankLayout().tabs[1].items[100].perSlot)
+            end)
+
+            it("adopts a remote layout with two prioritized overflow tabs", function()
+                local changed, err = GBL:AdoptRemoteBankLayout({
+                    bankLayout = {
+                        version = 7,
+                        updatedAt = MockWoW.serverTime + 500,
+                        updatedBy = "RemoteGM-Realm",
+                        tabs = {
+                            [2] = { mode = "overflow" },
+                            [5] = { mode = "overflow", overflowPriority = 1 },
+                        },
+                    },
+                    stockReserves = {},
+                })
+                assert.is_true(changed, err)
+                -- The adopted copy must carry both tabs and their fill order.
+                assert.same({ 5, 2 },
+                    GBL.BankLayout.OrderedOverflowTabs(GBL:GetBankLayout()))
             end)
 
             it("adopts without local write access (sync intake bypasses the gate)", function()

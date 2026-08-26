@@ -330,7 +330,7 @@ function GBL:_SortView_Preview()
     if unpN > 0 then
         local h = AceGUI:Create("Heading")
         h:SetFullWidth(true)
-        h:SetText("Unplaced (couldn't route - overflow full)")
+        h:SetText("Unplaced (couldn't route - no room in overflow tabs)")
         content:AddChild(h)
         for _, u in ipairs(plan.unplaced) do
             local lbl = AceGUI:Create("Label")

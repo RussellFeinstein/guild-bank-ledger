@@ -61,6 +61,18 @@ describe("Restock", function()
             assert.is_nil(d[101])
         end)
 
+        it("excludes every overflow tab of a multi-overflow layout (#57)", function()
+            local d = GBL:_RestockLayoutDemand(layout({
+                [1] = { mode = "display", items = { [100] = { slots = 2, perSlot = 10 } } },
+                [2] = { mode = "overflow", items = { [101] = { slots = 5, perSlot = 5 } } },
+                [5] = { mode = "overflow", overflowPriority = 1,
+                        items = { [102] = { slots = 5, perSlot = 5 } } },
+            }))
+            assert.equals(20, d[100])
+            assert.is_nil(d[101])
+            assert.is_nil(d[102])
+        end)
+
         it("returns empty for nil or malformed layout", function()
             assert.same({}, GBL:_RestockLayoutDemand(nil))
             assert.same({}, GBL:_RestockLayoutDemand({}))
@@ -175,6 +187,21 @@ describe("Restock", function()
                             items = { [100] = { slots = 1, perSlot = 5 } } },
                     [2] = { mode = "overflow", items = { [200] = { slots = 1, perSlot = 5 } } },
                     [3] = { mode = "ignore", items = { [300] = { slots = 1, perSlot = 5 } } },
+                }),
+                reserves = {},
+            })
+            assert.equals(1, #rows)
+            assert.equals(100, rows[1].itemID)
+        end)
+
+        it("excludes items on every overflow tab of a multi-overflow layout (#57)", function()
+            local rows = GBL:_RestockBuildItemUniverse({
+                layout = layout({
+                    [1] = { mode = "display", name = "A",
+                            items = { [100] = { slots = 1, perSlot = 5 } } },
+                    [2] = { mode = "overflow", items = { [200] = { slots = 1, perSlot = 5 } } },
+                    [5] = { mode = "overflow", overflowPriority = 1,
+                            items = { [201] = { slots = 1, perSlot = 5 } } },
                 }),
                 reserves = {},
             })

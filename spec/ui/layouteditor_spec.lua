@@ -606,3 +606,112 @@ describe("LayoutEditor._LayoutGrantSummary", function()
         assert.matches("1 delegate", s)
     end)
 end)
+
+describe("LayoutEditor.parseOverflowPriority", function()
+    local parse
+
+    before_each(function()
+        Helpers.setupMocks()
+        local GBL = Helpers.loadAddon()
+        GBL:OnInitialize()
+        parse = GBL._layoutEditorParseOverflowPriority
+        assert.is_function(parse,
+            "expected GBL._layoutEditorParseOverflowPriority test hook")
+    end)
+
+    it("accepts an integer", function()
+        local ok, v = parse("3")
+        assert.is_true(ok)
+        assert.equals(3, v)
+    end)
+
+    it("accepts a decimal", function()
+        local ok, v = parse("1.5")
+        assert.is_true(ok)
+        assert.equals(1.5, v)
+    end)
+
+    it("accepts a negative number", function()
+        local ok, v = parse("-2")
+        assert.is_true(ok)
+        assert.equals(-2, v)
+    end)
+
+    it("accepts zero", function()
+        local ok, v = parse("0")
+        assert.is_true(ok)
+        assert.equals(0, v)
+    end)
+
+    it("treats blank and whitespace-only input as a clear", function()
+        local ok, v = parse("")
+        assert.is_true(ok)
+        assert.is_nil(v)
+        ok, v = parse("   ")
+        assert.is_true(ok)
+        assert.is_nil(v)
+    end)
+
+    it("rejects junk text", function()
+        assert.is_false((parse("abc")))
+        assert.is_false((parse("1x")))
+    end)
+
+    it("rejects NaN however tonumber produces it", function()
+        -- Lua 5.1's tonumber goes through strtod, which on some platforms
+        -- accepts "nan". Whether it comes back as NaN or nil, the parse
+        -- must refuse it: a NaN priority breaks sort determinism.
+        assert.is_false((parse("nan")))
+        assert.is_false((parse("-nan")))
+    end)
+
+    it("rejects non-string input", function()
+        assert.is_false((parse(nil)))
+        assert.is_false((parse(5)))
+    end)
+end)
+
+describe("LayoutEditor.overflowOrderSummary", function()
+    local summary
+
+    before_each(function()
+        Helpers.setupMocks()
+        local GBL = Helpers.loadAddon()
+        GBL:OnInitialize()
+        summary = GBL._layoutEditorOverflowOrderSummary
+        assert.is_function(summary,
+            "expected GBL._layoutEditorOverflowOrderSummary test hook")
+    end)
+
+    it("names a single overflow tab in index form", function()
+        assert.equals("Tab 4", summary({ [4] = { mode = "overflow" } }))
+    end)
+
+    it("lists unprioritized tabs in tab order", function()
+        assert.equals("Tab 2, Tab 5, Tab 7", summary({
+            [5] = { mode = "overflow" },
+            [2] = { mode = "overflow" },
+            [7] = { mode = "overflow" },
+            [1] = { mode = "display", items = {} },
+        }))
+    end)
+
+    it("reorders by priority and annotates only the prioritized tab", function()
+        assert.equals("Tab 5 (priority 1), Tab 2", summary({
+            [2] = { mode = "overflow" },
+            [5] = { mode = "overflow", overflowPriority = 1 },
+        }))
+    end)
+
+    it("annotates a fractional priority as typed", function()
+        assert.equals("Tab 3 (priority 1.5), Tab 6", summary({
+            [3] = { mode = "overflow", overflowPriority = 1.5 },
+            [6] = { mode = "overflow" },
+        }))
+    end)
+
+    it("says none when no overflow tab exists", function()
+        assert.equals("none", summary({}))
+        assert.equals("none", summary({ [1] = { mode = "display", items = {} } }))
+    end)
+end)

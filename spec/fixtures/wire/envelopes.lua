@@ -271,4 +271,46 @@ return {
         -- Must still satisfy BankLayout.Validate after a real round trip.
         validatesAsLayout = true,
     },
+
+    -- The #57 shape: more than one overflow tab, with the optional routing
+    -- priority on one of them. Recorded beside the single-overflow case above
+    -- rather than replacing it, because both shapes are live on the wire at
+    -- once: a pre-#57 peer still serves single-overflow layouts, and a #57
+    -- peer's layout reaches pre-#57 peers, who reject it at Validate and
+    -- re-request until they update (see the gate comment in BankLayout.lua).
+    -- This case proves overflowPriority survives a real AceSerializer round
+    -- trip and that the round-tripped layout passes the relaxed Validate.
+    {
+        name = "LAYOUT_DATA with two overflow tabs, one prioritized",
+        serialized = "^1^T^Stype^SLAYOUT_DATA^Sguild^STest~`Guild^Schunk^N1^SbankLayout^T^Stabs^T^N1^T^Sitems^T^N191318^T^Sslots^N2^SperSlot^N20^t^t^Smode^Sdisplay^SslotOrder^T^N1^N191318^t^t^N2^T^Smode^Soverflow^t^N5^T^SoverflowPriority^N1^Smode^Soverflow^t^t^SupdatedAt^N1775300000^Sversion^N4^SupdatedBy^SGuildMaster-Stormrage^t^Snchunks^N1^SstockReserves^T^N191318^N40^t^t^^",
+        decoded = {
+            type = "LAYOUT_DATA",
+            guild = "Test Guild",
+            nchunks = 1,
+            chunk = 1,
+            bankLayout = {
+                version = 4,
+                updatedBy = "GuildMaster-Stormrage",
+                updatedAt = 1775300000,
+                tabs = {
+                    [1] = {
+                        mode = "display",
+                        items = {
+                            [191318] = { slots = 2, perSlot = 20 },
+                        },
+                        slotOrder = { 191318 },
+                    },
+                    [2] = { mode = "overflow" },
+                    [5] = { mode = "overflow", overflowPriority = 1 },
+                },
+            },
+            stockReserves = { [191318] = 40 },
+        },
+        numericKeyPaths = {
+            { "stockReserves" },
+            { "bankLayout", "tabs" },
+            { "bankLayout", "tabs", 1, "items" },
+        },
+        validatesAsLayout = true,
+    },
 }

@@ -1305,6 +1305,7 @@ describe("SortPlanner", function()
             local plan = GBL:PlanSort(snap, layout)
             assert.equals(0, #plan.ops)
             assert.is_nil(plan.overflowTab)
+            assert.same({}, plan.overflowTabs)
         end)
 
         it("orders same-item stacks by count DESC (bigger stack first)", function()
@@ -1704,6 +1705,411 @@ describe("SortPlanner", function()
             })
             local opts = { maxStackByItem = { [100] = 200 } }
             local plan = GBL:PlanSort(snap, emptyDisplayOverflow(), opts)
+            assert.equals(0, #plan.ops)
+        end)
+    end)
+
+    -- ------------------------------------------------------------------
+    -- Multiple overflow tabs (#57): classification, routing order, Phase 0
+    -- ------------------------------------------------------------------
+    describe("multiple overflow tabs: classification and Phase 0", function()
+        it("publishes plan.overflowTabs in tab order with overflowTab as its first entry", function()
+            local snap = snapshot({ [1] = {}, [2] = {}, [5] = {} })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                    [5] = overflow(),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout)
+            assert.same({ 2, 5 }, plan.overflowTabs)
+            assert.equals(2, plan.overflowTab)
+        end)
+
+        it("orders plan.overflowTabs by overflowPriority when set", function()
+            local snap = snapshot({ [1] = {}, [2] = {}, [5] = {} })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                    [5] = { mode = "overflow", overflowPriority = 1 },
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout)
+            assert.same({ 5, 2 }, plan.overflowTabs)
+            assert.equals(5, plan.overflowTab)
+        end)
+
+        it("Phase 0 merges partials within each overflow tab and never pours across tabs", function()
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [1] = { itemID = 100, count = 30 },
+                    [2] = { itemID = 100, count = 30 },
+                },
+                [5] = {
+                    [1] = { itemID = 100, count = 40 },
+                    [2] = { itemID = 100, count = 20 },
+                },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                    [5] = overflow(),
+                },
+            }
+            local opts = { maxStackByItem = { [100] = 60 } }
+            local plan = GBL:PlanSort(snap, layout, opts)
+            assert.equals(2, #plan.ops)
+            for _, op in ipairs(plan.ops) do
+                assert.equals(op.srcTab, op.dstTab,
+                    "overflow-internal op crossed tabs: " .. op.srcTab .. "->" .. op.dstTab)
+            end
+            assert.equals(2, plan.diag.phase0Merges)
+            assert.equals(2, plan.diag.phase0SlotsFreed)
+            local final = applyPlan(snap, plan)
+            assert.equals(60, final[2][1].count)
+            assert.is_nil(final[2][2])
+            assert.equals(60, final[5][1].count)
+            assert.is_nil(final[5][2])
+        end)
+
+        -- Build a full overflow tab: n stacks of itemID at count, slots 1..n.
+        local function fullTab(itemID, count, n)
+            local t = {}
+            for s = 1, (n or 98) do
+                t[s] = { itemID = itemID, count = count }
+            end
+            return t
+        end
+
+        it("spills to the first routing tab and leaves the second untouched", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 999, count = 5 } },
+                [2] = {},
+                [5] = {},
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                    [5] = overflow(),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout, { maxStackByItem = { [999] = 10 } })
+            assert.equals(1, #plan.ops)
+            assert.equals(2, plan.ops[1].dstTab)
+            for _, op in ipairs(plan.ops) do
+                assert.is_not.equals(5, op.dstTab)
+                assert.is_not.equals(5, op.srcTab)
+            end
+        end)
+
+        it("spills into the second overflow tab when the first is full", function()
+            -- Tab 5 is absent from the snapshot entirely: the cold-tab
+            -- seeding loop must still offer it as a destination.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 999, count = 5 } },
+                [2] = fullTab(200, 200),
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                    [5] = overflow(),
+                },
+            }
+            local opts = { maxStackByItem = { [200] = 200, [999] = 10 } }
+            local plan = GBL:PlanSort(snap, layout, opts)
+            assert.equals(0, #plan.unplaced)
+            local final = applyPlan(snap, plan)
+            assert.is_not_nil(final[5], "expected tab 5 to receive the spill")
+            assert.is_not_nil(final[5][1])
+            assert.equals(999, final[5][1].itemID)
+            assert.equals(5, final[5][1].count)
+        end)
+
+        it("tab-major: a first-empty in the first tab beats a topup in the second", function()
+            -- Deliberate design (#57): all four placement tiers run in tab A
+            -- before any tier in tab B, because routing priority means
+            -- "fill A first", even at the cost of a cross-tab partial.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 20 } },
+                [2] = {},
+                [5] = { [1] = { itemID = 100, count = 30 } },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                    [5] = overflow(),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout, { maxStackByItem = { [100] = 60 } })
+            local spill
+            for _, op in ipairs(plan.ops) do
+                if op.srcTab == 1 then spill = op end
+            end
+            assert.is_not_nil(spill, "expected the display stack to spill")
+            assert.equals(2, spill.dstTab)
+            assert.equals(20, spill.count)
+        end)
+
+        it("splits one supply across the tab boundary: topup in A, first-empty in B", function()
+            -- Tab 2 is canonical and nearly full: item 100 partial at slot 1
+            -- (capacity 10), item 200 full stacks at slots 2-98. The 30-count
+            -- supply tops up 10 in tab 2 and overflows 20 into tab 5.
+            local tab2 = { [1] = { itemID = 100, count = 50 } }
+            for s = 2, 98 do
+                tab2[s] = { itemID = 200, count = 200 }
+            end
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 30 } },
+                [2] = tab2,
+                [5] = {},
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                    [5] = overflow(),
+                },
+            }
+            local opts = { maxStackByItem = { [100] = 60, [200] = 200 } }
+            local plan = GBL:PlanSort(snap, layout, opts)
+            assert.equals(0, #plan.unplaced)
+            assert.equals(2, #plan.ops)
+            assert.equals(1, plan.diag.phase1bTopup)
+            assert.equals(1, plan.diag.phase1bFirstEmpty)
+            local final = applyPlan(snap, plan)
+            assert.equals(60, final[2][1].count)
+            assert.equals(100, final[5][1].itemID)
+            assert.equals(20, final[5][1].count)
+        end)
+
+        it("reports overflow-full only when every overflow tab is full", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 999, count = 5 } },
+                [2] = fullTab(200, 200),
+                [5] = fullTab(300, 200),
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                    [5] = overflow(),
+                },
+            }
+            local opts = { maxStackByItem = { [200] = 200, [300] = 200, [999] = 10 } }
+            local plan = GBL:PlanSort(snap, layout, opts)
+            assert.equals(1, #plan.unplaced)
+            assert.equals(GBL._sortPlannerReasons.OVERFLOW_FULL, plan.unplaced[1].reason)
+        end)
+
+        it("still reports no-overflow-defined when the layout has no overflow tab", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 999, count = 5 } },
+            })
+            local layout = {
+                tabs = { [1] = displayTab({}, {}) },
+            }
+            local plan = GBL:PlanSort(snap, layout)
+            assert.equals(1, #plan.unplaced)
+            assert.equals(GBL._sortPlannerReasons.NO_OVERFLOW_DEFINED, plan.unplaced[1].reason)
+        end)
+
+        it("pulls a demand deterministically from two overflow tabs by (tab, slot)", function()
+            local snap = snapshot({
+                [1] = {},
+                [2] = { [3] = { itemID = 100, count = 20 } },
+                [5] = { [3] = { itemID = 100, count = 20 } },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({ [100] = { slots = 1, perSlot = 20 } }, { [1] = 100 }),
+                    [2] = overflow(),
+                    [5] = overflow(),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout, { maxStackByItem = { [100] = 20 } })
+            local fill
+            for _, op in ipairs(plan.ops) do
+                if op.dstTab == 1 then fill = op end
+            end
+            assert.is_not_nil(fill, "expected a fill op into the display tab")
+            assert.equals(2, fill.srcTab)
+            assert.equals(3, fill.srcSlot)
+        end)
+
+        it("cold cache across two tabs: unknown maxStack extends in the first tab, totals preserved", function()
+            local snap = snapshot({
+                [1] = { [5] = { itemID = 100, count = 30 } },
+                [2] = {
+                    [1] = { itemID = 100, count = 50 },
+                    [2] = { itemID = 100, count = 50 },
+                },
+                [5] = { [1] = { itemID = 100, count = 50 } },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                    [5] = overflow(),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout, { maxStackByItem = {} })
+            local final = applyPlan(snap, plan)
+            local total = 0
+            for _, t in ipairs({ 2, 5 }) do
+                for s = 1, 98 do
+                    if final[t] and final[t][s] and final[t][s].itemID == 100 then
+                        total = total + final[t][s].count
+                    end
+                end
+            end
+            assert.equals(180, total)
+            assert.is_true(final[1][5] == nil, "display straggler should have spilled")
+        end)
+
+        it("finds a pivot in the second overflow tab when the first is full", function()
+            -- Same fully-claimed-display 2-cycle as the single-tab pivot
+            -- fallback test, but overflow tab 2 is completely full, so the
+            -- pivot must come from overflow tab 5.
+            local items = {
+                [100] = { slots = 1, perSlot = 10 },
+                [200] = { slots = 1, perSlot = 5 },
+            }
+            local slotOrder = { [1] = 100, [2] = 200 }
+            for i = 3, 98 do
+                local id = 10000 + i
+                items[id] = { slots = 1, perSlot = 1 }
+                slotOrder[i] = id
+            end
+            local snap = snapshot({
+                [1] = {
+                    [1] = { itemID = 200, count = 5 },
+                    [2] = { itemID = 100, count = 10 },
+                },
+                [2] = fullTab(300, 200),
+                [5] = {},
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab(items, slotOrder),
+                    [2] = overflow(),
+                    [5] = overflow(),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout, { maxStackByItem = { [300] = 200 } })
+            local touchedSecond = false
+            for _, op in ipairs(plan.ops) do
+                if (op.itemID == 100 or op.itemID == 200)
+                   and (op.srcTab == 5 or op.dstTab == 5) then
+                    touchedSecond = true
+                end
+            end
+            assert.is_true(touchedSecond, "tab 5 should serve as the pivot")
+            local final = applyPlan(snap, plan)
+            assert.equals(100, final[1][1].itemID)
+            assert.equals(200, final[1][2].itemID)
+            for _, u in ipairs(plan.unplaced) do
+                assert.is_not.equals(GBL._sortPlannerReasons.CYCLE_NO_PIVOT, u.reason)
+            end
+        end)
+
+        it("packs each overflow tab into its own contiguous run, never across tabs", function()
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [3] = { itemID = 100, count = 5 },
+                    [7] = { itemID = 200, count = 8 },
+                },
+                [5] = {
+                    [4] = { itemID = 150, count = 6 },
+                    [9] = { itemID = 175, count = 4 },
+                },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                    [5] = overflow(),
+                },
+            }
+            local opts = { maxStackByItem = {
+                [100] = 20, [200] = 20, [150] = 20, [175] = 20,
+            } }
+            local plan = GBL:PlanSort(snap, layout, opts)
+            assert.equals(4, #plan.ops)
+            assert.equals(4, plan.diag.phase4PositionShifts)
+            for _, op in ipairs(plan.ops) do
+                assert.equals(op.srcTab, op.dstTab,
+                    "Phase 4 op crossed tabs: " .. op.srcTab .. "->" .. op.dstTab)
+            end
+            local final = applyPlan(snap, plan)
+            assert.equals(100, final[2][1].itemID)
+            assert.equals(200, final[2][2].itemID)
+            assert.is_nil(final[2][3]); assert.is_nil(final[2][7])
+            assert.equals(150, final[5][1].itemID)
+            assert.equals(175, final[5][2].itemID)
+            assert.is_nil(final[5][4]); assert.is_nil(final[5][9])
+
+            -- Replanning on the packed result is a no-op (idempotence
+            -- composed across tabs).
+            local desc = {}
+            for t, slots in pairs(final) do
+                desc[t] = {}
+                for s, v in pairs(slots) do
+                    desc[t][s] = { itemID = v.itemID, count = v.count }
+                end
+            end
+            local plan2 = GBL:PlanSort(snapshot(desc), layout, opts)
+            assert.equals(0, #plan2.ops)
+        end)
+
+        it("is idempotent on a canonical two-tab overflow state", function()
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [1] = { itemID = 100, count = 5 },
+                    [2] = { itemID = 100, count = 3 },
+                    [3] = { itemID = 200, count = 10 },
+                },
+                [5] = {
+                    [1] = { itemID = 150, count = 8 },
+                },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                    [5] = overflow(),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout)
+            assert.equals(0, #plan.ops)
+        end)
+
+        it("leaves already-packed stock in a later overflow tab alone (no rebalancing)", function()
+            local snap = snapshot({
+                [1] = {},
+                [2] = {},
+                [5] = {
+                    [1] = { itemID = 100, count = 60 },
+                    [2] = { itemID = 100, count = 15 },
+                },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                    [5] = overflow(),
+                },
+            }
+            local opts = { maxStackByItem = { [100] = 60 } }
+            local plan = GBL:PlanSort(snap, layout, opts)
             assert.equals(0, #plan.ops)
         end)
     end)
