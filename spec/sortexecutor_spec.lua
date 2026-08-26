@@ -560,6 +560,16 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.equals(3, countItem(1, 777))
             assert.equals(0, result.bagOpsIssued)
             assert.equals(1, result.bagOpsSkipped)
+
+            -- The run summary gives a count; the per-op line gives the slot,
+            -- which is what answers "why is this still in my bags".
+            local blob = {}
+            for _, e in ipairs(GBL:GetLog("sort") or {}) do
+                blob[#blob + 1] = e.message or ""
+            end
+            blob = table.concat(blob, "\n")
+            assert.is_truthy(blob:find("skipped", 1, true))
+            assert.is_truthy(blob:find("Bag0/1", 1, true))
         end)
 
         it("skips a bag slot whose item no longer matches the op", function()

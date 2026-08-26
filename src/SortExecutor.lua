@@ -287,6 +287,8 @@ function finish(ok, reason)
         hitchByBucket = state.hitchByBucket,
         stallCount = state.stallCount,
         syncActiveAtStart = state.syncActiveAtStart,
+        bagOpsIssued = state.bagOpsIssued or 0,
+        bagOpsSkipped = state.bagOpsSkipped or 0,
     }
 
     local elapsed = (GetTime() and state.startedAt) and (GetTime() - state.startedAt) or 0
@@ -298,6 +300,15 @@ function finish(ok, reason)
         ok and "complete" or ("aborted (" .. (reason or "?") .. ")"),
         elapsed, passes, issued, failed,
         avg, state.cursorStuck or 0, state.stallCount or 0, state.rescanTicks or 0))
+
+    -- Bag deposits get their own line rather than a rider on the summary
+    -- above: a skip count is the thing to look at when items the user
+    -- expected to be deposited are still sitting in their bags (#139).
+    if (state.bagOpsIssued or 0) > 0 or (state.bagOpsSkipped or 0) > 0 then
+        GBL:SortInfo(string.format(
+            "Sort bags: %d deposit(s) issued, %d skipped",
+            state.bagOpsIssued or 0, state.bagOpsSkipped or 0))
+    end
 
     -- Hitch histogram on its own line: validates the pump kept the loop awake.
     do
@@ -344,23 +355,74 @@ end
 --- sequence is the WoW-API-mandated way to relocate a guild bank stack. Cursor
 --- safety brackets the issue so a failed place never carries an item into the
 --- next tick.
+--- Lift the source half of an op onto the cursor from a player bag (#139).
+--- Returns false when the slot is not what the plan expected, in which case
+--- NOTHING has been picked up and the caller must not run the destination
+--- half. That is the whole point of the guard: PickupGuildBankItem on an
+--- empty cursor does not place, it picks the destination slot up, so falling
+--- through after a refused source would harvest an innocent bank stack.
+---
+--- The plan is a snapshot in time and the player can move things while the
+--- pump runs, so a mismatch here is ordinary, not an error. Convergence
+--- handles it: the next pass re-scans and re-plans.
+local function liftFromBag(op)
+    local bagID = GBL:BagIDFromTab(op.srcTab)
+    if not bagID then return false end
+    if not (C_Container and C_Container.GetContainerItemInfo) then return false end
+
+    local info = C_Container.GetContainerItemInfo(bagID, op.srcSlot)
+    if type(info) ~= "table" then return false end
+    if info.isLocked then return false end
+    if info.itemID and op.itemID and info.itemID ~= op.itemID then return false end
+
+    local have = info.stackCount or 0
+    local want = op.count or 0
+    if have < want or want <= 0 then return false end
+
+    if op.op == "split" and have > want and C_Container.SplitContainerItem then
+        C_Container.SplitContainerItem(bagID, op.srcSlot, want)
+    elseif C_Container.PickupContainerItem then
+        C_Container.PickupContainerItem(bagID, op.srcSlot)
+    else
+        return false
+    end
+    return true
+end
+
+--- @return boolean issued, false when a bag source was refused and the op
+---   was skipped without touching the destination.
 local function issueOp(op)
     if _G.CursorHasItem and _G.CursorHasItem() then ClearCursor() end
-    local srcCount = 0
-    if _G.GetGuildBankItemInfo then
-        local _, c = _G.GetGuildBankItemInfo(op.srcTab, op.srcSlot)
-        srcCount = c or 0
-    end
-    if op.op == "split" and srcCount > (op.count or 0) then
-        SplitGuildBankItem(op.srcTab, op.srcSlot, op.count)
+
+    if (op.srcTab or 0) < 0 then
+        if not liftFromBag(op) then
+            if state then
+                state.bagOpsSkipped = (state.bagOpsSkipped or 0) + 1
+            end
+            return false
+        end
+        if state then
+            state.bagOpsIssued = (state.bagOpsIssued or 0) + 1
+        end
     else
-        PickupGuildBankItem(op.srcTab, op.srcSlot)
+        local srcCount = 0
+        if _G.GetGuildBankItemInfo then
+            local _, c = _G.GetGuildBankItemInfo(op.srcTab, op.srcSlot)
+            srcCount = c or 0
+        end
+        if op.op == "split" and srcCount > (op.count or 0) then
+            SplitGuildBankItem(op.srcTab, op.srcSlot, op.count)
+        else
+            PickupGuildBankItem(op.srcTab, op.srcSlot)
+        end
     end
+
     PickupGuildBankItem(op.dstTab, op.dstSlot)
     if _G.CursorHasItem and _G.CursorHasItem() then
         ClearCursor()
         if state then state.cursorStuck = (state.cursorStuck or 0) + 1 end
     end
+    return true
 end
 
 --- Schedule the next pump tick. The captured token lets a watchdog re-kick
@@ -390,13 +452,26 @@ pumpOne = function()
     emitProgress("step", { opIndex = state.opIndex })
     local itemDesc = (op.itemID and GBL.DescribeItem)
         and GBL:DescribeItem(op.itemID) or ("it:" .. tostring(op.itemID))
+    -- Slot refs go through GBL:FormatSlotRef so a bag source reads "Bag0/3"
+    -- rather than the "T-1/3" a bare tab format would print (#139).
     GBL:SortInfo(string.format(
-        "Sort op %d/%d: %s T%d/S%d->T%d/S%d %s x%d (viewed %s)",
+        "Sort op %d/%d: %s %s->%s %s x%d (viewed %s)",
         state.opIndex, #state.plan.ops, op.op or "move",
-        op.srcTab or 0, op.srcSlot or 0, op.dstTab or 0, op.dstSlot or 0,
+        GBL:FormatSlotRef(op.srcTab or 0, op.srcSlot or 0),
+        GBL:FormatSlotRef(op.dstTab or 0, op.dstSlot or 0),
         itemDesc, op.count or 0, viewedTabStr()))
 
-    issueOp(op)
+    -- A refused bag source is ordinary, not an error: the plan is a snapshot
+    -- and the player can move things mid-run. Name the slot at WARN anyway,
+    -- because "why is this still in my bags" is answered by which slot was
+    -- refused, not by the run summary's count (#139).
+    if not issueOp(op) then
+        GBL:SortWarn(string.format(
+            "Sort op %d/%d skipped: %s no longer holds %d x %s",
+            state.opIndex, #state.plan.ops,
+            GBL:FormatSlotRef(op.srcTab or 0, op.srcSlot or 0),
+            op.count or 0, itemDesc))
+    end
     state.opIndex = state.opIndex + 1
     state.totalIssued = (state.totalIssued or 0) + 1
     -- Flush the transaction log every N issued ops while we have Ledger's
@@ -469,7 +544,14 @@ endOfPass = function()
                 finish(false, "scan returned no snapshot")
                 return
             end
-            local newPlan = GBL:PlanSort(snapshot, state.layout)
+            -- Re-read the bags rather than reusing the run's opening
+            -- snapshot: this pass just deposited out of them, so a cached
+            -- copy would plan moves for stacks that are already in the bank.
+            local replanOpts
+            if state.includeBags and GBL.ScanBags then
+                replanOpts = { bagSnapshot = GBL:ScanBags() }
+            end
+            local newPlan = GBL:PlanSort(snapshot, state.layout, replanOpts)
             local newOps = (newPlan and newPlan.ops) and #newPlan.ops or 0
             local prevOps = state.lastPassOps or math.huge
 
@@ -519,7 +601,10 @@ end
 --- Begin executing a plan.
 -- @param plan table from SortPlanner
 -- @param onComplete function(result) called when the run ends
--- @param opts table|nil { layout = layoutForRerun }
+-- @param opts table|nil { layout = layoutForRerun, includeBags = boolean }
+--   includeBags (#139) says the plan may contain ops sourced from player
+--   bags, and that the end-of-pass replan should re-read them. It is kept
+--   for the whole run, not consulted once at the start.
 -- @return ok, errMessage
 function GBL:ExecuteSortPlan(plan, onComplete, opts)
     if isRunning() then return false, "sort already running" end
@@ -530,6 +615,12 @@ function GBL:ExecuteSortPlan(plan, onComplete, opts)
         plan = plan,
         firstPassOps = #plan.ops,
         layout = opts and opts.layout or nil,
+        -- #139: remembered for the whole run, not just pass 1. endOfPass
+        -- re-reads the bags for its replan; without this the second pass
+        -- would silently revert to bank-only and strand the rest.
+        includeBags = (opts and opts.includeBags) and true or false,
+        bagOpsIssued = 0,
+        bagOpsSkipped = 0,
         opIndex = 1,
         passes = 0,
         lastPassOps = nil,
@@ -626,6 +717,9 @@ function GBL:_sortExecutorGetPumpInfo()
         planOps = #state.plan.ops,
         totalIssued = state.totalIssued,
         cursorStuck = state.cursorStuck,
+        includeBags = state.includeBags,
+        bagOpsIssued = state.bagOpsIssued,
+        bagOpsSkipped = state.bagOpsSkipped,
     }
 end
 
