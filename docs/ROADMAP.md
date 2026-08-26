@@ -41,6 +41,7 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 - SortExecutor: throttled per-op execution with cursor-leak safety and replan-on-foreign-activity
 - Layout tab editor with rank-gated write access
 - Sort tab preview + rank-gated execute
+- Bags as an optional sort source (#139): an "Include bags" toggle deposits any bag item the layout names as part of the sort, layout slots first and surplus to overflow, so a farming run does not have to be deposited by hand first. Source only, never a destination; bound, locked, and unnamed items are left alone. Off by default
 
 **Restock** (v0.34.0):
 - Restock tab: layout-driven item list grouped by bank tab, showing each item's target, current stock, and shortfall; gated by sort access
@@ -78,7 +79,7 @@ Per-area status:
 
 - **Mature**: recording, categorization, deduplication.
 - **Active** (in guild use, improvements queued): sync (rate limiting pending), UI (sort/filter polish, pagination layout, window resize), sort + layout (confirmation-speed tuning, the overflow-pack full-stack-merge edge case, layout editor slot visibility, refresh flicker). Restock (new in v0.34.0): layout-driven targets and Auctionator buying are in initial use, with a UI polish pass and the reserve-targets producer queued.
-- **Under audit**: accessibility. Palettes, contrast, triple encoding, and font scaling are wired; keyboard-navigation primitives exist but are not threaded through all UI widgets. An independent audit pass is the next planned milestone and is a v1.0 release gate.
+- **Under audit**: accessibility. Palettes, contrast, triple encoding, and font scaling are wired; keyboard-navigation primitives exist but are not threaded through all UI widgets. Restock and Sort now carry the focus walk end to end (Sort gained it with #139), which leaves the rest of the tabs as the gap. An independent audit pass is the next planned milestone and is a v1.0 release gate.
 - **Under audit**: the storage layer. `docs/DATA-MODEL.md` measured the declared schema against a live 12,310-record file and found the defaults block, the record builders and the stored data all disagreeing. Tiered storage was removed rather than repaired, because compaction never once ran (issue #62). Schema migrations work but nothing pins the entry point of the ladder, and roughly 12% of everything ever received via sync arrived with mangled field names. Intake validation and repair shipped in v0.37.0, so new arrivals are checked before they land; the corrupted backlog already on disk is issue #75. Tracked under the Data model integrity milestone and a v1.0 release gate.
 
 ---
