@@ -110,4 +110,102 @@ describe("C_Container mock", function()
         assert.is_false(CursorHasItem())
         assert.is_not_nil(MockWoW.bags[0].slots[1])
     end)
+
+    it("GetContainerItemInfo returns a copy, not the live slot table", function()
+        Helpers.populateBag(0, {
+            [1] = { itemID = 100, name = "Iron Ore", count = 7 },
+        })
+        -- Retail builds a fresh table per call. A caller must not be able
+        -- to write through into the bag, and a captured table must keep
+        -- reading what the slot held at call time.
+        local info = C_Container.GetContainerItemInfo(0, 1)
+        info.stackCount = 999
+        assert.equals(7, MockWoW.bags[0].slots[1].stackCount)
+        assert.equals(7, C_Container.GetContainerItemInfo(0, 1).stackCount)
+
+        local before = C_Container.GetContainerItemInfo(0, 1)
+        C_Container.SplitContainerItem(0, 1, 3)
+        assert.equals(7, before.stackCount)
+        assert.equals(4, MockWoW.bags[0].slots[1].stackCount)
+    end)
+
+    it("a bag-sourced bounce fires no bank event", function()
+        -- The drop was refused, so no guild bank slot changed. Firing
+        -- GUILDBANKBAGSLOTS_CHANGED here would claim one did.
+        MockWoW.itemNames[100] = { stackCount = 20 }
+        MockWoW.addTab("Tab 1", nil, true)
+        Helpers.populateTab(1, {
+            [1] = { itemID = 100, name = "Iron Ore", count = 20 },
+        })
+        Helpers.populateBag(0, {
+            [1] = { itemID = 100, name = "Iron Ore", count = 5 },
+        })
+        C_Container.PickupContainerItem(0, 1)
+        MockWoW.deferredBankEvents = true
+        MockWoW.queuedBankEvents = {}
+        PickupGuildBankItem(1, 1)
+        assert.equals(0, #MockWoW.queuedBankEvents)
+        -- The bounce still completed: cursor empty, bag stack restored.
+        assert.is_false(CursorHasItem())
+        assert.equals(5, MockWoW.bags[0].slots[1].stackCount)
+    end)
+
+    it("a later generic fire is not gated by the skipped bounce event", function()
+        -- fireBankEvent consumes _lastMutatedTab. Skipping the fire on a
+        -- bag bounce has to clear it too, or the next mutation inherits a
+        -- stale tab and gets gated away under viewGatedReads.
+        MockWoW.itemNames[100] = { stackCount = 20 }
+        MockWoW.addTab("Tab 1", nil, true)
+        Helpers.populateTab(1, {
+            [1] = { itemID = 100, name = "Iron Ore", count = 20 },
+        })
+        Helpers.populateBag(0, {
+            [1] = { itemID = 100, name = "Iron Ore", count = 5 },
+        })
+        C_Container.PickupContainerItem(0, 1)
+        PickupGuildBankItem(1, 1)
+        assert.is_nil(MockWoW.guildBank._lastMutatedTab)
+    end)
+
+    it("dropping the cursor into a bag raises", function()
+        -- Bags are a sort SOURCE only: findPivot walks the blocked tab
+        -- plus overflow tabs, Phase 3 sweeps display tabs, Phase 4 packs
+        -- overflow tabs. The planner side is pinned by applyPlan's
+        -- dstTab >= 1 assertion, but executor specs never route through
+        -- applyPlan, so the mock is the only thing standing between an
+        -- executor regression and a silently accepted bag destination.
+        Helpers.populateBag(0, {
+            [1] = { itemID = 100, name = "Iron Ore", count = 5 },
+        })
+        C_Container.PickupContainerItem(0, 1)
+        assert.is_true(CursorHasItem())
+        assert.has_error(function()
+            C_Container.PickupContainerItem(0, 2)
+        end)
+    end)
+
+    it("a bounce into a source holding a different item raises", function()
+        -- Unreachable through the pipeline: a full pickup nils the source
+        -- so the restore branch runs, and a split leaves the same item
+        -- behind. Constructed by hand here so the blind merge cannot come
+        -- back as silent count inflation.
+        MockWoW.itemNames[100] = { stackCount = 20 }
+        MockWoW.addTab("Tab 1", nil, true)
+        Helpers.populateTab(1, {
+            [1] = { itemID = 100, name = "Iron Ore", count = 20 },
+        })
+        Helpers.populateBag(0, {
+            [1] = { itemID = 100, name = "Iron Ore", count = 10 },
+        })
+        C_Container.SplitContainerItem(0, 1, 5)
+        -- Something else claims the source slot while the cursor is up.
+        MockWoW.bags[0].slots[1] = {
+            hyperlink = Helpers.makeItemLink(101, "Copper Ore", 1),
+            iconFileID = 134400, stackCount = 5, quality = 1,
+            isLocked = false, isBound = false, itemID = 101,
+        }
+        assert.has_error(function()
+            PickupGuildBankItem(1, 1)
+        end)
+    end)
 end)
