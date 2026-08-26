@@ -343,3 +343,168 @@ describe("Scanner", function()
         end)
     end)
 end)
+
+------------------------------------------------------------------------
+-- Bag scanning (#139: include bags in sort)
+--
+-- ScanBags is the synchronous bag-side sibling of the tab scan: it reads
+-- C_Container state directly (no query round-trip, no events) and emits a
+-- bank-shaped snapshot keyed by NEGATIVE pseudo-tab indices so the sort
+-- planner can consume it without learning a second slot vocabulary.
+------------------------------------------------------------------------
+
+describe("Scanner bag scanning", function()
+    local GBL
+
+    before_each(function()
+        Helpers.setupMocks()
+        GBL = Helpers.loadAddon()
+        GBL:OnInitialize()
+        MockWoW.guild.name = "Test Guild"
+        GBL:OnEnable()
+    end)
+
+    describe("pseudo-tab helpers", function()
+        it("encodes bagIDs 0..5 to tabs -1..-6", function()
+            assert.equals(-1, GBL:TabFromBagID(0))
+            assert.equals(-3, GBL:TabFromBagID(2))
+            assert.equals(-6, GBL:TabFromBagID(5))
+        end)
+
+        it("decodes negative tabs back to bagIDs", function()
+            assert.equals(0, GBL:BagIDFromTab(-1))
+            assert.equals(2, GBL:BagIDFromTab(-3))
+            assert.equals(5, GBL:BagIDFromTab(-6))
+        end)
+
+        it("returns nil for tabs that are not bag pseudo-tabs", function()
+            assert.is_nil(GBL:BagIDFromTab(4))
+            assert.is_nil(GBL:BagIDFromTab(0))
+            assert.is_nil(GBL:BagIDFromTab(-7))
+        end)
+
+        it("formats bag and bank slot references", function()
+            assert.equals("Bag0/5", GBL:FormatSlotRef(-1, 5))
+            assert.equals("Bag5/1", GBL:FormatSlotRef(-6, 1))
+            assert.equals("T3/12", GBL:FormatSlotRef(3, 12))
+        end)
+    end)
+
+    describe("ScanBags", function()
+        it("returns an empty table when no bags exist", function()
+            assert.same({}, GBL:ScanBags())
+        end)
+
+        it("emits an entry with zero items for a present but empty bag", function()
+            Helpers.populateBag(0, {})
+            local result = GBL:ScanBags()
+            assert.is_not_nil(result[-1])
+            assert.equals(0, result[-1].itemCount)
+            assert.same({}, result[-1].slots)
+        end)
+
+        it("emits a bank-shaped entry keyed by pseudo-tab", function()
+            Helpers.populateBag(0, {
+                [3] = { itemID = 100, name = "Iron Ore", count = 20 },
+            })
+            local result = GBL:ScanBags()
+            assert.is_not_nil(result[-1])
+            local slot = result[-1].slots[3]
+            assert.is_not_nil(slot)
+            assert.equals(20, slot.count)
+            assert.equals(3, slot.slotIndex)
+            assert.equals(-1, slot.tabIndex)
+            assert.equals(100, slot.itemID)
+            assert.is_truthy(slot.itemLink:find("Hitem:100", 1, true))
+            assert.equals(1, result[-1].itemCount)
+        end)
+
+        it("scans the reagent bag as pseudo-tab -6", function()
+            Helpers.populateBag(5, {
+                [1] = { itemID = 200, name = "Chromatic Dust", count = 40 },
+            })
+            local result = GBL:ScanBags()
+            assert.is_not_nil(result[-6])
+            assert.equals(200, result[-6].slots[1].itemID)
+        end)
+
+        it("omits bags that do not exist", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Iron Ore", count = 1 },
+            })
+            local result = GBL:ScanBags()
+            assert.is_not_nil(result[-1])
+            for tab in pairs(result) do
+                assert.equals(-1, tab)
+            end
+        end)
+
+        it("skips bound items and counts them", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Warbound Ore", count = 5, isBound = true },
+                [2] = { itemID = 101, name = "Iron Ore", count = 5 },
+            })
+            local result = GBL:ScanBags()
+            assert.is_nil(result[-1].slots[1])
+            assert.is_not_nil(result[-1].slots[2])
+            assert.equals(1, result[-1].itemCount)
+            assert.equals(1, result[-1].boundSkips)
+        end)
+
+        it("skips locked slots and counts them", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Iron Ore", count = 5, locked = true },
+            })
+            local result = GBL:ScanBags()
+            assert.is_nil(result[-1].slots[1])
+            assert.equals(0, result[-1].itemCount)
+            assert.equals(1, result[-1].lockedSkips)
+        end)
+
+        it("skips bag 5 when Enum.BagIndex is absent", function()
+            Helpers.populateBag(5, {
+                [1] = { itemID = 200, name = "Chromatic Dust", count = 1 },
+            })
+            local stash = _G.Enum.BagIndex
+            _G.Enum.BagIndex = nil
+            local result = GBL:ScanBags()
+            _G.Enum.BagIndex = stash
+            assert.is_nil(result[-6])
+        end)
+
+        it("skips slots with no usable item link", function()
+            Helpers.populateBag(0, {
+                -- Item data not yet streamed: itemID known, hyperlink nil.
+                [1] = { itemID = 100, name = "Iron Ore", count = 1, noHyperlink = true },
+                -- Caged battle pet: hyperlink present but not an item: link.
+                [2] = { itemID = 82800, name = "Feline Familiar", count = 1,
+                        link = "|cff0070dd|Hbattlepet:1234:1:3:158:10:12:0|h[Feline Familiar]|h|r" },
+                [3] = { itemID = 101, name = "Copper Ore", count = 2 },
+            })
+            local result = GBL:ScanBags()
+            assert.is_nil(result[-1].slots[1])
+            assert.is_nil(result[-1].slots[2])
+            assert.is_not_nil(result[-1].slots[3])
+            assert.equals(1, result[-1].itemCount)
+            assert.equals(2, result[-1].noLink)
+        end)
+
+        it("warms the item cache once per distinct scanned item", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Iron Ore", count = 20 },
+                [2] = { itemID = 100, name = "Iron Ore", count = 5 },
+                [3] = { itemID = 101, name = "Copper Ore", count = 3 },
+            })
+            local seen = {}
+            local orig = GBL.GetMaxStack
+            GBL.GetMaxStack = function(self, id)
+                seen[id] = (seen[id] or 0) + 1
+                return orig(self, id)
+            end
+            GBL:ScanBags()
+            GBL.GetMaxStack = orig
+            assert.equals(1, seen[100])
+            assert.equals(1, seen[101])
+        end)
+    end)
+end)
