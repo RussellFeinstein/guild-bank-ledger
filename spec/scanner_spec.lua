@@ -383,6 +383,15 @@ describe("Scanner bag scanning", function()
             assert.is_nil(GBL:BagIDFromTab(-7))
         end)
 
+        -- -1.5 decodes to bagID 0.5, which is inside the range check and
+        -- comes back out as a fractional bagID. Nothing produces one today,
+        -- but the decoder is the boundary that keeps a bad tab from reaching
+        -- C_Container as a bag index, so it rejects rather than rounds.
+        it("returns nil for a negative tab that is not an integer", function()
+            assert.is_nil(GBL:BagIDFromTab(-1.5))
+            assert.is_nil(GBL:BagIDFromTab(-5.001))
+        end)
+
         it("formats bag and bank slot references", function()
             assert.equals("Bag0/5", GBL:FormatSlotRef(-1, 5))
             assert.equals("Bag5/1", GBL:FormatSlotRef(-6, 1))
@@ -520,6 +529,60 @@ describe("Scanner bag scanning", function()
             GBL.GetMaxStack = orig
             assert.equals(1, seen[100])
             assert.equals(1, seen[101])
+        end)
+
+        -- Scanner sits above BankLayout in the .toc, so ExtractItemID is
+        -- resolved at call time and can legitimately be missing. SortPlanner
+        -- and Restock both carry the same inline fallback; without it every
+        -- bag slot silently counts as noLink and the sort sees empty bags.
+        it("parses item links itself when BankLayout.ExtractItemID is absent", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Iron Ore", count = 20 },
+            })
+            local stash = GBL.BankLayout
+            GBL.BankLayout = nil
+            local result = GBL:ScanBags()
+            GBL.BankLayout = stash
+
+            assert.is_not_nil(result[-1].slots[1])
+            assert.equals(100, result[-1].slots[1].itemID)
+            assert.equals(1, result[-1].itemCount)
+            assert.equals(0, result[-1].noLink)
+        end)
+
+        -- Same load-order reasoning as ExtractItemID above: the cache warm is
+        -- an optimisation, so a missing GetMaxStack must not take the scan
+        -- down with it.
+        it("still scans when GetMaxStack is unavailable", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Iron Ore", count = 20 },
+            })
+            local stash = GBL.GetMaxStack
+            GBL.GetMaxStack = nil
+            local ok, result = pcall(function() return GBL:ScanBags() end)
+            GBL.GetMaxStack = stash
+
+            assert.is_true(ok)
+            assert.equals(1, result[-1].itemCount)
+        end)
+
+        -- The reagent bag index comes from the client, and the pseudo-tab
+        -- range is 0..5. A value outside it would encode to a tab that
+        -- BagIDFromTab cannot decode, so the executor could never turn the
+        -- op back into a bag. Derive the scan list from what decodes.
+        it("ignores a reagent bag index outside the encodable range", function()
+            Helpers.populateBag(9, {
+                [1] = { itemID = 100, name = "Iron Ore", count = 20 },
+            })
+            local stash = _G.Enum.BagIndex.ReagentBag
+            _G.Enum.BagIndex.ReagentBag = 9
+            local result = GBL:ScanBags()
+            _G.Enum.BagIndex.ReagentBag = stash
+
+            assert.is_nil(result[-10])
+            for tabIndex in pairs(result) do
+                assert.is_not_nil(GBL:BagIDFromTab(tabIndex))
+            end
         end)
     end)
 end)
