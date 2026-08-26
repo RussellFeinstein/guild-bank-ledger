@@ -22,6 +22,13 @@ MockWoW.guildBank = {
     visibleSlots = {},  -- tabIndex -> { slotIndex -> slot copy } (view-gated only)
 }
 
+-- Mock player bags (#139): bagID -> { numSlots, slots = { slotIndex ->
+-- containerInfo-shaped table } }. Slot entries mirror the retail
+-- C_Container.GetContainerItemInfo return: stackCount, isLocked, isBound,
+-- hyperlink (nil when item data is not streamed), itemID, quality,
+-- iconFileID. Populated via Helpers.populateBag.
+MockWoW.bags = {}
+
 -- Mock guild state
 MockWoW.guild = {
     name = nil,      -- nil = not in guild
@@ -86,6 +93,7 @@ function MockWoW.reset()
         ranks = {},  -- array of rank names, 1-indexed (1 = GM, 2 = next rank, etc.)
     }
     MockWoW.player = { name = "TestOfficer", realm = "TestRealm" }
+    MockWoW.bags = {}
     MockWoW.inRaid = false
     MockWoW.instanceType = "none"
     MockWoW.itemInfo = {}
@@ -141,6 +149,8 @@ function MockWoW.install()
     _G.Enum = _G.Enum or {}
     _G.Enum.PlayerInteractionType = _G.Enum.PlayerInteractionType or {}
     _G.Enum.PlayerInteractionType.GuildBanker = 10
+    _G.Enum.BagIndex = _G.Enum.BagIndex or {}
+    _G.Enum.BagIndex.ReagentBag = 5
 
     -- Constants
     _G.MAX_GUILDBANK_SLOTS_PER_TAB = 98
@@ -484,7 +494,27 @@ function MockWoW.install()
                     -- but in practice the cursor was picked up from src so
                     -- src had room for it before).
                     local srcRef = cur.src
-                    if srcRef then
+                    if srcRef and srcRef.bagID ~= nil then
+                        -- #139: cursor was lifted from a player bag, so the
+                        -- bounce restores into MockWoW.bags, not the bank.
+                        local bag = MockWoW.bags[srcRef.bagID]
+                        if bag then
+                            local srcSlot = bag.slots[srcRef.slotIndex]
+                            if not srcSlot then
+                                bag.slots[srcRef.slotIndex] = {
+                                    hyperlink = cur.itemLink,
+                                    iconFileID = cur.texture,
+                                    stackCount = cur.count,
+                                    quality = cur.quality,
+                                    isLocked = false,
+                                    isBound = false,
+                                    itemID = cur.itemID,
+                                }
+                            else
+                                srcSlot.stackCount = srcSlot.stackCount + cur.count
+                            end
+                        end
+                    elseif srcRef then
                         local srcTab = MockWoW.guildBank.tabs[srcRef.tabIndex]
                         if srcTab then
                             local srcSlot = srcTab.slots[srcRef.slotIndex]
@@ -558,6 +588,105 @@ function MockWoW.install()
         end
         fireBankEvent()
     end
+
+    -----------------------------------------------------------------------
+    -- C_Container (#139): player bag reads and moves. Shares MockWoW.cursor
+    -- with the guild bank mock so a bag pickup can drop into a bank slot.
+    -- Bag mutations fire no bank event (bags are not event-scanned).
+    -----------------------------------------------------------------------
+
+    _G.C_Container = {
+        GetContainerNumSlots = function(bagID)
+            local bag = MockWoW.bags[bagID]
+            return bag and bag.numSlots or 0
+        end,
+
+        GetContainerItemInfo = function(bagID, slotIndex)
+            local bag = MockWoW.bags[bagID]
+            return bag and bag.slots[slotIndex] or nil
+        end,
+
+        --- Pick up the full stack in (bagID, slotIndex), or drop the cursor
+        --- into that bag slot. Locked slots refuse the pickup, as the real
+        --- client does while an item is in use.
+        PickupContainerItem = function(bagID, slotIndex)
+            local bag = MockWoW.bags[bagID]
+            if not bag then return end
+            local slot = bag.slots[slotIndex]
+            if MockWoW.cursor == nil then
+                if not slot or slot.isLocked then return end
+                MockWoW.cursor = {
+                    itemLink = slot.hyperlink,
+                    itemID = slot.itemID,
+                    count = slot.stackCount,
+                    src = { bagID = bagID, slotIndex = slotIndex },
+                    texture = slot.iconFileID,
+                    quality = slot.quality,
+                }
+                bag.slots[slotIndex] = nil
+            else
+                -- Drop into the bag. The sort pipeline never targets bags,
+                -- but the mock stays coherent for any test that does.
+                local cur = MockWoW.cursor
+                if not slot then
+                    bag.slots[slotIndex] = {
+                        hyperlink = cur.itemLink,
+                        iconFileID = cur.texture,
+                        stackCount = cur.count,
+                        quality = cur.quality,
+                        isLocked = false,
+                        isBound = false,
+                        itemID = cur.itemID,
+                    }
+                    MockWoW.cursor = nil
+                elseif slot.itemID == cur.itemID then
+                    slot.stackCount = slot.stackCount + cur.count
+                    MockWoW.cursor = nil
+                else
+                    local prev = slot
+                    bag.slots[slotIndex] = {
+                        hyperlink = cur.itemLink,
+                        iconFileID = cur.texture,
+                        stackCount = cur.count,
+                        quality = cur.quality,
+                        isLocked = false,
+                        isBound = false,
+                        itemID = cur.itemID,
+                    }
+                    MockWoW.cursor = {
+                        itemLink = prev.hyperlink,
+                        itemID = prev.itemID,
+                        count = prev.stackCount,
+                        src = { bagID = bagID, slotIndex = slotIndex },
+                        texture = prev.iconFileID,
+                        quality = prev.quality,
+                    }
+                end
+            end
+        end,
+
+        --- Pick up a partial stack from (bagID, slotIndex).
+        SplitContainerItem = function(bagID, slotIndex, amount)
+            local bag = MockWoW.bags[bagID]
+            if not bag then return end
+            local slot = bag.slots[slotIndex]
+            if not slot or slot.isLocked or MockWoW.cursor ~= nil then return end
+            amount = math.min(amount or slot.stackCount, slot.stackCount)
+            if amount <= 0 then return end
+            MockWoW.cursor = {
+                itemLink = slot.hyperlink,
+                itemID = slot.itemID,
+                count = amount,
+                src = { bagID = bagID, slotIndex = slotIndex },
+                texture = slot.iconFileID,
+                quality = slot.quality,
+            }
+            slot.stackCount = slot.stackCount - amount
+            if slot.stackCount == 0 then
+                bag.slots[slotIndex] = nil
+            end
+        end,
+    }
 
     --- Test utility: simulate a foreign player deleting an item from a slot
     --- (e.g. another guild member withdrawing while we're sorting). Fires

@@ -255,6 +255,112 @@ function GBL:GetLastScanResults()
 end
 
 ------------------------------------------------------------------------
+-- Bag scanning (#139: include bags in sort)
+------------------------------------------------------------------------
+
+-- Bags enter the sort pipeline as NEGATIVE pseudo-tab indices so the
+-- planner can treat them as ordinary source-only tabs without ever
+-- colliding with bank tabs 1..8 or entering layout.tabs, whose
+-- BankLayout.Validate rejects tabIndex < 1 by design.
+local BAG_ID_MIN, BAG_ID_MAX = 0, 5
+
+--- Encode a bagID (0-5) as a planner pseudo-tab index (-1..-6).
+function GBL:TabFromBagID(bagID)
+    return -(bagID + 1)
+end
+
+--- Decode a pseudo-tab index back to a bagID, or nil when the tab is a
+--- bank tab or outside the bag range.
+function GBL:BagIDFromTab(tab)
+    if type(tab) ~= "number" or tab >= 0 then return nil end
+    local bagID = -tab - 1
+    if bagID < BAG_ID_MIN or bagID > BAG_ID_MAX then return nil end
+    return bagID
+end
+
+--- Render a slot reference for logs and UI: "T3/12" for bank tabs,
+--- "Bag0/5" for bag pseudo-tabs. Every sort-side render site routes
+--- through this so a negative tab can never surface as "T-1".
+function GBL:FormatSlotRef(tab, slot)
+    local bagID = self:BagIDFromTab(tab)
+    if bagID then
+        return string.format("Bag%d/%d", bagID, slot)
+    end
+    return string.format("T%d/%d", tab, slot)
+end
+
+--- Synchronously scan the player's bags (0-4, plus the reagent bag when
+--- the client has one) into a bank-shaped snapshot keyed by pseudo-tab.
+--- No query round-trip and no events: C_Container reads are local.
+---
+--- This is source-only data for the sort planner (opts.bagSnapshot).
+--- Skipped with per-bag counters: bound items (the server refuses them
+--- at the guild bank), locked slots, and slots without a parseable item
+--- link (caged pets, item data not yet streamed).
+-- @return table { [pseudoTab] = { slots, itemCount, boundSkips,
+--   lockedSkips, noLink } }, empty when C_Container is unavailable
+function GBL:ScanBags()
+    local results = {}
+    if not (C_Container and C_Container.GetContainerNumSlots
+            and C_Container.GetContainerItemInfo) then
+        return results
+    end
+
+    -- Resolved at call time: Scanner loads before BankLayout in the .toc.
+    local BankLayout = self.BankLayout
+    local extract = BankLayout and BankLayout.ExtractItemID
+
+    local bagIDs = { 0, 1, 2, 3, 4 }
+    if Enum and Enum.BagIndex and Enum.BagIndex.ReagentBag then
+        table.insert(bagIDs, Enum.BagIndex.ReagentBag)
+    end
+
+    local warmed = {}
+    for _, bagID in ipairs(bagIDs) do
+        local numSlots = C_Container.GetContainerNumSlots(bagID) or 0
+        if numSlots > 0 then
+            local tabIndex = self:TabFromBagID(bagID)
+            local tabResult = {
+                slots = {}, itemCount = 0,
+                boundSkips = 0, lockedSkips = 0, noLink = 0,
+            }
+            for slotIndex = 1, numSlots do
+                local info = C_Container.GetContainerItemInfo(bagID, slotIndex)
+                if type(info) == "table" then
+                    local itemID = extract and extract(info.hyperlink) or nil
+                    if info.isBound then
+                        tabResult.boundSkips = tabResult.boundSkips + 1
+                    elseif info.isLocked then
+                        tabResult.lockedSkips = tabResult.lockedSkips + 1
+                    elseif not itemID then
+                        tabResult.noLink = tabResult.noLink + 1
+                    else
+                        tabResult.slots[slotIndex] = {
+                            itemLink = info.hyperlink,
+                            texture = info.iconFileID,
+                            count = info.stackCount or 1,
+                            slotIndex = slotIndex,
+                            tabIndex = tabIndex,
+                            itemID = itemID,
+                        }
+                        tabResult.itemCount = tabResult.itemCount + 1
+                        if not warmed[itemID] then
+                            warmed[itemID] = true
+                            -- Kick the async stack-size load now so the
+                            -- planner's maxStack lookups are warm by sort
+                            -- time rather than the follow-up sort.
+                            self:GetMaxStack(itemID)
+                        end
+                    end
+                end
+            end
+            results[tabIndex] = tabResult
+        end
+    end
+    return results
+end
+
+------------------------------------------------------------------------
 -- Event handler
 ------------------------------------------------------------------------
 

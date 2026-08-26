@@ -62,6 +62,7 @@ read_globals = {
     -- WoW utilities
     "C_AuctionHouse",
     "C_ChatBubbles",
+    "C_Container",
     "C_Item",
     "C_Timer",
     "Item",
