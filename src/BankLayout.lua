@@ -15,6 +15,11 @@ local MAX_TABS = MAX_GUILDBANK_TABS or 8
 -- overflow tab); 2 = optional overflowPriority on overflow-mode tabs.
 -- Nothing reads this constant yet; it records the shape so future migration
 -- or compatibility code has a correct starting point.
+-- Mixed-version note: a v1-shape client's copy loops strip overflowPriority
+-- on adopt while keeping the cursor, so if such a client later re-saves, the
+-- stripped copy can win last-writer-wins. That only happens on layouts old
+-- clients can adopt at all (single-overflow), where priority has no routing
+-- effect; recovery is the GM re-saving.
 local LAYOUT_SCHEMA_VERSION = 2
 
 ------------------------------------------------------------------------
@@ -29,6 +34,14 @@ end
 
 local function emptyTable(t)
     for k in pairs(t) do t[k] = nil end
+end
+
+--- One definition of a usable overflowPriority, shared by Validate (which
+-- rejects anything else non-nil) and OrderedOverflowTabs' sort key (which
+-- falls back to the tab index), so the two can never drift on edge values.
+-- NaN is type "number" but breaks sort determinism, hence p == p.
+local function isUsablePriority(p)
+    return type(p) == "number" and p == p
 end
 
 --- Whitelist deep copy of one tab record. The single copy shared by
@@ -94,7 +107,7 @@ function BankLayout.OrderedOverflowTabs(layout)
     end
     local function sortKey(tabIndex)
         local p = layout.tabs[tabIndex].overflowPriority
-        if type(p) == "number" and p == p then return p end
+        if isUsablePriority(p) then return p end
         return tabIndex
     end
     table.sort(out, function(a, b)
@@ -158,8 +171,7 @@ function BankLayout.Validate(layout)
         if mode == "overflow" then
             overflowCount = overflowCount + 1
             local p = tab.overflowPriority
-            -- NaN is type "number" but breaks sort determinism, so p == p.
-            if p ~= nil and (type(p) ~= "number" or p ~= p) then
+            if p ~= nil and not isUsablePriority(p) then
                 return false, "tab " .. tabIndex .. " overflowPriority must be a number"
             end
         elseif mode == "display" then

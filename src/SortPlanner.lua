@@ -59,7 +59,8 @@
 --                dstTab, dstSlot, itemID, count}, ... },
 --       deficits = { [itemID] = count },
 --       unplaced = { {tabIndex, slotIndex, itemID, count, reason}, ... },
---       overflowTab = tabIndex | nil,
+--       overflowTabs = { tabIndex, ... },  -- routing (fill) order, {} if none
+--       overflowTab = tabIndex | nil,      -- alias for overflowTabs[1]
 --   }
 --
 --   opts.maxStackByItem :: { [itemID]=number } | nil
@@ -174,7 +175,8 @@ end
 
 function GBL:PlanSort(snapshot, layout, opts)
     local plan = {
-        ops = {}, deficits = {}, unplaced = {}, overflowTab = nil,
+        ops = {}, deficits = {}, unplaced = {},
+        overflowTabs = {},
         -- demandMap is the authoritative expected layout: for each display
         -- tab, a map slotIndex -> {itemID, perSlot} including both
         -- slotOrder-pinned demands and items[id].slots extensions. Populated
@@ -241,17 +243,28 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- Classify tabs.
     -- --------------------------------------------------------------
     local displayTabs = {}
-    local overflowTab = nil
     local ignoreSet = {}
     for tabIndex, tab in pairs(layout.tabs) do
-        if tab.mode == "overflow" then
-            overflowTab = tabIndex
-        elseif tab.mode == "display" then
+        if tab.mode == "display" then
             table.insert(displayTabs, { tabIndex = tabIndex, tab = tab })
         elseif tab.mode == "ignore" then
             ignoreSet[tabIndex] = true
         end
     end
+    -- Overflow tabs in routing (fill) order, from the shared helper
+    -- (BankLayout.OrderedOverflowTabs). Never iterate overflow tabs via
+    -- pairs(): the ordered array is what keeps plan output deterministic
+    -- with more than one overflow tab.
+    local overflowTabsOrdered = BankLayout.OrderedOverflowTabs(layout)
+    local overflowSet = {}
+    for _, t in ipairs(overflowTabsOrdered) do overflowSet[t] = true end
+    -- Transitional scalar for phases not yet multi-tab-aware (spill, pivot
+    -- fallback, compaction): they fill and pack the first tab in routing
+    -- order. Replaced as those phases generalize.
+    local overflowTab = overflowTabsOrdered[1]
+    -- The helper returns a fresh caller-owned array and the planner never
+    -- mutates it, so publishing it directly is safe.
+    plan.overflowTabs = overflowTabsOrdered
     plan.overflowTab = overflowTab
     table.sort(displayTabs, function(a, b) return a.tabIndex < b.tabIndex end)
 
@@ -275,7 +288,9 @@ function GBL:PlanSort(snapshot, layout, opts)
             end
         end
     end
-    if overflowTab and not bank[overflowTab] then bank[overflowTab] = {} end
+    for _, ovTab in ipairs(overflowTabsOrdered) do
+        if not bank[ovTab] then bank[ovTab] = {} end
+    end
 
     -- --------------------------------------------------------------
     -- Working state + emit machinery (used by Phase 0 onward).
@@ -339,17 +354,19 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- PHASE 0: Overflow pre-merge
     -- --------------------------------------------------------------
     -- Before Phase 1 builds supplies and Phase 1B routes spills to
-    -- overflow, walk each same-item run on the overflow tab and pour
+    -- overflow, walk each same-item run on each overflow tab and pour
     -- partial stacks together up to the per-item max stack size.
-    -- This compacts the overflow tab to its minimum slot count so
+    -- This compacts each overflow tab to its minimum slot count so
     -- pickOverflowSlot has maximum free slots to work with — fixes
     -- the "out of space" cascade where partial stacks consumed slots
     -- that could be merged. Items with unknown maxStack (cold cache)
     -- skip the merge for that item only and fall back to grouping.
-    if overflowTab then
+    -- Merging is per tab: pours are always srcTab == dstTab, so Phase 0
+    -- never moves stock between overflow tabs (no rebalancing).
+    for _, ovTab in ipairs(overflowTabsOrdered) do
         local ovStacks = {}
         for s = 1, MAX_SLOTS do
-            local slot = state[overflowTab] and state[overflowTab][s]
+            local slot = state[ovTab] and state[ovTab][s]
             if slot then
                 table.insert(ovStacks, {
                     origSlot = s, itemID = slot.itemID, count = slot.count,
@@ -385,8 +402,8 @@ function GBL:PlanSort(snapshot, layout, opts)
                         local pour = math.min(maxStack - left.count,
                                               right.count)
                         emitAssignment({
-                            srcTab = overflowTab, srcSlot = right.origSlot,
-                            dstTab = overflowTab, dstSlot = left.origSlot,
+                            srcTab = ovTab, srcSlot = right.origSlot,
+                            dstTab = ovTab, dstSlot = left.origSlot,
                             itemID = left.itemID, count = pour,
                         })
                         left.count  = left.count  + pour
@@ -557,7 +574,9 @@ function GBL:PlanSort(snapshot, layout, opts)
     for _, entry in ipairs(displayTabs) do
         table.insert(tabOrder, entry.tabIndex)
     end
-    if overflowTab then table.insert(tabOrder, overflowTab) end
+    for _, ovTab in ipairs(overflowTabsOrdered) do
+        table.insert(tabOrder, ovTab)
+    end
     table.sort(tabOrder)
 
     -- Read supplies from POST-Phase-0 state (not bank): if Phase 0
@@ -574,7 +593,7 @@ function GBL:PlanSort(snapshot, layout, opts)
                         tabIndex = tabIndex, slotIndex = slotIndex,
                         itemID = slot.itemID, count = slot.count,
                         available = slot.count,
-                        isOverflow = (tabIndex == overflowTab),
+                        isOverflow = overflowSet[tabIndex] or false,
                         isKeep = false,
                     })
                 end
