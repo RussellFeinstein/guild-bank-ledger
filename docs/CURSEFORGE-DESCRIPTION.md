@@ -50,7 +50,7 @@ Settings sync to all guild members automatically.
 - 4 colorblind-safe palettes (auto-detected from WoW settings)
 - High contrast mode (WCAG AAA)
 - Triple encoding: shape + color + text for all transaction types
-- Keyboard navigation: partial (Tab/Shift+Tab wiring under audit; complete before v1.0)
+- Keyboard navigation: partial (Tab/Shift+Tab, arrows and Enter/Space work on the Sort and Restock tabs, with a focus ring; the remaining tabs are under audit and complete before v1.0)
 - Font scaling (8–24pt)
 
 ## Commands
