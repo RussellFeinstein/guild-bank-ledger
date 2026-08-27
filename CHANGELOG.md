@@ -5,6 +5,17 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.39.0] - 2026-08-27
+
+### Added
+- The sort can now take items straight out of your bags. Tick "Include bags" on the Sort tab and any bag item your layout names is deposited as part of the sort run: layout slots are filled first, and whatever is left over routes to your overflow tabs. A farming run or an Auction House haul no longer has to be deposited by hand and rescanned before you can sort it. Bag items your layout does not name are left alone, as are bound and locked slots. Bank stock is always used before a bag when both can fill the same slot, since moving inside the bank costs nothing. The preview labels bag sources as `Bag0/3` and says when something has to stay in your bags. Off by default.
+- Keyboard navigation on the Sort tab: Tab and Shift+Tab move between Preview, Execute, Cancel, Scan bank, Open Sort Log and Include bags, arrow keys do the same, and Enter or Space activates whatever is focused.
+
+### Fixed
+- The keyboard focus indicator now draws. Moving focus with Tab has been setting focus correctly and showing nothing on screen, which made the feature impossible to use and impossible to notice was broken: the function meant to draw the highlight only ever recorded the state in memory. Focus now shows a 2 pixel ring in the palette's focus colour, so it follows your colourblind mode and high contrast setting. This affects the Restock tab as well, where keyboard navigation had the same invisible behaviour since it shipped.
+
 ## [0.38.1] - 2026-08-27
 
 ### Fixed

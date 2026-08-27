@@ -44,17 +44,24 @@ describe("SortPlanner", function()
     end
 
     --- Count occurrences of itemID in a simulated final bank state after applying plan.ops.
-    local function applyPlan(snap, plan)
+    -- @param bags table|nil Optional opts.bagSnapshot, absorbed under its own
+    --   negative pseudo-tabs so a plan that sources from bags can be applied.
+    local function applyPlan(snap, plan, bags)
         -- Deep-ish copy of snapshot into a flat bank[tab][slot] = {itemID,count}
         local bank = {}
-        for tabIndex, tabResult in pairs(snap) do
-            bank[tabIndex] = {}
-            for slotIndex, slot in pairs(tabResult.slots or {}) do
-                local id = GBL._sortPlannerExtractItemID(slot.itemLink)
-                bank[tabIndex][slotIndex] = { itemID = id, count = slot.count }
+        local function absorb(src)
+            for tabIndex, tabResult in pairs(src or {}) do
+                bank[tabIndex] = bank[tabIndex] or {}
+                for slotIndex, slot in pairs(tabResult.slots or {}) do
+                    local id = GBL._sortPlannerExtractItemID(slot.itemLink)
+                    bank[tabIndex][slotIndex] = { itemID = id, count = slot.count }
+                end
             end
         end
+        absorb(snap)
+        absorb(bags)
         for _, op in ipairs(plan.ops) do
+            assert(op.dstTab >= 1, "plan op targets a non-bank tab")
             local src = bank[op.srcTab] and bank[op.srcTab][op.srcSlot]
             assert(src, "plan op references empty src")
             assert(src.itemID == op.itemID, "plan op itemID mismatch with src")
@@ -2653,6 +2660,491 @@ describe("SortPlanner", function()
             local plan = GBL:PlanSort(snap, layoutWithOverflow(), packOpts)
             assert.equals(0, #plan.ops,
                 "20 identical full stacks already packed from slot 1 need no moves")
+        end)
+    end)
+
+    ------------------------------------------------------------------
+    -- Bag sources (#139)
+    --
+    -- Player bags reach the planner through opts.bagSnapshot as NEGATIVE
+    -- pseudo-tabs (bagID N is tab -(N+1)), never through the bank
+    -- snapshot: tab classification, the perTabOccupied diagnostic and
+    -- BankLayout.Validate must never see them. They are source-only, and
+    -- applyPlan's dstTab assertion above is what pins that globally.
+    ------------------------------------------------------------------
+    describe("bag sources", function()
+        --- Build an opts.bagSnapshot from { [bagID] = { [slot] = {itemID,count} } }.
+        local function bagSnapshot(bags)
+            local out = {}
+            for bagID, slots in pairs(bags) do
+                local tabIndex = -(bagID + 1)
+                local tabResult = { slots = {}, itemCount = 0 }
+                for slotIndex, s in pairs(slots) do
+                    tabResult.slots[slotIndex] = {
+                        itemLink = Helpers.makeItemLink(s.itemID, "Item" .. s.itemID, 1),
+                        count = s.count,
+                        slotIndex = slotIndex,
+                        tabIndex = tabIndex,
+                        itemID = s.itemID,
+                    }
+                    tabResult.itemCount = tabResult.itemCount + 1
+                end
+                out[tabIndex] = tabResult
+            end
+            return out
+        end
+
+        local function fullTab(itemID, count)
+            local t = {}
+            for s = 1, 98 do t[s] = { itemID = itemID, count = count } end
+            return t
+        end
+
+        --- One display tab needing `perSlot` of item 100 at slot 1, plus an
+        --- overflow tab. The shape most of these tests vary from.
+        local function oneDemandLayout(perSlot)
+            return {
+                tabs = {
+                    [1] = displayTab({ [100] = { slots = 1, perSlot = perSlot } },
+                        { [1] = 100 }),
+                    [2] = overflow(),
+                },
+            }
+        end
+
+        it("fills a display-tab deficit from a bag", function()
+            local snap = snapshot({ [1] = {}, [2] = {} })
+            local layout = oneDemandLayout(20)
+
+            -- Same bank, no bags: the demand is a pure deficit. Asserting
+            -- this first is what stops the bag case passing vacuously.
+            assert.equals(20, GBL:PlanSort(snap, layout).deficits[100])
+
+            local bags = bagSnapshot({ [0] = { [3] = { itemID = 100, count = 20 } } })
+            local plan = GBL:PlanSort(snap, layout, { bagSnapshot = bags })
+            assert.is_nil(plan.deficits[100])
+            assert.equals(1, #plan.ops)
+            assert.equals(-1, plan.ops[1].srcTab)
+            assert.equals(3, plan.ops[1].srcSlot)
+            assert.equals(1, plan.ops[1].dstTab)
+            assert.equals(1, plan.ops[1].dstSlot)
+            assert.equals(20, plan.ops[1].count)
+        end)
+
+        it("prefers a bank source over a bag holding more of the item", function()
+            -- T3 holds 10 as a foreign surplus; the bag holds 60. Without a
+            -- dedicated bag tier both sit at priority 3, where the bag wins
+            -- twice over: larger `available`, and a lower tabIndex on the
+            -- tiebreak after it. Bank stock has to win, because moving inside
+            -- the bank is free and a deposit is not.
+            local snap = snapshot({
+                [1] = {},
+                [2] = {},
+                [3] = { [5] = { itemID = 100, count = 10 } },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({ [100] = { slots = 1, perSlot = 10 } },
+                        { [1] = 100 }),
+                    [2] = overflow(),
+                    [3] = displayTab({}, {}),
+                },
+            }
+            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 60 } } })
+            local plan = GBL:PlanSort(snap, layout, {
+                bagSnapshot = bags,
+                maxStackByItem = { [100] = 200 },
+            })
+
+            local fill
+            for _, op in ipairs(plan.ops) do
+                if op.dstTab == 1 and op.dstSlot == 1 then fill = op end
+            end
+            assert.is_not_nil(fill)
+            assert.equals(3, fill.srcTab)
+        end)
+
+        it("leaves a bag item that is in no display template alone", function()
+            local snap = snapshot({ [1] = {}, [2] = {} })
+            local bags = bagSnapshot({ [0] = {
+                [1] = { itemID = 100, count = 20 },
+                [2] = { itemID = 999, count = 5 },
+            } })
+            local plan = GBL:PlanSort(snap, oneDemandLayout(20), { bagSnapshot = bags })
+
+            for _, op in ipairs(plan.ops) do
+                assert.is_not.equals(999, op.itemID)
+            end
+            for _, u in ipairs(plan.unplaced) do
+                assert.is_not.equals(999, u.itemID)
+            end
+            assert.is_nil(plan.deficits[999])
+        end)
+
+        it("routes bag surplus beyond the demand to overflow", function()
+            local snap = snapshot({ [1] = {}, [2] = {} })
+            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 50 } } })
+            local plan = GBL:PlanSort(snap, oneDemandLayout(20), {
+                bagSnapshot = bags,
+                maxStackByItem = { [100] = 100 },
+            })
+
+            assert.is_nil(plan.deficits[100])
+            assert.equals(0, #plan.unplaced)
+            local toOverflow = 0
+            for _, op in ipairs(plan.ops) do
+                if op.dstTab == 2 then toOverflow = toOverflow + op.count end
+            end
+            assert.equals(30, toOverflow)
+        end)
+
+        it("splits one bag stack across an overflow top-up and a fresh slot", function()
+            -- Demand already satisfied in-tab, so the whole bag stack is
+            -- surplus: 5 tops up the partial at T2/1, the remaining 20 opens
+            -- T2/2. One supply, two destinations.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 10 } },
+                [2] = { [1] = { itemID = 100, count = 15 } },
+            })
+            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 25 } } })
+            local plan = GBL:PlanSort(snap, oneDemandLayout(10), {
+                bagSnapshot = bags,
+                maxStackByItem = { [100] = 20 },
+            })
+
+            local byDst = {}
+            for _, op in ipairs(plan.ops) do
+                if op.srcTab == -1 then byDst[op.dstSlot] = op.count end
+            end
+            assert.equals(5, byDst[1])
+            assert.equals(20, byDst[2])
+            -- The remainder extends the item's existing group rather than
+            -- opening a first-empty: T2/1 already holds item 100, so T2/2
+            -- is a right-extension of that run.
+            assert.equals(1, plan.diag.phase1bTopup)
+            assert.equals(1, plan.diag.phase1bExtendRight)
+        end)
+
+        it("spills bank leftovers before bag surplus", function()
+            -- Supply order is bank tabs first, bags appended after. At
+            -- maxStack 20 each destination seals, so the order is readable
+            -- off which slot each source landed in.
+            local snap = snapshot({
+                [1] = {},
+                [2] = {},
+                [3] = { [1] = { itemID = 100, count = 30 } },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({ [100] = { slots = 1, perSlot = 10 } },
+                        { [1] = 100 }),
+                    [2] = overflow(),
+                    [3] = displayTab({}, {}),
+                },
+            }
+            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 40 } } })
+            local plan = GBL:PlanSort(snap, layout, {
+                bagSnapshot = bags,
+                maxStackByItem = { [100] = 20 },
+            })
+
+            local srcOf = {}
+            for _, op in ipairs(plan.ops) do
+                if op.dstTab == 2 then srcOf[op.dstSlot] = op.srcTab end
+            end
+            assert.equals(3, srcOf[1])
+            assert.equals(-1, srcOf[2])
+        end)
+
+        it("reports unroutable bag surplus as unplaced at its bag pseudo-tab", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 10 } },
+                [2] = fullTab(200, 200),
+            })
+            local bags = bagSnapshot({ [0] = { [4] = { itemID = 100, count = 50 } } })
+            local plan = GBL:PlanSort(snap, oneDemandLayout(10), {
+                bagSnapshot = bags,
+                maxStackByItem = { [100] = 20, [200] = 200 },
+            })
+
+            assert.equals(1, #plan.unplaced)
+            local u = plan.unplaced[1]
+            assert.equals(GBL._sortPlannerReasons.OVERFLOW_FULL, u.reason)
+            assert.equals(-1, u.tabIndex)
+            assert.equals(4, u.slotIndex)
+            assert.equals(50, u.count)
+        end)
+
+        it("still fills demands from bags when the layout has no overflow tab", function()
+            local snap = snapshot({ [1] = {} })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({ [100] = { slots = 1, perSlot = 10 } },
+                        { [1] = 100 }),
+                },
+            }
+            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 30 } } })
+            local plan = GBL:PlanSort(snap, layout, { bagSnapshot = bags })
+
+            assert.is_nil(plan.deficits[100])
+            assert.equals(1, #plan.unplaced)
+            assert.equals(GBL._sortPlannerReasons.NO_OVERFLOW_DEFINED,
+                plan.unplaced[1].reason)
+            assert.equals(-1, plan.unplaced[1].tabIndex)
+            assert.equals(20, plan.unplaced[1].count)
+        end)
+
+        it("spills bag surplus without top-ups when maxStack is unknown", function()
+            -- Cold ItemCache after a /reload. capacity reads 0, so the
+            -- top-up branch is unreachable and every spill opens a slot.
+            -- The plan must still be valid; a later sort merges them.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 10 } },
+                [2] = { [1] = { itemID = 100, count = 5 } },
+            })
+            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 12 } } })
+            local plan = GBL:PlanSort(snap, oneDemandLayout(10), { bagSnapshot = bags })
+
+            assert.equals(0, plan.diag.phase1bTopup)
+            assert.equals(0, #plan.unplaced)
+
+            -- Assert the total rather than the slots. The bag stack opens a
+            -- new slot instead of merging, then Phase 4 packs the tab, so
+            -- which slot holds what is packing's business; what this test
+            -- owns is that nothing was dropped and nothing over-stacked.
+            local final = applyPlan(snap, plan, bags)
+            local inOverflow = 0
+            for _, s in pairs(final[2] or {}) do
+                assert.equals(100, s.itemID)
+                inOverflow = inOverflow + s.count
+            end
+            assert.equals(17, inOverflow)
+        end)
+
+        it("is idempotent: re-planning the applied result with empty bags is a no-op", function()
+            local snap = snapshot({ [1] = {}, [2] = {} })
+            local layout = oneDemandLayout(20)
+            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 50 } } })
+            local opts = { bagSnapshot = bags, maxStackByItem = { [100] = 100 } }
+
+            local plan = GBL:PlanSort(snap, layout, opts)
+            local final = applyPlan(snap, plan, bags)
+
+            -- Rebuild a scanner-shaped snapshot from the applied bank, minus
+            -- the pseudo-tabs: the bags are empty once the deposits land.
+            local after = {}
+            for tabIndex, slots in pairs(final) do
+                if tabIndex >= 1 then
+                    local t = { slots = {}, itemCount = 0 }
+                    for slotIndex, s in pairs(slots) do
+                        t.slots[slotIndex] = {
+                            itemLink = Helpers.makeItemLink(s.itemID, "Item" .. s.itemID, 1),
+                            count = s.count, slotIndex = slotIndex, tabIndex = tabIndex,
+                        }
+                        t.itemCount = t.itemCount + 1
+                    end
+                    after[tabIndex] = t
+                end
+            end
+
+            local second = GBL:PlanSort(after, layout,
+                { bagSnapshot = {}, maxStackByItem = { [100] = 100 } })
+            assert.equals(0, #second.ops)
+        end)
+
+        it("is deterministic across two identical calls", function()
+            local snap = snapshot({
+                [1] = {},
+                [2] = {},
+                [3] = { [2] = { itemID = 100, count = 7 } },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({ [100] = { slots = 2, perSlot = 10 } },
+                        { [1] = 100, [2] = 100 }),
+                    [2] = overflow(),
+                    [3] = displayTab({}, {}),
+                },
+            }
+            local opts = {
+                bagSnapshot = bagSnapshot({ [0] = {
+                    [1] = { itemID = 100, count = 9 },
+                    [4] = { itemID = 100, count = 30 },
+                } }),
+                maxStackByItem = { [100] = 20 },
+            }
+
+            local a = GBL:PlanSort(snap, layout, opts)
+            local b = GBL:PlanSort(snap, layout, opts)
+            assert.equals(#a.ops, #b.ops)
+            for i, op in ipairs(a.ops) do
+                assert.same({ op.srcTab, op.srcSlot, op.dstTab, op.dstSlot,
+                              op.itemID, op.count },
+                            { b.ops[i].srcTab, b.ops[i].srcSlot, b.ops[i].dstTab,
+                              b.ops[i].dstSlot, b.ops[i].itemID, b.ops[i].count })
+            end
+        end)
+
+        it("never harvests a keep-slot when a bag holds the same item", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 10 } },
+                [2] = {},
+            })
+            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 10 } } })
+            local plan = GBL:PlanSort(snap, oneDemandLayout(10), {
+                bagSnapshot = bags,
+                maxStackByItem = { [100] = 20 },
+            })
+
+            for _, op in ipairs(plan.ops) do
+                assert.is_false(op.srcTab == 1 and op.srcSlot == 1)
+            end
+        end)
+
+        it("labels bag slots as BagN/S in the summary and never as a negative tab", function()
+            local snap = snapshot({ [1] = {}, [2] = fullTab(200, 200) })
+            local bags = bagSnapshot({ [0] = {
+                [3] = { itemID = 100, count = 20 },
+                [7] = { itemID = 100, count = 50 },
+            } })
+            local plan = GBL:PlanSort(snap, oneDemandLayout(20), {
+                bagSnapshot = bags,
+                maxStackByItem = { [100] = 20, [200] = 200 },
+            })
+            local lines = GBL:SummarizeSortPlan(plan)
+            local blob = table.concat(lines, "\n")
+
+            -- Both halves matter: the positive one alone passes on output
+            -- that renders nothing, the negative one alone passes on empty.
+            assert.is_truthy(blob:find("Bag0/3", 1, true))
+            assert.is_truthy(blob:find("Bag0/7", 1, true))
+            assert.is_truthy(blob:find("stays in bags", 1, true))
+            assert.is_nil(blob:find("T-", 1, true))
+        end)
+
+        it("keeps pseudo-tabs out of demandMap and the tab breakdown", function()
+            local snap = snapshot({ [1] = {}, [2] = {} })
+            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 20 } } })
+            local plan = GBL:PlanSort(snap, oneDemandLayout(20), { bagSnapshot = bags })
+
+            for tabIndex in pairs(plan.demandMap) do
+                assert.is_true(tabIndex >= 1)
+            end
+            for _, line in ipairs(GBL:GetLog("sort") or {}) do
+                assert.is_nil((line.message or ""):find("T-", 1, true))
+            end
+        end)
+
+        it("counts bag activity in plan.diag", function()
+            local snap = snapshot({ [1] = {}, [2] = {} })
+            local bags = bagSnapshot({ [0] = {
+                [1] = { itemID = 100, count = 20 },
+                [2] = { itemID = 100, count = 15 },
+            } })
+            local plan = GBL:PlanSort(snap, oneDemandLayout(20), {
+                bagSnapshot = bags,
+                maxStackByItem = { [100] = 100 },
+            })
+
+            assert.equals(2, plan.diag.bagSupplies)
+            assert.equals(1, plan.diag.bagDemandFills)
+            assert.equals(1, plan.diag.bagSpills)
+        end)
+
+        -- The three below all needed more than one bag, or a bank spill
+        -- alongside a bag one. Mutation testing found the gap: reversing the
+        -- bag walk and counting every spill as a bag spill both left the
+        -- suite green, because every other fixture here uses bag 0 alone and
+        -- has nothing but bag surplus to route.
+        it("fills a demand from the lowest bagID when two bags tie", function()
+            local snap = snapshot({ [1] = {}, [2] = {} })
+            local bags = bagSnapshot({
+                [0] = { [1] = { itemID = 100, count = 10 } },
+                [1] = { [1] = { itemID = 100, count = 10 } },
+            })
+            local plan = GBL:PlanSort(snap, oneDemandLayout(10), {
+                bagSnapshot = bags,
+                maxStackByItem = { [100] = 20 },
+            })
+
+            local fill
+            for _, op in ipairs(plan.ops) do
+                if op.dstTab == 1 and op.dstSlot == 1 then fill = op end
+            end
+            assert.is_not_nil(fill)
+            -- Equal counts, so this lands on the (tab, slot) tiebreak. A raw
+            -- tabIndex compare picks -2 over -1, which is bag 1 beating the
+            -- backpack and contradicts the spill order.
+            assert.equals(-1, fill.srcTab)
+        end)
+
+        it("spills bags in bagID order", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 10 } },
+                [2] = {},
+            })
+            local bags = bagSnapshot({
+                [0] = { [1] = { itemID = 100, count = 20 } },
+                [1] = { [1] = { itemID = 100, count = 20 } },
+            })
+            local plan = GBL:PlanSort(snap, oneDemandLayout(10), {
+                bagSnapshot = bags,
+                maxStackByItem = { [100] = 20 },
+            })
+
+            -- Each stack fills a slot exactly, so the destination slot is a
+            -- direct readout of which bag the walk reached first.
+            local srcOf = {}
+            for _, op in ipairs(plan.ops) do
+                if op.dstTab == 2 and op.srcTab < 0 then srcOf[op.dstSlot] = op.srcTab end
+            end
+            assert.equals(-1, srcOf[1])
+            assert.equals(-2, srcOf[2])
+        end)
+
+        it("counts only bag-sourced spills in diag.bagSpills", function()
+            -- T3's leftover and the bag stack both spill. bagSpills has to
+            -- separate them, which is invisible unless a bank spill is
+            -- present to be miscounted.
+            local snap = snapshot({
+                [1] = {},
+                [2] = {},
+                [3] = { [1] = { itemID = 100, count = 30 } },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({ [100] = { slots = 1, perSlot = 10 } },
+                        { [1] = 100 }),
+                    [2] = overflow(),
+                    [3] = displayTab({}, {}),
+                },
+            }
+            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 15 } } })
+            local plan = GBL:PlanSort(snap, layout, {
+                bagSnapshot = bags,
+                maxStackByItem = { [100] = 100 },
+            })
+
+            assert.equals(1, plan.diag.bagSupplies)
+            assert.equals(0, plan.diag.bagDemandFills)
+            assert.equals(1, plan.diag.bagSpills)
+        end)
+
+        it("plans identically with no opts, an empty bagSnapshot, and no bags", function()
+            local snap = snapshot({
+                [1] = { [2] = { itemID = 100, count = 5 } },
+                [2] = {},
+            })
+            local layout = oneDemandLayout(20)
+
+            local a = GBL:PlanSort(snap, layout)
+            local b = GBL:PlanSort(snap, layout, {})
+            local c = GBL:PlanSort(snap, layout, { bagSnapshot = {} })
+
+            assert.equals(#a.ops, #b.ops)
+            assert.equals(#a.ops, #c.ops)
+            assert.equals(a.deficits[100], c.deficits[100])
+            assert.equals(0, c.diag.bagSupplies)
         end)
     end)
 end)

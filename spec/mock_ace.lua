@@ -285,6 +285,12 @@ function MockAce.install()
     local function createMockWidget(widgetType)
         local widget = {
             _type = widgetType,
+            -- Real AceGUI widgets carry the type on `type` (each widget's
+            -- Constructor sets self.type = Type), and production code
+            -- branches on it to tell a CheckBox from a Button. The mock's
+            -- own `_type` predates that and existing specs read it, so both
+            -- are set rather than renaming one.
+            type = widgetType,
             _callbacks = {},
             _children = {},
             _text = "",
@@ -351,6 +357,25 @@ function MockAce.install()
             HookScript = function(self, event, func)
                 self._hookScripts[event] = self._hookScripts[event] or {}
                 table.insert(self._hookScripts[event], func)
+            end,
+            -- Real AceGUI widget frames can hold textures; the focus ring is
+            -- drawn on this frame, so a spec that never had CreateTexture
+            -- could not tell a drawn indicator from a stubbed one.
+            CreateTexture = function(self)
+                self._textureCount = (self._textureCount or 0) + 1
+                local MW = _G.__MockWoW_makeTexture
+                if MW then return MW() end
+                local tex = { _shown = true }
+                tex.SetColorTexture = function(_, r, g, b, a) tex._color = { r, g, b, a } end
+                tex.SetPoint = function() end
+                tex.ClearAllPoints = function() end
+                tex.SetHeight = function() end
+                tex.SetWidth = function() end
+                tex.SetDrawLayer = function() end
+                tex.Show = function() tex._shown = true end
+                tex.Hide = function() tex._shown = false end
+                tex.IsShown = function() return tex._shown end
+                return tex
             end,
             CreateFontString = function()
                 local fs = { _text = "" }

@@ -25,9 +25,12 @@ end
 --- to be visible to both call sites.
 local function formatOpRow(op, marker)
     local prefix = marker or "  "
-    return format("%s%s  %d x %s   T%d/%d -> T%d/%d",
+    -- Slot refs go through GBL:FormatSlotRef so a bag source renders as
+    -- "Bag0/3" rather than the "T-1/3" a bare tab format would produce (#139).
+    return format("%s%s  %d x %s   %s -> %s",
         prefix, op.op, op.count, itemLabel(op.itemID),
-        op.srcTab, op.srcSlot, op.dstTab, op.dstSlot)
+        GBL:FormatSlotRef(op.srcTab, op.srcSlot),
+        GBL:FormatSlotRef(op.dstTab, op.dstSlot))
 end
 
 ------------------------------------------------------------------------
@@ -161,8 +164,105 @@ function GBL:BuildSortTab(container)
     end)
     controls:AddChild(sortLogBtn)
 
+    -- Include bags (#139). Toggling invalidates the cached plan and
+    -- re-previews, so Execute can never run a plan built under the other
+    -- setting: the move list on screen is always the one that would run.
+    local bagsCB = AceGUI:Create("CheckBox")
+    bagsCB:SetLabel("Include bags")
+    bagsCB:SetWidth(160)
+    bagsCB:SetValue(self:IsSortIncludeBags())
+    bagsCB:SetDisabled(self:IsSortRunning())
+    bagsCB:SetCallback("OnValueChanged", function(_widget, _event, value)
+        self.db.profile.sort.includeBags = value and true or false
+        self._sortLastPlan = nil
+        self._sortOpStatus = {}
+        self:_SortView_Preview()
+    end)
+    controls:AddChild(bagsCB)
+
+    -- Keyboard navigation. Registered in reading order; only interactive
+    -- widgets get a stop, because the move list is read-only and a per-row
+    -- stop would make the tab unusable to keyboard users.
+    self:ClearFocusOrder()
+    local focusN = 0
+    local function focus(widget)
+        focusN = focusN + 1
+        self:RegisterFocusable(widget, focusN)
+    end
+    focus(previewBtn)
+    focus(execBtn)
+    focus(cancelBtn)
+    focus(scanBtn)
+    focus(sortLogBtn)
+    focus(bagsCB)
+
+    -- Key capture for the focus walk, mirroring RestockView. Propagation is
+    -- handed back for anything not handled so normal keybinds still fire, and
+    -- the tab check stops a stale frame from eating keys after a tab switch.
+    local capture = content.frame
+    if capture and capture.EnableKeyboard then
+        capture:EnableKeyboard(true)
+        capture:SetScript("OnKeyDown", function(frame, key)
+            if self.activeTab ~= "sort" then
+                if frame.SetPropagateKeyboardInput then
+                    frame:SetPropagateKeyboardInput(true)
+                end
+                return
+            end
+            local handled = self:_SortView_NavKey(key, IsShiftKeyDown and IsShiftKeyDown())
+            if frame.SetPropagateKeyboardInput then
+                frame:SetPropagateKeyboardInput(not handled)
+            end
+        end)
+    end
+
     -- Initial content
     self:_SortView_Preview()
+end
+
+------------------------------------------------------------------------
+-- Keyboard navigation
+------------------------------------------------------------------------
+
+--- Activate the focused widget. CheckBox fires OnValueChanged rather than
+--- OnClick, so the toggle is driven directly for that widget type; firing
+--- OnClick at a checkbox would do nothing and the key would read as dead.
+function GBL:_SortView_ActivateFocused()
+    local order = self.A11Y and self.A11Y.focusOrder
+    local idx = (self.A11Y and self.A11Y.focusIndex) or 0
+    local widget = order and idx > 0 and order[idx]
+    if not widget then return false end
+    if widget.type == "CheckBox" and widget.GetValue and widget.SetValue then
+        local newValue = not widget:GetValue()
+        widget:SetValue(newValue)
+        if widget.Fire then widget:Fire("OnValueChanged", newValue) end
+        return true
+    end
+    if widget.Fire then
+        widget:Fire("OnClick")
+        return true
+    end
+    return false
+end
+
+--- Map a key press to a focus action. Returns true if handled (the caller
+--- then consumes the key). The frame handler passes the live Shift state.
+--- @param key string OnKeyDown key name
+--- @param shiftDown boolean whether Shift is held (Tab direction)
+function GBL:_SortView_NavKey(key, shiftDown)
+    if key == "TAB" then
+        self:AdvanceFocus(shiftDown and -1 or 1)
+        return true
+    elseif key == "DOWN" then
+        self:AdvanceFocus(1)
+        return true
+    elseif key == "UP" then
+        self:AdvanceFocus(-1)
+        return true
+    elseif key == "ENTER" or key == "NUMPADENTER" or key == "SPACE" then
+        return self:_SortView_ActivateFocused()
+    end
+    return false
 end
 
 --- Refresh the Sort tab — called after state transitions.
@@ -234,7 +334,7 @@ function GBL:_SortView_Preview()
             return
         end
 
-        plan = self:PlanSort(snapshot, layout)
+        plan = self:PlanSort(snapshot, layout, self:BuildSortPlanOpts())
         self._sortLastPlan = plan
     end
 
@@ -289,9 +389,10 @@ function GBL:_SortView_Preview()
             local lbl = AceGUI:Create("Label")
             lbl:SetFullWidth(true)
             lbl:SetFontObject(GameFontNormalSmall)
-            lbl:SetText(format("  %s  %d x %s   T%d/%d -> T%d/%d",
-                op.op, op.count, itemLabel(op.itemID),
-                op.srcTab, op.srcSlot, op.dstTab, op.dstSlot))
+            -- Same rendering as the live progress handler, from the one
+            -- helper. These were two character-identical format strings and
+            -- the bag branch had to reach both, so they are now one (#139).
+            lbl:SetText(formatOpRow(op))
             content:AddChild(lbl)
             -- Retain the label ref keyed by op index so the progress
             -- handler can prefix it with a status marker.
@@ -380,7 +481,7 @@ function GBL:_SortView_Execute()
         -- the pre-sort plan. Rescan first, then refresh so Preview reflects
         -- post-sort state.
         self:_SortView_RescanAndRefresh()
-    end, { layout = layout })
+    end, { layout = layout, includeBags = self:IsSortIncludeBags() })
     self:RefreshSortTab()
 end
 

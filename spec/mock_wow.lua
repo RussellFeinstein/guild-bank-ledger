@@ -22,6 +22,13 @@ MockWoW.guildBank = {
     visibleSlots = {},  -- tabIndex -> { slotIndex -> slot copy } (view-gated only)
 }
 
+-- Mock player bags (#139): bagID -> { numSlots, slots = { slotIndex ->
+-- containerInfo-shaped table } }. Slot entries mirror the retail
+-- C_Container.GetContainerItemInfo return: stackCount, isLocked, isBound,
+-- hyperlink (nil when item data is not streamed), itemID, quality,
+-- iconFileID. Populated via Helpers.populateBag.
+MockWoW.bags = {}
+
 -- Mock guild state
 MockWoW.guild = {
     name = nil,      -- nil = not in guild
@@ -86,6 +93,7 @@ function MockWoW.reset()
         ranks = {},  -- array of rank names, 1-indexed (1 = GM, 2 = next rank, etc.)
     }
     MockWoW.player = { name = "TestOfficer", realm = "TestRealm" }
+    MockWoW.bags = {}
     MockWoW.inRaid = false
     MockWoW.instanceType = "none"
     MockWoW.itemInfo = {}
@@ -141,6 +149,8 @@ function MockWoW.install()
     _G.Enum = _G.Enum or {}
     _G.Enum.PlayerInteractionType = _G.Enum.PlayerInteractionType or {}
     _G.Enum.PlayerInteractionType.GuildBanker = 10
+    _G.Enum.BagIndex = _G.Enum.BagIndex or {}
+    _G.Enum.BagIndex.ReagentBag = 5
 
     -- Constants
     _G.MAX_GUILDBANK_SLOTS_PER_TAB = 98
@@ -363,8 +373,16 @@ function MockWoW.install()
     -- Cursor + guild bank movement (M-sort-2).
     --
     -- Simplified model:
-    --   * MockWoW.cursor holds { itemLink, itemID, count, src = {tabIndex, slotIndex} } or nil.
+    --   * MockWoW.cursor holds { itemLink, itemID, count, src } or nil, where
+    --     src is { tabIndex, slotIndex } for a guild bank slot or
+    --     { bagID, slotIndex } for a player bag slot (#139). The two forms
+    --     are told apart by which key is present, and the bounce-back path
+    --     below has to check bagID first so a bag-sourced item is returned to
+    --     the bag rather than written into a guild bank tab.
     --   * PickupGuildBankItem / SplitGuildBankItem pick items up into cursor.
+    --     C_Container.PickupContainerItem / SplitContainerItem do the same
+    --     from bags, sharing this one cursor so a bag pickup can drop into
+    --     a bank slot, which is the whole point of the sort's bag support.
     --   * PickupGuildBankItem with a filled cursor drops the cursor onto the slot.
     --   * If the dest is empty → place. If dest has the same item → merge (capped for realism).
     --   * If dest has a different item → swap: cursor gets dest's old contents, src gets nothing.
@@ -432,6 +450,21 @@ function MockWoW.install()
         return id and tonumber(id) or nil
     end
 
+    --- A max-stack bounce merges the cursor back into its source slot.
+    --- That is only ever the same item in practice: a full pickup nils the
+    --- source so the restore branch runs instead, and a split leaves the
+    --- remainder behind. Merging blindly would inflate a foreign item's
+    --- count and lose the cursor item, so refuse loudly rather than let a
+    --- future arrangement corrupt counts in silence.
+    local function assertSameItemOnBounce(srcItemID, cursorItemID, kind, container, slotIndex)
+        if srcItemID ~= nil and cursorItemID ~= nil and srcItemID ~= cursorItemID then
+            error(("bounce: %s %s slot %s holds item %s but the cursor carries %s. "
+                .. "Merging them would inflate one count and lose the other.")
+                :format(kind, tostring(container), tostring(slotIndex),
+                    tostring(srcItemID), tostring(cursorItemID)))
+        end
+    end
+
     --- Pick up the full stack in (tabIndex, slotIndex) or drop cursor onto it.
     _G.PickupGuildBankItem = function(tabIndex, slotIndex)
         local tab = MockWoW.guildBank.tabs[tabIndex]
@@ -484,7 +517,31 @@ function MockWoW.install()
                     -- but in practice the cursor was picked up from src so
                     -- src had room for it before).
                     local srcRef = cur.src
-                    if srcRef then
+                    local bouncedToBag = false
+                    if srcRef and srcRef.bagID ~= nil then
+                        -- #139: cursor was lifted from a player bag, so the
+                        -- bounce restores into MockWoW.bags, not the bank.
+                        bouncedToBag = true
+                        local bag = MockWoW.bags[srcRef.bagID]
+                        if bag then
+                            local srcSlot = bag.slots[srcRef.slotIndex]
+                            if not srcSlot then
+                                bag.slots[srcRef.slotIndex] = {
+                                    hyperlink = cur.itemLink,
+                                    iconFileID = cur.texture,
+                                    stackCount = cur.count,
+                                    quality = cur.quality,
+                                    isLocked = false,
+                                    isBound = false,
+                                    itemID = cur.itemID,
+                                }
+                            else
+                                assertSameItemOnBounce(srcSlot.itemID, cur.itemID,
+                                    "bag", srcRef.bagID, srcRef.slotIndex)
+                                srcSlot.stackCount = srcSlot.stackCount + cur.count
+                            end
+                        end
+                    elseif srcRef then
                         local srcTab = MockWoW.guildBank.tabs[srcRef.tabIndex]
                         if srcTab then
                             local srcSlot = srcTab.slots[srcRef.slotIndex]
@@ -499,12 +556,24 @@ function MockWoW.install()
                                     itemID = cur.itemID,
                                 }
                             else
+                                assertSameItemOnBounce(extractItemID(srcSlot.itemLink),
+                                    cur.itemID, "tab", srcRef.tabIndex, srcRef.slotIndex)
                                 srcSlot.count = srcSlot.count + cur.count
                             end
                         end
                     end
                     MockWoW.cursor = nil
-                    fireBankEvent()
+                    if bouncedToBag then
+                        -- The drop was refused and the item went back to a
+                        -- bag, so no guild bank slot changed. Firing here
+                        -- would claim one did. Clear _lastMutatedTab by hand
+                        -- since fireBankEvent is what normally consumes it,
+                        -- or the next generic fire inherits a stale tab and
+                        -- gets gated away under viewGatedReads.
+                        MockWoW.guildBank._lastMutatedTab = nil
+                    else
+                        fireBankEvent()
+                    end
                 else
                     slot.count = slot.count + cur.count
                     MockWoW.cursor = nil
@@ -558,6 +627,87 @@ function MockWoW.install()
         end
         fireBankEvent()
     end
+
+    -----------------------------------------------------------------------
+    -- C_Container (#139): player bag reads and moves. Shares MockWoW.cursor
+    -- with the guild bank mock so a bag pickup can drop into a bank slot.
+    -- Bag mutations fire no bank event (bags are not event-scanned).
+    -----------------------------------------------------------------------
+
+    _G.C_Container = {
+        GetContainerNumSlots = function(bagID)
+            local bag = MockWoW.bags[bagID]
+            return bag and bag.numSlots or 0
+        end,
+
+        --- Retail builds a fresh table per call, so a caller can neither
+        --- write through into the bag nor watch a captured table change.
+        --- Copy rather than returning the live slot: every field is a
+        --- scalar, so a shallow copy is faithful.
+        GetContainerItemInfo = function(bagID, slotIndex)
+            local bag = MockWoW.bags[bagID]
+            local slot = bag and bag.slots[slotIndex]
+            if not slot then return nil end
+            local info = {}
+            for k, v in pairs(slot) do info[k] = v end
+            return info
+        end,
+
+        --- Pick up the full stack in (bagID, slotIndex). Locked slots refuse
+        --- the pickup, as the real client does while an item is in use.
+        --- Dropping a filled cursor into a bag raises: see below.
+        PickupContainerItem = function(bagID, slotIndex)
+            local bag = MockWoW.bags[bagID]
+            if not bag then return end
+            local slot = bag.slots[slotIndex]
+            if MockWoW.cursor == nil then
+                if not slot or slot.isLocked then return end
+                MockWoW.cursor = {
+                    itemLink = slot.hyperlink,
+                    itemID = slot.itemID,
+                    count = slot.stackCount,
+                    src = { bagID = bagID, slotIndex = slotIndex },
+                    texture = slot.iconFileID,
+                    quality = slot.quality,
+                }
+                bag.slots[slotIndex] = nil
+            else
+                -- Bags are a sort SOURCE only (#139): findPivot walks the
+                -- blocked tab plus overflow tabs, Phase 3 sweeps display
+                -- tabs, Phase 4 packs overflow tabs. The planner side is
+                -- pinned by applyPlan's dstTab >= 1 assertion, but executor
+                -- specs never route through applyPlan, so refusing here is
+                -- the only thing that turns a regression which targeted a
+                -- bag into a red test rather than a silently accepted move.
+                error(("PickupContainerItem: refusing to drop into bag %s slot %s. "
+                    .. "Bags are a sort source only; an op with a bag destination "
+                    .. "is a bug in whatever produced it.")
+                    :format(tostring(bagID), tostring(slotIndex)))
+            end
+        end,
+
+        --- Pick up a partial stack from (bagID, slotIndex).
+        SplitContainerItem = function(bagID, slotIndex, amount)
+            local bag = MockWoW.bags[bagID]
+            if not bag then return end
+            local slot = bag.slots[slotIndex]
+            if not slot or slot.isLocked or MockWoW.cursor ~= nil then return end
+            amount = math.min(amount or slot.stackCount, slot.stackCount)
+            if amount <= 0 then return end
+            MockWoW.cursor = {
+                itemLink = slot.hyperlink,
+                itemID = slot.itemID,
+                count = amount,
+                src = { bagID = bagID, slotIndex = slotIndex },
+                texture = slot.iconFileID,
+                quality = slot.quality,
+            }
+            slot.stackCount = slot.stackCount - amount
+            if slot.stackCount == 0 then
+                bag.slots[slotIndex] = nil
+            end
+        end,
+    }
 
     --- Test utility: simulate a foreign player deleting an item from a slot
     --- (e.g. another guild member withdrawing while we're sorting). Fires
@@ -733,6 +883,43 @@ function MockWoW.install()
         end,
     }
 
+    --- Texture stub. Retail shows a freshly created texture by default, so
+    --- _shown starts true; anything that wants it hidden must say so.
+    local function makeTexture()
+        local tex = { _shown = true, _points = {} }
+        tex.SetColorTexture = function(_, r, g, b, a) tex._color = { r, g, b, a } end
+        tex.SetTexture = function(_, r, g, b, a) tex._color = { r, g, b, a } end
+        tex.SetPoint = function(_, ...) table.insert(tex._points, { ... }) end
+        tex.ClearAllPoints = function() tex._points = {} end
+        tex.SetHeight = function(_, h) tex._height = h end
+        tex.SetWidth = function(_, w) tex._width = w end
+        tex.SetDrawLayer = function(_, layer) tex._layer = layer end
+        tex.Show = function() tex._shown = true end
+        tex.Hide = function() tex._shown = false end
+        tex.IsShown = function() return tex._shown end
+        return tex
+    end
+    MockWoW.makeTexture = makeTexture
+    -- Shared with the AceGUI widget mock, which builds its frames separately.
+    _G.__MockWoW_makeTexture = makeTexture
+
+    --- Minimal frame with texture support, for specs that need to assert a
+    --- widget actually DREW something rather than set a flag.
+    function MockWoW.makeFrame()
+        local frame = { _shown = true, _textureCount = 0, _scripts = {} }
+        frame.CreateTexture = function()
+            frame._textureCount = frame._textureCount + 1
+            return makeTexture()
+        end
+        frame.SetPoint = function() end
+        frame.SetScript = function(_, e, fn) frame._scripts[e] = fn end
+        frame.GetScript = function(_, e) return frame._scripts[e] end
+        frame.Show = function() frame._shown = true end
+        frame.Hide = function() frame._shown = false end
+        frame.IsShown = function() return frame._shown end
+        return frame
+    end
+
     -- CreateFrame stub
     _G.CreateFrame = function(frameType, name, parent, template)
         local frame = {
@@ -752,6 +939,10 @@ function MockWoW.install()
             SetSize = function() end,
             SetPoint = function() end,
             SetMovable = function() end,
+            CreateTexture = function(self)
+                self._textureCount = (self._textureCount or 0) + 1
+                return makeTexture()
+            end,
             EnableMouse = function() end,
             RegisterForDrag = function() end,
             SetClampedToScreen = function() end,

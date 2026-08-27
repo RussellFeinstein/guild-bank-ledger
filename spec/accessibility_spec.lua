@@ -265,6 +265,91 @@ describe("Accessibility", function()
         end)
     end)
 
+    describe("Focus indicator rendering", function()
+        -- The _focused flag above is bookkeeping. These pin that something is
+        -- actually DRAWN, which is what the flag never proved: the indicator
+        -- was a stub that set the flag and nothing else, so a focus walk was
+        -- alive and completely invisible in game.
+        local function frameWidget()
+            return { frame = MockWoW.makeFrame() }
+        end
+
+        before_each(function()
+            GBL:ClearFocusOrder()
+        end)
+
+        it("draws a visible ring on the focused widget's frame", function()
+            local w = frameWidget()
+            GBL:SetFocusIndicator(w, true)
+            local ring = w._focusRing
+            assert.is_table(ring)
+            for _, edge in ipairs({ "top", "bottom", "left", "right" }) do
+                assert.is_not_nil(ring[edge])
+                assert.is_true(ring[edge]:IsShown())
+            end
+        end)
+
+        it("hides the ring when focus leaves", function()
+            local w = frameWidget()
+            GBL:SetFocusIndicator(w, true)
+            GBL:SetFocusIndicator(w, false)
+            for _, edge in ipairs({ "top", "bottom", "left", "right" }) do
+                assert.is_false(w._focusRing[edge]:IsShown())
+            end
+        end)
+
+        it("reuses the ring textures instead of creating a set per focus", function()
+            local w = frameWidget()
+            GBL:SetFocusIndicator(w, true)
+            local first = w._focusRing.top
+            GBL:SetFocusIndicator(w, false)
+            GBL:SetFocusIndicator(w, true)
+            assert.equals(first, w._focusRing.top)
+            assert.equals(4, w.frame._textureCount)
+        end)
+
+        it("gives the ring a colour so it is not an invisible texture", function()
+            local w = frameWidget()
+            GBL:SetFocusIndicator(w, true)
+            local c = w._focusRing.top._color
+            assert.is_table(c)
+            -- Alpha has to be non-zero or the ring draws nothing at all.
+            assert.is_true((c[4] or 1) > 0)
+        end)
+
+        it("tolerates a widget with no frame", function()
+            -- ChangelogView and the specs above register plain tables.
+            local w = { _focused = false }
+            assert.has_no.errors(function()
+                GBL:SetFocusIndicator(w, true)
+            end)
+            assert.is_true(w._focused)
+            assert.is_nil(w._focusRing)
+        end)
+
+        it("moves the drawn ring as focus advances", function()
+            local a, b = frameWidget(), frameWidget()
+            GBL:RegisterFocusable(a, 1)
+            GBL:RegisterFocusable(b, 2)
+            GBL:AdvanceFocus(1)
+            assert.is_true(a._focusRing.top:IsShown())
+            GBL:AdvanceFocus(1)
+            assert.is_false(a._focusRing.top:IsShown())
+            assert.is_true(b._focusRing.top:IsShown())
+        end)
+
+        it("hides rings when the focus order is cleared", function()
+            -- AceGUI pools and reuses widget frames, so a ring left showing on
+            -- a released widget reappears on whatever recycles that frame.
+            local w = frameWidget()
+            GBL:RegisterFocusable(w, 1)
+            GBL:AdvanceFocus(1)
+            assert.is_true(w._focusRing.top:IsShown())
+            GBL:ClearFocusOrder()
+            assert.is_false(w._focusRing.top:IsShown())
+        end)
+    end)
+
     describe("ClampFrameToScreen", function()
         it("calls SetClampedToScreen when available", function()
             local clamped = false

@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.38.1"
+local VERSION = "0.39.0"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -139,7 +139,11 @@ local defaults = {
         export = { delimiter = ",", includeHeaders = true, dateFormat = "%Y-%m-%d %H:%M" },
         sync = { enabled = true, autoSync = true, chatLog = false, debugChat = false,
                  auditCapture = true },
-        sort = { chatLog = false, debugChat = false },
+        -- includeBags (#139): treat the player's bags as a sort source, so
+        -- farmed or bought stacks are deposited as part of the sort instead
+        -- of by hand first. Off by default: it spends deposits, and a sort
+        -- that silently emptied someone's bags would be a surprise.
+        sort = { chatLog = false, debugChat = false, includeBags = false },
         system = { chatLog = false, debugChat = false },
         filters = { defaultDays = 7, defaultCategory = "ALL" },
         chatFilters = { muteAmbientNPCs = false },
@@ -2270,6 +2274,28 @@ end
 -- and print every mismatch. Useful after a sort to confirm the result, or
 -- before a sort to see what's deviant. Uses the same expected layout the
 -- planner does (including items[id].slots extensions beyond slotOrder).
+--- Is the sort configured to treat the player's bags as a source? (#139)
+function GBL:IsSortIncludeBags()
+    return (self.db and self.db.profile and self.db.profile.sort
+        and self.db.profile.sort.includeBags) and true or false
+end
+
+--- Build the opts table for a PlanSort call from the current setting (#139).
+--- Returns nil when bags are off, deliberately rather than an empty table, so
+--- a bank-only plan takes the byte-identical path it always did.
+---
+--- The bags are re-read on every call. They are the one input the player can
+--- change between clicking Preview and clicking Execute, so a cached copy
+--- would plan moves for stacks that are no longer there.
+function GBL:BuildSortPlanOpts()
+    if not self:IsSortIncludeBags() then return nil end
+    if not self.ScanBags then return nil end
+    return { bagSnapshot = self:ScanBags() }
+end
+
+--- Bank-only on purpose, not by omission: this reads plan.demandMap and
+--- nothing else, and demandMap is derived purely from the layout, so a bag
+--- snapshot cannot change a single line of the output (#139).
 function GBL:PrintDeviations()
     if not self.PlanSort then
         self:Print("SortPlanner not loaded.")
@@ -2406,7 +2432,8 @@ function GBL:RunSortExec()
         self:Print("No bank layout configured yet.")
         return
     end
-    local plan = self:PlanSort(snapshot, layout)
+    local includeBags = self:IsSortIncludeBags()
+    local plan = self:PlanSort(snapshot, layout, self:BuildSortPlanOpts())
     if not plan.ops or #plan.ops == 0 then
         self:Print("Plan is a no-op. Nothing to execute.")
         return
@@ -2420,7 +2447,7 @@ function GBL:RunSortExec()
             self:Print(format("Sort aborted (%s): %d/%d done, %d failed, %d replans.",
                 result.reason, result.done, result.total, result.failed, result.replans))
         end
-    end, { layout = layout })
+    end, { layout = layout, includeBags = includeBags })
 end
 
 --- Debug helper: print the current planned sort moves to chat.
@@ -2523,8 +2550,16 @@ function GBL:PrintSortPreview()
     end
     self:Print(format("  Scan contents: [%s] (%d occupied slots total)",
         table.concat(snapSummary, ", "), totalSupplies))
+    -- Say so either way (#139). "Include bags: off" answers the question a
+    -- user asks when a stack they are holding does not appear in the plan,
+    -- which silence does not.
+    if self:IsSortIncludeBags() then
+        self:Print("  Include bags: on")
+    else
+        self:Print("  Include bags: off")
+    end
 
-    local plan = self:PlanSort(snapshot, layout)
+    local plan = self:PlanSort(snapshot, layout, self:BuildSortPlanOpts())
     local opsN = #(plan.ops or {})
     local defN = 0; for _ in pairs(plan.deficits or {}) do defN = defN + 1 end
     local unpN = #(plan.unplaced or {})
