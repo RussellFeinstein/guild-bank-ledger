@@ -883,6 +883,43 @@ function MockWoW.install()
         end,
     }
 
+    --- Texture stub. Retail shows a freshly created texture by default, so
+    --- _shown starts true; anything that wants it hidden must say so.
+    local function makeTexture()
+        local tex = { _shown = true, _points = {} }
+        tex.SetColorTexture = function(_, r, g, b, a) tex._color = { r, g, b, a } end
+        tex.SetTexture = function(_, r, g, b, a) tex._color = { r, g, b, a } end
+        tex.SetPoint = function(_, ...) table.insert(tex._points, { ... }) end
+        tex.ClearAllPoints = function() tex._points = {} end
+        tex.SetHeight = function(_, h) tex._height = h end
+        tex.SetWidth = function(_, w) tex._width = w end
+        tex.SetDrawLayer = function(_, layer) tex._layer = layer end
+        tex.Show = function() tex._shown = true end
+        tex.Hide = function() tex._shown = false end
+        tex.IsShown = function() return tex._shown end
+        return tex
+    end
+    MockWoW.makeTexture = makeTexture
+    -- Shared with the AceGUI widget mock, which builds its frames separately.
+    _G.__MockWoW_makeTexture = makeTexture
+
+    --- Minimal frame with texture support, for specs that need to assert a
+    --- widget actually DREW something rather than set a flag.
+    function MockWoW.makeFrame()
+        local frame = { _shown = true, _textureCount = 0, _scripts = {} }
+        frame.CreateTexture = function()
+            frame._textureCount = frame._textureCount + 1
+            return makeTexture()
+        end
+        frame.SetPoint = function() end
+        frame.SetScript = function(_, e, fn) frame._scripts[e] = fn end
+        frame.GetScript = function(_, e) return frame._scripts[e] end
+        frame.Show = function() frame._shown = true end
+        frame.Hide = function() frame._shown = false end
+        frame.IsShown = function() return frame._shown end
+        return frame
+    end
+
     -- CreateFrame stub
     _G.CreateFrame = function(frameType, name, parent, template)
         local frame = {
@@ -902,6 +939,10 @@ function MockWoW.install()
             SetSize = function() end,
             SetPoint = function() end,
             SetMovable = function() end,
+            CreateTexture = function(self)
+                self._textureCount = (self._textureCount or 0) + 1
+                return makeTexture()
+            end,
             EnableMouse = function() end,
             RegisterForDrag = function() end,
             SetClampedToScreen = function() end,

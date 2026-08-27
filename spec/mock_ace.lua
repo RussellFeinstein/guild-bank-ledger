@@ -358,6 +358,25 @@ function MockAce.install()
                 self._hookScripts[event] = self._hookScripts[event] or {}
                 table.insert(self._hookScripts[event], func)
             end,
+            -- Real AceGUI widget frames can hold textures; the focus ring is
+            -- drawn on this frame, so a spec that never had CreateTexture
+            -- could not tell a drawn indicator from a stubbed one.
+            CreateTexture = function(self)
+                self._textureCount = (self._textureCount or 0) + 1
+                local MW = _G.__MockWoW_makeTexture
+                if MW then return MW() end
+                local tex = { _shown = true }
+                tex.SetColorTexture = function(_, r, g, b, a) tex._color = { r, g, b, a } end
+                tex.SetPoint = function() end
+                tex.ClearAllPoints = function() end
+                tex.SetHeight = function() end
+                tex.SetWidth = function() end
+                tex.SetDrawLayer = function() end
+                tex.Show = function() tex._shown = true end
+                tex.Hide = function() tex._shown = false end
+                tex.IsShown = function() return tex._shown end
+                return tex
+            end,
             CreateFontString = function()
                 local fs = { _text = "" }
                 -- Record args like the AceGUI Label mock: WoW 12.0.7 rejects a
