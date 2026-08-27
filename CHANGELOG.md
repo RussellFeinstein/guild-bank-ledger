@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-08-27
+
 ### Added
 - The sort can now take items straight out of your bags. Tick "Include bags" on the Sort tab and any bag item your layout names is deposited as part of the sort run: layout slots are filled first, and whatever is left over routes to your overflow tabs. A farming run or an Auction House haul no longer has to be deposited by hand and rescanned before you can sort it. Bag items your layout does not name are left alone, as are bound and locked slots. Bank stock is always used before a bag when both can fill the same slot, since moving inside the bank costs nothing. The preview labels bag sources as `Bag0/3` and says when something has to stay in your bags. Off by default.
 - Keyboard navigation on the Sort tab: Tab and Shift+Tab move between Preview, Execute, Cancel, Scan bank, Open Sort Log and Include bags, arrow keys do the same, and Enter or Space activates whatever is focused.
