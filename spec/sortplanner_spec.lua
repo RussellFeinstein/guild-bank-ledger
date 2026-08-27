@@ -75,6 +75,31 @@ describe("SortPlanner", function()
         return bank
     end
 
+    --- Apply only the first `limit` ops. The executor issues a plan one op at
+    --- a time and a pass can end early (bank closed, cancelled, the pump
+    --- stopping), so a partially applied plan is an ordinary state the next
+    --- plan has to cope with, not a synthetic one.
+    local function applyPlanPartial(snap, plan, limit)
+        local trimmed = { ops = {} }
+        for i = 1, math.min(limit, #plan.ops) do
+            trimmed.ops[i] = plan.ops[i]
+        end
+        return applyPlan(snap, trimmed)
+    end
+
+    --- Turn an applied bank state back into a snapshot description, so a plan
+    --- can be fed its own result.
+    local function redescribe(bank)
+        local desc = {}
+        for t, slots in pairs(bank) do
+            desc[t] = {}
+            for s, v in pairs(slots) do
+                desc[t][s] = { itemID = v.itemID, count = v.count }
+            end
+        end
+        return desc
+    end
+
     it("produces no ops when bank already matches layout", function()
         local snap = snapshot({
             [1] = {
@@ -2503,6 +2528,116 @@ describe("SortPlanner", function()
                 assert.is_nil(op.plannerDstAt,
                     "expected packing dst to be empty at emit")
             end
+        end)
+    end)
+
+    ------------------------------------------------------------------
+    -- #140: Phase 4 packing churn on a near-full overflow tab.
+    --
+    -- From a live capture: depositing 29 bag stacks took an overflow tab
+    -- from 78 to 97 of 98 occupied, and sorting then cascaded for minutes,
+    -- with replans coming back LARGER than the pass that had just run and
+    -- successive passes shifting in opposite directions.
+    --
+    -- PlanSort is pure (its only outside read is the guarded GetMaxStack),
+    -- so the whole thing reproduces here with no client.
+    ------------------------------------------------------------------
+    describe("near-full overflow packing (#140)", function()
+        -- A few item types with many FULL identical stacks each, scattered so
+        -- sorted order differs from slot order. This mirrors a real bank
+        -- (dozens of Thalassian Phoenix Oil x20, Light's Potential x200) and
+        -- it is the shape that matters: when stacks share an itemID AND a
+        -- count, overflowStackOrder falls through to origSlot, so position is
+        -- the only thing ordering them. A fixture of DISTINCT items never
+        -- reaches that tiebreak and never reproduces the churn.
+        local ITEMS = { 241289, 241301, 241309, 243733, 271883 }
+        local MAXSTACK = {
+            [241289] = 200, [241301] = 200, [241309] = 200,
+            [243733] = 20, [271883] = 200,
+        }
+
+        local function scatteredOverflow(occupied)
+            local slots, k = {}, 3
+            for s = 1, occupied do
+                k = (k * 7 + 13) % #ITEMS
+                local id = ITEMS[k + 1]
+                slots[s] = { itemID = id, count = MAXSTACK[id] }
+            end
+            return slots
+        end
+
+        local function layoutWithOverflow()
+            return {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                },
+            }
+        end
+
+        local packOpts = { maxStackByItem = MAXSTACK }
+
+        it("converges after a full pass", function()
+            local snap = snapshot({ [1] = {}, [2] = scatteredOverflow(97) })
+            local layout = layoutWithOverflow()
+
+            local plan = GBL:PlanSort(snap, layout, packOpts)
+            local bank = applyPlan(snap, plan)
+            local plan2 = GBL:PlanSort(snapshot(redescribe(bank)), layout, packOpts)
+            assert.equals(0, #plan2.ops,
+                "replan after a full pass should be a no-op")
+        end)
+
+        it("does not grow the plan after a partially executed pass", function()
+            -- The executor finishes when a replan is not smaller than the pass
+            -- before it, so a plan that GROWS after partial progress is what
+            -- makes a real sort stop early and report a residual. Live: 28 ops
+            -- executed, replan came back with 124.
+            local snap = snapshot({ [1] = {}, [2] = scatteredOverflow(97) })
+            local layout = layoutWithOverflow()
+            local plan = GBL:PlanSort(snap, layout, packOpts)
+
+            for _, frac in ipairs({ 0.25, 0.5, 0.75 }) do
+                local done = math.floor(#plan.ops * frac)
+                local remained = #plan.ops - done
+                local bank = applyPlanPartial(snap, plan, done)
+                local plan2 = GBL:PlanSort(snapshot(redescribe(bank)), layout, packOpts)
+                assert.is_true(#plan2.ops <= remained, string.format(
+                    "after %d of %d ops, %d remained but the replan wants %d",
+                    done, #plan.ops, remained, #plan2.ops))
+            end
+        end)
+
+        it("does not repack the whole tab when one stack is added", function()
+            -- Live: a packed tab planned 0 ops, one item moved in, and the
+            -- next plan was 147 ops.
+            local snap = snapshot({ [1] = {}, [2] = scatteredOverflow(97) })
+            local layout = layoutWithOverflow()
+            local packed = redescribe(applyPlan(snap, GBL:PlanSort(snap, layout, packOpts)))
+            assert.equals(0, #GBL:PlanSort(snapshot(packed), layout, packOpts).ops)
+
+            packed[2][98] = { itemID = ITEMS[1], count = MAXSTACK[ITEMS[1]] }
+            local plan = GBL:PlanSort(snapshot(packed), layout, packOpts)
+            -- Inserting into a sorted run costs a shift of everything after
+            -- it, so this is not zero. It should not approach a full repack.
+            assert.is_true(#plan.ops <= 50, string.format(
+                "one added stack triggered %d ops on a 98-slot tab", #plan.ops))
+        end)
+
+        it("keeps indistinguishable stacks where they are", function()
+            -- Two stacks with the same itemID and the same count are
+            -- interchangeable, so any move between their positions is work
+            -- with no observable result. This is the root of the churn:
+            -- overflowStackOrder ranks them by origSlot, and executing the
+            -- plan rewrites origSlot, which re-aims the next plan.
+            local slots = {}
+            for s = 1, 20 do
+                slots[s] = { itemID = 243733, count = 20 }
+            end
+            local snap = snapshot({ [1] = {}, [2] = slots })
+            local plan = GBL:PlanSort(snap, layoutWithOverflow(), packOpts)
+            assert.equals(0, #plan.ops,
+                "20 identical full stacks already packed from slot 1 need no moves")
         end)
     end)
 end)
