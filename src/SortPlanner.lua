@@ -1261,6 +1261,11 @@ function GBL:PlanSort(snapshot, layout, opts)
                 for k = runStart, runEnd do
                     group[#group + 1] = ovStacks[k]
                 end
+                -- Comparing a slot number against runStart/runEnd, which are
+                -- indices into the sorted array, is only meaningful because
+                -- the emit loop below packs rank i to slot i. If the packing
+                -- target ever stops being "slot == rank" (a reserved slot, a
+                -- different origin), this comparison silently aims wrong.
                 -- origSlot is unique per stack, so this can never collide.
                 local stayPut, movers = {}, {}
                 for _, st in ipairs(group) do
