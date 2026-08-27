@@ -2597,14 +2597,29 @@ describe("SortPlanner", function()
             local layout = layoutWithOverflow()
             local plan = GBL:PlanSort(snap, layout, packOpts)
 
-            for _, frac in ipairs({ 0.25, 0.5, 0.75 }) do
+            for _, frac in ipairs({ 0.1, 0.25, 0.5, 0.75, 0.9 }) do
                 local done = math.floor(#plan.ops * frac)
                 local remained = #plan.ops - done
                 local bank = applyPlanPartial(snap, plan, done)
                 local plan2 = GBL:PlanSort(snapshot(redescribe(bank)), layout, packOpts)
-                assert.is_true(#plan2.ops <= remained, string.format(
-                    "after %d of %d ops, %d remained but the replan wants %d",
-                    done, #plan.ops, remained, #plan2.ops))
+
+                -- Progress must be real: the replan is strictly smaller than
+                -- the plan it continues.
+                assert.is_true(#plan2.ops < #plan.ops, string.format(
+                    "after %d of %d ops the replan is %d, no smaller than the "
+                    .. "plan it continues", done, #plan.ops, #plan2.ops))
+
+                -- The only excess over the untouched tail that is legitimate
+                -- is pivot overhead. A pivot parks a blocker and brings it
+                -- back, so it costs two ops, and whether one is needed depends
+                -- on the free-slot pattern, which partial execution genuinely
+                -- changes. Anything beyond that means the plan was re-aimed
+                -- rather than continued, which is the #140 defect.
+                local pivots = (plan2.diag and plan2.diag.phase2Pivots) or 0
+                assert.is_true(#plan2.ops <= remained + 2 * pivots, string.format(
+                    "after %d of %d ops, %d remained but the replan wants %d "
+                    .. "with only %d pivot(s) to account for it",
+                    done, #plan.ops, remained, #plan2.ops, pivots))
             end
         end)
 

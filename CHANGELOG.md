@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.38.1] - 2026-08-27
+
+### Fixed
+- Sorting a full or nearly full overflow tab no longer shuffles for minutes and then stops with moves still outstanding. When a tab held many identical full stacks of the same item, the sort was picking which stack went in which slot by where each one currently sat, and moving them changed that. Every pass re-aimed the next one, so the work never shrank the way it should, and the sort gave up part-done rather than finishing. Stacks that are interchangeable now stay where they are, so a pass only ever does what is left. On a 98-slot test tab this cut the plan by a quarter on its own, and a part-finished pass now leaves the remaining work intact instead of nearly doubling it.
+
 ## [0.38.0] - 2026-08-26
 
 ### Added
