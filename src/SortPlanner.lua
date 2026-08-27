@@ -50,6 +50,12 @@
 --       optional opts.maxStackByItem override) so each run ends as
 --       [full, full, ..., partial?]. Items with unknown max stack
 --       (cold cache) skip merging and fall back to grouping only.
+--       Within a run of stacks sharing an itemID AND a count, which slot
+--       each one lands in is arbitrary, so the assignment minimises
+--       movement: a stack already inside the run's slot range stays put.
+--       Ranking them by origSlot instead makes the target depend on
+--       current positions, which executing the plan changes, so a pass
+--       that ends early re-aims the rest of it (#140).
 --
 -- Public contract — drop-in compatible with SortExecutor and UI/SortView.
 -- The optional third arg opts is read by tests; production callers omit it.
@@ -1099,6 +1105,57 @@ function GBL:PlanSort(snapshot, layout, opts)
         end
 
         table.sort(ovStacks, overflowStackOrder)
+
+        -- Within a run of indistinguishable stacks (same itemID AND same
+        -- count) it does not matter which stack lands in which slot: the
+        -- resulting tab is identical either way, so any move between two of
+        -- them is work with no observable result. The comparator ranks them
+        -- by origSlot, which makes the target depend on where they are now,
+        -- and executing a plan rewrites exactly that. A pass that ends early
+        -- therefore re-aims the rest of the plan instead of shortening it,
+        -- the next plan comes back larger than the work that was left, and
+        -- the executor's non-decreasing rule stops the sort with a residual
+        -- (#140: 28 ops issued, 124-op replan, on a bank whose overflow tab
+        -- held dozens of identical full stacks).
+        --
+        -- So assign each run to minimise movement: a stack already sitting
+        -- inside the run's slot range stays where it is, and only the rest
+        -- fill the gaps. The packing contract is unchanged, because the
+        -- contract is about which item and count occupies each slot.
+        local runStart = 1
+        while runStart <= #ovStacks do
+            local runEnd = runStart
+            while runEnd < #ovStacks
+                and ovStacks[runEnd + 1].itemID == ovStacks[runStart].itemID
+                and ovStacks[runEnd + 1].count == ovStacks[runStart].count do
+                runEnd = runEnd + 1
+            end
+            if runEnd > runStart then
+                local group = {}
+                for k = runStart, runEnd do
+                    group[#group + 1] = ovStacks[k]
+                end
+                -- origSlot is unique per stack, so this can never collide.
+                local stayPut, movers = {}, {}
+                for _, st in ipairs(group) do
+                    if st.origSlot >= runStart and st.origSlot <= runEnd then
+                        stayPut[st.origSlot] = st
+                    else
+                        movers[#movers + 1] = st
+                    end
+                end
+                local mi = 1
+                for t = runStart, runEnd do
+                    if stayPut[t] then
+                        ovStacks[t] = stayPut[t]
+                    else
+                        ovStacks[t] = movers[mi]
+                        mi = mi + 1
+                    end
+                end
+            end
+            runStart = runEnd + 1
+        end
 
         for i, stack in ipairs(ovStacks) do
             if stack.origSlot ~= i then
