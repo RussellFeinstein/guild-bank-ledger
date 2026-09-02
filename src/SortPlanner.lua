@@ -991,9 +991,10 @@ function GBL:PlanSort(snapshot, layout, opts)
                         progressed = true
                     else
                         phase2Debug(string.format(
-                            "sort plan Phase 2: refused emit T%d/S%d->T%d/S%d "
+                            "sort plan Phase 2: refused emit %s->%s "
                             .. "(item %d x%d): %s",
-                            ass.srcTab, ass.srcSlot, ass.dstTab, ass.dstSlot,
+                            slotRef(self, ass.srcTab, ass.srcSlot),
+                            slotRef(self, ass.dstTab, ass.dstSlot),
                             ass.itemID or 0, ass.count or 0, reason or "unknown"))
                     end
                 end
