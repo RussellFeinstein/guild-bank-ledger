@@ -3128,6 +3128,18 @@ describe("SortPlanner", function()
             assert.equals(1, plan.diag.bagSupplies)
             assert.equals(0, plan.diag.bagDemandFills)
             assert.equals(1, plan.diag.bagSpills)
+
+            -- The same numbers on the plan line, in a fixture where fill and
+            -- spill differ, so a swapped pair of format arguments shows.
+            local logged
+            for _, e in ipairs(GBL:GetLog("sort") or {}) do
+                local m = e.message or ""
+                if m:find("tabs) bags:", 1, true) then logged = m end
+            end
+            assert.is_truthy(logged, "expected a plan line with a bags term")
+            assert.is_truthy(logged:find(
+                "tabs) bags:1/1(fill=0,spill=1,stay=0,ignored=0,bound=0,locked=0,nolink=0)",
+                1, true), logged)
         end)
 
         it("plans identically with no opts, an empty bagSnapshot, and no bags", function()
