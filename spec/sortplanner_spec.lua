@@ -3284,5 +3284,42 @@ describe("SortPlanner", function()
                 assert.is_truthy(line:find(", and 1 more", 1, true), line)
             end)
         end)
+
+        -- The Phase 2 refused-emit debug line was the one place a bag source
+        -- still rendered through a bare tab format. A bag-sourced assignment
+        -- is refused on the first drain pass whenever its destination still
+        -- holds the stack that has to move out first.
+        describe("Phase 2 debug slot refs", function()
+            it("renders a bag source as BagN/S in the refused-emit line", function()
+                GBL.db.profile.sort.debugChat = true
+                local snap = snapshot({
+                    [1] = { [1] = { itemID = 200, count = 5 } },
+                    [2] = {},
+                })
+                local layout = {
+                    tabs = {
+                        [1] = displayTab(
+                            {
+                                [100] = { slots = 1, perSlot = 10 },
+                                [200] = { slots = 1, perSlot = 5 },
+                            },
+                            { [1] = 100, [2] = 200 }
+                        ),
+                        [2] = overflow(),
+                    },
+                }
+                local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 10 } } })
+                GBL:PlanSort(snap, layout, { bagSnapshot = bags })
+
+                local refused
+                for _, entry in ipairs(GBL:GetLog("sort") or {}) do
+                    local m = entry.message or ""
+                    if m:find("refused emit", 1, true) then refused = m end
+                    assert.is_nil(m:find("T-", 1, true), m)
+                end
+                assert.is_truthy(refused, "expected a refused-emit debug line")
+                assert.is_truthy(refused:find("refused emit Bag0/1->T1/1", 1, true), refused)
+            end)
+        end)
     end)
 end)
