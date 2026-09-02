@@ -3225,6 +3225,64 @@ describe("SortPlanner", function()
                     "tabs) bags:1/1(fill=0,spill=0,stay=1,ignored=0,bound=0,locked=0,nolink=0)"),
                     table.concat(sortLines(), "\n"))
             end)
+
+            -- Which admitted stacks stay behind, and why, on one indented
+            -- continuation of the plan line. The count on the term says how
+            -- many; this says which. Capped so a bag full of the same item
+            -- cannot turn one entry into a page.
+            it("names each layout stack that stays in bags with its reason", function()
+                local snap = snapshot({
+                    [1] = {
+                        [1] = { itemID = 100, count = 10 },
+                        [5] = { itemID = 300, count = 5 },
+                    },
+                    [2] = fullTab(200, 200),
+                })
+                local bags = bagSnapshot({ [0] = { [4] = { itemID = 100, count = 50 } } })
+                GBL:PlanSort(snap, oneDemandLayout(10), {
+                    bagSnapshot = bags,
+                    maxStackByItem = { [100] = 20, [200] = 200, [300] = 20 },
+                })
+
+                local line = findLine("bags stay:")
+                assert.equals("  bags stay: it:100 x50 at Bag0/4 (overflow-full)", line,
+                    table.concat(sortLines(), "\n"))
+                for _, m in ipairs(sortLines()) do
+                    assert.is_nil(m:find("T-", 1, true), m)
+                end
+            end)
+
+            it("emits no stay line when every bag stack is placed", function()
+                local snap = snapshot({ [1] = {}, [2] = {} })
+                local bags = bagSnapshot({ [0] = {
+                    [1] = { itemID = 100, count = 20 },
+                    [2] = { itemID = 100, count = 15 },
+                } })
+                GBL:PlanSort(snap, oneDemandLayout(20), {
+                    bagSnapshot = bags,
+                    maxStackByItem = { [100] = 100 },
+                })
+
+                assert.is_nil(findLine("bags stay:"), table.concat(sortLines(), "\n"))
+            end)
+
+            it("caps the stay line at ten named stacks and counts the rest", function()
+                local slots = {}
+                for s = 1, 12 do slots[s] = { itemID = 100, count = 20 } end
+                local snap = snapshot({ [1] = {}, [2] = fullTab(200, 200) })
+                local bags = bagSnapshot({ [0] = slots })
+                local plan = GBL:PlanSort(snap, oneDemandLayout(20), {
+                    bagSnapshot = bags,
+                    maxStackByItem = { [100] = 20, [200] = 200 },
+                })
+
+                assert.equals(11, plan.diag.bagStay)
+                local line = findLine("bags stay:")
+                assert.is_truthy(line, table.concat(sortLines(), "\n"))
+                local _, named = line:gsub(" at Bag0/", "")
+                assert.equals(10, named, line)
+                assert.is_truthy(line:find(", and 1 more", 1, true), line)
+            end)
         end)
     end)
 end)
