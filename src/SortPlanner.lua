@@ -267,6 +267,13 @@ function GBL:PlanSort(snapshot, layout, opts)
         -- bagSupplies > 0 and both others 0 means the layout named the
         -- items but had nowhere to put them.
         bagSupplies = 0, bagDemandFills = 0, bagSpills = 0,
+        -- What the scan saw and the sort left alone, so a capture can say
+        -- why a bag stack was never a candidate: not named by the layout
+        -- (ignored), or skipped by ScanBags as bound, locked or link-less.
+        -- bagStay is the number of admitted stacks the plan could not place,
+        -- counted from plan.unplaced once every phase has run.
+        bagIgnored = 0, bagBound = 0, bagLocked = 0, bagNoLink = 0,
+        bagStay = 0,
     }
 
     -- v0.32.8 B4a: Phase 2 instrumentation. SortDebug emissions are
@@ -359,12 +366,17 @@ function GBL:PlanSort(snapshot, layout, opts)
             if type(tabIndex) == "number" and tabIndex < 0 then
                 local held = {}
                 local any = false
+                diag.bagBound = diag.bagBound + ((tabResult or {}).boundSkips or 0)
+                diag.bagLocked = diag.bagLocked + ((tabResult or {}).lockedSkips or 0)
+                diag.bagNoLink = diag.bagNoLink + ((tabResult or {}).noLink or 0)
                 for slotIndex, slot in pairs((tabResult or {}).slots or {}) do
                     local itemID = slot.itemID or extractItemID(slot.itemLink)
                     if itemID and layoutItems[itemID] then
                         held[slotIndex] = { itemID = itemID, count = slot.count or 1 }
                         any = true
                         diag.bagSupplies = diag.bagSupplies + 1
+                    else
+                        diag.bagIgnored = diag.bagIgnored + 1
                     end
                 end
                 if any then
@@ -1323,6 +1335,15 @@ function GBL:PlanSort(snapshot, layout, opts)
         end
     end
 
+    -- Admitted bag stacks the plan could not place. plan.unplaced is final
+    -- here (Phases 1B, 2 and 3 are the producers), and a bag-origin entry is
+    -- the only kind with a negative tabIndex.
+    for _, u in ipairs(plan.unplaced) do
+        if type(u.tabIndex) == "number" and u.tabIndex < 0 then
+            diag.bagStay = diag.bagStay + 1
+        end
+    end
+
     -- Planner diagnostics. The first line is always emitted (baseline
     -- timing + replan hitch investigation). The phase / demand breakdown
     -- lines fire only when there's plan or demand activity, so quiet
@@ -1348,11 +1369,20 @@ function GBL:PlanSort(snapshot, layout, opts)
         end
         -- The breakdown is built from perTabOccupied, which was filled from
         -- `snapshot` before bags were admitted, so it stays bank-only and no
-        -- "T-1:N" can appear here. Bag input is reported as its own term.
+        -- "T-1:N" can appear here. Bag input is reported as its own term,
+        -- present whenever bags were on (even with nothing admitted, so a
+        -- capture can tell "on, nothing to deposit" from "off"): admitted
+        -- over seen, what the admitted ones did, and why the rest were not
+        -- candidates. seen is every occupied slot the scan classified.
         local bagsPart = ""
-        if diag.bagSupplies > 0 then
-            bagsPart = string.format(" bags:%d(fill=%d,spill=%d)",
-                diag.bagSupplies, diag.bagDemandFills, diag.bagSpills)
+        if opts and type(opts.bagSnapshot) == "table" then
+            local seen = diag.bagSupplies + diag.bagIgnored + diag.bagBound
+                + diag.bagLocked + diag.bagNoLink
+            bagsPart = string.format(
+                " bags:%d/%d(fill=%d,spill=%d,stay=%d,ignored=%d,bound=%d,locked=%d,nolink=%d)",
+                diag.bagSupplies, seen, diag.bagDemandFills, diag.bagSpills,
+                diag.bagStay, diag.bagIgnored, diag.bagBound, diag.bagLocked,
+                diag.bagNoLink)
         end
         self:SortInfo(string.format(
             "Sort plan: %.1fms, %d ops, %d deficits, %d unplaced "
