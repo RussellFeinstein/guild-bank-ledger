@@ -106,6 +106,11 @@ local REASON_OVERFLOW_FULL       = "overflow-full"
 local REASON_CYCLE_NO_PIVOT      = "cycle-no-pivot"
 local REASON_NO_OVERFLOW_DEFINED = "no-overflow-defined"
 
+-- How many stacks the "bags stay:" plan-line continuation names before it
+-- switches to a count. A bag full of one item would otherwise turn a single
+-- log entry into a page.
+local STAY_LINE_MAX_NAMED = 10
+
 --- Render one slot reference. Routes through GBL:FormatSlotRef (Scanner.lua,
 --- loaded ahead of this file) so a bag pseudo-tab prints "Bag0/5" instead of
 --- the "T-1/5" a bare format would produce. The fallback only matters for a
@@ -1389,6 +1394,28 @@ function GBL:PlanSort(snapshot, layout, opts)
             .. "(input: %d slots / %d tabs)%s [%s]",
             elapsed, #plan.ops, deficitCount, #plan.unplaced,
             inputSlots, inputTabs, bagsPart, table.concat(breakdownParts, " ")))
+
+        -- Which admitted bag stacks stay behind, and why. The term above
+        -- carries the count; this names them, because "why is this still in
+        -- my bags" is answered by the slot and the reason, not by a number.
+        -- Bank-origin unplaced entries are not bag stays and are left out.
+        if diag.bagStay > 0 then
+            local parts = {}
+            for _, u in ipairs(plan.unplaced) do
+                if type(u.tabIndex) == "number" and u.tabIndex < 0
+                   and #parts < STAY_LINE_MAX_NAMED then
+                    local desc = self.DescribeItem and self:DescribeItem(u.itemID)
+                        or ("it:" .. tostring(u.itemID))
+                    table.insert(parts, string.format("%s x%d at %s (%s)",
+                        desc, u.count or 0, slotRef(self, u.tabIndex, u.slotIndex),
+                        tostring(u.reason)))
+                end
+            end
+            local more = diag.bagStay - #parts
+            self:SortInfo(string.format("  bags stay: %s%s",
+                table.concat(parts, ", "),
+                (more > 0) and string.format(", and %d more", more) or ""))
+        end
 
         local totalDemands = diag.demandPinned + diag.demandExtendRight
             + diag.demandExtendLeft + diag.demandFirstEmpty
