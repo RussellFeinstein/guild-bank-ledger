@@ -3146,5 +3146,85 @@ describe("SortPlanner", function()
             assert.equals(a.deficits[100], c.deficits[100])
             assert.equals(0, c.diag.bagSupplies)
         end)
+
+        -- The plan line's bags term is the only place a capture says what
+        -- the bag scan saw. It has to render whenever bags were on, even
+        -- when nothing was admitted, or "bags on, nothing to deposit" reads
+        -- the same as "bags off".
+        describe("plan line bags term", function()
+            local function sortLines()
+                local out = {}
+                for _, e in ipairs(GBL:GetLog("sort") or {}) do
+                    out[#out + 1] = e.message or ""
+                end
+                return out
+            end
+
+            local function findLine(needle)
+                for _, m in ipairs(sortLines()) do
+                    if m:find(needle, 1, true) then return m end
+                end
+                return nil
+            end
+
+            it("reports admitted over seen with the scan's skip breakdown", function()
+                local snap = snapshot({ [1] = {}, [2] = {} })
+                local bags = {
+                    [-1] = {
+                        slots = {
+                            [1] = { itemID = 100, count = 20, slotIndex = 1, tabIndex = -1 },
+                            [2] = { itemID = 100, count = 15, slotIndex = 2, tabIndex = -1 },
+                            [3] = { itemID = 555, count = 1, slotIndex = 3, tabIndex = -1 },
+                        },
+                        itemCount = 3, boundSkips = 2, lockedSkips = 1, noLink = 1,
+                    },
+                }
+                GBL:PlanSort(snap, oneDemandLayout(20), {
+                    bagSnapshot = bags,
+                    maxStackByItem = { [100] = 100 },
+                })
+
+                assert.is_truthy(findLine(
+                    "tabs) bags:2/7(fill=1,spill=1,stay=0,ignored=1,bound=2,locked=1,nolink=1)"),
+                    table.concat(sortLines(), "\n"))
+            end)
+
+            it("renders a zero term when bags are on but empty, and none when off", function()
+                local snap = snapshot({ [1] = {}, [2] = {} })
+                GBL:PlanSort(snap, oneDemandLayout(20), { bagSnapshot = {} })
+                assert.is_truthy(findLine(
+                    "tabs) bags:0/0(fill=0,spill=0,stay=0,ignored=0,bound=0,locked=0,nolink=0)"),
+                    table.concat(sortLines(), "\n"))
+
+                GBL:ClearLog("sort")
+                GBL:PlanSort(snap, oneDemandLayout(20))
+                GBL:PlanSort(snap, oneDemandLayout(20), {})
+                assert.is_nil(findLine("tabs) bags:"), table.concat(sortLines(), "\n"))
+            end)
+
+            it("counts only bag-origin unplaced entries as stay", function()
+                -- Overflow is full, so the bag surplus stays in the bag and the
+                -- non-layout bank stack at T1/5 has nowhere to go either. Only
+                -- the first is a bag stay.
+                local snap = snapshot({
+                    [1] = {
+                        [1] = { itemID = 100, count = 10 },
+                        [5] = { itemID = 300, count = 5 },
+                    },
+                    [2] = fullTab(200, 200),
+                })
+                local bags = bagSnapshot({ [0] = { [4] = { itemID = 100, count = 50 } } })
+                local plan = GBL:PlanSort(snap, oneDemandLayout(10), {
+                    bagSnapshot = bags,
+                    maxStackByItem = { [100] = 20, [200] = 200, [300] = 20 },
+                })
+
+                assert.equals(2, #plan.unplaced)
+                assert.equals(1, plan.diag.bagStay)
+                assert.is_truthy(findLine(
+                    "tabs) bags:1/1(fill=0,spill=0,stay=1,ignored=0,bound=0,locked=0,nolink=0)"),
+                    table.concat(sortLines(), "\n"))
+            end)
+        end)
     end)
 end)
