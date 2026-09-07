@@ -721,9 +721,12 @@ function GBL:ExecuteSortPlan(plan, onComplete, opts)
     -- line reflects what the user actually had set, not what we are about to
     -- change it to.
     state.rescanWasActive = (GBL.IsPeriodicRescanActive and GBL:IsPeriodicRescanActive()) and true or false
+    -- bags= is what every later bag line is read against: without it a run
+    -- that deposited nothing cannot be told from one with the toggle off.
     GBL:SortInfo(string.format(
-        "Sort: starting execution of %d ops, cadence %.1fs (%s)",
-        #plan.ops, CADENCE, netPingStr()))
+        "Sort: starting execution of %d ops, cadence %.1fs (%s) bags=%s",
+        #plan.ops, CADENCE, netPingStr(),
+        state.includeBags and "on" or "off"))
     local autoSyncOn = GBL.db and GBL.db.profile and GBL.db.profile.sync
         and GBL.db.profile.sync.autoSync
     GBL:SortInfo(string.format(
