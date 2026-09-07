@@ -819,6 +819,129 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.equals(2, result.total)
         end)
 
+        ------------------------------------------------------------------
+        -- The finish line (#139)
+        --
+        -- "N issued, M skipped" answers what the run did. It does not
+        -- answer the question the user actually has, which is whether
+        -- anything is still sitting in their bags, so the line carries the
+        -- freshest replan's count of that too.
+        ------------------------------------------------------------------
+        it("reports an emptied bag as nothing left behind", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = -1, srcSlot = 1,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
+            }, function() end, { includeBags = true, layout = layoutWithDemand(20) })
+            drainTimers()
+
+            assert.is_not_nil(
+                findLine("Sort bags: 1 deposit(s) issued, 0 skipped, still in bags: 0"),
+                "expected the finish line to report an empty bag: "
+                .. tostring(findLine("Sort bags:")))
+        end)
+
+        -- The counts come from the LAST replan, not the first. Pass 1's
+        -- figure is the state before the run did anything, which is the one
+        -- number guaranteed to be wrong by the time it is printed.
+        it("reports what the freshest replan still sees in the bags", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local realPlanSort = GBL.PlanSort
+            GBL.PlanSort = function()
+                return { ops = {}, deficits = {}, unplaced = {},
+                         diag = { bagSupplies = 3, bagStay = 1 } }
+            end
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = -1, srcSlot = 1,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
+            }, function(r) result = r end,
+               { includeBags = true, layout = layoutWithDemand(20) })
+            drainTimers()
+            GBL.PlanSort = realPlanSort
+
+            assert.is_not_nil(findLine("still in bags: 3 (1 unplaceable)"),
+                "expected the replan's own counts: " .. tostring(findLine("Sort bags:")))
+            assert.equals(3, result.bagsStillInBags)
+            assert.equals(1, result.bagsUnplaceable)
+        end)
+
+        -- A run that aborts before any replan has no honest number to give,
+        -- and printing 0 there would say the bags are empty when nothing
+        -- ever looked.
+        it("says the bag count is unknown when no replan ran", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+                [2] = { itemID = 100, name = "Flask", count = 15 },
+            })
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = -1, srcSlot = 1,
+                      dstTab = 1, dstSlot = 1, itemID = 100, count = 20 },
+                    { op = "move", srcTab = -1, srcSlot = 2,
+                      dstTab = 1, dstSlot = 2, itemID = 100, count = 15 },
+                },
+            }, function() end, { includeBags = true, layout = layoutWithDemand(20) })
+            GBL:_SortExecutorOnBankClosed()
+            drainTimers()
+
+            assert.is_not_nil(findLine("still in bags: unknown (no replan)"),
+                "an aborted run should not claim a count it never measured: "
+                .. tostring(findLine("Sort bags:")))
+        end)
+
+        it("breaks the skipped count down by reason, in a stable order", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20, locked = true },
+                [2] = { itemID = 100, name = "Flask", count = 12 },
+            })
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = -1, srcSlot = 1,
+                      dstTab = 1, dstSlot = 1, itemID = 100, count = 20 },
+                    { op = "move", srcTab = -1, srcSlot = 2,
+                      dstTab = 1, dstSlot = 2, itemID = 100, count = 20 },
+                },
+            }, function() end, { includeBags = true })
+            drainTimers()
+
+            assert.is_not_nil(
+                findLine("0 deposit(s) issued, 2 skipped [locked:1 short-stack:1]"),
+                "expected a sorted per-reason breakdown: "
+                .. tostring(findLine("Sort bags:")))
+        end)
+
+        -- Bags on and nothing to deposit is a real answer, and it is the one
+        -- a capture needs to tell "the toggle was on and your bags held
+        -- nothing the layout names" from "the toggle was off".
+        it("writes the bag line even when the run moved nothing out of a bag", function()
+            Helpers.populateTab(1, { [1] = { itemID = 200, name = "Ore", count = 10 } })
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 200, count = 10 } },
+            }, function() end, { includeBags = true })
+            drainTimers()
+
+            assert.is_not_nil(findLine("Sort bags: 0 deposit(s) issued, 0 skipped"),
+                "bags on with no bag ops should still say so")
+        end)
+
+        it("writes no bag line when bags were not included", function()
+            Helpers.populateTab(1, { [1] = { itemID = 200, name = "Ore", count = 10 } })
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 200, count = 10 } },
+            }, function() end)
+            drainTimers()
+
+            assert.is_nil(findLine("Sort bags:"),
+                "a bank-only run should not carry a bag line")
+        end)
+
         it("carries on with later ops after a skip", function()
             Helpers.populateBag(0, {
                 [1] = { itemID = 100, name = "Flask", count = 20, locked = true },
