@@ -289,6 +289,7 @@ function finish(ok, reason)
         syncActiveAtStart = state.syncActiveAtStart,
         bagOpsIssued = state.bagOpsIssued or 0,
         bagOpsSkipped = state.bagOpsSkipped or 0,
+        bagSkipReasons = state.bagSkipReasons or {},
     }
 
     local elapsed = (GetTime() and state.startedAt) and (GetTime() - state.startedAt) or 0
@@ -365,41 +366,66 @@ end
 --- The plan is a snapshot in time and the player can move things while the
 --- pump runs, so a mismatch here is ordinary, not an error. Convergence
 --- handles it: the next pass re-scans and re-plans.
+---
+--- @return boolean lifted, string|nil reason, string|nil detail
+---   The six reasons are the whole refusal vocabulary and each calls for a
+---   different response from whoever reads the capture: no-bag and no-api
+---   mean the op could never have run on this client, locked and empty mean
+---   the slot moved under the plan, item-mismatch and short-stack mean it
+---   moved in a way worth naming precisely, so those two carry a detail.
 local function liftFromBag(op)
     local bagID = GBL:BagIDFromTab(op.srcTab)
-    if not bagID then return false end
-    if not (C_Container and C_Container.GetContainerItemInfo) then return false end
+    if not bagID then return false, "no-bag" end
+    if not (C_Container and C_Container.GetContainerItemInfo) then
+        return false, "no-api"
+    end
 
     local info = C_Container.GetContainerItemInfo(bagID, op.srcSlot)
-    if type(info) ~= "table" then return false end
-    if info.isLocked then return false end
-    if info.itemID and op.itemID and info.itemID ~= op.itemID then return false end
+    if type(info) ~= "table" then return false, "empty" end
+    if info.isLocked then return false, "locked" end
+    if info.itemID and op.itemID and info.itemID ~= op.itemID then
+        -- The raw id form rather than DescribeItem: this names the item the
+        -- plan did NOT ask for, so its name is exactly the one the item
+        -- cache was never warmed for, and "it:999" beats an empty string.
+        return false, "item-mismatch", "holds it:" .. tostring(info.itemID)
+    end
 
     local have = info.stackCount or 0
     local want = op.count or 0
-    if have < want or want <= 0 then return false end
+    -- A want of zero is a malformed op rather than a short stack, but it
+    -- cannot reach here from the planner and the warning prints the wanted
+    -- count anyway, so it shares the reason rather than widening the
+    -- vocabulary with a value nothing can produce.
+    if have < want or want <= 0 then
+        return false, "short-stack", "have " .. tostring(have)
+    end
 
     if op.op == "split" and have > want and C_Container.SplitContainerItem then
         C_Container.SplitContainerItem(bagID, op.srcSlot, want)
     elseif C_Container.PickupContainerItem then
         C_Container.PickupContainerItem(bagID, op.srcSlot)
     else
-        return false
+        return false, "no-api"
     end
     return true
 end
 
---- @return boolean issued, false when a bag source was refused and the op
----   was skipped without touching the destination.
+--- @return boolean issued, string|nil reason, string|nil detail
+---   false when a bag source was refused and the op was skipped without
+---   touching the destination; the reason and detail come from liftFromBag.
 local function issueOp(op)
     if _G.CursorHasItem and _G.CursorHasItem() then ClearCursor() end
 
     if (op.srcTab or 0) < 0 then
-        if not liftFromBag(op) then
+        local lifted, reason, detail = liftFromBag(op)
+        if not lifted then
             if state then
                 state.bagOpsSkipped = (state.bagOpsSkipped or 0) + 1
+                state.bagSkipReasons = state.bagSkipReasons or {}
+                local key = reason or "unknown"
+                state.bagSkipReasons[key] = (state.bagSkipReasons[key] or 0) + 1
             end
-            return false
+            return false, reason, detail
         end
         if state then
             state.bagOpsIssued = (state.bagOpsIssued or 0) + 1
@@ -462,15 +488,18 @@ pumpOne = function()
         itemDesc, op.count or 0, viewedTabStr()))
 
     -- A refused bag source is ordinary, not an error: the plan is a snapshot
-    -- and the player can move things mid-run. Name the slot at WARN anyway,
-    -- because "why is this still in my bags" is answered by which slot was
-    -- refused, not by the run summary's count (#139).
-    if not issueOp(op) then
+    -- and the player can move things mid-run. Name the slot AND the reason at
+    -- WARN anyway, because "why is this still in my bags" is answered by
+    -- which slot was refused and why, not by the run summary's count (#139).
+    local issued, skipReason, skipDetail = issueOp(op)
+    if not issued then
+        local why = skipReason or "refused"
+        if skipDetail then why = why .. " (" .. skipDetail .. ")" end
         GBL:SortWarn(string.format(
-            "Sort op %d/%d skipped: %s no longer holds %d x %s",
+            "Sort op %d/%d skipped: %s %s, wanted %d x %s",
             state.opIndex, #state.plan.ops,
             GBL:FormatSlotRef(op.srcTab or 0, op.srcSlot or 0),
-            op.count or 0, itemDesc))
+            why, op.count or 0, itemDesc))
     end
     state.opIndex = state.opIndex + 1
     state.totalIssued = (state.totalIssued or 0) + 1
@@ -621,6 +650,7 @@ function GBL:ExecuteSortPlan(plan, onComplete, opts)
         includeBags = (opts and opts.includeBags) and true or false,
         bagOpsIssued = 0,
         bagOpsSkipped = 0,
+        bagSkipReasons = {},
         opIndex = 1,
         passes = 0,
         lastPassOps = nil,
