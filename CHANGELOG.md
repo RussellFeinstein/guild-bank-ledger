@@ -11,7 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The sort can now take items straight out of your bags. Tick "Include bags" on the Sort tab and any bag item your layout names is deposited as part of the sort run: layout slots are filled first, and whatever is left over routes to your overflow tabs. A farming run or an Auction House haul no longer has to be deposited by hand and rescanned before you can sort it. Bag items your layout does not name are left alone, as are bound and locked slots. Bank stock is always used before a bag when both can fill the same slot, since moving inside the bank costs nothing. The preview labels bag sources as `Bag0/3` and says when something has to stay in your bags. Off by default.
 - Keyboard navigation on the Sort tab: Tab and Shift+Tab move between Preview, Execute, Cancel, Scan bank, Open Sort Log and Include bags, arrow keys do the same, and Enter or Space activates whatever is focused.
 
+### Changed
+- The sort log now says what the bag scan saw and what became of it: how many bag stacks the layout named, how many were left alone as not in the layout, bound, locked or unreadable, which named stacks have to stay in your bags and why, why any deposit was refused during the run, and how many named stacks were still in your bags when the sort finished. Before this the log could only show the number of deposits it attempted.
+- `/gbl help` and the README command table now list every command the addon answers to. Nine commands worked but appeared in neither place, so the only way to find them was to read the source. The additions are `/gbl restock`, `/gbl cleanup`, `/gbl sortpreview`, `/gbl sortexec`, `/gbl sortcancel`, `/gbl syncdiag`, `/gbl deviations`, `/gbl epoch0` and `/gbl bubbletest`.
+
 ### Fixed
+- A bag deposit the sort had to skip no longer counts as a completed move, so the run summary's ops issued count, average time per move and done count reflect what was actually moved.
 - The keyboard focus indicator now draws. Moving focus with Tab has been setting focus correctly and showing nothing on screen, which made the feature impossible to use and impossible to notice was broken: the function meant to draw the highlight only ever recorded the state in memory. Focus now shows a 2 pixel ring in the palette's focus colour, so it follows your colourblind mode and high contrast setting. This affects the Restock tab as well, where keyboard navigation had the same invisible behaviour since it shipped.
 
 ## [0.38.1] - 2026-08-27

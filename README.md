@@ -36,7 +36,8 @@ Persistent guild bank transaction logging for World of Warcraft. WoW's built-in 
 These items block the v1.0 release:
 
 - Accessibility audit and keyboard-nav completion: wire `RegisterFocusable` into every AceGUI widget, hook Tab/Shift+Tab via a key handler, verify focus indicators on every tab, screen-reader audit, palette validation against WCAG AAA contrast targets
-- Sync rate limiting (per-peer bandwidth budgeting)
+- Sync convergence demonstration: the per-peer budgeting has shipped (inter-chunk gap floor, bounded sessions, nudge throttle); what remains is a whole-guild capture showing a backfill converging without starving a member
+- Security hardening: a threat-model pass over the paths that act on messages other clients send
 - Performance audit (SavedVariables size, UI debouncing). Compaction verification came off this list when compaction itself was retired (#62)
 - Community feedback iteration
 
