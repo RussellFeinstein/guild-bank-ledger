@@ -290,6 +290,10 @@ function finish(ok, reason)
         bagOpsIssued = state.bagOpsIssued or 0,
         bagOpsSkipped = state.bagOpsSkipped or 0,
         bagSkipReasons = state.bagSkipReasons or {},
+        -- nil rather than 0 when no replan ran: the caller has to be able to
+        -- tell "the bags are empty" from "nothing measured them".
+        bagsStillInBags = state.lastBagSupplies,
+        bagsUnplaceable = state.lastBagStay,
     }
 
     local elapsed = (GetTime() and state.startedAt) and (GetTime() - state.startedAt) or 0
@@ -303,12 +307,36 @@ function finish(ok, reason)
         avg, state.cursorStuck or 0, state.stallCount or 0, state.rescanTicks or 0))
 
     -- Bag deposits get their own line rather than a rider on the summary
-    -- above: a skip count is the thing to look at when items the user
-    -- expected to be deposited are still sitting in their bags (#139).
-    if (state.bagOpsIssued or 0) > 0 or (state.bagOpsSkipped or 0) > 0 then
+    -- above: what is still sitting in the user's bags is the thing they
+    -- read this line to find out, and it is not answerable from the run's
+    -- own counts (#139).
+    --
+    -- Written whenever bags were included, even at 0 and 0. A suppressed
+    -- line reads exactly like a run with the toggle off, which is the one
+    -- distinction a capture most needs here.
+    if state.includeBags then
+        local skipped = state.bagOpsSkipped or 0
+        local parts = {}
+        for tag, n in pairs(state.bagSkipReasons or {}) do
+            parts[#parts + 1] = string.format("%s:%d", tag, n)
+        end
+        table.sort(parts)
+        -- No replan means nothing ever looked at the bags after the pass, so
+        -- there is no honest count to give. Printing 0 would say they are
+        -- empty; this says nobody checked.
+        local stillIn = "unknown (no replan)"
+        if state.lastBagSupplies then
+            stillIn = tostring(state.lastBagSupplies)
+            if (state.lastBagStay or 0) > 0 then
+                stillIn = stillIn .. string.format(" (%d unplaceable)", state.lastBagStay)
+            end
+        end
         GBL:SortInfo(string.format(
-            "Sort bags: %d deposit(s) issued, %d skipped",
-            state.bagOpsIssued or 0, state.bagOpsSkipped or 0))
+            "Sort bags: %d deposit(s) issued, %d skipped%s, still in bags: %s",
+            state.bagOpsIssued or 0, skipped,
+            (skipped > 0 and #parts > 0)
+                and (" [" .. table.concat(parts, " ") .. "]") or "",
+            stillIn))
     end
 
     -- Hitch histogram on its own line: validates the pump kept the loop awake.
@@ -587,6 +615,16 @@ endOfPass = function()
                 replanOpts = { bagSnapshot = GBL:ScanBags() }
             end
             local newPlan = GBL:PlanSort(snapshot, state.layout, replanOpts)
+            -- Record what the freshest plan still sees in the bags, so the
+            -- finish line reports the last replan rather than the first.
+            -- Pass 1's figure is the state before the run did anything,
+            -- which is the one number guaranteed to be stale by the time it
+            -- is printed. Every terminal branch below runs after this, so
+            -- complete, converged and the pass cap all report the same way.
+            if newPlan and newPlan.diag then
+                state.lastBagSupplies = newPlan.diag.bagSupplies or 0
+                state.lastBagStay = newPlan.diag.bagStay or 0
+            end
             local newOps = (newPlan and newPlan.ops) and #newPlan.ops or 0
             local prevOps = state.lastPassOps or math.huge
 
