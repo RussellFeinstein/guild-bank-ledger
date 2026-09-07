@@ -1014,6 +1014,38 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.equals(2, result.done)
             assert.equals(1, result.bagOpsIssued)
             assert.equals(0, result.bagOpsSkipped)
+            assert.is_not_nil(findLine("Sort bags: 1 deposit(s) issued, 0 skipped"),
+                "the bank op should not be counted as a bag deposit: "
+                .. tostring(findLine("Sort bags:")))
+        end)
+
+        -- Both counts non-zero and different, so the line cannot pass by
+        -- reading the two the wrong way round.
+        it("reports issued and skipped deposits as distinct counts", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+                [2] = { itemID = 100, name = "Flask", count = 15 },
+                [3] = { itemID = 100, name = "Flask", count = 20, locked = true },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = -1, srcSlot = 1,
+                      dstTab = 1, dstSlot = 1, itemID = 100, count = 20 },
+                    { op = "move", srcTab = -1, srcSlot = 2,
+                      dstTab = 1, dstSlot = 2, itemID = 100, count = 15 },
+                    { op = "move", srcTab = -1, srcSlot = 3,
+                      dstTab = 1, dstSlot = 3, itemID = 100, count = 20 },
+                },
+            }, function(r) result = r end, { includeBags = true })
+            drainTimers()
+
+            assert.equals(2, result.bagOpsIssued)
+            assert.equals(1, result.bagOpsSkipped)
+            assert.is_not_nil(
+                findLine("Sort bags: 2 deposit(s) issued, 1 skipped [locked:1]"),
+                "expected two issued and one skipped: "
+                .. tostring(findLine("Sort bags:")))
         end)
 
         it("logs a bag source as BagN/S and never as a negative tab", function()
