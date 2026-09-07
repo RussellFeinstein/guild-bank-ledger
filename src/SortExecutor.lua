@@ -492,7 +492,25 @@ pumpOne = function()
     -- WARN anyway, because "why is this still in my bags" is answered by
     -- which slot was refused and why, not by the run summary's count (#139).
     local issued, skipReason, skipDetail = issueOp(op)
-    if not issued then
+    if issued then
+        state.totalIssued = (state.totalIssued or 0) + 1
+        -- Flush the transaction log every N issued ops while we have Ledger's
+        -- periodic rescan paused, so the per-tab bank log doesn't overflow
+        -- before we capture its older entries. Gated on rescanWasActive: if the
+        -- user had the rescan disabled, we do not sneak it back in here. The
+        -- same call Ledger's ticker makes; pcall + a no-op callback are
+        -- defensive. Inside this branch because a refused op moved nothing, so
+        -- it added no bank log entry to capture and must not spend a
+        -- synchronous QueryGuildBankLog burst.
+        if state.rescanWasActive
+           and state.totalIssued % TRANSACTION_LOG_FLUSH_OPS == 0 then
+            pcall(function()
+                if GBL.RescanTransactionLogs then
+                    GBL:RescanTransactionLogs(function() end)
+                end
+            end)
+        end
+    else
         local why = skipReason or "refused"
         if skipDetail then why = why .. " (" .. skipDetail .. ")" end
         GBL:SortWarn(string.format(
@@ -501,21 +519,9 @@ pumpOne = function()
             GBL:FormatSlotRef(op.srcTab or 0, op.srcSlot or 0),
             why, op.count or 0, itemDesc))
     end
+    -- Advances either way: the op is done with, issued or refused, and the
+    -- pump must not re-try it. Convergence re-plans what is left.
     state.opIndex = state.opIndex + 1
-    state.totalIssued = (state.totalIssued or 0) + 1
-    -- Flush the transaction log every N issued ops while we have Ledger's
-    -- periodic rescan paused, so the per-tab bank log doesn't overflow before we
-    -- capture its older entries. Gated on rescanWasActive: if the user had the
-    -- rescan disabled, we do not sneak it back in here. The same call Ledger's
-    -- ticker makes; pcall + a no-op callback are defensive.
-    if state.rescanWasActive
-       and state.totalIssued % TRANSACTION_LOG_FLUSH_OPS == 0 then
-        pcall(function()
-            if GBL.RescanTransactionLogs then
-                GBL:RescanTransactionLogs(function() end)
-            end
-        end)
-    end
     scheduleNextPump()
 end
 
