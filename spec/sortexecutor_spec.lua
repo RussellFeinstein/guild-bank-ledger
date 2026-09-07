@@ -368,6 +368,56 @@ describe("SortExecutor (fire-and-forget pump)", function()
             restoreRescanFns(s)
         end)
 
+        -- The flush fires on a count of issued ops, so a refused bag deposit
+        -- must not advance it. Fourteen real moves plus a refusal is fourteen
+        -- ops of bank traffic, and flushing there spends a synchronous
+        -- QueryGuildBankLog burst on nothing.
+        it("does not let a refused bag op advance the flush counter", function()
+            local s = spyRescanFns()
+            flushBankOpenedChain(s)
+            GBL._rescanActive = true
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20, locked = true },
+            })
+            local ops, slots = {}, {}
+            for i = 1, 14 do
+                ops[i] = { op = "move", srcTab = 1, srcSlot = i,
+                           dstTab = 2, dstSlot = i, itemID = 100, count = 5 }
+                slots[i] = { itemID = 100, name = "Flask", count = 5 }
+            end
+            ops[15] = { op = "move", srcTab = -1, srcSlot = 1,
+                        dstTab = 2, dstSlot = 20, itemID = 100, count = 20 }
+            Helpers.populateTab(1, slots)
+            GBL:ExecuteSortPlan({ ops = ops }, function() end, { includeBags = true })
+            drainTimers(120)
+            assert.equals(0, s.rescanCalls,
+                "14 issued ops plus a refusal should not reach the flush count")
+            restoreRescanFns(s)
+        end)
+
+        it("still flushes on the fifteenth issued op when a refusal follows", function()
+            local s = spyRescanFns()
+            flushBankOpenedChain(s)
+            GBL._rescanActive = true
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20, locked = true },
+            })
+            local ops, slots = {}, {}
+            for i = 1, 15 do
+                ops[i] = { op = "move", srcTab = 1, srcSlot = i,
+                           dstTab = 2, dstSlot = i, itemID = 100, count = 5 }
+                slots[i] = { itemID = 100, name = "Flask", count = 5 }
+            end
+            ops[16] = { op = "move", srcTab = -1, srcSlot = 1,
+                        dstTab = 2, dstSlot = 20, itemID = 100, count = 20 }
+            Helpers.populateTab(1, slots)
+            GBL:ExecuteSortPlan({ ops = ops }, function() end, { includeBags = true })
+            drainTimers(120)
+            assert.equals(1, s.rescanCalls,
+                "the fifteenth issued op should still flush exactly once")
+            restoreRescanFns(s)
+        end)
+
         it("does not flush when rescan was not active at start (honours user disable)", function()
             local s = spyRescanFns()
             flushBankOpenedChain(s)
@@ -719,6 +769,54 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.is_not_nil(result.bagSkipReasons, "no per-reason breakdown")
             assert.equals(1, result.bagSkipReasons["locked"])
             assert.equals(1, result.bagSkipReasons["short-stack"])
+        end)
+
+        -- "Ops issued" is the number the summary's average seconds-per-op is
+        -- computed from, so counting a refusal as issued makes the run look
+        -- faster than it was and claims work that never happened.
+        it("does not count a refused deposit as an issued op", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20, locked = true },
+            })
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = -1, srcSlot = 1,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
+            }, function() end, { includeBags = true })
+            drainTimers()
+
+            -- Probe with the surrounding commas: a bare "0 ops issued" is a
+            -- substring of "10 ops issued" and would pass on the wrong run.
+            assert.is_not_nil(findLine("passes, 0 ops issued,"),
+                "the summary should not claim an op it refused: "
+                .. tostring(findLine("ops issued")))
+        end)
+
+        -- The abort path is the one that derives done from the issued count
+        -- (the normal path takes total minus residual), so it is where a
+        -- refusal counted as issued reaches the caller as work completed.
+        it("reports no work done when the only issued op was refused", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20, locked = true },
+            })
+            Helpers.populateTab(1, { [1] = { itemID = 200, name = "Ore", count = 10 } })
+            local result
+            -- The first pump tick runs inside ExecuteSortPlan, so by the time
+            -- it returns the bag op has already been refused and op 2 is
+            -- still pending.
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = -1, srcSlot = 1,
+                      dstTab = 1, dstSlot = 1, itemID = 100, count = 20 },
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 200, count = 10 },
+                },
+            }, function(r) result = r end, { includeBags = true })
+            GBL:CancelSortExecution()
+            drainTimers()
+
+            assert.is_not_nil(result)
+            assert.equals(0, result.done)
+            assert.equals(2, result.total)
         end)
 
         it("carries on with later ops after a skip", function()
