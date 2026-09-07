@@ -426,6 +426,23 @@ describe("SortExecutor (fire-and-forget pump)", function()
             return total
         end
 
+        --- Every sort-channel message this run produced, in order.
+        local function sortLines()
+            local out = {}
+            for _, e in ipairs(GBL:GetLog("sort") or {}) do
+                out[#out + 1] = e.message or ""
+            end
+            return out
+        end
+
+        --- The first sort line containing `needle` (literal, never a pattern).
+        local function findLine(needle)
+            for _, m in ipairs(sortLines()) do
+                if m:find(needle, 1, true) then return m end
+            end
+            return nil
+        end
+
         --- A layout the executor can re-plan against between passes.
         local function layoutWithDemand(perSlot)
             return {
@@ -561,15 +578,16 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.equals(0, result.bagOpsIssued)
             assert.equals(1, result.bagOpsSkipped)
 
-            -- The run summary gives a count; the per-op line gives the slot,
-            -- which is what answers "why is this still in my bags".
-            local blob = {}
-            for _, e in ipairs(GBL:GetLog("sort") or {}) do
-                blob[#blob + 1] = e.message or ""
-            end
-            blob = table.concat(blob, "\n")
-            assert.is_truthy(blob:find("skipped", 1, true))
-            assert.is_truthy(blob:find("Bag0/1", 1, true))
+            -- The run summary gives a count; the warning gives the slot AND
+            -- the reason, which is what answers "why is this still in my
+            -- bags". Probe the warning's own prefix rather than the bare
+            -- words: "skipped" alone is also satisfied by the finish line
+            -- and "Bag0/1" by the ordinary per-op line, so both passed
+            -- before any reason was recorded.
+            local warn = findLine("skipped: Bag0/1 locked")
+            assert.is_not_nil(warn, "no warning naming the locked slot and its reason")
+            assert.is_truthy(warn:find("wanted 20 x", 1, true),
+                "the warning should say what it wanted: " .. tostring(warn))
         end)
 
         -- The wrong item has to be present in SUFFICIENT quantity, or the
@@ -593,6 +611,11 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.equals(0, countItem(1, 999))
             assert.equals(3, countItem(1, 777))
             assert.equals(1, result.bagOpsSkipped)
+            -- The detail names what the slot actually holds, which is the
+            -- whole diagnosis: the stack the plan aimed at is gone and
+            -- something else took the slot.
+            assert.is_not_nil(findLine("skipped: Bag0/1 item-mismatch (holds it:999)"),
+                "the warning should name the item the slot now holds")
         end)
 
         it("skips an empty bag slot", function()
@@ -606,6 +629,96 @@ describe("SortExecutor (fire-and-forget pump)", function()
 
             assert.equals(1, result.bagOpsSkipped)
             assert.equals(0, countItem(1, 100))
+            assert.is_not_nil(findLine("skipped: Bag0/4 empty"),
+                "an absent slot should be reported as empty, not as a mismatch")
+        end)
+
+        -- A stack the player partly spent between the plan and the op. The
+        -- count is the diagnosis, so it rides the warning: "short-stack"
+        -- alone does not say whether one was missing or nineteen.
+        it("skips a bag slot that no longer holds enough", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 12 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = -1, srcSlot = 1,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
+            }, function(r) result = r end, { includeBags = true })
+            drainTimers()
+
+            assert.equals(1, result.bagOpsSkipped)
+            assert.equals(12, countBagItem(0, 100))
+            assert.equals(0, countItem(1, 100))
+            assert.is_not_nil(findLine("skipped: Bag0/1 short-stack (have 12)"),
+                "the warning should say how much is actually there")
+        end)
+
+        -- Defensive, not reachable from the planner: admission only accepts a
+        -- pseudo-tab that round-trips, so a tab this deep decodes to no bag at
+        -- all. It renders as T-7/1 rather than a Bag ref on purpose, because
+        -- calling an undecodable tab "Bag?" would be a lie about what the op
+        -- named. The rule that a bag source must never print as a negative tab
+        -- is about VALID bag tabs, which the neighbouring spec pins.
+        it("skips an op whose source tab decodes to no bag", function()
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = -7, srcSlot = 1,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
+            }, function(r) result = r end, { includeBags = true })
+            drainTimers()
+
+            assert.equals(1, result.bagOpsSkipped)
+            assert.is_not_nil(findLine("skipped: T-7/1 no-bag"),
+                "an undecodable source tab should be named as such")
+        end)
+
+        -- A client without the container API cannot lift from a bag at all.
+        -- Reported as its own reason so a capture does not read as "the
+        -- player emptied every one of these slots".
+        it("skips every bag op when the container API is absent", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            local realContainer = _G.C_Container
+            _G.C_Container = nil
+            local result
+            local ok, err = pcall(function()
+                GBL:ExecuteSortPlan({
+                    ops = { { op = "move", srcTab = -1, srcSlot = 1,
+                              dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
+                }, function(r) result = r end, { includeBags = true })
+                drainTimers()
+            end)
+            _G.C_Container = realContainer
+            assert.is_true(ok, tostring(err))
+
+            assert.equals(1, result.bagOpsSkipped)
+            assert.equals(20, countBagItem(0, 100))
+            assert.is_not_nil(findLine("skipped: Bag0/1 no-api"),
+                "a missing container API should be named, not reported as empty")
+        end)
+
+        it("counts each refusal reason separately in the result", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20, locked = true },
+                [2] = { itemID = 100, name = "Flask", count = 12 },
+            })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = -1, srcSlot = 1,
+                      dstTab = 1, dstSlot = 1, itemID = 100, count = 20 },
+                    { op = "move", srcTab = -1, srcSlot = 2,
+                      dstTab = 1, dstSlot = 2, itemID = 100, count = 20 },
+                },
+            }, function(r) result = r end, { includeBags = true })
+            drainTimers()
+
+            assert.equals(2, result.bagOpsSkipped)
+            assert.is_not_nil(result.bagSkipReasons, "no per-reason breakdown")
+            assert.equals(1, result.bagSkipReasons["locked"])
+            assert.equals(1, result.bagSkipReasons["short-stack"])
         end)
 
         it("carries on with later ops after a skip", function()
