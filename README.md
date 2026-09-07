@@ -72,6 +72,11 @@ Auctionator is an optional dependency. With it installed, the Restock tab can se
 | `/gbl status` | Show addon version, guild name, transaction count, last scan time |
 | `/gbl scan` | Manually trigger a full guild bank scan |
 | `/gbl restock` | Open the Restock tab |
+| `/gbl cleanup` | Remove duplicate records from the database |
+| `/gbl sortpreview` | Print the current sort plan without running it |
+| `/gbl sortexec` | Run the current sort plan (needs sort access, bank open) |
+| `/gbl sortcancel` | Stop a running sort |
+| `/gbl deviations` | List every slot where the bank differs from the layout |
 | `/gbl synclog` | Show the sync-channel session log in a copy-pastable pop-up |
 | `/gbl sortlog` | Show the sort-channel session log in a copy-pastable pop-up |
 | `/gbl logs` | Show the master log: sync + sort + system, merged in timestamp order |
@@ -79,6 +84,9 @@ Auctionator is an optional dependency. With it installed, the Restock tab can se
 | `/gbl logs clear sync\|sort\|system\|all` | Truncate a channel |
 | `/gbl logs debug sync\|sort\|system on\|off` | Toggle per-channel DEBUG-to-chat mirroring |
 | `/gbl audit on\|off\|status\|clear` | Manage persistent log capture (on by default; off is the kill switch; clear wipes the whole account's captures) |
+| `/gbl syncdiag` | Compare your addon version against every peer the client has seen |
+| `/gbl epoch0` | Report records stamped with a zero timestamp (diagnostic for issue #93) |
+| `/gbl bubbletest` | Show chat bubble filter diagnostics |
 | `/gbl help` | Show available commands |
 
 Scanning happens automatically when you open the guild bank. Results are saved per-guild in `SavedVariables/GuildBankLedgerDB.lua`.
