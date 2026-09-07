@@ -232,6 +232,12 @@ function GBL:_SortView_ActivateFocused()
     local idx = (self.A11Y and self.A11Y.focusIndex) or 0
     local widget = order and idx > 0 and order[idx]
     if not widget then return false end
+    -- A disabled widget is not activatable. AceGUI's own click handlers
+    -- check `disabled` before firing, but this function drives SetValue
+    -- and Fire directly (a CheckBox ignores OnClick), which walks past
+    -- that check. Returning false leaves the key propagating rather than
+    -- reporting a press that did nothing.
+    if widget.disabled then return false end
     if widget.type == "CheckBox" and widget.GetValue and widget.SetValue then
         local newValue = not widget:GetValue()
         widget:SetValue(newValue)
@@ -437,8 +443,12 @@ function GBL:_SortView_Preview()
             local lbl = AceGUI:Create("Label")
             lbl:SetFullWidth(true)
             lbl:SetFontObject(GameFontNormalSmall)
-            lbl:SetText(format("  |cffff5555%d x %s at T%d/%d|r",
-                u.count, itemLabel(u.itemID), u.tabIndex, u.slotIndex))
+            -- Through FormatSlotRef like every other slot ref on this tab:
+            -- an unplaced entry can be a bag source (#139), and a bare
+            -- "T%d/%d" renders the pseudo-tab as "T-1/5".
+            lbl:SetText(format("  |cffff5555%d x %s at %s|r",
+                u.count, itemLabel(u.itemID),
+                GBL:FormatSlotRef(u.tabIndex, u.slotIndex)))
             content:AddChild(lbl)
         end
     end
