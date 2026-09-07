@@ -391,7 +391,7 @@ describe("ChangelogView", function()
             local scroll = findChild(container, "ScrollFrame")
             local navGroup = scroll._children[1]
             local prevBtn = navGroup._children[1]
-            assert.is_true(prevBtn._disabled)
+            assert.is_true(prevBtn.disabled)
             assert.truthy(prevBtn._text:find("- Previous -"))
 
             GBL.CHANGELOG_DATA = original
@@ -410,7 +410,7 @@ describe("ChangelogView", function()
             local scroll = findChild(container, "ScrollFrame")
             local navGroup = scroll._children[1]
             local nextBtn = navGroup._children[3]
-            assert.is_true(nextBtn._disabled)
+            assert.is_true(nextBtn.disabled)
             assert.truthy(nextBtn._text:find("- Next -"))
 
             GBL.CHANGELOG_DATA = original

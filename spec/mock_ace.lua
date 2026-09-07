@@ -301,7 +301,13 @@ function MockAce.install()
             _height = 0,
             _fullWidth = false,
             _shown = true,
-            _disabled = false,
+            -- Real AceGUI widgets store the flag as `disabled` (see
+            -- AceGUIWidget-CheckBox.lua and -Button.lua, both `self.disabled
+            -- = disabled`), and the widget's own OnClick handler reads it to
+            -- refuse a click. Production code that consults the flag must
+            -- therefore read `disabled`, so the mock has to spell it the same
+            -- way or a guard passes here and does nothing in game.
+            disabled = false,
             _title = "",
             _statusText = "",
         }
@@ -404,7 +410,7 @@ function MockAce.install()
         widget.sizer_se = mockSizer()
         widget.sizer_s  = mockSizer()
         widget.sizer_e  = mockSizer()
-        widget.SetDisabled = function(self, d) self._disabled = d end
+        widget.SetDisabled = function(self, d) self.disabled = d end
         widget.SetLayout = function() end
         widget.SetTitle = function(self, t) self._title = t end
         widget.SetStatusText = function(self, t) self._statusText = t end
