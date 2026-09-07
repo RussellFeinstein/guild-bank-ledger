@@ -428,7 +428,18 @@ local function liftFromBag(op)
         return false, "short-stack", "have " .. tostring(have)
     end
 
-    if op.op == "split" and have > want and C_Container.SplitContainerItem then
+    -- Take exactly what the op asked for. The plan is a snapshot, so a
+    -- stack the player topped up between Preview and Execute holds more
+    -- than the op wants, and bags are mutated far more often than a guild
+    -- bank is. The destination was sized for op.count, so a whole-stack
+    -- pickup would over-deposit; the split is decided from what the slot
+    -- holds NOW rather than from op.op, which was decided at plan time.
+    if have > want then
+        -- No split API means no partial take. Refusing costs one skipped
+        -- op that the next pass retries; falling through to the whole-stack
+        -- pickup would deposit everything the player had, and the
+        -- destination half of the op cannot tell the difference.
+        if not C_Container.SplitContainerItem then return false, "no-api" end
         C_Container.SplitContainerItem(bagID, op.srcSlot, want)
     elseif C_Container.PickupContainerItem then
         C_Container.PickupContainerItem(bagID, op.srcSlot)

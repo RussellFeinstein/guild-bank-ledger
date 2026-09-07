@@ -122,6 +122,47 @@ local function slotRef(self, tabIndex, slotIndex)
     return string.format("T%d/%d", tabIndex, slotIndex)
 end
 
+--- Fold plan.unplaced down to one entry per distinct bag slot.
+---
+--- A single bag slot can be recorded more than once: Phase 1B records the
+--- leftover a supply could not place, and either Phase 2 abort then records
+--- one entry per remaining assignment, several of which share a source when
+--- a stack was split across destinations. Those portions are disjoint takes
+--- from one stack, so the counts add up and the slot is named once. The
+--- first entry's reason wins; a slot with two reasons was blocked by the
+--- first one it hit.
+---
+--- Bank-origin entries (non-negative tabIndex) are not bag stays and are
+--- dropped. Recording order is preserved so the continuation line names
+--- stacks in the order the planner met them.
+---
+--- Exported as GBL._BagStays for the spec: it is otherwise file-local, and
+--- the multi-entry arrangement it exists for is expensive to build through
+--- PlanSort.
+--- @param unplaced table plan.unplaced
+--- @return table Array of { tabIndex, slotIndex, itemID, count, reason }
+local function bagStays(unplaced)
+    local out, byKey = {}, {}
+    for _, u in ipairs(unplaced or {}) do
+        if type(u.tabIndex) == "number" and u.tabIndex < 0 then
+            local key = u.tabIndex .. ":" .. tostring(u.slotIndex)
+            local seen = byKey[key]
+            if seen then
+                seen.count = (seen.count or 0) + (u.count or 0)
+            else
+                seen = {
+                    tabIndex = u.tabIndex, slotIndex = u.slotIndex,
+                    itemID = u.itemID, count = u.count or 0, reason = u.reason,
+                }
+                byKey[key] = seen
+                out[#out + 1] = seen
+            end
+        end
+    end
+    return out
+end
+GBL._BagStays = bagStays
+
 ------------------------------------------------------------------------
 -- Helpers
 ------------------------------------------------------------------------
@@ -1342,13 +1383,11 @@ function GBL:PlanSort(snapshot, layout, opts)
     end
 
     -- Admitted bag stacks the plan could not place. plan.unplaced is final
-    -- here (Phases 1B, 2 and 3 are the producers), and a bag-origin entry is
-    -- the only kind with a negative tabIndex.
-    for _, u in ipairs(plan.unplaced) do
-        if type(u.tabIndex) == "number" and u.tabIndex < 0 then
-            diag.bagStay = diag.bagStay + 1
-        end
-    end
+    -- here (Phases 1B, 2 and 3 are the producers). Folded by slot, because
+    -- one slot can be recorded several times and the unit a player counts
+    -- is the stack in the slot, not the number of takes that failed.
+    local stays = bagStays(plan.unplaced)
+    diag.bagStay = #stays
 
     -- Planner diagnostics. The first line is always emitted (baseline
     -- timing + replan hitch investigation). The phase / demand breakdown
@@ -1402,9 +1441,8 @@ function GBL:PlanSort(snapshot, layout, opts)
         -- Bank-origin unplaced entries are not bag stays and are left out.
         if diag.bagStay > 0 then
             local parts = {}
-            for _, u in ipairs(plan.unplaced) do
-                if type(u.tabIndex) == "number" and u.tabIndex < 0
-                   and #parts < STAY_LINE_MAX_NAMED then
+            for _, u in ipairs(stays) do
+                if #parts < STAY_LINE_MAX_NAMED then
                     local desc = self.DescribeItem and self:DescribeItem(u.itemID)
                         or ("it:" .. tostring(u.itemID))
                     table.insert(parts, string.format("%s x%d at %s (%s)",
