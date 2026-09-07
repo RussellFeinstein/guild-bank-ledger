@@ -843,10 +843,79 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 .. tostring(findLine("Sort bags:")))
         end)
 
-        -- The counts come from the LAST replan, not the first. Pass 1's
-        -- figure is the state before the run did anything, which is the one
-        -- number guaranteed to be wrong by the time it is printed.
-        it("reports what the freshest replan still sees in the bags", function()
+        -- Two replans, because one cannot tell "the last replan wins" from
+        -- "the first replan wins": with a single pass the two are the same
+        -- number. Mutation testing caught exactly that. The first replan
+        -- still sees two stacks and returns a shorter plan, so a second pass
+        -- runs; the second sees none.
+        it("reports the last replan's bag count, not the first", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+                [2] = { itemID = 100, name = "Flask", count = 15 },
+            })
+            Helpers.populateTab(1, { [5] = { itemID = 200, name = "Ore", count = 5 } })
+            local calls = 0
+            local realPlanSort = GBL.PlanSort
+            GBL.PlanSort = function()
+                calls = calls + 1
+                if calls == 1 then
+                    return {
+                        ops = { { op = "move", srcTab = 1, srcSlot = 5,
+                                  dstTab = 2, dstSlot = 5, itemID = 200, count = 5 } },
+                        deficits = {}, unplaced = {},
+                        diag = { bagSupplies = 2, bagStay = 1 },
+                    }
+                end
+                return { ops = {}, deficits = {}, unplaced = {},
+                         diag = { bagSupplies = 0, bagStay = 0 } }
+            end
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = -1, srcSlot = 1,
+                      dstTab = 1, dstSlot = 1, itemID = 100, count = 20 },
+                    { op = "move", srcTab = -1, srcSlot = 2,
+                      dstTab = 1, dstSlot = 2, itemID = 100, count = 15 },
+                },
+            }, function() end, { includeBags = true, layout = layoutWithDemand(20) })
+            drainTimers(120)
+            GBL.PlanSort = realPlanSort
+
+            assert.is_true(calls >= 2,
+                "fixture needs two replans to tell first from last, got " .. calls)
+            assert.is_not_nil(findLine("still in bags: 0"),
+                "expected the second replan's count: " .. tostring(findLine("Sort bags:")))
+            assert.is_nil(findLine("still in bags: 2"),
+                "the first replan's count should not survive to the finish line")
+        end)
+
+        -- Three reasons rather than two, because with two the unsorted order
+        -- happens to match the sorted one and the mutation that drops the
+        -- sort passes.
+        it("orders the reason breakdown regardless of table order", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20, locked = true },
+                [2] = { itemID = 100, name = "Flask", count = 12 },
+            })
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = -1, srcSlot = 1,
+                      dstTab = 1, dstSlot = 1, itemID = 100, count = 20 },
+                    { op = "move", srcTab = -1, srcSlot = 2,
+                      dstTab = 1, dstSlot = 2, itemID = 100, count = 20 },
+                    { op = "move", srcTab = -1, srcSlot = 9,
+                      dstTab = 1, dstSlot = 3, itemID = 100, count = 20 },
+                },
+            }, function() end, { includeBags = true })
+            drainTimers()
+
+            assert.is_not_nil(findLine("[empty:1 locked:1 short-stack:1]"),
+                "expected the three reasons in sorted order: "
+                .. tostring(findLine("Sort bags:")))
+        end)
+
+        -- The counts come from a replan rather than from the run's own
+        -- tallies, and the unplaceable share renders only when there is one.
+        it("renders the replan's bag counts with the unplaceable share", function()
             Helpers.populateBag(0, {
                 [1] = { itemID = 100, name = "Flask", count = 20 },
             })
