@@ -17,6 +17,12 @@ before the third run rather than after it.
 | 1 | `bags:23(fill=0,spill=31)` | 31 |
 | 2 (replan) | `bags:4(fill=0,spill=7)` | 7 |
 
+Those terms are in the **pre-diagnostics format**, which is what the client was
+emitting on the day. The current term reads
+`bags:<admitted>/<seen>(fill=,spill=,stay=,ignored=,bound=,locked=,nolink=)`, so
+grepping a new capture for the shape above finds nothing. The recording is left
+as it was said rather than rewritten to a format that did not exist yet.
+
 Thirty-eight of thirty-eight deposits landed. No refusal, no cursor left holding
 anything, and no op anywhere in the capture targeted a bag, which is the source-only
 invariant holding under pressure rather than in a fixture.

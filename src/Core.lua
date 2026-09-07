@@ -2270,10 +2270,6 @@ function GBL:HandleSlashCommand(input)
     end
 end
 
---- Compare the current bank scan against the layout's expected demand map
--- and print every mismatch. Useful after a sort to confirm the result, or
--- before a sort to see what's deviant. Uses the same expected layout the
--- planner does (including items[id].slots extensions beyond slotOrder).
 --- Is the sort configured to treat the player's bags as a source? (#139)
 function GBL:IsSortIncludeBags()
     return (self.db and self.db.profile and self.db.profile.sort
@@ -2293,6 +2289,11 @@ function GBL:BuildSortPlanOpts()
     return { bagSnapshot = self:ScanBags() }
 end
 
+--- Compare the current bank scan against the layout's expected demand map
+--- and print every mismatch. Useful after a sort to confirm the result, or
+--- before a sort to see what's deviant. Uses the same expected layout the
+--- planner does (including items[id].slots extensions beyond slotOrder).
+---
 --- Bank-only on purpose, not by omission: this reads plan.demandMap and
 --- nothing else, and demandMap is derived purely from the layout, so a bag
 --- snapshot cannot change a single line of the output (#139).

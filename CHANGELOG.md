@@ -13,11 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - The sort log now says what the bag scan saw and what became of it: how many bag stacks the layout named, how many were left alone as not in the layout, bound, locked or unreadable, which named stacks have to stay in your bags and why, why any deposit was refused during the run, and how many named stacks were still in your bags when the sort finished. Before this the log could only show the number of deposits it attempted.
-- `/gbl help` and the README command table now list every command the addon answers to. Nine commands worked but appeared in neither place, so the only way to find them was to read the source. The additions are `/gbl restock`, `/gbl cleanup`, `/gbl sortpreview`, `/gbl sortexec`, `/gbl sortcancel`, `/gbl syncdiag`, `/gbl deviations`, `/gbl epoch0` and `/gbl bubbletest`.
+- `/gbl help` and the README command table now list every command the addon answers to. Four of them appeared in neither place, so the only way to find them was to read the source, and five more were listed in one but not the other. The additions are `/gbl restock`, `/gbl cleanup`, `/gbl sortpreview`, `/gbl sortexec`, `/gbl sortcancel`, `/gbl syncdiag`, `/gbl deviations`, `/gbl epoch0` and `/gbl bubbletest`.
 
 ### Fixed
-- A bag deposit the sort had to skip no longer counts as a completed move, so the run summary's ops issued count, average time per move and done count reflect what was actually moved.
-- The keyboard focus indicator now draws. Moving focus with Tab has been setting focus correctly and showing nothing on screen, which made the feature impossible to use and impossible to notice was broken: the function meant to draw the highlight only ever recorded the state in memory. Focus now shows a 2 pixel ring in the palette's focus colour, so it follows your colourblind mode and high contrast setting. This affects the Restock tab as well, where keyboard navigation had the same invisible behaviour since it shipped.
+- A bag deposit the sort had to skip no longer counts as a completed move, so the run summary's ops issued count and average time per move reflect what was actually moved.
+- The sort preview no longer shows a bag slot as a bank tab. An item the sort could not place read as "at T-1/5" in the Unplaced list while every other line on the tab, and the chat preview, called the same slot "Bag0/5".
+- Keyboard navigation no longer activates a control that is greyed out. Tabbing to "Include bags" during a running sort and pressing Space used to toggle it, which threw away the move list on screen and replaced it with one for a different set of items.
+- The sort now deposits only the amount it planned to. If you added to a bag stack between previewing and running the sort, the whole enlarged stack was deposited instead of the surplus the plan asked for.
+- A bag stack the sort cannot place is counted once. A stack the plan had tried to split across several destinations was reported as several stacks, and the log named its slot once per attempt.
+- The keyboard focus indicator now draws. Moving focus with Tab has been setting focus correctly and showing nothing on screen, which made the feature impossible to use and impossible to notice was broken: the function meant to draw the highlight only ever recorded the state in memory. Focus now shows a 2 pixel yellow ring, drawn from the palette's focus colour so a future palette can change it. This affects the Restock tab as well, where keyboard navigation had the same invisible behaviour since it shipped.
 
 ## [0.38.1] - 2026-08-27
 
