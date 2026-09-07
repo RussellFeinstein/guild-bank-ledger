@@ -942,6 +942,38 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 "a bank-only run should not carry a bag line")
         end)
 
+        -- The finish line says what the bags did. Nothing said whether they
+        -- were in scope at all, so a run that deposited nothing was
+        -- indistinguishable from a run with the toggle off, from the very
+        -- first line of the capture.
+        it("records that bags were included on the start line", function()
+            Helpers.populateTab(1, { [1] = { itemID = 200, name = "Ore", count = 10 } })
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 200, count = 10 } },
+            }, function() end, { includeBags = true })
+            drainTimers()
+
+            local start = findLine("starting execution")
+            assert.is_not_nil(start, "no start line")
+            assert.is_truthy(start:find("bags=on", 1, true),
+                "start line should say bags were included: " .. tostring(start))
+        end)
+
+        it("records that bags were excluded on the start line", function()
+            Helpers.populateTab(1, { [1] = { itemID = 200, name = "Ore", count = 10 } })
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 200, count = 10 } },
+            }, function() end)
+            drainTimers()
+
+            local start = findLine("starting execution")
+            assert.is_not_nil(start, "no start line")
+            assert.is_truthy(start:find("bags=off", 1, true),
+                "start line should say bags were excluded: " .. tostring(start))
+        end)
+
         it("carries on with later ops after a skip", function()
             Helpers.populateBag(0, {
                 [1] = { itemID = 100, name = "Flask", count = 20, locked = true },
