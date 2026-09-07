@@ -749,6 +749,55 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 "a missing container API should be named, not reported as empty")
         end)
 
+        -- A partial take needs SplitContainerItem. Falling through to the
+        -- whole-stack pickup when it is missing deposits everything the
+        -- player had, not the surplus the plan asked for, and the bank half
+        -- of the op cannot tell the difference. Refusing is recoverable;
+        -- over-depositing is not.
+        it("refuses a partial take when the split API is absent", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 60 },
+            })
+            local realSplit = _G.C_Container.SplitContainerItem
+            _G.C_Container.SplitContainerItem = nil
+            local result
+            local ok, err = pcall(function()
+                GBL:ExecuteSortPlan({
+                    ops = { { op = "split", srcTab = -1, srcSlot = 1,
+                              dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
+                }, function(r) result = r end, { includeBags = true })
+                drainTimers()
+            end)
+            _G.C_Container.SplitContainerItem = realSplit
+            assert.is_true(ok, tostring(err))
+
+            assert.equals(1, result.bagOpsSkipped)
+            assert.equals(60, countBagItem(0, 100),
+                "the whole stack must stay in the bag rather than be deposited")
+            assert.is_not_nil(findLine("skipped: Bag0/1 no-api"),
+                "the missing split API should be named")
+        end)
+
+        -- The plan is a snapshot. A player who tops a stack up between
+        -- Preview and Execute turns a whole-stack "move" into one where the
+        -- source holds more than the op asked for, and bags are mutated far
+        -- more often than a guild bank is. Take what the op asked for: the
+        -- destination was sized for that count, not for whatever the stack
+        -- has grown to.
+        it("takes only the wanted count when the bag stack grew", function()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 60 },
+            })
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = -1, srcSlot = 1,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
+            }, function() end, { includeBags = true })
+            drainTimers()
+
+            assert.equals(40, countBagItem(0, 100),
+                "only the 20 the op asked for should have left the bag")
+        end)
+
         it("counts each refusal reason separately in the result", function()
             Helpers.populateBag(0, {
                 [1] = { itemID = 100, name = "Flask", count = 20, locked = true },

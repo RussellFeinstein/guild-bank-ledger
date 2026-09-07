@@ -3297,6 +3297,73 @@ describe("SortPlanner", function()
             end)
         end)
 
+        -- One bag slot can reach plan.unplaced more than once. Phase 1B
+        -- records the leftover a supply could not place, and either Phase 2
+        -- abort then records one entry per REMAINING ASSIGNMENT, several of
+        -- which share a source when a stack was split across destinations.
+        -- Counting entries therefore reports one stack as several, names
+        -- the same slot repeatedly on the continuation line, and inflates
+        -- the executor's "still in bags" tail, which reads the same figure.
+        -- The unit is the slot, so the helper folds by slot and sums the
+        -- portions, which are disjoint takes from one stack.
+        describe("_BagStays", function()
+            it("folds two entries for one bag slot into one stay", function()
+                local stays = GBL._BagStays({
+                    { tabIndex = -1, slotIndex = 3, itemID = 100, count = 40,
+                      reason = "cycle-no-pivot" },
+                    { tabIndex = -1, slotIndex = 3, itemID = 100, count = 30,
+                      reason = "cycle-no-pivot" },
+                })
+
+                assert.equals(1, #stays)
+                assert.equals(70, stays[1].count, "the portions are disjoint and add up")
+                assert.equals(-1, stays[1].tabIndex)
+                assert.equals(3, stays[1].slotIndex)
+            end)
+
+            it("keeps two different bag slots apart", function()
+                local stays = GBL._BagStays({
+                    { tabIndex = -1, slotIndex = 3, itemID = 100, count = 40 },
+                    { tabIndex = -1, slotIndex = 4, itemID = 100, count = 30 },
+                })
+
+                assert.equals(2, #stays)
+            end)
+
+            it("keeps the same slot number in two different bags apart", function()
+                local stays = GBL._BagStays({
+                    { tabIndex = -1, slotIndex = 3, itemID = 100, count = 40 },
+                    { tabIndex = -2, slotIndex = 3, itemID = 100, count = 30 },
+                })
+
+                assert.equals(2, #stays)
+            end)
+
+            it("leaves bank entries out entirely", function()
+                local stays = GBL._BagStays({
+                    { tabIndex = 4, slotIndex = 3, itemID = 100, count = 40 },
+                    { tabIndex = -1, slotIndex = 3, itemID = 100, count = 30 },
+                })
+
+                assert.equals(1, #stays)
+                assert.equals(-1, stays[1].tabIndex)
+            end)
+
+            it("preserves the order the entries were recorded in", function()
+                local stays = GBL._BagStays({
+                    { tabIndex = -2, slotIndex = 9, itemID = 100, count = 1 },
+                    { tabIndex = -1, slotIndex = 3, itemID = 200, count = 1 },
+                })
+
+                assert.equals(-2, stays[1].tabIndex)
+                assert.equals(-1, stays[2].tabIndex)
+            end)
+
+            it("returns nothing for an empty list", function()
+                assert.equals(0, #GBL._BagStays({}))
+            end)
+        end)
+
         -- The Phase 2 refused-emit debug line was the one place a bag source
         -- still rendered through a bare tab format. A bag-sourced assignment
         -- is refused on the first drain pass whenever its destination still
