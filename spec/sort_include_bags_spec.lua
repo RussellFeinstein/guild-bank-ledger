@@ -220,6 +220,13 @@ describe("Include bags in sort", function()
             GBL:PrintDeviations()
             local on = table.concat(MockWoW.prints, "\n")
 
+            -- Anchor both sides as real output first. Without this the
+            -- comparison passes on two empty strings, so an early return
+            -- added to PrintDeviations later would read as agreement.
+            assert.is_truthy(off:find("Deviation", 1, true) or off:find("deviation", 1, true),
+                "expected deviation output, got: " .. off)
+            assert.is_true(#off > 0)
+
             assert.equals(off, on)
         end)
     end)

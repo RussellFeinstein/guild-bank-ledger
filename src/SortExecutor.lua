@@ -788,6 +788,11 @@ GBL._sortExecutorConstants = {
     MAX_PASSES = MAX_PASSES,
     SCAN_WAIT_TIMEOUT = SCAN_WAIT_TIMEOUT,
     STALL_SLACK = STALL_SLACK,
+    -- Read by the flush-throttle specs. A spec matching the literal 15
+    -- silently stops discriminating if this moves up: N-1 issued ops
+    -- produce no flush under any larger value, so the test passes for the
+    -- wrong reason rather than failing.
+    TRANSACTION_LOG_FLUSH_OPS = TRANSACTION_LOG_FLUSH_OPS,
 }
 
 -- Drive one pump tick directly (the mock does not auto-run timers).

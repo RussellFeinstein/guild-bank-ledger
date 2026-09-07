@@ -379,19 +379,20 @@ describe("SortExecutor (fire-and-forget pump)", function()
             Helpers.populateBag(0, {
                 [1] = { itemID = 100, name = "Flask", count = 20, locked = true },
             })
+            local flushEvery = GBL._sortExecutorConstants.TRANSACTION_LOG_FLUSH_OPS
             local ops, slots = {}, {}
-            for i = 1, 14 do
+            for i = 1, flushEvery - 1 do
                 ops[i] = { op = "move", srcTab = 1, srcSlot = i,
                            dstTab = 2, dstSlot = i, itemID = 100, count = 5 }
                 slots[i] = { itemID = 100, name = "Flask", count = 5 }
             end
-            ops[15] = { op = "move", srcTab = -1, srcSlot = 1,
+            ops[flushEvery] = { op = "move", srcTab = -1, srcSlot = 1,
                         dstTab = 2, dstSlot = 20, itemID = 100, count = 20 }
             Helpers.populateTab(1, slots)
             GBL:ExecuteSortPlan({ ops = ops }, function() end, { includeBags = true })
             drainTimers(120)
             assert.equals(0, s.rescanCalls,
-                "14 issued ops plus a refusal should not reach the flush count")
+                "one short of the flush count plus a refusal should not flush")
             restoreRescanFns(s)
         end)
 
@@ -402,13 +403,14 @@ describe("SortExecutor (fire-and-forget pump)", function()
             Helpers.populateBag(0, {
                 [1] = { itemID = 100, name = "Flask", count = 20, locked = true },
             })
+            local flushEvery = GBL._sortExecutorConstants.TRANSACTION_LOG_FLUSH_OPS
             local ops, slots = {}, {}
-            for i = 1, 15 do
+            for i = 1, flushEvery do
                 ops[i] = { op = "move", srcTab = 1, srcSlot = i,
                            dstTab = 2, dstSlot = i, itemID = 100, count = 5 }
                 slots[i] = { itemID = 100, name = "Flask", count = 5 }
             end
-            ops[16] = { op = "move", srcTab = -1, srcSlot = 1,
+            ops[flushEvery + 1] = { op = "move", srcTab = -1, srcSlot = 1,
                         dstTab = 2, dstSlot = 20, itemID = 100, count = 20 }
             Helpers.populateTab(1, slots)
             GBL:ExecuteSortPlan({ ops = ops }, function() end, { includeBags = true })
