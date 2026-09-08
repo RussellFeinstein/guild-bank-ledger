@@ -875,9 +875,13 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- remainder walking through every stack of the item. The last whole
     -- stack still tops up, which lands the remainder at the tail of the
     -- run in one split and leaves Phase 4 nothing to reorder. A deferred
-    -- stack that finds no free slot is reported unplaced whole rather
-    -- than split, because the last stack fills that partial anyway. And
-    -- within one source (the bank tabs, then each bag) whole stacks are
+    -- stack that no tab can take whole tops up after all: with nothing
+    -- free its remainder cannot open a new partial, so that cannot
+    -- restart the cascade, and skipping it would strand the room a
+    -- second tab's partial still has (Phase 0 merges within a tab, so
+    -- two tabs can each hold one) or spend a deposit on a top-up a bank
+    -- stack should have made. And within one source (the bank tabs as
+    -- one source, then each bag) whole stacks are
     -- walked before partials, so an odd stack sitting ahead of whole
     -- stacks in slot order lands after them instead of opening the run
     -- they then have to split around.
@@ -992,11 +996,12 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- tier 1 cannot fire (every capacity reads 0).
     local function isWholeStack(sup)
         local m = getMaxStack(sup.itemID)
-        return m ~= nil and sup.available >= m
+        return type(m) == "number" and sup.available >= m
     end
-    local wholesLeft = {}
-    for _, sup in ipairs(supplies) do
+    local wholesLeft, wholeAt = {}, {}
+    for i, sup in ipairs(supplies) do
         if sup.available > 0 and not sup.isOverflow and isWholeStack(sup) then
+            wholeAt[i] = true
             wholesLeft[sup.itemID] = (wholesLeft[sup.itemID] or 0) + 1
         end
     end
@@ -1021,7 +1026,7 @@ function GBL:PlanSort(snapshot, layout, opts)
         local sa, sb = supplies[a], supplies[b]
         local ga, gb = spillGroup(sa), spillGroup(sb)
         if ga ~= gb then return ga < gb end
-        local wa, wb = isWholeStack(sa), isWholeStack(sb)
+        local wa, wb = wholeAt[a] or false, wholeAt[b] or false
         if wa ~= wb then return wa end
         return a < b
     end)
@@ -1029,7 +1034,7 @@ function GBL:PlanSort(snapshot, layout, opts)
     for _, supIndex in ipairs(spillOrder) do
         local sup = supplies[supIndex]
         local deferTopup = false
-        if isWholeStack(sup) then
+        if wholeAt[supIndex] then
             wholesLeft[sup.itemID] = wholesLeft[sup.itemID] - 1
             deferTopup = wholesLeft[sup.itemID] > 0
         end
@@ -1041,6 +1046,15 @@ function GBL:PlanSort(snapshot, layout, opts)
             while sup.available > 0 do
                 local ovTab, ovSlot, take, mode =
                     pickOverflowSlot(sup.itemID, sup.available, deferTopup)
+                if not ovTab and deferTopup then
+                    -- No tab can take this stack whole. Topping up is the
+                    -- only room left, and with nothing free the remainder
+                    -- cannot open a new partial, so the cascade cannot
+                    -- restart from here (#146).
+                    deferTopup = false
+                    ovTab, ovSlot, take, mode =
+                        pickOverflowSlot(sup.itemID, sup.available, false)
+                end
                 if not ovTab or not take or take <= 0 then
                     recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
                         sup.available, REASON_OVERFLOW_FULL)
@@ -1297,6 +1311,10 @@ function GBL:PlanSort(snapshot, layout, opts)
                     else
                         local remaining_ = slot.count
                         while remaining_ > 0 do
+                            -- No deferral here (#146): a straggler only
+                            -- exists after a Phase 2 abort, and two whole
+                            -- stragglers of one item cascading would be
+                            -- that abort's symptom, not a routing choice.
                             local ovTab, ovSlot, take =
                                 pickOverflowSlot(slot.itemID, remaining_)
                             if not ovTab or not take or take <= 0 then
