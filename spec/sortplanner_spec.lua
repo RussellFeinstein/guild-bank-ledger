@@ -3401,4 +3401,352 @@ describe("SortPlanner", function()
             end)
         end)
     end)
+
+    ------------------------------------------------------------------
+    -- Whole-stack top-up cascade (#146)
+    --
+    -- Tier 1 of pickOverflowSlotInTab tops up a same-item partial from
+    -- whatever supply arrives, a whole stack included. A whole stack
+    -- meeting a partial was therefore split to fill it, and its own
+    -- remainder became the next partial: two ops per stack, with the
+    -- remainder walking through every later stack of the item (eleven
+    -- ops for six stacks in the 2026-09-07 capture). Now a whole stack
+    -- takes a free slot while more whole stacks of its item are still to
+    -- come, and only the last one tops up the partial, which puts the
+    -- remainder at the run's tail in one split instead of one per stack.
+    ------------------------------------------------------------------
+    describe("whole-stack top-up cascade (#146)", function()
+        --- Display tab 1 holds exactly what it wants, so every stack of
+        --- item 100 anywhere else is surplus bound for overflow tab 2.
+        --- Tab 3 is a display tab with no template: the bank-side source.
+        local function satisfiedLayout()
+            return {
+                tabs = {
+                    [1] = displayTab({ [100] = { slots = 1, perSlot = 20 } }, { [1] = 100 }),
+                    [2] = overflow(),
+                    [3] = displayTab({}, {}),
+                },
+            }
+        end
+
+        local function splitCount(plan)
+            local n = 0
+            for _, op in ipairs(plan.ops) do
+                if op.op == "split" then n = n + 1 end
+            end
+            return n
+        end
+
+        --- Overflow tab 2 after the plan as { [slot] = count } for item
+        --- 100, failing if anything else landed there.
+        local function overflowCounts(final)
+            local out = {}
+            for s, v in pairs(final[2] or {}) do
+                assert.equals(100, v.itemID)
+                out[s] = v.count
+            end
+            return out
+        end
+
+        it("splits only the last whole stack when the run already ends in a partial", function()
+            -- Overflow holds a full stack and a x10 tail. Three whole x20
+            -- stacks arrive. Two take free slots whole; the third pours 10
+            -- into the tail and its own remainder becomes the new tail.
+            -- Four ops, one split, and the run is already canonical so
+            -- Phase 4 has nothing to do. Today every stack splits: six ops.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 20 } },
+                [2] = {
+                    [1] = { itemID = 100, count = 20 },
+                    [2] = { itemID = 100, count = 10 },
+                },
+                [3] = {
+                    [1] = { itemID = 100, count = 20 },
+                    [2] = { itemID = 100, count = 20 },
+                    [3] = { itemID = 100, count = 20 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, satisfiedLayout(),
+                { maxStackByItem = { [100] = 20 } })
+
+            assert.equals(0, #plan.unplaced)
+            assert.equals(4, #plan.ops,
+                "three whole stacks and one tail should cost four ops")
+            assert.equals(1, splitCount(plan))
+            assert.equals(1, plan.diag.phase1bTopup)
+            assert.same({ [1] = 20, [2] = 20, [3] = 20, [4] = 20, [5] = 10 },
+                overflowCounts(applyPlan(snap, plan)))
+        end)
+
+        it("still fills the partial when the tab has no free slot for a whole stack", function()
+            -- Overflow: item 100 x10 at slot 1 with room for 10, every
+            -- other slot a full foreign stack. Two whole x20 stacks arrive
+            -- and neither can take a slot whole. Deferring the first must
+            -- not lose the room the tab still has: the last stack pours 10
+            -- into the partial and 30 stays behind as unplaced.
+            local tab2 = { [1] = { itemID = 100, count = 10 } }
+            for s = 2, 98 do tab2[s] = { itemID = 200, count = 200 } end
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 20 } },
+                [2] = tab2,
+                [3] = {
+                    [1] = { itemID = 100, count = 20 },
+                    [2] = { itemID = 100, count = 20 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, satisfiedLayout(),
+                { maxStackByItem = { [100] = 20, [200] = 200 } })
+
+            assert.equals(1, plan.diag.phase1bTopup)
+            local left = 0
+            for _, u in ipairs(plan.unplaced) do
+                assert.equals(GBL._sortPlannerReasons.OVERFLOW_FULL, u.reason)
+                left = left + u.count
+            end
+            assert.equals(30, left)
+            assert.equals(20, applyPlan(snap, plan)[2][1].count)
+        end)
+
+        --- Same builder as "bag sources" above, which scopes it locally.
+        local function bagSnapshot(bags)
+            local out = {}
+            for bagID, slots in pairs(bags) do
+                local tabIndex = -(bagID + 1)
+                local tabResult = { slots = {}, itemCount = 0 }
+                for slotIndex, s in pairs(slots) do
+                    tabResult.slots[slotIndex] = {
+                        itemLink = Helpers.makeItemLink(s.itemID, "Item" .. s.itemID, 1),
+                        count = s.count,
+                        slotIndex = slotIndex,
+                        tabIndex = tabIndex,
+                        itemID = s.itemID,
+                    }
+                    tabResult.itemCount = tabResult.itemCount + 1
+                end
+                out[tabIndex] = tabResult
+            end
+            return out
+        end
+
+        --- Total count and slot count of item 100 in overflow tab 2.
+        local function overflowTotal(final)
+            local total, slots = 0, 0
+            for _, c in pairs(overflowCounts(final)) do
+                total = total + c
+                slots = slots + 1
+            end
+            return total, slots
+        end
+
+        it("deposits five whole bag stacks whole when the odd stack sits first (the capture)", function()
+            -- Bag 3 slots 4 to 9 as the 2026-09-07 run had them: x1, then
+            -- five x20 of an item whose max stack is 20. Whole stacks are
+            -- walked before partials within a bag, so the x1 lands last
+            -- and the run comes out canonical with nothing split. Today
+            -- the x1 opens the run and the last whole stack has to split
+            -- around it: seven ops, or eleven before the last-stack rule.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 20 } },
+                [2] = {},
+                [3] = {},
+            })
+            local bags = bagSnapshot({ [3] = {
+                [4] = { itemID = 100, count = 1 },
+                [5] = { itemID = 100, count = 20 },
+                [6] = { itemID = 100, count = 20 },
+                [7] = { itemID = 100, count = 20 },
+                [8] = { itemID = 100, count = 20 },
+                [9] = { itemID = 100, count = 20 },
+            } })
+            local plan = GBL:PlanSort(snap, satisfiedLayout(),
+                { bagSnapshot = bags, maxStackByItem = { [100] = 20 } })
+
+            assert.equals(0, #plan.unplaced)
+            assert.equals(6, #plan.ops, "six stacks should cost six ops")
+            assert.equals(0, splitCount(plan))
+            assert.equals(0, plan.diag.phase1bTopup)
+            local total, slots = overflowTotal(applyPlan(snap, plan, bags))
+            assert.equals(101, total)
+            assert.equals(6, slots)
+        end)
+
+        it("moves a display-tab surplus whole when the odd stack sits first (#144's shape)", function()
+            -- The same six stacks as bank surplus in a display tab.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 20 } },
+                [2] = {},
+                [3] = {
+                    [1] = { itemID = 100, count = 1 },
+                    [2] = { itemID = 100, count = 20 },
+                    [3] = { itemID = 100, count = 20 },
+                    [4] = { itemID = 100, count = 20 },
+                    [5] = { itemID = 100, count = 20 },
+                    [6] = { itemID = 100, count = 20 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, satisfiedLayout(),
+                { maxStackByItem = { [100] = 20 } })
+
+            assert.equals(0, #plan.unplaced)
+            assert.equals(6, #plan.ops)
+            assert.equals(0, splitCount(plan))
+            local total, slots = overflowTotal(applyPlan(snap, plan))
+            assert.equals(101, total)
+            assert.equals(6, slots)
+        end)
+
+        it("already costs six ops when the odd stack sits last (control)", function()
+            -- Pins that the fix is about the walk, not the stacks: with
+            -- the whole stacks first in slot order nothing ever split.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 20 } },
+                [2] = {},
+                [3] = {
+                    [1] = { itemID = 100, count = 20 },
+                    [2] = { itemID = 100, count = 20 },
+                    [3] = { itemID = 100, count = 20 },
+                    [4] = { itemID = 100, count = 20 },
+                    [5] = { itemID = 100, count = 20 },
+                    [6] = { itemID = 100, count = 1 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, satisfiedLayout(),
+                { maxStackByItem = { [100] = 20 } })
+
+            assert.equals(6, #plan.ops)
+            assert.equals(0, splitCount(plan))
+        end)
+
+        it("keeps bank leftovers ahead of a whole bag stack when one slot is left", function()
+            -- Whole-first ordering is within a source, never across
+            -- sources: a bank leftover still claims overflow before a
+            -- deposit does (#139), however small it is. One free slot, a
+            -- x10 bank leftover and a x20 bag stack: the leftover opens the
+            -- slot, the bag stack (the last whole stack of its item) tops
+            -- it up with 10, and the other 10 stays in the bag. Walked
+            -- whole-first across sources, the bag stack would take the
+            -- slot whole and the bank leftover would be the one unplaced.
+            local tab2 = {}
+            for s = 2, 98 do tab2[s] = { itemID = 200, count = 200 } end
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 20 } },
+                [2] = tab2,
+                [3] = { [1] = { itemID = 100, count = 10 } },
+            })
+            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 20 } } })
+            local plan = GBL:PlanSort(snap, satisfiedLayout(),
+                { bagSnapshot = bags, maxStackByItem = { [100] = 20, [200] = 200 } })
+
+            assert.equals(2, #plan.ops)
+            local countFrom = {}
+            for _, op in ipairs(plan.ops) do
+                assert.equals(2, op.dstTab)
+                assert.equals(1, op.dstSlot)
+                countFrom[op.srcTab] = op.count
+            end
+            assert.equals(10, countFrom[3])
+            assert.equals(10, countFrom[-1])
+            assert.equals(1, #plan.unplaced)
+            assert.equals(-1, plan.unplaced[1].tabIndex)
+            assert.equals(10, plan.unplaced[1].count)
+        end)
+
+        it("keeps slot order between stacks of the same kind when only one slot is left", function()
+            -- Whole-first is the only reordering. Two partials of different
+            -- items in one display tab and one free overflow slot: the
+            -- lower slot's stack lands, as it did before the walk was
+            -- sorted, and the higher slot's is the one reported unplaced.
+            -- The filler item sorts after both so Phase 4 wants nothing;
+            -- a filler that sorted first would try to swap the placed
+            -- stack to the end of a full tab and abort into unplaced.
+            local tab2 = {}
+            for s = 2, 98 do tab2[s] = { itemID = 900, count = 200 } end
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 20 } },
+                [2] = tab2,
+                [3] = {
+                    [1] = { itemID = 300, count = 5 },
+                    [2] = { itemID = 400, count = 5 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, satisfiedLayout(),
+                { maxStackByItem = { [900] = 200, [300] = 20, [400] = 20 } })
+
+            assert.equals(1, #plan.ops)
+            assert.equals(300, plan.ops[1].itemID)
+            assert.equals(1, #plan.unplaced)
+            assert.equals(400, plan.unplaced[1].itemID)
+        end)
+
+        it("uses the room in every tab's partial when no tab has a free slot", function()
+            -- Two overflow tabs, each holding a x5 partial of item 100 and
+            -- nothing else free. Three whole x20 stacks arrive. Deferring
+            -- a whole stack must not strand the room a second tab's
+            -- partial still has: once no tab can take a stack whole, a
+            -- deferred stack tops up after all, and because nothing is
+            -- free that top-up can never open a new partial. Both partials
+            -- end full, 30 placed and 30 left behind, as before the change.
+            local function fullTabWithPartial()
+                local t = { [1] = { itemID = 100, count = 5 } }
+                for s = 2, 98 do t[s] = { itemID = 900, count = 200 } end
+                return t
+            end
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 20 } },
+                [2] = fullTabWithPartial(),
+                [3] = fullTabWithPartial(),
+                [4] = {
+                    [1] = { itemID = 100, count = 20 },
+                    [2] = { itemID = 100, count = 20 },
+                    [3] = { itemID = 100, count = 20 },
+                },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({ [100] = { slots = 1, perSlot = 20 } }, { [1] = 100 }),
+                    [2] = overflow(),
+                    [3] = overflow(),
+                    [4] = displayTab({}, {}),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout,
+                { maxStackByItem = { [100] = 20, [900] = 200 } })
+
+            local placed, left = 0, 0
+            for _, op in ipairs(plan.ops) do placed = placed + op.count end
+            for _, u in ipairs(plan.unplaced) do left = left + u.count end
+            assert.equals(30, placed)
+            assert.equals(30, left)
+            local final = applyPlan(snap, plan)
+            assert.equals(20, final[2][1].count)
+            assert.equals(20, final[3][1].count)
+        end)
+
+        it("lets a bank stack top up ahead of a whole bag stack when nothing is free", function()
+            -- The last whole stack of an item is a bag stack whenever the
+            -- bags hold one, so without the no-free-slot fallback the bank
+            -- stack would be deferred straight to unplaced and the deposit
+            -- would be spent on the top-up instead. Bank leftovers claim
+            -- overflow before a deposit does (#139): the bank stack splits
+            -- 10 into the partial and the bag stack stays in the bag whole.
+            local tab2 = { [1] = { itemID = 100, count = 10 } }
+            for s = 2, 98 do tab2[s] = { itemID = 900, count = 200 } end
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 20 } },
+                [2] = tab2,
+                [3] = { [1] = { itemID = 100, count = 20 } },
+            })
+            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 20 } } })
+            local plan = GBL:PlanSort(snap, satisfiedLayout(),
+                { bagSnapshot = bags, maxStackByItem = { [100] = 20, [900] = 200 } })
+
+            assert.equals(1, #plan.ops)
+            assert.equals(3, plan.ops[1].srcTab)
+            assert.equals(10, plan.ops[1].count)
+            local leftAt = {}
+            for _, u in ipairs(plan.unplaced) do leftAt[u.tabIndex] = u.count end
+            assert.equals(10, leftAt[3])
+            assert.equals(20, leftAt[-1])
+        end)
+    end)
 end)

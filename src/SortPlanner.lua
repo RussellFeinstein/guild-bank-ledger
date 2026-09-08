@@ -868,6 +868,24 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- partial-target plus a fresh slot (possibly in the next overflow
     -- tab) when one destination doesn't fully absorb it.
     --
+    -- A whole stack skips tier 1 while more whole stacks of its item are
+    -- still to come (#146). Topping up from a whole stack splits it and
+    -- leaves a remainder that is itself a partial, so the next whole
+    -- stack split into that, and so on: two ops per stack, one odd
+    -- remainder walking through every stack of the item. The last whole
+    -- stack still tops up, which lands the remainder at the tail of the
+    -- run in one split and leaves Phase 4 nothing to reorder. A deferred
+    -- stack that no tab can take whole tops up after all: with nothing
+    -- free its remainder cannot open a new partial, so that cannot
+    -- restart the cascade, and skipping it would strand the room a
+    -- second tab's partial still has (Phase 0 merges within a tab, so
+    -- two tabs can each hold one) or spend a deposit on a top-up a bank
+    -- stack should have made. And within one source (the bank tabs as
+    -- one source, then each bag) whole stacks are
+    -- walked before partials, so an odd stack sitting ahead of whole
+    -- stacks in slot order lands after them instead of opening the run
+    -- they then have to split around.
+    --
     -- capacity = max(0, maxStack - count) when maxStack is known;
     -- 0 (treated as full, can't top up) when maxStack is unknown
     -- (cold cache). This is the conservative fallback — a future
@@ -893,14 +911,18 @@ function GBL:PlanSort(snapshot, layout, opts)
     end
     rebuildOverflowSlotInfo()
 
-    -- The four-tier preference within ONE overflow tab.
-    local function pickOverflowSlotInTab(ovTab, itemID, want)
+    -- The four-tier preference within ONE overflow tab. deferTopup skips
+    -- tier 1 (see the #146 note above): the caller passes it for a whole
+    -- stack that is not the last of its item.
+    local function pickOverflowSlotInTab(ovTab, itemID, want, deferTopup)
         local info = overflowSlotInfo[ovTab]
         -- 1. Top up an existing same-item partial with capacity.
-        for s = 1, MAX_SLOTS do
-            local slot = info[s]
-            if slot and slot.itemID == itemID and slot.capacity > 0 then
-                return s, math.min(want, slot.capacity), "topup"
+        if not deferTopup then
+            for s = 1, MAX_SLOTS do
+                local slot = info[s]
+                if slot and slot.itemID == itemID and slot.capacity > 0 then
+                    return s, math.min(want, slot.capacity), "topup"
+                end
             end
         end
         -- 2. Right-extend an existing same-item group.
@@ -932,9 +954,9 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- partial sitting in tab B, even though that can leave a partial in
     -- each of two tabs. Do not "fix" this into a cross-tab topup-first
     -- scan; the tab order is the contract the layout editor shows.
-    local function pickOverflowSlot(itemID, want)
+    local function pickOverflowSlot(itemID, want, deferTopup)
         for _, ovTab in ipairs(overflowTabsOrdered) do
-            local s, take, mode = pickOverflowSlotInTab(ovTab, itemID, want)
+            local s, take, mode = pickOverflowSlotInTab(ovTab, itemID, want, deferTopup)
             if s then return ovTab, s, take, mode end
         end
         return nil
@@ -967,43 +989,98 @@ function GBL:PlanSort(snapshot, layout, opts)
         unplacedSlots[tabIndex][slotIndex] = true
     end
 
-    for _, sup in ipairs(supplies) do
+    -- How many whole stacks of each item are about to spill (#146). A
+    -- whole stack defers its top-up while this count says another whole
+    -- stack of the item is still behind it in the walk. Unknown maxStack
+    -- means nothing counts as whole, which is also the state in which
+    -- tier 1 cannot fire (every capacity reads 0).
+    local function isWholeStack(sup)
+        local m = getMaxStack(sup.itemID)
+        return type(m) == "number" and sup.available >= m
+    end
+    local wholesLeft, wholeAt = {}, {}
+    for i, sup in ipairs(supplies) do
+        if sup.available > 0 and not sup.isOverflow and isWholeStack(sup) then
+            wholeAt[i] = true
+            wholesLeft[sup.itemID] = (wholesLeft[sup.itemID] or 0) + 1
+        end
+    end
+
+    -- Walk order (#146). Sources keep the order the supply list gave
+    -- them: bank tabs first, then bags by bagID, which is the contract
+    -- the supply builder above explains. Within one source, whole stacks
+    -- go before partials, so a partial never opens a run that the whole
+    -- stacks behind it would then have to split around. The supply index
+    -- is the final key, which keeps the sort total and the walk
+    -- deterministic.
+    local function spillGroup(sup)
+        return sup.isBag and -sup.tabIndex or 0
+    end
+    local spillOrder = {}
+    for i, sup in ipairs(supplies) do
         if sup.available > 0 and not sup.isOverflow then
-            if #overflowTabsOrdered == 0 then
-                recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
-                    sup.available, REASON_NO_OVERFLOW_DEFINED)
-                diag.phase1bUnplaced = diag.phase1bUnplaced + 1
-            else
-                while sup.available > 0 do
-                    local ovTab, ovSlot, take, mode =
-                        pickOverflowSlot(sup.itemID, sup.available)
-                    if not ovTab or not take or take <= 0 then
-                        recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
-                            sup.available, REASON_OVERFLOW_FULL)
-                        diag.phase1bUnplaced = diag.phase1bUnplaced + 1
-                        sup.available = 0
-                        break
-                    end
-                    if mode == "topup" then
-                        diag.phase1bTopup = diag.phase1bTopup + 1
-                    elseif mode == "extend-right" then
-                        diag.phase1bExtendRight = diag.phase1bExtendRight + 1
-                    elseif mode == "extend-left" then
-                        diag.phase1bExtendLeft = diag.phase1bExtendLeft + 1
-                    elseif mode == "first-empty" then
-                        diag.phase1bFirstEmpty = diag.phase1bFirstEmpty + 1
-                    end
-                    table.insert(assignments, {
-                        srcTab = sup.tabIndex, srcSlot = sup.slotIndex,
-                        dstTab = ovTab, dstSlot = ovSlot,
-                        itemID = sup.itemID, count = take,
-                    })
-                    if sup.isBag then
-                        diag.bagSpills = diag.bagSpills + 1
-                    end
-                    notePlacement(ovTab, ovSlot, sup.itemID, take)
-                    sup.available = sup.available - take
+            spillOrder[#spillOrder + 1] = i
+        end
+    end
+    table.sort(spillOrder, function(a, b)
+        local sa, sb = supplies[a], supplies[b]
+        local ga, gb = spillGroup(sa), spillGroup(sb)
+        if ga ~= gb then return ga < gb end
+        local wa, wb = wholeAt[a] or false, wholeAt[b] or false
+        if wa ~= wb then return wa end
+        return a < b
+    end)
+
+    for _, supIndex in ipairs(spillOrder) do
+        local sup = supplies[supIndex]
+        local deferTopup = false
+        if wholeAt[supIndex] then
+            wholesLeft[sup.itemID] = wholesLeft[sup.itemID] - 1
+            deferTopup = wholesLeft[sup.itemID] > 0
+        end
+        if #overflowTabsOrdered == 0 then
+            recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
+                sup.available, REASON_NO_OVERFLOW_DEFINED)
+            diag.phase1bUnplaced = diag.phase1bUnplaced + 1
+        else
+            while sup.available > 0 do
+                local ovTab, ovSlot, take, mode =
+                    pickOverflowSlot(sup.itemID, sup.available, deferTopup)
+                if not ovTab and deferTopup then
+                    -- No tab can take this stack whole. Topping up is the
+                    -- only room left, and with nothing free the remainder
+                    -- cannot open a new partial, so the cascade cannot
+                    -- restart from here (#146).
+                    deferTopup = false
+                    ovTab, ovSlot, take, mode =
+                        pickOverflowSlot(sup.itemID, sup.available, false)
                 end
+                if not ovTab or not take or take <= 0 then
+                    recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
+                        sup.available, REASON_OVERFLOW_FULL)
+                    diag.phase1bUnplaced = diag.phase1bUnplaced + 1
+                    sup.available = 0
+                    break
+                end
+                if mode == "topup" then
+                    diag.phase1bTopup = diag.phase1bTopup + 1
+                elseif mode == "extend-right" then
+                    diag.phase1bExtendRight = diag.phase1bExtendRight + 1
+                elseif mode == "extend-left" then
+                    diag.phase1bExtendLeft = diag.phase1bExtendLeft + 1
+                elseif mode == "first-empty" then
+                    diag.phase1bFirstEmpty = diag.phase1bFirstEmpty + 1
+                end
+                table.insert(assignments, {
+                    srcTab = sup.tabIndex, srcSlot = sup.slotIndex,
+                    dstTab = ovTab, dstSlot = ovSlot,
+                    itemID = sup.itemID, count = take,
+                })
+                if sup.isBag then
+                    diag.bagSpills = diag.bagSpills + 1
+                end
+                notePlacement(ovTab, ovSlot, sup.itemID, take)
+                sup.available = sup.available - take
             end
         end
     end
@@ -1234,6 +1311,10 @@ function GBL:PlanSort(snapshot, layout, opts)
                     else
                         local remaining_ = slot.count
                         while remaining_ > 0 do
+                            -- No deferral here (#146): a straggler only
+                            -- exists after a Phase 2 abort, and two whole
+                            -- stragglers of one item cascading would be
+                            -- that abort's symptom, not a routing choice.
                             local ovTab, ovSlot, take =
                                 pickOverflowSlot(slot.itemID, remaining_)
                             if not ovTab or not take or take <= 0 then
