@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.39.1
+    {"0.39.1", "2026-09-08", {
+        Fixed = {
+            "The sort no longer splits every full stack of an item to chase one odd remainder. A full stack that met a partial stack in overflow was split to fill it, and its own remainder became the next partial, so every later stack of that item was split too: six stacks cost eleven moves in a captured run. Full stacks now go into overflow whole and ahead of the odd stack, and only the last full stack of an item tops up a partial, which leaves the remainder at the end of the run in a single split. The same six stacks now cost six moves.",
+        },
+    }},
+
     -- v0.39.0
     {"0.39.0", "2026-09-07", {
         Added = {
