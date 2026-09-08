@@ -3650,5 +3650,32 @@ describe("SortPlanner", function()
             assert.equals(-1, plan.unplaced[1].tabIndex)
             assert.equals(10, plan.unplaced[1].count)
         end)
+
+        it("keeps slot order between stacks of the same kind when only one slot is left", function()
+            -- Whole-first is the only reordering. Two partials of different
+            -- items in one display tab and one free overflow slot: the
+            -- lower slot's stack lands, as it did before the walk was
+            -- sorted, and the higher slot's is the one reported unplaced.
+            -- The filler item sorts after both so Phase 4 wants nothing;
+            -- a filler that sorted first would try to swap the placed
+            -- stack to the end of a full tab and abort into unplaced.
+            local tab2 = {}
+            for s = 2, 98 do tab2[s] = { itemID = 900, count = 200 } end
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 20 } },
+                [2] = tab2,
+                [3] = {
+                    [1] = { itemID = 300, count = 5 },
+                    [2] = { itemID = 400, count = 5 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, satisfiedLayout(),
+                { maxStackByItem = { [900] = 200, [300] = 20, [400] = 20 } })
+
+            assert.equals(1, #plan.ops)
+            assert.equals(300, plan.ops[1].itemID)
+            assert.equals(1, #plan.unplaced)
+            assert.equals(400, plan.unplaced[1].itemID)
+        end)
     end)
 end)
