@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The sort no longer splits every full stack of an item to chase one odd remainder. When a stack of, say, 20 met a partial stack in overflow, it was split to fill the partial and its own remainder became the next partial, so every later stack of that item was split too: six stacks of Phoenix Oil cost eleven moves in a captured run. Full stacks now go into overflow whole, the odd stack lands last, and only the last full stack tops up a partial that was already there, which puts the remainder at the end of the run in a single split. The same six stacks now cost six moves.
+
 ## [0.39.0] - 2026-09-07
 
 ### Added
