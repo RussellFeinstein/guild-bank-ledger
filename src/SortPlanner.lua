@@ -876,7 +876,11 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- stack still tops up, which lands the remainder at the tail of the
     -- run in one split and leaves Phase 4 nothing to reorder. A deferred
     -- stack that finds no free slot is reported unplaced whole rather
-    -- than split, because the last stack fills that partial anyway.
+    -- than split, because the last stack fills that partial anyway. And
+    -- within one source (the bank tabs, then each bag) whole stacks are
+    -- walked before partials, so an odd stack sitting ahead of whole
+    -- stacks in slot order lands after them instead of opening the run
+    -- they then have to split around.
     --
     -- capacity = max(0, maxStack - count) when maxStack is known;
     -- 0 (treated as full, can't top up) when maxStack is unknown
@@ -997,48 +1001,72 @@ function GBL:PlanSort(snapshot, layout, opts)
         end
     end
 
-    for _, sup in ipairs(supplies) do
+    -- Walk order (#146). Sources keep the order the supply list gave
+    -- them: bank tabs first, then bags by bagID, which is the contract
+    -- the supply builder above explains. Within one source, whole stacks
+    -- go before partials, so a partial never opens a run that the whole
+    -- stacks behind it would then have to split around. The supply index
+    -- is the final key, which keeps the sort total and the walk
+    -- deterministic.
+    local function spillGroup(sup)
+        return sup.isBag and -sup.tabIndex or 0
+    end
+    local spillOrder = {}
+    for i, sup in ipairs(supplies) do
         if sup.available > 0 and not sup.isOverflow then
-            local deferTopup = false
-            if isWholeStack(sup) then
-                wholesLeft[sup.itemID] = wholesLeft[sup.itemID] - 1
-                deferTopup = wholesLeft[sup.itemID] > 0
-            end
-            if #overflowTabsOrdered == 0 then
-                recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
-                    sup.available, REASON_NO_OVERFLOW_DEFINED)
-                diag.phase1bUnplaced = diag.phase1bUnplaced + 1
-            else
-                while sup.available > 0 do
-                    local ovTab, ovSlot, take, mode =
-                        pickOverflowSlot(sup.itemID, sup.available, deferTopup)
-                    if not ovTab or not take or take <= 0 then
-                        recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
-                            sup.available, REASON_OVERFLOW_FULL)
-                        diag.phase1bUnplaced = diag.phase1bUnplaced + 1
-                        sup.available = 0
-                        break
-                    end
-                    if mode == "topup" then
-                        diag.phase1bTopup = diag.phase1bTopup + 1
-                    elseif mode == "extend-right" then
-                        diag.phase1bExtendRight = diag.phase1bExtendRight + 1
-                    elseif mode == "extend-left" then
-                        diag.phase1bExtendLeft = diag.phase1bExtendLeft + 1
-                    elseif mode == "first-empty" then
-                        diag.phase1bFirstEmpty = diag.phase1bFirstEmpty + 1
-                    end
-                    table.insert(assignments, {
-                        srcTab = sup.tabIndex, srcSlot = sup.slotIndex,
-                        dstTab = ovTab, dstSlot = ovSlot,
-                        itemID = sup.itemID, count = take,
-                    })
-                    if sup.isBag then
-                        diag.bagSpills = diag.bagSpills + 1
-                    end
-                    notePlacement(ovTab, ovSlot, sup.itemID, take)
-                    sup.available = sup.available - take
+            spillOrder[#spillOrder + 1] = i
+        end
+    end
+    table.sort(spillOrder, function(a, b)
+        local sa, sb = supplies[a], supplies[b]
+        local ga, gb = spillGroup(sa), spillGroup(sb)
+        if ga ~= gb then return ga < gb end
+        local wa, wb = isWholeStack(sa), isWholeStack(sb)
+        if wa ~= wb then return wa end
+        return a < b
+    end)
+
+    for _, supIndex in ipairs(spillOrder) do
+        local sup = supplies[supIndex]
+        local deferTopup = false
+        if isWholeStack(sup) then
+            wholesLeft[sup.itemID] = wholesLeft[sup.itemID] - 1
+            deferTopup = wholesLeft[sup.itemID] > 0
+        end
+        if #overflowTabsOrdered == 0 then
+            recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
+                sup.available, REASON_NO_OVERFLOW_DEFINED)
+            diag.phase1bUnplaced = diag.phase1bUnplaced + 1
+        else
+            while sup.available > 0 do
+                local ovTab, ovSlot, take, mode =
+                    pickOverflowSlot(sup.itemID, sup.available, deferTopup)
+                if not ovTab or not take or take <= 0 then
+                    recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
+                        sup.available, REASON_OVERFLOW_FULL)
+                    diag.phase1bUnplaced = diag.phase1bUnplaced + 1
+                    sup.available = 0
+                    break
                 end
+                if mode == "topup" then
+                    diag.phase1bTopup = diag.phase1bTopup + 1
+                elseif mode == "extend-right" then
+                    diag.phase1bExtendRight = diag.phase1bExtendRight + 1
+                elseif mode == "extend-left" then
+                    diag.phase1bExtendLeft = diag.phase1bExtendLeft + 1
+                elseif mode == "first-empty" then
+                    diag.phase1bFirstEmpty = diag.phase1bFirstEmpty + 1
+                end
+                table.insert(assignments, {
+                    srcTab = sup.tabIndex, srcSlot = sup.slotIndex,
+                    dstTab = ovTab, dstSlot = ovSlot,
+                    itemID = sup.itemID, count = take,
+                })
+                if sup.isBag then
+                    diag.bagSpills = diag.bagSpills + 1
+                end
+                notePlacement(ovTab, ovSlot, sup.itemID, take)
+                sup.available = sup.available - take
             end
         end
     end
