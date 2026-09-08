@@ -250,7 +250,15 @@ function GBL:RegisterFocusable(widget, order)
 end
 
 --- Clear the focus order (call when switching tabs).
+--- Hides any drawn ring first. AceGUI pools and reuses widget frames, so a
+--- ring left showing on a released widget reappears on whatever recycles
+--- that frame, which reads as a focus indicator on an unrelated control.
 function GBL:ClearFocusOrder()
+    for _, widget in pairs(self.A11Y.focusOrder) do
+        if widget and widget._focusRing then
+            self:SetFocusIndicator(widget, false)
+        end
+    end
     self.A11Y.focusOrder = {}
     self.A11Y.focusIndex = 0
 end
@@ -284,14 +292,74 @@ function GBL:AdvanceFocus(delta)
     end
 end
 
+--- Thickness of the focus ring, in pixels, per WCAG 2.4.7 focus-visible.
+local FOCUS_RING_THICKNESS = 2
+
+--- Build (once) the four edge textures that make up a widget's focus ring.
+--- Returns nil for anything without a real frame: ChangelogView and several
+--- specs register plain tables as focusables, and those must keep working.
+local function ensureFocusRing(widget)
+    if widget._focusRing then return widget._focusRing end
+    local frame = widget.frame
+    if not frame or not frame.CreateTexture then return nil end
+
+    local t = FOCUS_RING_THICKNESS
+    local ring = {}
+    for _, edge in ipairs({ "top", "bottom", "left", "right" }) do
+        local tex = frame:CreateTexture(nil, "OVERLAY")
+        if tex.SetDrawLayer then tex:SetDrawLayer("OVERLAY", 7) end
+        if edge == "top" then
+            tex:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
+            tex:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0)
+            tex:SetHeight(t)
+        elseif edge == "bottom" then
+            tex:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 0, 0)
+            tex:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+            tex:SetHeight(t)
+        elseif edge == "left" then
+            tex:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
+            tex:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 0, 0)
+            tex:SetWidth(t)
+        else
+            tex:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0)
+            tex:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+            tex:SetWidth(t)
+        end
+        tex:Hide()
+        ring[edge] = tex
+    end
+    widget._focusRing = ring
+    return ring
+end
+
 --- Show or hide the focus indicator on a widget.
--- In WoW, this would add/remove a 2px yellow border texture.
--- In the test environment, we track it as a flag.
+--- Draws a 2px ring in the palette's FOCUS colour, which is what makes a
+--- keyboard focus walk visible. Before this drew anything, SetFocusIndicator
+--- only set widget._focused, so Tab advanced focus with nothing on screen.
+--- The flag is still set: it is the state other code and the specs read.
 -- @param widget table AceGUI widget
 -- @param active boolean true to show, false to hide
 function GBL:SetFocusIndicator(widget, active)
     if not widget then return end
     widget._focused = active
+
+    local ring = ensureFocusRing(widget)
+    if not ring then return end
+
+    if active then
+        local c = self:GetAccessibleColor("FOCUS")
+        for _, edge in ipairs({ "top", "bottom", "left", "right" }) do
+            local tex = ring[edge]
+            if tex.SetColorTexture then
+                tex:SetColorTexture(c.r or 1, c.g or 1, c.b or 0, 1)
+            end
+            tex:Show()
+        end
+    else
+        for _, edge in ipairs({ "top", "bottom", "left", "right" }) do
+            ring[edge]:Hide()
+        end
+    end
 end
 
 --- Restore focus to the last focused element (on frame reopen).

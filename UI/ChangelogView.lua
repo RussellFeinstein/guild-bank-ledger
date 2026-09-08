@@ -29,6 +29,26 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.39.0
+    {"0.39.0", "2026-09-07", {
+        Added = {
+            "The sort can now take items straight out of your bags. Tick \"Include bags\" on the Sort tab and any bag item your layout names is deposited as part of the sort run: layout slots are filled first, and whatever is left over routes to your overflow tabs. A farming run or an Auction House haul no longer has to be deposited by hand and rescanned before you can sort it. Bag items your layout does not name are left alone, as are bound and locked slots. Bank stock is always used before a bag when both can fill the same slot. Off by default.",
+            "Keyboard navigation on the Sort tab: Tab and Shift+Tab move between Preview, Execute, Cancel, Scan bank, Open Sort Log and Include bags, arrow keys do the same, and Enter or Space activates whatever is focused.",
+        },
+        Changed = {
+            "The sort log now says what the bag scan saw and what became of it: how many bag stacks the layout named, how many were left alone as not in the layout, bound, locked or unreadable, which named stacks have to stay in your bags and why, why any deposit was refused during the run, and how many named stacks were still in your bags when the sort finished.",
+            "/gbl help and the README now list every command the addon answers to. Four of them appeared in neither place, so the only way to find them was to read the source, and five more were listed in one but not the other.",
+        },
+        Fixed = {
+            "The keyboard focus indicator now draws. Moving focus with Tab has been setting focus correctly and showing nothing on screen, which made the feature impossible to use and impossible to notice was broken. Focus now shows a 2 pixel yellow ring. This affects the Restock tab as well, where keyboard navigation had the same invisible behaviour since it shipped.",
+            "A bag deposit the sort had to skip no longer counts as a completed move, so the run summary's ops issued count and average time per move reflect what was actually moved.",
+            "The sort preview no longer shows a bag slot as a bank tab. An item the sort could not place read as a negative tab number in the Unplaced list while every other line called the same slot Bag0/5.",
+            "Keyboard navigation no longer activates a control that is greyed out. Tabbing to Include bags during a running sort and pressing Space used to toggle it, which threw away the move list on screen and replaced it with one for a different set of items.",
+            "The sort now deposits only the amount it planned to. If you added to a bag stack between previewing and running the sort, the whole enlarged stack was deposited instead of the surplus the plan asked for.",
+            "A bag stack the sort cannot place is counted once. A stack the plan had tried to split across several destinations was reported as several stacks, and the log named its slot once per attempt.",
+        },
+    }},
+
     -- v0.38.1
     {"0.38.1", "2026-08-27", {
         Fixed = {

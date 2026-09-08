@@ -26,16 +26,18 @@ Persistent guild bank transaction logging for World of Warcraft. WoW's built-in 
 - **Minimap button** — Left-click to toggle the ledger window
 - **Mute ambient NPC chatter**: Optional client-side filter that suppresses `Silvermoon Citizen` say/yell/emote in chat and hides the matching world speech bubbles. Off by default. Toggle on the personal-preferences row at the top of the ledger window.
 - **Access control** — GM configures a rank threshold for full addon access. Players below the threshold are restricted to Sync Only or Own Transactions Only mode (GM's choice). Settings sync to all guild members via the HELLO protocol
+- **Sort**: Preview the moves that would reshape the bank toward your saved layout, then execute them on a one-second cadence, re-planning until the bank matches or nothing further can be placed. Optionally include your bags: with "Include bags" ticked, a bag item your layout names is deposited as part of the run, layout slots first and the surplus to your overflow tabs, so a farming run does not have to be deposited by hand and rescanned first. Bag items your layout does not name stay put, as do bound and locked slots, and bank stock is always used before a bag when both can fill the same slot. Off by default
 - **Sort access**: A separate GM-managed, two-tier policy (Layout Write and Sort-only, by rank threshold or named delegate) gates the Sort and Layout tabs. Members without access do not see them. The policy syncs guild-wide via the HELLO protocol, so a grant reaches the granted member without a reload. The saved bank layout itself syncs to members with sort access (advertise-and-pull: HELLO carries only a version cursor, and a member who can sort fetches the full template only when it changes), so a granted officer can sort against the GM's layout without rebuilding it
 - **Restock**: Restock the guild bank to your layout targets. The Restock tab lists every layout item grouped by bank tab with its target, current stock, and how many to buy. With the Auctionator addon installed it searches the Auction House and buys the shortfall, per item or as a sweep (optionally capped by a per-run gold budget). Gated by sort access, like the Sort tab. Buying spends real gold through WoW's commodity purchase flow, with an up-front affordability check
-- **Accessibility**: Colorblind-safe palettes (4 modes, auto-detected from WoW settings), high contrast mode, triple encoding (shape + color + text), keyboard-navigation primitives (partial; Tab/Shift+Tab wiring under audit), font scaling (8-24pt)
+- **Accessibility**: Colorblind-safe palettes (4 modes, auto-detected from WoW settings), high contrast mode, triple encoding (shape + color + text), keyboard navigation (partial: Tab/Shift+Tab, arrows, and Enter/Space work on the Sort and Restock tabs with a 2px focus ring; the other tabs are still under audit), font scaling (8-24pt)
 
 ### Before v1.0
 
 These items block the v1.0 release:
 
 - Accessibility audit and keyboard-nav completion: wire `RegisterFocusable` into every AceGUI widget, hook Tab/Shift+Tab via a key handler, verify focus indicators on every tab, screen-reader audit, palette validation against WCAG AAA contrast targets
-- Sync rate limiting (per-peer bandwidth budgeting)
+- Sync convergence demonstration: the per-peer budgeting has shipped (inter-chunk gap floor, bounded sessions, nudge throttle); what remains is a whole-guild capture showing a backfill converging without starving a member
+- Security hardening: a threat-model pass over the paths that act on messages other clients send
 - Performance audit (SavedVariables size, UI debouncing). Compaction verification came off this list when compaction itself was retired (#62)
 - Community feedback iteration
 
@@ -71,6 +73,11 @@ Auctionator is an optional dependency. With it installed, the Restock tab can se
 | `/gbl status` | Show addon version, guild name, transaction count, last scan time |
 | `/gbl scan` | Manually trigger a full guild bank scan |
 | `/gbl restock` | Open the Restock tab |
+| `/gbl cleanup` | Remove duplicate records from the database |
+| `/gbl sortpreview` | Print the current sort plan without running it |
+| `/gbl sortexec` | Run the current sort plan (needs sort access, bank open) |
+| `/gbl sortcancel` | Stop a running sort |
+| `/gbl deviations` | List every slot where the bank differs from the layout |
 | `/gbl synclog` | Show the sync-channel session log in a copy-pastable pop-up |
 | `/gbl sortlog` | Show the sort-channel session log in a copy-pastable pop-up |
 | `/gbl logs` | Show the master log: sync + sort + system, merged in timestamp order |
@@ -78,6 +85,9 @@ Auctionator is an optional dependency. With it installed, the Restock tab can se
 | `/gbl logs clear sync\|sort\|system\|all` | Truncate a channel |
 | `/gbl logs debug sync\|sort\|system on\|off` | Toggle per-channel DEBUG-to-chat mirroring |
 | `/gbl audit on\|off\|status\|clear` | Manage persistent log capture (on by default; off is the kill switch; clear wipes the whole account's captures) |
+| `/gbl syncdiag` | Compare your addon version against every peer the client has seen |
+| `/gbl epoch0` | Report records stamped with a zero timestamp (diagnostic for issue #93) |
+| `/gbl bubbletest` | Show chat bubble filter diagnostics |
 | `/gbl help` | Show available commands |
 
 Scanning happens automatically when you open the guild bank. Results are saved per-guild in `SavedVariables/GuildBankLedgerDB.lua`.

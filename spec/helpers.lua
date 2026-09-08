@@ -53,6 +53,43 @@ function Helpers.populateTab(tabIndex, items)
     end
 end
 
+--- Populate a mock player bag with items (#139).
+-- Slot entries mirror the retail C_Container.GetContainerItemInfo table:
+-- stackCount, isLocked, isBound, hyperlink, itemID, quality, iconFileID.
+-- Defaults follow the real producer: an occupied slot always has a
+-- stackCount (>= 1) and boolean lock/bound flags; only hyperlink may be
+-- nil (item data not streamed), which tests opt into via noHyperlink.
+-- @param bagID number Bag index (0 = backpack, 1-4 bags, 5 reagent bag)
+-- @param items table Array of { itemID, name, count, quality, locked,
+--   isBound, noHyperlink, link } (sparse OK, nil = empty slot)
+-- @param numSlots number|nil Bag size (default 32)
+function Helpers.populateBag(bagID, items, numSlots)
+    local bag = { numSlots = numSlots or 32, slots = {} }
+    MockWoW.bags[bagID] = bag
+    for slotIndex, item in pairs(items or {}) do
+        if item then
+            local link
+            if item.noHyperlink then
+                link = nil
+            elseif item.link then
+                link = item.link
+            else
+                link = Helpers.makeItemLink(item.itemID or 12345,
+                    item.name or "Test Item", item.quality or 1)
+            end
+            bag.slots[slotIndex] = {
+                hyperlink = link,
+                iconFileID = 134400,
+                stackCount = item.count or 1,
+                quality = item.quality or 1,
+                isLocked = item.locked or false,
+                isBound = item.isBound or false,
+                itemID = item.itemID or 12345,
+            }
+        end
+    end
+end
+
 --- Full reset: clear all mock state and reload the addon.
 function Helpers.resetAll()
     MockWoW.reset()

@@ -335,6 +335,24 @@ describe("RestockView", function()
             assert.is_false(GBL:_RestockView_NavKey("ENTER", false))
         end)
 
+        it("ENTER does not fire a disabled widget", function()
+            -- This tab disables Buy buttons once a budget cap is reached,
+            -- and firing OnClick directly skips the check AceGUI's own
+            -- click handler does. The purchase path re-checks the budget,
+            -- so this is defence in depth, but a disabled button that
+            -- answers a key still lies about what it will do.
+            local clicked = false
+            b1:SetCallback("OnClick", function() clicked = true end)
+            b1:SetDisabled(true)
+            GBL.A11Y.focusIndex = 1
+
+            local handled = GBL:_RestockView_NavKey("ENTER", false)
+
+            assert.is_false(clicked, "a disabled button must not run its callback")
+            assert.is_false(handled,
+                "an unhandled key should propagate rather than read as consumed")
+        end)
+
         it("returns false for an unhandled key", function()
             assert.is_false(GBL:_RestockView_NavKey("X", false))
         end)

@@ -525,7 +525,7 @@ describe("LayoutEditor Keep field", function()
         local AceGUI = LibStub("AceGUI-3.0")
         local parent = AceGUI:Create("SimpleGroup")
         GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, false)
-        assert.is_true(findKeep(parent)._disabled)
+        assert.is_true(findKeep(parent).disabled)
     end)
 
     it("coerces a string itemID (synced layout) to the number-keyed reserve", function()

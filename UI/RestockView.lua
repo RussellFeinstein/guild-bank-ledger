@@ -291,6 +291,12 @@ function GBL:_RestockView_ActivateFocused()
     local order = self.A11Y and self.A11Y.focusOrder
     local idx = (self.A11Y and self.A11Y.focusIndex) or 0
     local widget = order and idx > 0 and order[idx]
+    -- Same disabled check as the Sort tab: firing OnClick bypasses the
+    -- one AceGUI's own handler does, and this tab disables Buy buttons
+    -- when a budget cap is reached. The purchase path re-checks the
+    -- budget itself, so this is defence in depth rather than the only
+    -- gate, but a disabled button that responds to a key is still wrong.
+    if widget and widget.disabled then return false end
     if widget and widget.Fire then
         widget:Fire("OnClick")
         return true
