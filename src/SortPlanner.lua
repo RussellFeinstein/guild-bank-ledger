@@ -868,6 +868,16 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- partial-target plus a fresh slot (possibly in the next overflow
     -- tab) when one destination doesn't fully absorb it.
     --
+    -- A whole stack skips tier 1 while more whole stacks of its item are
+    -- still to come (#146). Topping up from a whole stack splits it and
+    -- leaves a remainder that is itself a partial, so the next whole
+    -- stack split into that, and so on: two ops per stack, one odd
+    -- remainder walking through every stack of the item. The last whole
+    -- stack still tops up, which lands the remainder at the tail of the
+    -- run in one split and leaves Phase 4 nothing to reorder. A deferred
+    -- stack that finds no free slot is reported unplaced whole rather
+    -- than split, because the last stack fills that partial anyway.
+    --
     -- capacity = max(0, maxStack - count) when maxStack is known;
     -- 0 (treated as full, can't top up) when maxStack is unknown
     -- (cold cache). This is the conservative fallback — a future
@@ -893,14 +903,18 @@ function GBL:PlanSort(snapshot, layout, opts)
     end
     rebuildOverflowSlotInfo()
 
-    -- The four-tier preference within ONE overflow tab.
-    local function pickOverflowSlotInTab(ovTab, itemID, want)
+    -- The four-tier preference within ONE overflow tab. deferTopup skips
+    -- tier 1 (see the #146 note above): the caller passes it for a whole
+    -- stack that is not the last of its item.
+    local function pickOverflowSlotInTab(ovTab, itemID, want, deferTopup)
         local info = overflowSlotInfo[ovTab]
         -- 1. Top up an existing same-item partial with capacity.
-        for s = 1, MAX_SLOTS do
-            local slot = info[s]
-            if slot and slot.itemID == itemID and slot.capacity > 0 then
-                return s, math.min(want, slot.capacity), "topup"
+        if not deferTopup then
+            for s = 1, MAX_SLOTS do
+                local slot = info[s]
+                if slot and slot.itemID == itemID and slot.capacity > 0 then
+                    return s, math.min(want, slot.capacity), "topup"
+                end
             end
         end
         -- 2. Right-extend an existing same-item group.
@@ -932,9 +946,9 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- partial sitting in tab B, even though that can leave a partial in
     -- each of two tabs. Do not "fix" this into a cross-tab topup-first
     -- scan; the tab order is the contract the layout editor shows.
-    local function pickOverflowSlot(itemID, want)
+    local function pickOverflowSlot(itemID, want, deferTopup)
         for _, ovTab in ipairs(overflowTabsOrdered) do
-            local s, take, mode = pickOverflowSlotInTab(ovTab, itemID, want)
+            local s, take, mode = pickOverflowSlotInTab(ovTab, itemID, want, deferTopup)
             if s then return ovTab, s, take, mode end
         end
         return nil
@@ -967,8 +981,29 @@ function GBL:PlanSort(snapshot, layout, opts)
         unplacedSlots[tabIndex][slotIndex] = true
     end
 
+    -- How many whole stacks of each item are about to spill (#146). A
+    -- whole stack defers its top-up while this count says another whole
+    -- stack of the item is still behind it in the walk. Unknown maxStack
+    -- means nothing counts as whole, which is also the state in which
+    -- tier 1 cannot fire (every capacity reads 0).
+    local function isWholeStack(sup)
+        local m = getMaxStack(sup.itemID)
+        return m ~= nil and sup.available >= m
+    end
+    local wholesLeft = {}
+    for _, sup in ipairs(supplies) do
+        if sup.available > 0 and not sup.isOverflow and isWholeStack(sup) then
+            wholesLeft[sup.itemID] = (wholesLeft[sup.itemID] or 0) + 1
+        end
+    end
+
     for _, sup in ipairs(supplies) do
         if sup.available > 0 and not sup.isOverflow then
+            local deferTopup = false
+            if isWholeStack(sup) then
+                wholesLeft[sup.itemID] = wholesLeft[sup.itemID] - 1
+                deferTopup = wholesLeft[sup.itemID] > 0
+            end
             if #overflowTabsOrdered == 0 then
                 recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
                     sup.available, REASON_NO_OVERFLOW_DEFINED)
@@ -976,7 +1011,7 @@ function GBL:PlanSort(snapshot, layout, opts)
             else
                 while sup.available > 0 do
                     local ovTab, ovSlot, take, mode =
-                        pickOverflowSlot(sup.itemID, sup.available)
+                        pickOverflowSlot(sup.itemID, sup.available, deferTopup)
                     if not ovTab or not take or take <= 0 then
                         recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
                             sup.available, REASON_OVERFLOW_FULL)
