@@ -3677,5 +3677,76 @@ describe("SortPlanner", function()
             assert.equals(1, #plan.unplaced)
             assert.equals(400, plan.unplaced[1].itemID)
         end)
+
+        it("uses the room in every tab's partial when no tab has a free slot", function()
+            -- Two overflow tabs, each holding a x5 partial of item 100 and
+            -- nothing else free. Three whole x20 stacks arrive. Deferring
+            -- a whole stack must not strand the room a second tab's
+            -- partial still has: once no tab can take a stack whole, a
+            -- deferred stack tops up after all, and because nothing is
+            -- free that top-up can never open a new partial. Both partials
+            -- end full, 30 placed and 30 left behind, as before the change.
+            local function fullTabWithPartial()
+                local t = { [1] = { itemID = 100, count = 5 } }
+                for s = 2, 98 do t[s] = { itemID = 900, count = 200 } end
+                return t
+            end
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 20 } },
+                [2] = fullTabWithPartial(),
+                [3] = fullTabWithPartial(),
+                [4] = {
+                    [1] = { itemID = 100, count = 20 },
+                    [2] = { itemID = 100, count = 20 },
+                    [3] = { itemID = 100, count = 20 },
+                },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({ [100] = { slots = 1, perSlot = 20 } }, { [1] = 100 }),
+                    [2] = overflow(),
+                    [3] = overflow(),
+                    [4] = displayTab({}, {}),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout,
+                { maxStackByItem = { [100] = 20, [900] = 200 } })
+
+            local placed, left = 0, 0
+            for _, op in ipairs(plan.ops) do placed = placed + op.count end
+            for _, u in ipairs(plan.unplaced) do left = left + u.count end
+            assert.equals(30, placed)
+            assert.equals(30, left)
+            local final = applyPlan(snap, plan)
+            assert.equals(20, final[2][1].count)
+            assert.equals(20, final[3][1].count)
+        end)
+
+        it("lets a bank stack top up ahead of a whole bag stack when nothing is free", function()
+            -- The last whole stack of an item is a bag stack whenever the
+            -- bags hold one, so without the no-free-slot fallback the bank
+            -- stack would be deferred straight to unplaced and the deposit
+            -- would be spent on the top-up instead. Bank leftovers claim
+            -- overflow before a deposit does (#139): the bank stack splits
+            -- 10 into the partial and the bag stack stays in the bag whole.
+            local tab2 = { [1] = { itemID = 100, count = 10 } }
+            for s = 2, 98 do tab2[s] = { itemID = 900, count = 200 } end
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 20 } },
+                [2] = tab2,
+                [3] = { [1] = { itemID = 100, count = 20 } },
+            })
+            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 20 } } })
+            local plan = GBL:PlanSort(snap, satisfiedLayout(),
+                { bagSnapshot = bags, maxStackByItem = { [100] = 20, [900] = 200 } })
+
+            assert.equals(1, #plan.ops)
+            assert.equals(3, plan.ops[1].srcTab)
+            assert.equals(10, plan.ops[1].count)
+            local leftAt = {}
+            for _, u in ipairs(plan.unplaced) do leftAt[u.tabIndex] = u.count end
+            assert.equals(10, leftAt[3])
+            assert.equals(20, leftAt[-1])
+        end)
     end)
 end)
