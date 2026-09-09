@@ -1368,6 +1368,13 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- `assignments` / `remaining` and re-running both once for all tabs.
     local phase4Added = false
     for _, ovTab in ipairs(overflowTabsOrdered) do
+        -- A stranded slot (one of Phase 2's aborts gave up on an assignment
+        -- reading from it, so it is already reported unplaced) is left out
+        -- of the packing entirely: out of ovStacks here, and out of the
+        -- target list below, so nothing is aimed at it either. Moving a
+        -- stack the plan has already told the player it could not place
+        -- would contradict the report and, at the tab's own abort, could
+        -- name the same slot twice.
         local ovStacks = {}
         for s = 1, MAX_SLOTS do
             local slot = state[ovTab] and state[ovTab][s]
@@ -1381,6 +1388,23 @@ function GBL:PlanSort(snapshot, layout, opts)
         end
 
         table.sort(ovStacks, overflowStackOrder)
+
+        -- Where each rank lands. A slot Phase 2 gave up on is excluded from
+        -- ovStacks above but stays occupied, so packing rank i to slot i
+        -- would aim some other stack at it and pivot the abandoned stack
+        -- away, which is the one thing the skip exists to prevent (#143).
+        -- The target list is the leading slots that are NOT stranded, so
+        -- the run closes around such a slot instead of through it. With
+        -- nothing stranded targets[i] == i and this is the old behaviour.
+        local targets = {}
+        for s = 1, MAX_SLOTS do
+            if #targets >= #ovStacks then break end
+            local isUnplaced = unplacedSlots[ovTab]
+                and unplacedSlots[ovTab][s]
+            if not isUnplaced then
+                targets[#targets + 1] = s
+            end
+        end
 
         -- Within a run of indistinguishable stacks (same itemID AND same
         -- count) it does not matter which stack lands in which slot: the
@@ -1411,26 +1435,32 @@ function GBL:PlanSort(snapshot, layout, opts)
                 for k = runStart, runEnd do
                     group[#group + 1] = ovStacks[k]
                 end
-                -- Comparing a slot number against runStart/runEnd, which are
-                -- indices into the sorted array, is only meaningful because
-                -- the emit loop below packs rank i to slot i. If the packing
-                -- target ever stops being "slot == rank" (a reserved slot, a
-                -- different origin), this comparison silently aims wrong.
-                -- origSlot is unique per stack, so this can never collide.
+                -- The comparison is against the SLOTS this run will occupy,
+                -- not against its rank indices. Those were the same thing
+                -- until a stranded slot could push the targets apart (#143),
+                -- and reading the indices then calls a stack that is already
+                -- in place a mover and scrambles the run. origSlot is unique
+                -- per stack, so the stayPut map can never collide.
+                local firstSlot, lastSlot = targets[runStart], targets[runEnd]
                 local stayPut, movers = {}, {}
                 for _, st in ipairs(group) do
-                    if st.origSlot >= runStart and st.origSlot <= runEnd then
+                    -- A stranded slot never reaches ovStacks, and targets
+                    -- holds every non-stranded slot up to the last one it
+                    -- uses, so "inside the range" and "one of this run's
+                    -- target slots" are the same test for a group member.
+                    if st.origSlot >= firstSlot and st.origSlot <= lastSlot then
                         stayPut[st.origSlot] = st
                     else
                         movers[#movers + 1] = st
                     end
                 end
                 local mi = 1
-                for t = runStart, runEnd do
-                    if stayPut[t] then
-                        ovStacks[t] = stayPut[t]
+                for k = runStart, runEnd do
+                    local slotForRank = targets[k]
+                    if stayPut[slotForRank] then
+                        ovStacks[k] = stayPut[slotForRank]
                     else
-                        ovStacks[t] = movers[mi]
+                        ovStacks[k] = movers[mi]
                         mi = mi + 1
                     end
                 end
@@ -1439,11 +1469,12 @@ function GBL:PlanSort(snapshot, layout, opts)
         end
 
         for i, stack in ipairs(ovStacks) do
-            if stack.origSlot ~= i then
+            local dstSlot = targets[i]
+            if stack.origSlot ~= dstSlot then
                 local idx = #assignments + 1
                 assignments[idx] = {
                     srcTab = ovTab, srcSlot = stack.origSlot,
-                    dstTab = ovTab, dstSlot = i,
+                    dstTab = ovTab, dstSlot = dstSlot,
                     itemID = stack.itemID, count = stack.count,
                     -- Marks this as position packing rather than a demand
                     -- fill, which is what lets the pivot loop treat a
