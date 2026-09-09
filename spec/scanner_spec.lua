@@ -342,6 +342,100 @@ describe("Scanner", function()
             _G.QueryGuildBankTab = mockQuery
         end)
     end)
+
+    describe("scan coverage (#137)", function()
+        -- The scan skips tabs the player's rank cannot view, so a hidden
+        -- tab's absence from the results reads exactly like a tab that was
+        -- scanned and found empty. Recording which tabs the scan actually
+        -- covered is what lets the sort planner tell those apart (#137).
+        -- It cannot ride on the results table itself: every reader there
+        -- assumes each value is a tab result, and the Layout editor's
+        -- Capture treats a present entry as "scanned, capture it".
+        it("records the viewable tabs the scan covered", function()
+            MockWoW.addTab("Tab 1", nil, true)
+            MockWoW.addTab("Tab 2", nil, false)  -- not viewable
+            MockWoW.addTab("Tab 3", nil, true)
+
+            GBL:CancelPendingScan()
+            GBL.scanInProgress = false
+            GBL.bankOpen = true
+
+            GBL:StartFullScan()
+            MockWoW.fireTimers()
+
+            local coverage = GBL:GetLastScanCoverage()
+            assert.is_not_nil(coverage)
+            assert.same({ 1, 3 }, coverage.viewableTabs)
+        end)
+
+        it("returns nil before any scan has finished", function()
+            MockWoW.addTab("Tab 1", nil, true)
+
+            assert.is_nil(GBL:GetLastScanCoverage())
+        end)
+
+        -- Distinct from nil on purpose, and the distinction is the whole
+        -- point of the record: a scan that ran and saw no tab means every
+        -- declared tab is hidden, which the planner must act on. nil means
+        -- no scan yet, which it must not act on.
+        it("records an empty list when no tab is viewable", function()
+            MockWoW.addTab("Hidden", nil, false)
+
+            GBL:CancelPendingScan()
+            GBL.scanInProgress = false
+            GBL.bankOpen = true
+
+            GBL:StartFullScan()
+
+            local coverage = GBL:GetLastScanCoverage()
+            assert.is_not_nil(coverage)
+            assert.same({}, coverage.viewableTabs)
+        end)
+
+        it("replaces the coverage on the next scan", function()
+            MockWoW.addTab("Tab 1", nil, true)
+            MockWoW.addTab("Tab 2", nil, false)
+
+            GBL:CancelPendingScan()
+            GBL.scanInProgress = false
+            GBL.bankOpen = true
+            GBL:StartFullScan()
+            MockWoW.fireTimers()
+            assert.same({ 1 }, GBL:GetLastScanCoverage().viewableTabs)
+
+            -- The rank gained the tab, or the guild bought it.
+            MockWoW.guildBank.tabs[2].isViewable = true
+            GBL:CancelPendingScan()
+            GBL.scanInProgress = false
+            GBL.bankOpen = true
+            GBL:StartFullScan()
+            MockWoW.fireTimers()
+
+            assert.same({ 1, 2 }, GBL:GetLastScanCoverage().viewableTabs)
+        end)
+
+        -- Cancelling clears the in-flight scan state, not the last
+        -- completed scan's record, which is how lastScanResults already
+        -- behaves. A preview taken after a cancelled rescan reads both,
+        -- so the two must survive together or the planner pairs a
+        -- snapshot with no coverage and silently stops filtering.
+        it("survives a cancelled scan", function()
+            MockWoW.addTab("Tab 1", nil, true)
+
+            GBL:CancelPendingScan()
+            GBL.scanInProgress = false
+            GBL.bankOpen = true
+            GBL:StartFullScan()
+            MockWoW.fireTimers()
+
+            GBL:CancelPendingScan()
+
+            local coverage = GBL:GetLastScanCoverage()
+            assert.is_not_nil(coverage,
+                "a cancelled scan erased the last completed scan's coverage")
+            assert.same({ 1 }, coverage.viewableTabs)
+        end)
+    end)
 end)
 
 ------------------------------------------------------------------------
