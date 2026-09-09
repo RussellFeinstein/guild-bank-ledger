@@ -3985,4 +3985,82 @@ describe("SortPlanner", function()
             assert.equals(1, op.dstSlot)
         end)
     end)
+
+    describe("pivot budget exhaustion (#138)", function()
+        --- Two disjoint two-cycles in one display tab, each resolvable with
+        --- a single pivot through the unclaimed slots from 5 up. The slot
+        --- order puts item 400's demand ahead of item 300's so that if the
+        --- second cycle's stacks are swept to overflow they land in itemID
+        --- order and Phase 4 adds nothing, which keeps the op counts here
+        --- about the budget and nothing else.
+        local function twoCycleLayout()
+            return {
+                tabs = {
+                    [1] = displayTab({
+                        [100] = { slots = 1, perSlot = 10 },
+                        [200] = { slots = 1, perSlot = 5 },
+                        [300] = { slots = 1, perSlot = 7 },
+                        [400] = { slots = 1, perSlot = 3 },
+                    }, { [1] = 100, [2] = 200, [3] = 400, [4] = 300 }),
+                    [2] = overflow(),
+                },
+            }
+        end
+
+        local function twoCycleSnapshot()
+            return snapshot({
+                [1] = {
+                    [1] = { itemID = 200, count = 5 },
+                    [2] = { itemID = 100, count = 10 },
+                    [3] = { itemID = 300, count = 7 },
+                    [4] = { itemID = 400, count = 3 },
+                },
+                [2] = {},
+            })
+        end
+
+        local maxStacks = { [100] = 20, [200] = 20, [300] = 20, [400] = 20 }
+
+        it("exports the default budget for specs to read", function()
+            assert.equals(500, GBL.SORT_PIVOT_BUDGET)
+        end)
+
+        it("resolves both cycles when the budget is not reached", function()
+            local snap = twoCycleSnapshot()
+            local plan = GBL:PlanSort(snap, twoCycleLayout(),
+                { maxStackByItem = maxStacks })
+
+            assert.equals(6, #plan.ops)
+            assert.equals(2, plan.diag.phase2Pivots)
+            assert.equals(0, #plan.unplaced)
+            assert.equals(0, plan.diag.phase3Sweeps)
+        end)
+
+        it("reports the assignments it dropped when the budget runs out", function()
+            local snap = twoCycleSnapshot()
+            local plan = GBL:PlanSort(snap, twoCycleLayout(),
+                { maxStackByItem = maxStacks, pivotBudget = 1 })
+
+            -- One pivot's worth of work: the first cycle, and nothing else.
+            assert.equals(1, plan.diag.phase2Pivots)
+            assert.equals(3, #plan.ops)
+
+            -- The second cycle's two assignments are named by slot, with a
+            -- reason that tells budget exhaustion from a genuine no-pivot.
+            assert.equals(2, #plan.unplaced)
+            assert.equals(2, plan.diag.phase2CycleAborts)
+            local at = {}
+            for _, u in ipairs(plan.unplaced) do
+                assert.equals(1, u.tabIndex)
+                assert.equals(GBL._sortPlannerReasons.CYCLE_BUDGET_EXHAUSTED,
+                    u.reason)
+                at[u.slotIndex] = u.count
+            end
+            assert.same({ [3] = 7, [4] = 3 }, at)
+
+            -- Recording them also stops Phase 3 sweeping to overflow the
+            -- very stacks the plan has just said it could not move.
+            assert.equals(0, plan.diag.phase3Sweeps)
+        end)
+    end)
 end)
