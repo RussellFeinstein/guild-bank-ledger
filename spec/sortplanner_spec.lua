@@ -3754,4 +3754,123 @@ describe("SortPlanner", function()
             assert.equals(20, leftAt[-1])
         end)
     end)
+
+    describe("same-item swap inside an overflow run (#147)", function()
+        --- Display tab 1 carries no template, so nothing competes with the
+        --- overflow tab for the stacks under test.
+        local function emptyDisplayOverflow()
+            return {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                },
+            }
+        end
+
+        --- Overflow tab 2 after the plan as { [slot] = count }, failing if
+        --- anything but item 100 landed there.
+        local function runCounts(final)
+            local out = {}
+            for s, v in pairs(final[2] or {}) do
+                assert.equals(100, v.itemID)
+                out[s] = v.count
+            end
+            return out
+        end
+
+        it("swaps a full stack past a partial stranded in the middle of a run", function()
+            -- Phase 4 wants both full stacks ahead of the partial, so slots
+            -- 2 and 3 have to exchange. Each destination holds the same
+            -- item and merging would make 30 against a max stack of 20, so
+            -- canExecute refuses both with max-stack-overflow. Until this
+            -- fix the stuck scan only recognised a FOREIGN blocker, so no
+            -- pivot was tried and both stacks came back unplaced with zero
+            -- ops, which repeats identically on every later pass.
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [1] = { itemID = 100, count = 20 },
+                    [2] = { itemID = 100, count = 10 },
+                    [3] = { itemID = 100, count = 20 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(),
+                { maxStackByItem = { [100] = 20 } })
+
+            -- Precondition: Phase 4 did ask for the swap. Without this the
+            -- op and unplaced counts below would also be satisfied by a
+            -- Phase 4 that wanted nothing at all.
+            assert.equals(2, plan.diag.phase4PositionShifts)
+
+            assert.equals(3, #plan.ops)
+            assert.equals(1, plan.diag.phase2Pivots)
+            assert.equals(0, plan.diag.phase2CycleAborts)
+            assert.equals(0, #plan.unplaced)
+            assert.same({ [1] = 20, [2] = 20, [3] = 10 },
+                runCounts(applyPlan(snap, plan)))
+        end)
+
+        it("swaps a full stack past a partial at the head of a run", function()
+            -- Same pair the other way round: the partial is where a full
+            -- stack belongs. The pivot parks the partial, the full stack
+            -- takes slot 1, and the partial comes back to the tail.
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [1] = { itemID = 100, count = 10 },
+                    [2] = { itemID = 100, count = 20 },
+                    [3] = { itemID = 100, count = 20 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(),
+                { maxStackByItem = { [100] = 20 } })
+
+            assert.equals(2, plan.diag.phase4PositionShifts)
+            assert.equals(3, #plan.ops)
+            assert.equals(1, plan.diag.phase2Pivots)
+            assert.equals(0, plan.diag.phase2CycleAborts)
+            assert.equals(0, #plan.unplaced)
+            assert.same({ [1] = 20, [2] = 20, [3] = 10 },
+                runCounts(applyPlan(snap, plan)))
+        end)
+
+        it("leaves a demand refused for max stack as a zero-op residual", function()
+            -- The scope pin. A demand fill is the only other assignment
+            -- canExecute can refuse for max stack, and only when the layout
+            -- asks for more of an item than one slot holds (perSlot 40
+            -- against a max stack of 20, which Validate and the editor both
+            -- accept). Pivoting there would move the stack already sitting
+            -- in the demand slot out to a free slot, fill the demand, and
+            -- plan the same thing again next pass, because the demand still
+            -- wants more than fits. Today it is a stable residual, which is
+            -- the better of the two, so the new stuck arm is scoped to
+            -- Phase 4's own assignments.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 15 } },
+                [2] = { [1] = { itemID = 100, count = 20 } },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({ [100] = { slots = 1, perSlot = 40 } },
+                        { [1] = 100 }),
+                    [2] = overflow(),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout,
+                { maxStackByItem = { [100] = 20 } })
+
+            assert.equals(0, plan.diag.phase2Pivots)
+            assert.equals(5, plan.deficits[100])
+            assert.equals(1, #plan.unplaced)
+            local u = plan.unplaced[1]
+            assert.equals(2, u.tabIndex)
+            assert.equals(1, u.slotIndex)
+            assert.equals(20, u.count)
+            assert.equals(GBL._sortPlannerReasons.CYCLE_NO_PIVOT, u.reason)
+            for _, op in ipairs(plan.ops) do
+                assert.is_not.equals(1, op.srcTab,
+                    "the stack already in the demand slot must not move")
+            end
+        end)
+    end)
 end)
