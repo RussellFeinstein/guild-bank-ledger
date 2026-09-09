@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.2] - 2026-09-08
+
 ### Fixed
 - The sort can now swap two stacks of the same item inside an overflow tab. When a part-full stack sat in the middle of an item's run, putting the run in order meant exchanging two slots that both held that item, neither move could be made directly, and the sort had no way to work around it: it listed both stacks as unplaceable and did nothing, on that pass and on every pass after it. It now moves one stack aside and back, the same way it already handled two different items that need to trade places.
 - A stack the sort has given up on stays where it is. The overflow packer knew to leave such a stack out of the tidying, but still treated its slot as a place to put something else, so it shoved that stack aside after telling you it could not be placed. Everything else now packs around it.
