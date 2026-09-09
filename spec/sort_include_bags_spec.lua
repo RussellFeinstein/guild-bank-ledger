@@ -170,6 +170,35 @@ describe("Include bags in sort", function()
             -- The stack is invisible, so the demand is still a deficit.
             assert.is_truthy(blob:find("0 moves", 1, true))
         end)
+        -- The empty-plan early return is the case the warning exists for.
+        -- A hidden overflow tab is one of the things that makes a plan
+        -- empty, and "every demand is already satisfied" is exactly the
+        -- wrong thing to tell someone whose overflow tab is invisible.
+        it("names a hidden overflow tab even when the plan is empty", function()
+            installLayout(20)
+            MockWoW.addTab("Tab 1", nil, true)
+            MockWoW.addTab("Tab 2", nil, true)
+            GBL.lastScanResults = {
+                [1] = { slots = {
+                    [1] = {
+                        itemLink = Helpers.makeItemLink(100, "Flask", 1),
+                        count = 20, slotIndex = 1, tabIndex = 1,
+                    },
+                }, itemCount = 1 },
+            }
+            GBL.lastScanCoverage = { viewableTabs = { 1 } }
+            GBL.lastScanTime = MockWoW.serverTime
+
+            Helpers.clearPrints()
+            GBL:PrintSortPreview()
+            local blob = table.concat(MockWoW.prints, "\n")
+
+            assert.is_truthy(blob:find("0 moves", 1, true),
+                "fixture should be producing an empty plan")
+            assert.is_truthy(blob:find("unviewable overflow tab: T2", 1, true),
+                "an empty plan hid the one thing the player needed to know")
+        end)
+
     end)
 
     describe("/gbl sortexec", function()

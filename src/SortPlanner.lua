@@ -1786,6 +1786,14 @@ function GBL:SummarizeSortPlan(plan)
     if #lines == 0 then
         table.insert(lines, "Bank already matches layout; no moves needed.")
     end
+    -- After the empty check, never inside it: a hidden overflow tab is one
+    -- of the things that produces an otherwise empty plan, and "nothing to
+    -- do" on its own is the misdiagnosis this warning exists to prevent.
+    for _, tabIndex in ipairs(plan.unviewableOverflowTabs or {}) do
+        table.insert(lines, string.format(
+            "unviewable overflow tab: T%d (not in the last bank scan: not "
+            .. "viewable to this character, or not yet purchased)", tabIndex))
+    end
     return lines
 end
 

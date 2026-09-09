@@ -2276,17 +2276,25 @@ function GBL:IsSortIncludeBags()
         and self.db.profile.sort.includeBags) and true or false
 end
 
---- Build the opts table for a PlanSort call from the current setting (#139).
---- Returns nil when bags are off, deliberately rather than an empty table, so
---- a bank-only plan takes the byte-identical path it always did.
+--- Build the opts table for a PlanSort call (#139 bags, #137 coverage).
+--- Returns nil only when there is nothing to carry: bags off and no scan
+--- finished yet. Coverage is not a bag concern, so a bank-only run needs it
+--- too, or the planner routes into tabs the scan could not see.
 ---
 --- The bags are re-read on every call. They are the one input the player can
 --- change between clicking Preview and clicking Execute, so a cached copy
 --- would plan moves for stacks that are no longer there.
 function GBL:BuildSortPlanOpts()
-    if not self:IsSortIncludeBags() then return nil end
-    if not self.ScanBags then return nil end
-    return { bagSnapshot = self:ScanBags() }
+    local opts
+    local coverage = self.GetLastScanCoverage and self:GetLastScanCoverage()
+    if coverage then
+        opts = { coverage = coverage }
+    end
+    if self:IsSortIncludeBags() and self.ScanBags then
+        opts = opts or {}
+        opts.bagSnapshot = self:ScanBags()
+    end
+    return opts
 end
 
 --- Compare the current bank scan against the layout's expected demand map
@@ -2593,7 +2601,11 @@ function GBL:PrintSortPreview()
         end
     end
 
-    if opsN == 0 and defN == 0 and unpN == 0 then
+    -- A hidden overflow tab (#137) produces an empty plan without the bank
+    -- being in order, so the reasons below would be the wrong answer. Fall
+    -- through instead and let the summary say so in its own words.
+    if opsN == 0 and defN == 0 and unpN == 0
+       and #(plan.unviewableOverflowTabs or {}) == 0 then
         if totalDemands == 0 then
             self:Print("  |cffffaa55Reason: layout has no display-tab demands - no template to sort toward. " ..
                        "Use Capture or Add Item on the Layout tab.|r")

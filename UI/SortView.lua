@@ -375,6 +375,20 @@ function GBL:_SortView_Preview()
     headerParent:AddChild(progress)
     self._sortProgressLabel = progress
 
+    -- Above the empty-plan return on purpose (#137): a tab the scan could
+    -- not see is one of the things that produces an empty plan, and the
+    -- move list cannot show it, because nothing was planned for it.
+    for _, tabIndex in ipairs(plan.unviewableOverflowTabs or {}) do
+        local warn = AceGUI:Create("Label")
+        warn:SetFullWidth(true)
+        warn:SetFontObject(GameFontNormalSmall)
+        warn:SetText(format(
+            "|cffffaa55Overflow tab %d was not in the last bank scan (not "
+            .. "viewable to this character, or not yet purchased). The sort "
+            .. "routes around it.|r", tabIndex))
+        headerParent:AddChild(warn)
+    end
+
     if opsN == 0 and defN == 0 and unpN == 0 then
         local lbl = AceGUI:Create("Label")
         lbl:SetFullWidth(true)
