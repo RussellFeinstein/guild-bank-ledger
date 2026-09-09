@@ -621,11 +621,9 @@ endOfPass = function()
             -- Re-read the bags rather than reusing the run's opening
             -- snapshot: this pass just deposited out of them, so a cached
             -- copy would plan moves for stacks that are already in the bank.
-            -- Every opts field the run needs is rebuilt here, not carried
-            -- from the opening plan. The bag snapshot taught that lesson
-            -- (#139) and coverage takes the same route (#137): it comes
-            -- from the scan this pass just ran, so a tab that became
-            -- visible mid-run is picked up on the next pass.
+            -- Every opts field the run needs is rebuilt here from this
+            -- pass's own scan, never carried from the opening plan (#139,
+            -- #137).
             local replanOpts
             local coverage = GBL.GetLastScanCoverage and GBL:GetLastScanCoverage()
             if coverage then

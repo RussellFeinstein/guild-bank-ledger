@@ -102,6 +102,8 @@
 --       free slots. nil means no filter, which is the fresh-layout case:
 --       a tab declared before anything scanned it stays usable. An empty
 --       viewableTabs list is NOT nil; it means a scan saw no tab at all.
+--
+--   opts.bagSnapshot :: { [pseudoTab] = tabResult } | nil   (#139)
 --       The player's bags, from GBL:ScanBags(), keyed by NEGATIVE
 --       pseudo-tab (bagID N is tab -(N+1)). Deliberately a separate arg
 --       rather than part of `snapshot`: tab classification, the
@@ -397,12 +399,9 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- pairs(): the ordered array is what keeps plan output deterministic
     -- with more than one overflow tab.
     local overflowTabsOrdered = BankLayout.OrderedOverflowTabs(layout)
-    -- Scan coverage (#137). A declared overflow tab the scan could not see
-    -- is absent from the snapshot exactly like one nobody has scanned yet,
-    -- and the seeding loop below then offers it as 98 free slots the
-    -- client cannot deposit into. Coverage tells those apart: hidden tabs
-    -- leave the routing order and are named instead. With no coverage
-    -- nothing changes, which is what keeps a fresh layout usable.
+    -- Scan coverage (#137). Tells a tab the scan could not see from one
+    -- nobody has scanned yet; without it the seeding loop offers both as
+    -- 98 free slots. No coverage means no filter.
     local coverage = opts and opts.coverage
     local haveCoverage = coverage and type(coverage.viewableTabs) == "table"
     local declaredOverflow = #overflowTabsOrdered
