@@ -93,6 +93,16 @@
 --       cannot be built in a fixture, so specs drive the exit with a small
 --       budget instead. Production callers omit it.
 --
+--   opts.coverage :: { viewableTabs = { tabIndex, ... } } | nil   (#137)
+--       What the scan that produced `snapshot` was able to read, from
+--       GBL:GetLastScanCoverage(). A declared overflow tab outside it is
+--       dropped from routing and reported in plan.unviewableOverflowTabs,
+--       because absence from the snapshot otherwise reads as an empty tab
+--       and the planner offers a tab the client cannot deposit into as 98
+--       free slots. nil means no filter, which is the fresh-layout case:
+--       a tab declared before anything scanned it stays usable. An empty
+--       viewableTabs list is NOT nil; it means a scan saw no tab at all.
+--
 --   opts.bagSnapshot :: { [pseudoTab] = tabResult } | nil   (#139)
 --       The player's bags, from GBL:ScanBags(), keyed by NEGATIVE
 --       pseudo-tab (bagID N is tab -(N+1)). Deliberately a separate arg
@@ -126,6 +136,7 @@ local REASON_OVERFLOW_FULL       = "overflow-full"
 local REASON_CYCLE_NO_PIVOT      = "cycle-no-pivot"
 local REASON_NO_OVERFLOW_DEFINED = "no-overflow-defined"
 local REASON_CYCLE_BUDGET        = "cycle-budget-exhausted"
+local REASON_OVERFLOW_UNVIEWABLE = "overflow-unviewable"
 
 -- How many pivot iterations one call of the pivot-break loop may spend.
 -- Each iteration emits one pivot and then re-drains, and a plan holds far
@@ -293,6 +304,10 @@ function GBL:PlanSort(snapshot, layout, opts)
     local plan = {
         ops = {}, deficits = {}, unplaced = {},
         overflowTabs = {},
+        -- Declared overflow tabs the scan could not see (#137). Ascending
+        -- by tab index. On the plan literal so the invalid-layout early
+        -- return below carries it too.
+        unviewableOverflowTabs = {},
         -- demandMap is the authoritative expected layout: for each display
         -- tab, a map slotIndex -> {itemID, perSlot} including both
         -- slotOrder-pinned demands and items[id].slots extensions. Populated
@@ -384,6 +399,37 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- pairs(): the ordered array is what keeps plan output deterministic
     -- with more than one overflow tab.
     local overflowTabsOrdered = BankLayout.OrderedOverflowTabs(layout)
+    -- Scan coverage (#137). Tells a tab the scan could not see from one
+    -- nobody has scanned yet; without it the seeding loop offers both as
+    -- 98 free slots. No coverage means no filter.
+    local coverage = opts and opts.coverage
+    local haveCoverage = coverage and type(coverage.viewableTabs) == "table"
+    local declaredOverflow = #overflowTabsOrdered
+    if haveCoverage then
+        local viewable = {}
+        for _, t in ipairs(coverage.viewableTabs) do viewable[t] = true end
+        local usable, hidden = {}, {}
+        for _, t in ipairs(overflowTabsOrdered) do
+            if viewable[t] then
+                usable[#usable + 1] = t
+            else
+                hidden[#hidden + 1] = t
+            end
+        end
+        -- By index, not routing order: this names tabs a player looks for
+        -- in the bank frame, where they are numbered.
+        table.sort(hidden)
+        overflowTabsOrdered = usable
+        plan.unviewableOverflowTabs = hidden
+    end
+    -- Which "nowhere to put it" this is. A layout declaring no overflow tab
+    -- needs a layout edit; one whose tabs are all hidden needs a rank
+    -- change. Only reachable with coverage, since nothing else empties the
+    -- list once tabs are declared.
+    local noOverflowReason = REASON_NO_OVERFLOW_DEFINED
+    if declaredOverflow > 0 and #overflowTabsOrdered == 0 then
+        noOverflowReason = REASON_OVERFLOW_UNVIEWABLE
+    end
     local overflowSet = {}
     for _, t in ipairs(overflowTabsOrdered) do overflowSet[t] = true end
     -- The helper returns a fresh caller-owned array and the planner never
@@ -1071,7 +1117,7 @@ function GBL:PlanSort(snapshot, layout, opts)
         end
         if #overflowTabsOrdered == 0 then
             recordUnplaced(sup.tabIndex, sup.slotIndex, sup.itemID,
-                sup.available, REASON_NO_OVERFLOW_DEFINED)
+                sup.available, noOverflowReason)
             diag.phase1bUnplaced = diag.phase1bUnplaced + 1
         else
             while sup.available > 0 do
@@ -1386,7 +1432,7 @@ function GBL:PlanSort(snapshot, layout, opts)
                 if not fits then
                     if #overflowTabsOrdered == 0 then
                         recordUnplaced(tabIndex, slotIndex, slot.itemID, slot.count,
-                            REASON_NO_OVERFLOW_DEFINED)
+                            noOverflowReason)
                     else
                         local remaining_ = slot.count
                         while remaining_ > 0 do
@@ -1624,11 +1670,26 @@ function GBL:PlanSort(snapshot, layout, opts)
                 diag.bagStay, diag.bagIgnored, diag.bagBound, diag.bagLocked,
                 diag.bagNoLink)
         end
+        -- Coverage term (#137), present whenever coverage was handed in,
+        -- including when it hid nothing: "checked, all visible" and "not
+        -- checked at all" are different states and a capture needs both.
+        local coveragePart = ""
+        if haveCoverage then
+            local hidden = plan.unviewableOverflowTabs
+            if #hidden == 0 then
+                coveragePart = " unviewable:none"
+            else
+                local names = {}
+                for i, t in ipairs(hidden) do names[i] = "T" .. t end
+                coveragePart = " unviewable:" .. table.concat(names, ",")
+            end
+        end
         self:SortInfo(string.format(
             "Sort plan: %.1fms, %d ops, %d deficits, %d unplaced "
-            .. "(input: %d slots / %d tabs)%s [%s]",
+            .. "(input: %d slots / %d tabs)%s%s [%s]",
             elapsed, #plan.ops, deficitCount, #plan.unplaced,
-            inputSlots, inputTabs, bagsPart, table.concat(breakdownParts, " ")))
+            inputSlots, inputTabs, bagsPart, coveragePart,
+            table.concat(breakdownParts, " ")))
 
         -- Which admitted bag stacks stay behind, and why. The term above
         -- carries the count; this names them, because "why is this still in
@@ -1724,6 +1785,14 @@ function GBL:SummarizeSortPlan(plan)
     if #lines == 0 then
         table.insert(lines, "Bank already matches layout; no moves needed.")
     end
+    -- After the empty check, never inside it: a hidden overflow tab is one
+    -- of the things that produces an otherwise empty plan, and "nothing to
+    -- do" on its own is the misdiagnosis this warning exists to prevent.
+    for _, tabIndex in ipairs(plan.unviewableOverflowTabs or {}) do
+        table.insert(lines, string.format(
+            "unviewable overflow tab: T%d (not in the last bank scan: not "
+            .. "viewable to this character, or not yet purchased)", tabIndex))
+    end
     return lines
 end
 
@@ -1738,4 +1807,5 @@ GBL._sortPlannerReasons = {
     CYCLE_NO_PIVOT          = REASON_CYCLE_NO_PIVOT,
     NO_OVERFLOW_DEFINED     = REASON_NO_OVERFLOW_DEFINED,
     CYCLE_BUDGET_EXHAUSTED  = REASON_CYCLE_BUDGET,
+    OVERFLOW_UNVIEWABLE     = REASON_OVERFLOW_UNVIEWABLE,
 }

@@ -608,6 +608,51 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.is_true(called, "endOfPass should re-plan")
             assert.is_nil(seen and seen.bagSnapshot)
         end)
+        -- Same trap the bag snapshot hit: the run's later passes plan with
+        -- whatever endOfPass builds, so an opts field the first plan had
+        -- and the replan does not is silently dropped halfway through a
+        -- sort. Coverage has to be rebuilt there, and from the pass's own
+        -- scan rather than the run's opening one.
+        it("passes the end-of-pass scan's coverage to the replan", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 20 } })
+            local seen
+            local realPlanSort = GBL.PlanSort
+            GBL.PlanSort = function(selfRef, snapshot, layout, opts)
+                seen = opts
+                return realPlanSort(selfRef, snapshot, layout, opts)
+            end
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 20 } },
+            }, function() end, { layout = layoutWithDemand(20) })
+            drainTimers()
+            GBL.PlanSort = realPlanSort
+
+            assert.is_not_nil(seen, "replan passed no opts at all")
+            assert.is_not_nil(seen.coverage, "replan lost the scan coverage")
+            assert.same({ 1, 2 }, seen.coverage.viewableTabs)
+        end)
+
+        it("takes the replan coverage from the pass's own scan", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 20 } })
+            MockWoW.guildBank.tabs[2].isViewable = false
+            local seen
+            local realPlanSort = GBL.PlanSort
+            GBL.PlanSort = function(selfRef, snapshot, layout, opts)
+                seen = opts
+                return realPlanSort(selfRef, snapshot, layout, opts)
+            end
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 20 } },
+            }, function() end, { layout = layoutWithDemand(20) })
+            drainTimers()
+            GBL.PlanSort = realPlanSort
+
+            assert.is_not_nil(seen and seen.coverage)
+            assert.same({ 1 }, seen.coverage.viewableTabs)
+        end)
+
 
         -- The dst pickup is the dangerous half: with an empty cursor it does
         -- not place, it PICKS UP whatever sits in the destination. So a

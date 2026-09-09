@@ -202,6 +202,13 @@ function GBL:FinalizeScan()
 
     self.lastScanTime = GetServerTime()
     self.lastScanResults = results
+    -- What the scan could look at, recorded here and nowhere else. A tab
+    -- missing from the results is hidden from this rank or unpurchased,
+    -- and the planner reads both as an empty tab without this (#137).
+    -- Copied because scanState is working memory, not a record.
+    local covered = {}
+    for i, tabIndex in ipairs(scanState.viewableTabs) do covered[i] = tabIndex end
+    self.lastScanCoverage = { viewableTabs = covered }
     self.scanInProgress = false
     scanState.inProgress = false
 
@@ -252,6 +259,15 @@ end
 -- @return table|nil Results table keyed by tab index
 function GBL:GetLastScanResults()
     return self.lastScanResults
+end
+
+--- Get the tabs the most recent finished scan was able to read.
+-- An empty viewableTabs list is a different fact from nil: it means a
+-- scan ran and saw no tab, so every declared tab is hidden, while nil
+-- means no scan has finished and nothing may be concluded from it.
+-- @return table|nil { viewableTabs = { tabIndex, ... } }
+function GBL:GetLastScanCoverage()
+    return self.lastScanCoverage
 end
 
 ------------------------------------------------------------------------

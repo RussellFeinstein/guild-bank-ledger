@@ -621,9 +621,17 @@ endOfPass = function()
             -- Re-read the bags rather than reusing the run's opening
             -- snapshot: this pass just deposited out of them, so a cached
             -- copy would plan moves for stacks that are already in the bank.
+            -- Every opts field the run needs is rebuilt here from this
+            -- pass's own scan, never carried from the opening plan (#139,
+            -- #137).
             local replanOpts
+            local coverage = GBL.GetLastScanCoverage and GBL:GetLastScanCoverage()
+            if coverage then
+                replanOpts = { coverage = coverage }
+            end
             if state.includeBags and GBL.ScanBags then
-                replanOpts = { bagSnapshot = GBL:ScanBags() }
+                replanOpts = replanOpts or {}
+                replanOpts.bagSnapshot = GBL:ScanBags()
             end
             local newPlan = GBL:PlanSort(snapshot, state.layout, replanOpts)
             -- Record what the freshest plan still sees in the bags, so the
