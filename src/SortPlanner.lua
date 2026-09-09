@@ -36,7 +36,7 @@
 --     * A same-item destination that would over-stack counts as blocked
 --       too, but only for a Phase 4 packing assignment (#147). There it
 --       means two stacks of one item must exchange places, which a pivot
---       resolves. On a demand fill the same refusal means the layout wants
+--       resolves. On anything else the same refusal means the layout wants
 --       more of the item than one slot holds, and pivoting would re-plan
 --       the same moves every pass, so those stay a zero-op residual.
 --     * The loop is bounded (GBL.SORT_PIVOT_BUDGET, overridable per plan
@@ -128,10 +128,12 @@ local REASON_NO_OVERFLOW_DEFINED = "no-overflow-defined"
 local REASON_CYCLE_BUDGET        = "cycle-budget-exhausted"
 
 -- How many pivot iterations one call of the pivot-break loop may spend.
--- Reaching it means on the order of this many interlocking swap cycles in
--- a single plan, which needs a nearly full bank whose layout demands close
--- to a permutation of it. Exported so specs can drive the exit with a
--- small budget instead of building 500 real cycles.
+-- Each iteration emits one pivot and then re-drains, and a plan holds far
+-- fewer independent swap cycles than this, so no plan is known to reach it
+-- and it is a defensive stop rather than a tuning knob. It earns its keep
+-- because reaching it used to drop the remaining moves out of the plan
+-- silently; they are now reported. Exported so specs can drive that exit
+-- with a small budget instead of building 500 real cycles.
 local PIVOT_BUDGET = 500
 GBL.SORT_PIVOT_BUDGET = PIVOT_BUDGET
 

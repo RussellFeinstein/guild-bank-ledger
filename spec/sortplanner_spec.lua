@@ -3859,6 +3859,7 @@ describe("SortPlanner", function()
             local plan = GBL:PlanSort(snap, layout,
                 { maxStackByItem = { [100] = 20 } })
 
+            assert.equals(0, #plan.ops)
             assert.equals(0, plan.diag.phase2Pivots)
             assert.equals(5, plan.deficits[100])
             assert.equals(1, #plan.unplaced)
