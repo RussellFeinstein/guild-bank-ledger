@@ -1209,11 +1209,20 @@ function GBL:PlanSort(snapshot, layout, opts)
             for i = 1, #assignments do
                 if remaining[i] then
                     local a = assignments[i]
-                    local _, reason = canExecute(a, state, getMaxStack)
-                    if reason == "dst-mismatch"
-                       or (reason == "max-stack-overflow" and a.pack) then
-                        stuckIdx = i
-                        break
+                    local dstCur = state[a.dstTab] and state[a.dstTab][a.dstSlot]
+                    if dstCur then
+                        if dstCur.itemID ~= a.itemID then
+                            stuckIdx = i
+                            break
+                        elseif a.pack then
+                            -- Cheap test first: getMaxStack is unmemoized
+                            -- and reaches the item cache (#147).
+                            local _, reason = canExecute(a, state, getMaxStack)
+                            if reason == "max-stack-overflow" then
+                                stuckIdx = i
+                                break
+                            end
+                        end
                     end
                 end
             end
