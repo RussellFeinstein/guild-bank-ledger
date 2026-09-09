@@ -33,6 +33,16 @@
 --     * If no pivot is available, record all remaining cycle participants
 --       as unplaced with reason="cycle-no-pivot" and stop — do not emit
 --       half-broken ops.
+--     * A same-item destination that would over-stack counts as blocked
+--       too, but only for a Phase 4 packing assignment (#147). There it
+--       means two stacks of one item must exchange places, which a pivot
+--       resolves. On a demand fill the same refusal means the layout wants
+--       more of the item than one slot holds, and pivoting would re-plan
+--       the same moves every pass, so those stay a zero-op residual.
+--     * The loop is bounded (GBL.SORT_PIVOT_BUDGET, overridable per plan
+--       by opts.pivotBudget for tests). Running out records what is left
+--       as unplaced with reason="cycle-budget-exhausted" and clears it,
+--       so it is reported once and never moved afterwards (#138).
 --
 --   Phase 3 Sweep
 --     * Defensive: any display-tab slot that still holds a non-fitting
@@ -56,6 +66,9 @@
 --       Ranking them by origSlot instead makes the target depend on
 --       current positions, which executing the plan changes, so a pass
 --       that ends early re-aims the rest of it (#140).
+--       A slot Phase 2 gave up on is left out of the packing entirely,
+--       targets included, so the run closes around it rather than
+--       through it and the stack reported unplaced is never moved (#143).
 --
 -- Public contract — drop-in compatible with SortExecutor and UI/SortView.
 -- The optional third arg opts is read by tests; production callers omit it.

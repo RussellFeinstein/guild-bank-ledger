@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The sort can now swap two stacks of the same item inside an overflow tab. When a part-full stack sat in the middle of an item's run, putting the run in order meant exchanging two slots that both held that item, neither move could be made directly, and the sort had no way to work around it: it listed both stacks as unplaceable and did nothing, on that pass and on every pass after it. It now moves one stack aside and back, the same way it already handled two different items that need to trade places.
+- A stack the sort has given up on stays where it is. The overflow packer knew to leave such a stack out of the tidying, but still treated its slot as a place to put something else, so it shoved that stack aside after telling you it could not be placed. Everything else now packs around it.
+- A sort plan that runs out of room to work now says what it left behind. There is a limit on how many stacks the planner will shuffle aside to break a deadlock, and on reaching it the moves it had not worked out yet were dropped from the plan with no mention anywhere, while the stacks involved could still be moved elsewhere by a later step. Those are now listed with the rest of the unplaced items, marked as the planner running out of room rather than as having nowhere to go.
+
 ## [0.39.1] - 2026-09-08
 
 ### Fixed
