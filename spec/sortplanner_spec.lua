@@ -3873,4 +3873,116 @@ describe("SortPlanner", function()
             end
         end)
     end)
+
+    describe("packing around an unplaced overflow slot (#143)", function()
+        --- A demand asking for more of an item than one slot holds is what
+        --- makes Phase 2 give up on an OVERFLOW slot while the rest of the
+        --- tab is still free: the fill is refused for max stack, which is
+        --- not a foreign blocker, so the loop aborts and flags the overflow
+        --- source. perSlot 40 against a max stack of 20 is accepted by
+        --- BankLayout.Validate and by the Layout editor, so this is an
+        --- arrangement a guild can have.
+        local function strandingLayout()
+            return {
+                tabs = {
+                    [1] = displayTab({ [100] = { slots = 1, perSlot = 40 } },
+                        { [1] = 100 }),
+                    [2] = overflow(),
+                },
+            }
+        end
+
+        --- The precondition every spec here rests on: Phase 2 gave up on
+        --- overflow slot 2, and on nothing else. Without this the op counts
+        --- below would also be satisfied by a plan that never stranded
+        --- anything, which is how this branch went unexercised.
+        local function assertStranded(plan)
+            assert.equals(1, #plan.unplaced)
+            local u = plan.unplaced[1]
+            assert.equals(2, u.tabIndex)
+            assert.equals(2, u.slotIndex)
+            assert.equals(20, u.count)
+            assert.equals(GBL._sortPlannerReasons.CYCLE_NO_PIVOT, u.reason)
+        end
+
+        it("leaves the tab alone when only the stranded slot breaks the run", function()
+            -- Slots 1 and 3 already hold what packing wants them to hold
+            -- once slot 2 is out of the reckoning. Today slot 2 counts as a
+            -- target anyway, so item 300 is aimed at it, the foreign blocker
+            -- is pivoted out, and the plan moves the very stack Phase 2 said
+            -- it could not place.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 15 } },
+                [2] = {
+                    [1] = { itemID = 50, count = 1 },
+                    [2] = { itemID = 100, count = 20 },
+                    [3] = { itemID = 300, count = 1 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, strandingLayout(),
+                { maxStackByItem = { [100] = 20 } })
+
+            assertStranded(plan)
+            assert.equals(0, plan.diag.phase4PositionShifts)
+            assert.equals(0, #plan.ops)
+        end)
+
+        it("packs the other stacks around the stranded slot", function()
+            -- Real packing work: item 50 belongs at slot 1 and item 300 at
+            -- the slot after it, which is 3 rather than 2 because 2 is out.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 15 } },
+                [2] = {
+                    [1] = { itemID = 300, count = 1 },
+                    [2] = { itemID = 100, count = 20 },
+                    [5] = { itemID = 50, count = 1 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, strandingLayout(),
+                { maxStackByItem = { [100] = 20 } })
+
+            assertStranded(plan)
+            assert.equals(2, #plan.ops)
+            for _, op in ipairs(plan.ops) do
+                assert.is_true(op.srcTab ~= 2 or op.srcSlot ~= 2,
+                    "the stranded slot must not be a source")
+                assert.is_true(op.dstTab ~= 2 or op.dstSlot ~= 2,
+                    "the stranded slot must not be a destination")
+            end
+            local final = applyPlan(snap, plan)
+            assert.equals(50, final[2][1].itemID)
+            assert.equals(100, final[2][2].itemID)
+            assert.equals(20, final[2][2].count)
+            assert.equals(300, final[2][3].itemID)
+        end)
+
+        it("keeps identical stacks put when the stranded slot splits their run", function()
+            -- Three interchangeable stacks and one target list of 1, 3, 4.
+            -- The stacks at 3 and 4 are already inside that range and stay
+            -- where they are (#140); only the one at 5 moves, into slot 1.
+            -- A stay-put test that still compares against the rank indices
+            -- 1 to 3 reads the stack at 4 as out of place and scrambles the
+            -- whole run instead.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 15 } },
+                [2] = {
+                    [2] = { itemID = 100, count = 20 },
+                    [3] = { itemID = 700, count = 20 },
+                    [4] = { itemID = 700, count = 20 },
+                    [5] = { itemID = 700, count = 20 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, strandingLayout(),
+                { maxStackByItem = { [100] = 20, [700] = 20 } })
+
+            assertStranded(plan)
+            assert.equals(1, #plan.ops)
+            local op = plan.ops[1]
+            assert.equals(700, op.itemID)
+            assert.equals(2, op.srcTab)
+            assert.equals(5, op.srcSlot)
+            assert.equals(2, op.dstTab)
+            assert.equals(1, op.dstSlot)
+        end)
+    end)
 end)
