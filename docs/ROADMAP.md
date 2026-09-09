@@ -65,7 +65,7 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 - Font scaling (8-24pt)
 
 **Infrastructure**:
-- 1917 busted tests across spec/
+- 1955 busted tests across spec/
 - Schema migrations v1--v11 (all tested)
 - GitHub Actions release pipeline (CurseForge + GitHub Releases via BigWigsMods/packager)
 - Daily TOC interface-version auto-update workflow

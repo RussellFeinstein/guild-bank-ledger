@@ -33,6 +33,16 @@
 --     * If no pivot is available, record all remaining cycle participants
 --       as unplaced with reason="cycle-no-pivot" and stop — do not emit
 --       half-broken ops.
+--     * A same-item destination that would over-stack counts as blocked
+--       too, but only for a Phase 4 packing assignment (#147). There it
+--       means two stacks of one item must exchange places, which a pivot
+--       resolves. On anything else the same refusal means the layout wants
+--       more of the item than one slot holds, and pivoting would re-plan
+--       the same moves every pass, so those stay a zero-op residual.
+--     * The loop is bounded (GBL.SORT_PIVOT_BUDGET, overridable per plan
+--       by opts.pivotBudget for tests). Running out records what is left
+--       as unplaced with reason="cycle-budget-exhausted" and clears it,
+--       so it is reported once and never moved afterwards (#138).
 --
 --   Phase 3 Sweep
 --     * Defensive: any display-tab slot that still holds a non-fitting
@@ -56,6 +66,9 @@
 --       Ranking them by origSlot instead makes the target depend on
 --       current positions, which executing the plan changes, so a pass
 --       that ends early re-aims the rest of it (#140).
+--       A slot Phase 2 gave up on is left out of the packing entirely,
+--       targets included, so the run closes around it rather than
+--       through it and the stack reported unplaced is never moved (#143).
 --
 -- Public contract — drop-in compatible with SortExecutor and UI/SortView.
 -- The optional third arg opts is read by tests; production callers omit it.
@@ -72,6 +85,13 @@
 --   opts.maxStackByItem :: { [itemID]=number } | nil
 --       Per-item max stack override used by tests. When absent, the
 --       planner reads max stack via GBL:GetMaxStack(itemID).
+--
+--   opts.pivotBudget :: number | nil
+--       How many pivot iterations one run of the Phase 2 loop may spend
+--       before it gives up and reports what is left (default
+--       GBL.SORT_PIVOT_BUDGET). Test-only: 500 interlocking swap cycles
+--       cannot be built in a fixture, so specs drive the exit with a small
+--       budget instead. Production callers omit it.
 --
 --   opts.bagSnapshot :: { [pseudoTab] = tabResult } | nil   (#139)
 --       The player's bags, from GBL:ScanBags(), keyed by NEGATIVE
@@ -105,6 +125,17 @@ local BankLayout = GBL.BankLayout
 local REASON_OVERFLOW_FULL       = "overflow-full"
 local REASON_CYCLE_NO_PIVOT      = "cycle-no-pivot"
 local REASON_NO_OVERFLOW_DEFINED = "no-overflow-defined"
+local REASON_CYCLE_BUDGET        = "cycle-budget-exhausted"
+
+-- How many pivot iterations one call of the pivot-break loop may spend.
+-- Each iteration emits one pivot and then re-drains, and a plan holds far
+-- fewer independent swap cycles than this, so no plan is known to reach it
+-- and it is a defensive stop rather than a tuning knob. It earns its keep
+-- because reaching it used to drop the remaining moves out of the plan
+-- silently; they are now reported. Exported so specs can drive that exit
+-- with a small budget instead of building 500 real cycles.
+local PIVOT_BUDGET = 500
+GBL.SORT_PIVOT_BUDGET = PIVOT_BUDGET
 
 -- How many stacks the "bags stay:" plan-line continuation names before it
 -- switches to a count. A bag full of one item would otherwise turn a single
@@ -1159,19 +1190,39 @@ function GBL:PlanSort(snapshot, layout, opts)
     end
 
     local function pivotBreakLoop()
+        local budget = (opts and opts.pivotBudget) or PIVOT_BUDGET
         local guard = 0
-        while next(remaining) ~= nil and guard < 500 do
+        while next(remaining) ~= nil and guard < budget do
             guard = guard + 1
 
-            -- Find the first remaining op whose dst currently holds a foreign item.
+            -- Find the first remaining op a pivot could unblock. A foreign
+            -- item in the destination is the classic case. A same-item
+            -- destination that would over-stack is the other one, and only
+            -- for a Phase 4 packing assignment (#147): there it means two
+            -- stacks of one item have to exchange positions, which a pivot
+            -- resolves in three ops. The same refusal on a demand fill means
+            -- the layout asks for more of the item than one slot holds, and
+            -- pivoting there would empty the demand slot, fill it, and plan
+            -- the identical pair of moves again on the next pass, so those
+            -- stay a zero-op residual.
             local stuckIdx
             for i = 1, #assignments do
                 if remaining[i] then
                     local a = assignments[i]
                     local dstCur = state[a.dstTab] and state[a.dstTab][a.dstSlot]
-                    if dstCur and dstCur.itemID ~= a.itemID then
-                        stuckIdx = i
-                        break
+                    if dstCur then
+                        if dstCur.itemID ~= a.itemID then
+                            stuckIdx = i
+                            break
+                        elseif a.pack then
+                            -- Cheap test first: getMaxStack is unmemoized
+                            -- and reaches the item cache (#147).
+                            local _, reason = canExecute(a, state, getMaxStack)
+                            if reason == "max-stack-overflow" then
+                                stuckIdx = i
+                                break
+                            end
+                        end
                     end
                 end
             end
@@ -1273,6 +1324,34 @@ function GBL:PlanSort(snapshot, layout, opts)
 
             greedyDrain()
         end
+
+        -- The budget ran out with assignments still pending (#138). Both
+        -- designed aborts above clear `remaining` as they record, and this
+        -- exit used to do neither, so those assignments vanished from the
+        -- plan's accounting: the abort count undercounted, and because
+        -- their source slots were never flagged, Phase 3 swept the very
+        -- stacks the plan had given up on into overflow. Record them with
+        -- their own reason so a capture can tell an exhausted budget from a
+        -- genuine no-pivot, and clear them so Phase 4's run of this loop
+        -- does not re-abort assignments whose sources have since drained.
+        if next(remaining) ~= nil then
+            local remainingCount = 0
+            for i = 1, #assignments do
+                if remaining[i] then remainingCount = remainingCount + 1 end
+            end
+            phase2Debug(string.format(
+                "sort plan Phase 2: pivot budget exhausted with %d remaining",
+                remainingCount))
+            for i = 1, #assignments do
+                if remaining[i] then
+                    local a = assignments[i]
+                    recordUnplaced(a.srcTab, a.srcSlot, a.itemID, a.count,
+                        REASON_CYCLE_BUDGET)
+                    remaining[i] = nil
+                    diag.phase2CycleAborts = diag.phase2CycleAborts + 1
+                end
+            end
+        end
     end
 
     greedyDrain()
@@ -1358,6 +1437,13 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- `assignments` / `remaining` and re-running both once for all tabs.
     local phase4Added = false
     for _, ovTab in ipairs(overflowTabsOrdered) do
+        -- A stranded slot (one of Phase 2's aborts gave up on an assignment
+        -- reading from it, so it is already reported unplaced) is left out
+        -- of the packing entirely: out of ovStacks here, and out of the
+        -- target list below, so nothing is aimed at it either. Moving a
+        -- stack the plan has already told the player it could not place
+        -- would contradict the report and, at the tab's own abort, could
+        -- name the same slot twice.
         local ovStacks = {}
         for s = 1, MAX_SLOTS do
             local slot = state[ovTab] and state[ovTab][s]
@@ -1371,6 +1457,23 @@ function GBL:PlanSort(snapshot, layout, opts)
         end
 
         table.sort(ovStacks, overflowStackOrder)
+
+        -- Where each rank lands. A slot Phase 2 gave up on is excluded from
+        -- ovStacks above but stays occupied, so packing rank i to slot i
+        -- would aim some other stack at it and pivot the abandoned stack
+        -- away, which is the one thing the skip exists to prevent (#143).
+        -- The target list is the leading slots that are NOT stranded, so
+        -- the run closes around such a slot instead of through it. With
+        -- nothing stranded targets[i] == i and this is the old behaviour.
+        local targets = {}
+        for s = 1, MAX_SLOTS do
+            if #targets >= #ovStacks then break end
+            local isUnplaced = unplacedSlots[ovTab]
+                and unplacedSlots[ovTab][s]
+            if not isUnplaced then
+                targets[#targets + 1] = s
+            end
+        end
 
         -- Within a run of indistinguishable stacks (same itemID AND same
         -- count) it does not matter which stack lands in which slot: the
@@ -1401,26 +1504,32 @@ function GBL:PlanSort(snapshot, layout, opts)
                 for k = runStart, runEnd do
                     group[#group + 1] = ovStacks[k]
                 end
-                -- Comparing a slot number against runStart/runEnd, which are
-                -- indices into the sorted array, is only meaningful because
-                -- the emit loop below packs rank i to slot i. If the packing
-                -- target ever stops being "slot == rank" (a reserved slot, a
-                -- different origin), this comparison silently aims wrong.
-                -- origSlot is unique per stack, so this can never collide.
+                -- The comparison is against the SLOTS this run will occupy,
+                -- not against its rank indices. Those were the same thing
+                -- until a stranded slot could push the targets apart (#143),
+                -- and reading the indices then calls a stack that is already
+                -- in place a mover and scrambles the run. origSlot is unique
+                -- per stack, so the stayPut map can never collide.
+                local firstSlot, lastSlot = targets[runStart], targets[runEnd]
                 local stayPut, movers = {}, {}
                 for _, st in ipairs(group) do
-                    if st.origSlot >= runStart and st.origSlot <= runEnd then
+                    -- A stranded slot never reaches ovStacks, and targets
+                    -- holds every non-stranded slot up to the last one it
+                    -- uses, so "inside the range" and "one of this run's
+                    -- target slots" are the same test for a group member.
+                    if st.origSlot >= firstSlot and st.origSlot <= lastSlot then
                         stayPut[st.origSlot] = st
                     else
                         movers[#movers + 1] = st
                     end
                 end
                 local mi = 1
-                for t = runStart, runEnd do
-                    if stayPut[t] then
-                        ovStacks[t] = stayPut[t]
+                for k = runStart, runEnd do
+                    local slotForRank = targets[k]
+                    if stayPut[slotForRank] then
+                        ovStacks[k] = stayPut[slotForRank]
                     else
-                        ovStacks[t] = movers[mi]
+                        ovStacks[k] = movers[mi]
                         mi = mi + 1
                     end
                 end
@@ -1429,12 +1538,17 @@ function GBL:PlanSort(snapshot, layout, opts)
         end
 
         for i, stack in ipairs(ovStacks) do
-            if stack.origSlot ~= i then
+            local dstSlot = targets[i]
+            if stack.origSlot ~= dstSlot then
                 local idx = #assignments + 1
                 assignments[idx] = {
                     srcTab = ovTab, srcSlot = stack.origSlot,
-                    dstTab = ovTab, dstSlot = i,
+                    dstTab = ovTab, dstSlot = dstSlot,
                     itemID = stack.itemID, count = stack.count,
+                    -- Marks this as position packing rather than a demand
+                    -- fill, which is what lets the pivot loop treat a
+                    -- same-item over-stack refusal as stuck (#147).
+                    pack = true,
                 }
                 remaining[idx] = true
                 phase4Added = true
@@ -1620,7 +1734,8 @@ GBL._sortPlannerApplyOpToState = applyOpToState
 
 -- Expose reason codes for tests/UI.
 GBL._sortPlannerReasons = {
-    OVERFLOW_FULL       = REASON_OVERFLOW_FULL,
-    CYCLE_NO_PIVOT      = REASON_CYCLE_NO_PIVOT,
-    NO_OVERFLOW_DEFINED = REASON_NO_OVERFLOW_DEFINED,
+    OVERFLOW_FULL           = REASON_OVERFLOW_FULL,
+    CYCLE_NO_PIVOT          = REASON_CYCLE_NO_PIVOT,
+    NO_OVERFLOW_DEFINED     = REASON_NO_OVERFLOW_DEFINED,
+    CYCLE_BUDGET_EXHAUSTED  = REASON_CYCLE_BUDGET,
 }

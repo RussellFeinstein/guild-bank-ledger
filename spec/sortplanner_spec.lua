@@ -2829,6 +2829,11 @@ describe("SortPlanner", function()
             -- Supply order is bank tabs first, bags appended after. At
             -- maxStack 20 each destination seals, so the order is readable
             -- off which slot each source landed in.
+            -- The bag holds exactly one stack, because a bag slot cannot
+            -- hold more than one: an over-stacked bag supply lands whole in
+            -- a slot Phase 4 then has to swap with the bank's stack, which
+            -- makes this fixture about the pivot loop rather than about
+            -- spill order (#147).
             local snap = snapshot({
                 [1] = {},
                 [2] = {},
@@ -2842,7 +2847,7 @@ describe("SortPlanner", function()
                     [3] = displayTab({}, {}),
                 },
             }
-            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 40 } } })
+            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 20 } } })
             local plan = GBL:PlanSort(snap, layout, {
                 bagSnapshot = bags,
                 maxStackByItem = { [100] = 20 },
@@ -3747,6 +3752,354 @@ describe("SortPlanner", function()
             for _, u in ipairs(plan.unplaced) do leftAt[u.tabIndex] = u.count end
             assert.equals(10, leftAt[3])
             assert.equals(20, leftAt[-1])
+        end)
+    end)
+
+    describe("same-item swap inside an overflow run (#147)", function()
+        --- Display tab 1 carries no template, so nothing competes with the
+        --- overflow tab for the stacks under test.
+        local function emptyDisplayOverflow()
+            return {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                },
+            }
+        end
+
+        --- Overflow tab 2 after the plan as { [slot] = count }, failing if
+        --- anything but item 100 landed there.
+        local function runCounts(final)
+            local out = {}
+            for s, v in pairs(final[2] or {}) do
+                assert.equals(100, v.itemID)
+                out[s] = v.count
+            end
+            return out
+        end
+
+        it("swaps a full stack past a partial stranded in the middle of a run", function()
+            -- Phase 4 wants both full stacks ahead of the partial, so slots
+            -- 2 and 3 have to exchange. Each destination holds the same
+            -- item and merging would make 30 against a max stack of 20, so
+            -- canExecute refuses both with max-stack-overflow. Until this
+            -- fix the stuck scan only recognised a FOREIGN blocker, so no
+            -- pivot was tried and both stacks came back unplaced with zero
+            -- ops, which repeats identically on every later pass.
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [1] = { itemID = 100, count = 20 },
+                    [2] = { itemID = 100, count = 10 },
+                    [3] = { itemID = 100, count = 20 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(),
+                { maxStackByItem = { [100] = 20 } })
+
+            -- Precondition: Phase 4 did ask for the swap. Without this the
+            -- op and unplaced counts below would also be satisfied by a
+            -- Phase 4 that wanted nothing at all.
+            assert.equals(2, plan.diag.phase4PositionShifts)
+
+            assert.equals(3, #plan.ops)
+            assert.equals(1, plan.diag.phase2Pivots)
+            assert.equals(0, plan.diag.phase2CycleAborts)
+            assert.equals(0, #plan.unplaced)
+            assert.same({ [1] = 20, [2] = 20, [3] = 10 },
+                runCounts(applyPlan(snap, plan)))
+        end)
+
+        it("swaps a full stack past a partial at the head of a run", function()
+            -- Same pair the other way round: the partial is where a full
+            -- stack belongs. The pivot parks the partial, the full stack
+            -- takes slot 1, and the partial comes back to the tail.
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [1] = { itemID = 100, count = 10 },
+                    [2] = { itemID = 100, count = 20 },
+                    [3] = { itemID = 100, count = 20 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, emptyDisplayOverflow(),
+                { maxStackByItem = { [100] = 20 } })
+
+            assert.equals(2, plan.diag.phase4PositionShifts)
+            assert.equals(3, #plan.ops)
+            assert.equals(1, plan.diag.phase2Pivots)
+            assert.equals(0, plan.diag.phase2CycleAborts)
+            assert.equals(0, #plan.unplaced)
+            assert.same({ [1] = 20, [2] = 20, [3] = 10 },
+                runCounts(applyPlan(snap, plan)))
+        end)
+
+        it("leaves a demand refused for max stack as a zero-op residual", function()
+            -- The scope pin. A demand fill is the only other assignment
+            -- canExecute can refuse for max stack, and only when the layout
+            -- asks for more of an item than one slot holds (perSlot 40
+            -- against a max stack of 20, which Validate and the editor both
+            -- accept). Pivoting there would move the stack already sitting
+            -- in the demand slot out to a free slot, fill the demand, and
+            -- plan the same thing again next pass, because the demand still
+            -- wants more than fits. Today it is a stable residual, which is
+            -- the better of the two, so the new stuck arm is scoped to
+            -- Phase 4's own assignments.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 15 } },
+                [2] = { [1] = { itemID = 100, count = 20 } },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({ [100] = { slots = 1, perSlot = 40 } },
+                        { [1] = 100 }),
+                    [2] = overflow(),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout,
+                { maxStackByItem = { [100] = 20 } })
+
+            assert.equals(0, #plan.ops)
+            assert.equals(0, plan.diag.phase2Pivots)
+            assert.equals(5, plan.deficits[100])
+            assert.equals(1, #plan.unplaced)
+            local u = plan.unplaced[1]
+            assert.equals(2, u.tabIndex)
+            assert.equals(1, u.slotIndex)
+            assert.equals(20, u.count)
+            assert.equals(GBL._sortPlannerReasons.CYCLE_NO_PIVOT, u.reason)
+            for _, op in ipairs(plan.ops) do
+                assert.is_not.equals(1, op.srcTab,
+                    "the stack already in the demand slot must not move")
+            end
+        end)
+    end)
+
+    describe("packing around an unplaced overflow slot (#143)", function()
+        --- A demand asking for more of an item than one slot holds is what
+        --- makes Phase 2 give up on an OVERFLOW slot while the rest of the
+        --- tab is still free: the fill is refused for max stack, which is
+        --- not a foreign blocker, so the loop aborts and flags the overflow
+        --- source. perSlot 40 against a max stack of 20 is accepted by
+        --- BankLayout.Validate and by the Layout editor, so this is an
+        --- arrangement a guild can have.
+        local function strandingLayout()
+            return {
+                tabs = {
+                    [1] = displayTab({ [100] = { slots = 1, perSlot = 40 } },
+                        { [1] = 100 }),
+                    [2] = overflow(),
+                },
+            }
+        end
+
+        --- The precondition every spec here rests on: Phase 2 gave up on
+        --- overflow slot 2, and on nothing else. Without this the op counts
+        --- below would also be satisfied by a plan that never stranded
+        --- anything, which is how this branch went unexercised.
+        local function assertStranded(plan)
+            assert.equals(1, #plan.unplaced)
+            local u = plan.unplaced[1]
+            assert.equals(2, u.tabIndex)
+            assert.equals(2, u.slotIndex)
+            assert.equals(20, u.count)
+            assert.equals(GBL._sortPlannerReasons.CYCLE_NO_PIVOT, u.reason)
+        end
+
+        it("leaves the tab alone when only the stranded slot breaks the run", function()
+            -- Slots 1 and 3 already hold what packing wants them to hold
+            -- once slot 2 is out of the reckoning. Today slot 2 counts as a
+            -- target anyway, so item 300 is aimed at it, the foreign blocker
+            -- is pivoted out, and the plan moves the very stack Phase 2 said
+            -- it could not place.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 15 } },
+                [2] = {
+                    [1] = { itemID = 50, count = 1 },
+                    [2] = { itemID = 100, count = 20 },
+                    [3] = { itemID = 300, count = 1 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, strandingLayout(),
+                { maxStackByItem = { [100] = 20 } })
+
+            assertStranded(plan)
+            assert.equals(0, plan.diag.phase4PositionShifts)
+            assert.equals(0, #plan.ops)
+        end)
+
+        it("packs the other stacks around the stranded slot", function()
+            -- Real packing work: item 50 belongs at slot 1 and item 300 at
+            -- the slot after it, which is 3 rather than 2 because 2 is out.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 15 } },
+                [2] = {
+                    [1] = { itemID = 300, count = 1 },
+                    [2] = { itemID = 100, count = 20 },
+                    [5] = { itemID = 50, count = 1 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, strandingLayout(),
+                { maxStackByItem = { [100] = 20 } })
+
+            assertStranded(plan)
+            assert.equals(2, #plan.ops)
+            for _, op in ipairs(plan.ops) do
+                assert.is_true(op.srcTab ~= 2 or op.srcSlot ~= 2,
+                    "the stranded slot must not be a source")
+                assert.is_true(op.dstTab ~= 2 or op.dstSlot ~= 2,
+                    "the stranded slot must not be a destination")
+            end
+            local final = applyPlan(snap, plan)
+            assert.equals(50, final[2][1].itemID)
+            assert.equals(100, final[2][2].itemID)
+            assert.equals(20, final[2][2].count)
+            assert.equals(300, final[2][3].itemID)
+        end)
+
+        it("keeps identical stacks put when the stranded slot splits their run", function()
+            -- Three interchangeable stacks and one target list of 1, 3, 4.
+            -- The stacks at 3 and 4 are already inside that range and stay
+            -- where they are (#140); only the one at 5 moves, into slot 1.
+            -- A stay-put test that still compares against the rank indices
+            -- 1 to 3 reads the stack at 4 as out of place and scrambles the
+            -- whole run instead.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 15 } },
+                [2] = {
+                    [2] = { itemID = 100, count = 20 },
+                    [3] = { itemID = 700, count = 20 },
+                    [4] = { itemID = 700, count = 20 },
+                    [5] = { itemID = 700, count = 20 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, strandingLayout(),
+                { maxStackByItem = { [100] = 20, [700] = 20 } })
+
+            assertStranded(plan)
+            assert.equals(1, #plan.ops)
+            local op = plan.ops[1]
+            assert.equals(700, op.itemID)
+            assert.equals(2, op.srcTab)
+            assert.equals(5, op.srcSlot)
+            assert.equals(2, op.dstTab)
+            assert.equals(1, op.dstSlot)
+        end)
+    end)
+
+    describe("pivot budget exhaustion (#138)", function()
+        --- Two disjoint two-cycles in one display tab, each resolvable with
+        --- a single pivot through the unclaimed slots from 5 up. The slot
+        --- order puts item 400's demand ahead of item 300's so that if the
+        --- second cycle's stacks are swept to overflow they land in itemID
+        --- order and Phase 4 adds nothing, which keeps the op counts here
+        --- about the budget and nothing else.
+        local function twoCycleLayout()
+            return {
+                tabs = {
+                    [1] = displayTab({
+                        [100] = { slots = 1, perSlot = 10 },
+                        [200] = { slots = 1, perSlot = 5 },
+                        [300] = { slots = 1, perSlot = 7 },
+                        [400] = { slots = 1, perSlot = 3 },
+                    }, { [1] = 100, [2] = 200, [3] = 400, [4] = 300 }),
+                    [2] = overflow(),
+                },
+            }
+        end
+
+        local function twoCycleSnapshot()
+            return snapshot({
+                [1] = {
+                    [1] = { itemID = 200, count = 5 },
+                    [2] = { itemID = 100, count = 10 },
+                    [3] = { itemID = 300, count = 7 },
+                    [4] = { itemID = 400, count = 3 },
+                },
+                [2] = {},
+            })
+        end
+
+        local maxStacks = { [100] = 20, [200] = 20, [300] = 20, [400] = 20 }
+
+        it("exports the default budget for specs to read", function()
+            assert.equals(500, GBL.SORT_PIVOT_BUDGET)
+        end)
+
+        it("resolves both cycles when the budget is not reached", function()
+            local snap = twoCycleSnapshot()
+            local plan = GBL:PlanSort(snap, twoCycleLayout(),
+                { maxStackByItem = maxStacks })
+
+            assert.equals(6, #plan.ops)
+            assert.equals(2, plan.diag.phase2Pivots)
+            assert.equals(0, #plan.unplaced)
+            assert.equals(0, plan.diag.phase3Sweeps)
+        end)
+
+        it("reports the assignments it dropped when the budget runs out", function()
+            local snap = twoCycleSnapshot()
+            local plan = GBL:PlanSort(snap, twoCycleLayout(),
+                { maxStackByItem = maxStacks, pivotBudget = 1 })
+
+            -- One pivot's worth of work: the first cycle, and nothing else.
+            assert.equals(1, plan.diag.phase2Pivots)
+            assert.equals(3, #plan.ops)
+
+            -- The second cycle's two assignments are named by slot, with a
+            -- reason that tells budget exhaustion from a genuine no-pivot.
+            assert.equals(2, #plan.unplaced)
+            assert.equals(2, plan.diag.phase2CycleAborts)
+            local at = {}
+            for _, u in ipairs(plan.unplaced) do
+                assert.equals(1, u.tabIndex)
+                assert.equals(GBL._sortPlannerReasons.CYCLE_BUDGET_EXHAUSTED,
+                    u.reason)
+                at[u.slotIndex] = u.count
+            end
+            assert.same({ [3] = 7, [4] = 3 }, at)
+
+            -- Recording them also stops Phase 3 sweeping to overflow the
+            -- very stacks the plan has just said it could not move.
+            assert.equals(0, plan.diag.phase3Sweeps)
+        end)
+
+        it("never moves what it reported, once Phase 4 runs the loop again", function()
+            -- Same exhaustion, but the overflow tab needs packing, so the
+            -- pivot loop runs a second time with its own budget. A dropped
+            -- assignment left in the pending set is picked up by that run
+            -- and resolved, which moves the stacks the plan has already
+            -- told the player it could not place. Clearing them as they are
+            -- recorded is what keeps the report and the ops agreeing.
+            local snap = snapshot({
+                [1] = {
+                    [1] = { itemID = 200, count = 5 },
+                    [2] = { itemID = 100, count = 10 },
+                    [3] = { itemID = 300, count = 7 },
+                    [4] = { itemID = 400, count = 3 },
+                },
+                [2] = {
+                    [1] = { itemID = 700, count = 5 },
+                    [2] = { itemID = 600, count = 5 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, twoCycleLayout(),
+                { maxStackByItem = maxStacks, pivotBudget = 1 })
+
+            assert.equals(2, #plan.unplaced)
+            local reported = {}
+            for _, u in ipairs(plan.unplaced) do
+                reported[u.tabIndex .. "/" .. u.slotIndex] = true
+            end
+            for _, op in ipairs(plan.ops) do
+                assert.is_nil(reported[op.srcTab .. "/" .. op.srcSlot],
+                    "no op may move a stack the plan reported unplaced")
+            end
+
+            -- Phase 4 still did its own work: the overflow pair is packed.
+            local final = applyPlan(snap, plan)
+            assert.equals(600, final[2][1].itemID)
+            assert.equals(700, final[2][2].itemID)
         end)
     end)
 end)
