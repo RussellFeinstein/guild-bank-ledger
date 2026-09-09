@@ -1163,13 +1163,23 @@ function GBL:PlanSort(snapshot, layout, opts)
         while next(remaining) ~= nil and guard < 500 do
             guard = guard + 1
 
-            -- Find the first remaining op whose dst currently holds a foreign item.
+            -- Find the first remaining op a pivot could unblock. A foreign
+            -- item in the destination is the classic case. A same-item
+            -- destination that would over-stack is the other one, and only
+            -- for a Phase 4 packing assignment (#147): there it means two
+            -- stacks of one item have to exchange positions, which a pivot
+            -- resolves in three ops. The same refusal on a demand fill means
+            -- the layout asks for more of the item than one slot holds, and
+            -- pivoting there would empty the demand slot, fill it, and plan
+            -- the identical pair of moves again on the next pass, so those
+            -- stay a zero-op residual.
             local stuckIdx
             for i = 1, #assignments do
                 if remaining[i] then
                     local a = assignments[i]
-                    local dstCur = state[a.dstTab] and state[a.dstTab][a.dstSlot]
-                    if dstCur and dstCur.itemID ~= a.itemID then
+                    local _, reason = canExecute(a, state, getMaxStack)
+                    if reason == "dst-mismatch"
+                       or (reason == "max-stack-overflow" and a.pack) then
                         stuckIdx = i
                         break
                     end
@@ -1435,6 +1445,10 @@ function GBL:PlanSort(snapshot, layout, opts)
                     srcTab = ovTab, srcSlot = stack.origSlot,
                     dstTab = ovTab, dstSlot = i,
                     itemID = stack.itemID, count = stack.count,
+                    -- Marks this as position packing rather than a demand
+                    -- fill, which is what lets the pivot loop treat a
+                    -- same-item over-stack refusal as stuck (#147).
+                    pack = true,
                 }
                 remaining[idx] = true
                 phase4Added = true
