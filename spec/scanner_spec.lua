@@ -368,6 +368,29 @@ describe("Scanner", function()
             assert.same({ 1, 3 }, coverage.viewableTabs)
         end)
 
+        -- Recording is not a display concern. notifyOnScan governs one
+        -- chat line, and a user who turned that off must still get a
+        -- filtered plan, or the sort plans into hidden tabs for them
+        -- alone. Every other spec here runs with the setting on, so
+        -- nothing else in the suite can catch that.
+        it("records coverage with scan notifications turned off", function()
+            MockWoW.addTab("Tab 1", nil, true)
+            MockWoW.addTab("Tab 2", nil, false)
+            GBL.db.profile.scanning.notifyOnScan = false
+
+            GBL:CancelPendingScan()
+            GBL.scanInProgress = false
+            GBL.bankOpen = true
+
+            GBL:StartFullScan()
+            MockWoW.fireTimers()
+
+            local coverage = GBL:GetLastScanCoverage()
+            assert.is_not_nil(coverage)
+            assert.same({ 1 }, coverage.viewableTabs,
+                "coverage must not depend on a chat-output setting")
+        end)
+
         -- Distinct from nil on purpose, and the distinction is the whole
         -- point of the record: a scan that ran and saw no tab means every
         -- declared tab is hidden, which the planner must act on. nil means
