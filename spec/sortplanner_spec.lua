@@ -4062,5 +4062,43 @@ describe("SortPlanner", function()
             -- very stacks the plan has just said it could not move.
             assert.equals(0, plan.diag.phase3Sweeps)
         end)
+
+        it("never moves what it reported, once Phase 4 runs the loop again", function()
+            -- Same exhaustion, but the overflow tab needs packing, so the
+            -- pivot loop runs a second time with its own budget. A dropped
+            -- assignment left in the pending set is picked up by that run
+            -- and resolved, which moves the stacks the plan has already
+            -- told the player it could not place. Clearing them as they are
+            -- recorded is what keeps the report and the ops agreeing.
+            local snap = snapshot({
+                [1] = {
+                    [1] = { itemID = 200, count = 5 },
+                    [2] = { itemID = 100, count = 10 },
+                    [3] = { itemID = 300, count = 7 },
+                    [4] = { itemID = 400, count = 3 },
+                },
+                [2] = {
+                    [1] = { itemID = 700, count = 5 },
+                    [2] = { itemID = 600, count = 5 },
+                },
+            })
+            local plan = GBL:PlanSort(snap, twoCycleLayout(),
+                { maxStackByItem = maxStacks, pivotBudget = 1 })
+
+            assert.equals(2, #plan.unplaced)
+            local reported = {}
+            for _, u in ipairs(plan.unplaced) do
+                reported[u.tabIndex .. "/" .. u.slotIndex] = true
+            end
+            for _, op in ipairs(plan.ops) do
+                assert.is_nil(reported[op.srcTab .. "/" .. op.srcSlot],
+                    "no op may move a stack the plan reported unplaced")
+            end
+
+            -- Phase 4 still did its own work: the overflow pair is packed.
+            local final = applyPlan(snap, plan)
+            assert.equals(600, final[2][1].itemID)
+            assert.equals(700, final[2][2].itemID)
+        end)
     end)
 end)
