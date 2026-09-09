@@ -199,6 +199,40 @@ describe("Include bags in sort", function()
                 "an empty plan hid the one thing the player needed to know")
         end)
 
+        -- The breakdown listed every declared overflow tab under a comment
+        -- claiming it matched what the planner routes to, while the warning
+        -- line a few prints later said the tab was invisible. One command
+        -- answering its own question two ways (#137).
+        it("lists only the overflow tabs the scan could see", function()
+            installLayout(20)
+            MockWoW.addTab("Tab 1", nil, true)
+            MockWoW.addTab("Tab 2", nil, true)
+            GBL.lastScanResults = { [1] = { slots = {}, itemCount = 0 } }
+            GBL.lastScanCoverage = { viewableTabs = { 1 } }
+            GBL.lastScanTime = MockWoW.serverTime
+
+            Helpers.clearPrints()
+            GBL:PrintSortPreview()
+            local blob = table.concat(MockWoW.prints, "\n")
+
+            assert.is_truthy(
+                blob:find("Overflow tabs: none usable (not in scan: 2)", 1, true),
+                "breakdown should name the hidden tab, got:\n" .. blob)
+        end)
+
+        it("lists a visible overflow tab as before", function()
+            installLayout(20)
+            installEmptyScan()
+
+            Helpers.clearPrints()
+            GBL:PrintSortPreview()
+            local blob = table.concat(MockWoW.prints, "\n")
+
+            assert.is_truthy(blob:find("Overflow tabs: [2]", 1, true),
+                "a viewable tab should still list plainly, got:\n" .. blob)
+            assert.is_nil(blob:find("not in scan", 1, true))
+        end)
+
     end)
 
     describe("/gbl sortexec", function()
@@ -284,6 +318,42 @@ describe("Include bags in sort", function()
             assert.is_true(#off > 0)
 
             assert.equals(off, on)
+        end)
+
+        -- The chat output is layout-derived and bank-only, but PlanSort
+        -- writes its plan line to the sort log on the way through, and the
+        -- Sort tab runs this command after every executed sort. Without
+        -- coverage a capture shows the run's filtered plan and then, seconds
+        -- later, an unfiltered one routing into the tab the run skipped.
+        --
+        -- Bags are deliberately still out: they cannot change a line of the
+        -- output, so passing BuildSortPlanOpts() here would buy a bag scan
+        -- for a log term nobody reads. The setting is on below so that
+        -- decision is pinned rather than assumed from the default.
+        it("carries the scan's coverage into the plan line it logs", function()
+            installLayout(20)
+            MockWoW.addTab("Tab 1", nil, true)
+            MockWoW.addTab("Tab 2", nil, true)
+            -- What a scan produces when overflow tab 2 is not viewable to
+            -- this character: a result for tab 1 only, coverage to match.
+            GBL.lastScanResults = { [1] = { slots = {}, itemCount = 0 } }
+            GBL.lastScanCoverage = { viewableTabs = { 1 } }
+            GBL.lastScanTime = MockWoW.serverTime
+            GBL.db.profile.sort.includeBags = true
+
+            GBL:ClearLog("sort")
+            GBL:PrintDeviations()
+
+            local planLine
+            for _, e in ipairs(GBL:GetLog("sort") or {}) do
+                if (e.message or ""):find("unviewable:T2", 1, true) then
+                    planLine = e.message
+                end
+            end
+            assert.is_not_nil(planLine,
+                "the plan line should name the tab the scan could not see")
+            assert.is_nil(planLine:find("bags:", 1, true),
+                "deviations should not scan bags for a line it never prints")
         end)
     end)
 
