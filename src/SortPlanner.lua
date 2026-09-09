@@ -73,6 +73,13 @@
 --       Per-item max stack override used by tests. When absent, the
 --       planner reads max stack via GBL:GetMaxStack(itemID).
 --
+--   opts.pivotBudget :: number | nil
+--       How many pivot iterations one run of the Phase 2 loop may spend
+--       before it gives up and reports what is left (default
+--       GBL.SORT_PIVOT_BUDGET). Test-only: 500 interlocking swap cycles
+--       cannot be built in a fixture, so specs drive the exit with a small
+--       budget instead. Production callers omit it.
+--
 --   opts.bagSnapshot :: { [pseudoTab] = tabResult } | nil   (#139)
 --       The player's bags, from GBL:ScanBags(), keyed by NEGATIVE
 --       pseudo-tab (bagID N is tab -(N+1)). Deliberately a separate arg
@@ -105,6 +112,15 @@ local BankLayout = GBL.BankLayout
 local REASON_OVERFLOW_FULL       = "overflow-full"
 local REASON_CYCLE_NO_PIVOT      = "cycle-no-pivot"
 local REASON_NO_OVERFLOW_DEFINED = "no-overflow-defined"
+local REASON_CYCLE_BUDGET        = "cycle-budget-exhausted"
+
+-- How many pivot iterations one call of the pivot-break loop may spend.
+-- Reaching it means on the order of this many interlocking swap cycles in
+-- a single plan, which needs a nearly full bank whose layout demands close
+-- to a permutation of it. Exported so specs can drive the exit with a
+-- small budget instead of building 500 real cycles.
+local PIVOT_BUDGET = 500
+GBL.SORT_PIVOT_BUDGET = PIVOT_BUDGET
 
 -- How many stacks the "bags stay:" plan-line continuation names before it
 -- switches to a count. A bag full of one item would otherwise turn a single
@@ -1159,8 +1175,9 @@ function GBL:PlanSort(snapshot, layout, opts)
     end
 
     local function pivotBreakLoop()
+        local budget = (opts and opts.pivotBudget) or PIVOT_BUDGET
         local guard = 0
-        while next(remaining) ~= nil and guard < 500 do
+        while next(remaining) ~= nil and guard < budget do
             guard = guard + 1
 
             -- Find the first remaining op a pivot could unblock. A foreign
@@ -1282,6 +1299,34 @@ function GBL:PlanSort(snapshot, layout, opts)
             end
 
             greedyDrain()
+        end
+
+        -- The budget ran out with assignments still pending (#138). Both
+        -- designed aborts above clear `remaining` as they record, and this
+        -- exit used to do neither, so those assignments vanished from the
+        -- plan's accounting: the abort count undercounted, and because
+        -- their source slots were never flagged, Phase 3 swept the very
+        -- stacks the plan had given up on into overflow. Record them with
+        -- their own reason so a capture can tell an exhausted budget from a
+        -- genuine no-pivot, and clear them so Phase 4's run of this loop
+        -- does not re-abort assignments whose sources have since drained.
+        if next(remaining) ~= nil then
+            local remainingCount = 0
+            for i = 1, #assignments do
+                if remaining[i] then remainingCount = remainingCount + 1 end
+            end
+            phase2Debug(string.format(
+                "sort plan Phase 2: pivot budget exhausted with %d remaining",
+                remainingCount))
+            for i = 1, #assignments do
+                if remaining[i] then
+                    local a = assignments[i]
+                    recordUnplaced(a.srcTab, a.srcSlot, a.itemID, a.count,
+                        REASON_CYCLE_BUDGET)
+                    remaining[i] = nil
+                    diag.phase2CycleAborts = diag.phase2CycleAborts + 1
+                end
+            end
         end
     end
 
@@ -1665,7 +1710,8 @@ GBL._sortPlannerApplyOpToState = applyOpToState
 
 -- Expose reason codes for tests/UI.
 GBL._sortPlannerReasons = {
-    OVERFLOW_FULL       = REASON_OVERFLOW_FULL,
-    CYCLE_NO_PIVOT      = REASON_CYCLE_NO_PIVOT,
-    NO_OVERFLOW_DEFINED = REASON_NO_OVERFLOW_DEFINED,
+    OVERFLOW_FULL           = REASON_OVERFLOW_FULL,
+    CYCLE_NO_PIVOT          = REASON_CYCLE_NO_PIVOT,
+    NO_OVERFLOW_DEFINED     = REASON_NO_OVERFLOW_DEFINED,
+    CYCLE_BUDGET_EXHAUSTED  = REASON_CYCLE_BUDGET,
 }
