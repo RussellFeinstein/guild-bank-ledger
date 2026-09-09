@@ -2397,6 +2397,52 @@ describe("SortPlanner", function()
                 assert.is_nil(findLine("unviewable:"))
             end)
         end)
+        -- SummarizeSortPlan is what /gbl sortpreview prints, line by line.
+        -- The warning belongs there rather than in PrintSortPreview so the
+        -- sentence has one home and one set of specs.
+        describe("summary lines", function()
+            it("names a hidden tab after the moves", function()
+                local plan = {
+                    ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                              dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+                    deficits = {}, unplaced = {},
+                    unviewableOverflowTabs = { 5 },
+                }
+                local blob = table.concat(GBL:SummarizeSortPlan(plan), "\n")
+
+                assert.is_truthy(blob:find("T5", 1, true))
+                assert.is_truthy(blob:find("unviewable overflow tab", 1, true))
+            end)
+
+            -- An otherwise empty plan still has something to say. Without
+            -- the warning it reads as "nothing to do" while a whole tab is
+            -- invisible, which is the misdiagnosis this issue is about.
+            it("names a hidden tab on a plan with nothing else in it", function()
+                local plan = {
+                    ops = {}, deficits = {}, unplaced = {},
+                    unviewableOverflowTabs = { 5 },
+                }
+                local blob = table.concat(GBL:SummarizeSortPlan(plan), "\n")
+
+                assert.is_truthy(blob:find("no moves needed", 1, true))
+                assert.is_truthy(blob:find("unviewable overflow tab", 1, true))
+            end)
+
+            it("says nothing when no tab was hidden", function()
+                local plan = { ops = {}, deficits = {}, unplaced = {},
+                               unviewableOverflowTabs = {} }
+                local blob = table.concat(GBL:SummarizeSortPlan(plan), "\n")
+                assert.is_nil(blob:find("unviewable", 1, true))
+            end)
+
+            it("tolerates a plan built before the field existed", function()
+                local plan = { ops = {}, deficits = {}, unplaced = {} }
+                local lines = GBL:SummarizeSortPlan(plan)
+                assert.is_true(#lines >= 1)
+                assert.is_nil(table.concat(lines, "\n"):find("unviewable", 1, true))
+            end)
+        end)
+
     end)
 
     -- ------------------------------------------------------------------

@@ -243,4 +243,71 @@ describe("SortView", function()
             assert.equals(1, GBL.A11Y.focusIndex)
         end)
     end)
+
+    -- A tab the scan could not see is the one thing the move list cannot
+    -- show, because the whole point is that nothing was planned for it
+    -- (#137). The warning has to survive the empty-plan early return, or
+    -- the case it exists for renders as "nothing to do".
+    describe("unviewable overflow tabs", function()
+        local function planWithHidden(hidden, ops)
+            return {
+                ops = ops or {},
+                deficits = {},
+                unplaced = {},
+                unviewableOverflowTabs = hidden,
+            }
+        end
+
+        it("names the tab the sort routed around", function()
+            GBL.IsSortRunning = function() return true end
+            GBL._sortLastPlan = planWithHidden({ 5 })
+
+            local container = buildTab()
+
+            assert.is_not_nil(findLabelContaining(container, "Overflow tab 5"),
+                "the tab should say which overflow tab was skipped")
+        end)
+
+        it("shows the warning on a plan with nothing else in it", function()
+            GBL.IsSortRunning = function() return true end
+            GBL._sortLastPlan = planWithHidden({ 5 })
+
+            local container = buildTab()
+            local blob = table.concat(allText(container), "\n")
+
+            assert.is_truthy(blob:find("nothing to do", 1, true),
+                "fixture should be taking the empty-plan path")
+            assert.is_truthy(blob:find("Overflow tab 5", 1, true))
+        end)
+
+        it("names each hidden tab", function()
+            GBL.IsSortRunning = function() return true end
+            GBL._sortLastPlan = planWithHidden({ 5, 7 })
+
+            local container = buildTab()
+
+            assert.is_not_nil(findLabelContaining(container, "Overflow tab 5"))
+            assert.is_not_nil(findLabelContaining(container, "Overflow tab 7"))
+        end)
+
+        it("says nothing when no tab was hidden", function()
+            GBL.IsSortRunning = function() return true end
+            GBL._sortLastPlan = planWithHidden({})
+
+            local container = buildTab()
+
+            for _, text in ipairs(allText(container)) do
+                assert.is_nil(text:find("Overflow tab", 1, true))
+            end
+        end)
+
+        it("tolerates a plan built before the field existed", function()
+            GBL.IsSortRunning = function() return true end
+            GBL._sortLastPlan = { ops = {}, deficits = {}, unplaced = {} }
+
+            local container = buildTab()
+
+            assert.is_not_nil(container)
+        end)
+    end)
 end)

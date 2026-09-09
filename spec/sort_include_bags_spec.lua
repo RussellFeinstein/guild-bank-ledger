@@ -63,6 +63,9 @@ describe("Include bags in sort", function()
             [1] = { slots = {}, itemCount = 0 },
             [2] = { slots = {}, itemCount = 0 },
         }
+        -- Coverage names the same two tabs the results carry, which is
+        -- what a real scan of a fully visible bank produces (#137).
+        GBL.lastScanCoverage = { viewableTabs = { 1, 2 } }
         GBL.lastScanTime = MockWoW.serverTime
     end
 
@@ -79,12 +82,36 @@ describe("Include bags in sort", function()
     end)
 
     describe("BuildSortPlanOpts", function()
-        it("returns nil when bags are off, so a bank-only plan is unchanged", function()
+        it("returns nil with bags off and no scan yet", function()
             Helpers.populateBag(0, {
                 [1] = { itemID = 100, name = "Flask", count = 20 },
             })
             assert.is_nil(GBL:BuildSortPlanOpts())
         end)
+        -- Coverage is not a bag concern, so it has to reach the planner on
+        -- a bank-only run too. Before #137 this returned nil whenever bags
+        -- were off, which would have left every bank-only sort unfiltered.
+        it("carries the last scan's coverage when bags are off", function()
+            installEmptyScan()
+
+            local opts = GBL:BuildSortPlanOpts()
+            assert.is_not_nil(opts, "a bank-only plan still needs coverage")
+            assert.is_nil(opts.bagSnapshot)
+            assert.same({ 1, 2 }, opts.coverage.viewableTabs)
+        end)
+
+        it("carries coverage alongside the bags when both exist", function()
+            installEmptyScan()
+            Helpers.populateBag(0, {
+                [1] = { itemID = 100, name = "Flask", count = 20 },
+            })
+            GBL.db.profile.sort.includeBags = true
+
+            local opts = GBL:BuildSortPlanOpts()
+            assert.is_not_nil(opts.bagSnapshot)
+            assert.same({ 1, 2 }, opts.coverage.viewableTabs)
+        end)
+
 
         it("carries a freshly scanned bag snapshot when bags are on", function()
             Helpers.populateBag(0, {
