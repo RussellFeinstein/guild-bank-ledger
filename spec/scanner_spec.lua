@@ -368,12 +368,6 @@ describe("Scanner", function()
             assert.same({ 1, 3 }, coverage.viewableTabs)
         end)
 
-        it("returns nil before any scan has finished", function()
-            MockWoW.addTab("Tab 1", nil, true)
-
-            assert.is_nil(GBL:GetLastScanCoverage())
-        end)
-
         -- Distinct from nil on purpose, and the distinction is the whole
         -- point of the record: a scan that ran and saw no tab means every
         -- declared tab is hidden, which the planner must act on. nil means
@@ -435,6 +429,29 @@ describe("Scanner", function()
                 "a cancelled scan erased the last completed scan's coverage")
             assert.same({ 1 }, coverage.viewableTabs)
         end)
+    end)
+end)
+
+------------------------------------------------------------------------
+-- Scan coverage before the first scan (#137)
+--
+-- Its own describe because the Scanner block above opens the bank in
+-- before_each, and autoScan runs a scan on bank open. That scan finishes
+-- having seen no tab, which is a real state and a different one: the
+-- planner filters on an empty coverage list and must not filter on nil.
+-- Reaching the nil means never opening the bank, which is a fresh login.
+------------------------------------------------------------------------
+
+describe("Scanner coverage before any scan", function()
+    it("is nil until a scan finishes", function()
+        Helpers.setupMocks()
+        local GBL = Helpers.loadAddon()
+        GBL:OnInitialize()
+        MockWoW.guild.name = "Test Guild"
+        GBL:OnEnable()
+        MockWoW.addTab("Tab 1", nil, true)
+
+        assert.is_nil(GBL:GetLastScanCoverage())
     end)
 end)
 
