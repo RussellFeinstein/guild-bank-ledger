@@ -2305,6 +2305,12 @@ end
 --- Bank-only on purpose, not by omission: this reads plan.demandMap and
 --- nothing else, and demandMap is derived purely from the layout, so a bag
 --- snapshot cannot change a single line of the output (#139).
+---
+--- Coverage is passed anyway (#137). PlanSort writes its plan line to the
+--- sort log whatever the caller does with the result, and the Sort tab runs
+--- this after every executed sort, so without it a capture reads a filtered
+--- plan followed by an unfiltered one routing into the tab just skipped.
+--- Bags stay out for the reason above: a scan for a term nobody prints.
 function GBL:PrintDeviations()
     if not self.PlanSort then
         self:Print("SortPlanner not loaded.")
@@ -2321,7 +2327,9 @@ function GBL:PrintDeviations()
         return
     end
 
-    local plan = self:PlanSort(snapshot, layout)
+    local plan = self:PlanSort(snapshot, layout, {
+        coverage = self.GetLastScanCoverage and self:GetLastScanCoverage(),
+    })
     local expected = plan.demandMap or {}
 
     -- Ignore tabs are excluded from comparison; they're never touched by sort.
@@ -2479,9 +2487,26 @@ function GBL:PrintSortPreview()
         return
     end
 
+    -- Planned up here so the breakdown below can report the overflow tabs
+    -- the planner will actually use rather than the ones the layout names.
+    -- Nothing this command prints depends on the order the plan was built
+    -- in; the three preview specs pin the output either way.
+    local plan = self:PlanSort(snapshot, layout, self:BuildSortPlanOpts())
+
     -- Layout breakdown. Overflow tabs come from the shared helper so the
-    -- fill order shown here matches what the planner actually routes to.
+    -- fill order shown here matches what the planner actually routes to,
+    -- minus any tab the last scan could not see (#137). Declared-minus-
+    -- hidden rather than plan.overflowTabs, because an invalid layout gets
+    -- an early return with that field empty and this is the command for
+    -- diagnosing exactly such a layout.
     local overflowTabsOrdered = self.BankLayout.OrderedOverflowTabs(layout)
+    local hiddenOverflow = plan.unviewableOverflowTabs or {}
+    local hiddenSet = {}
+    for _, t in ipairs(hiddenOverflow) do hiddenSet[t] = true end
+    local usableOverflow = {}
+    for _, t in ipairs(overflowTabsOrdered) do
+        if not hiddenSet[t] then usableOverflow[#usableOverflow + 1] = t end
+    end
     local displayTabs, ignoreTabs = {}, {}
     local totalDemands = 0
     for tabIndex, tab in pairs(layout.tabs) do
@@ -2534,12 +2559,27 @@ function GBL:PrintSortPreview()
     end
     self:Print(format("  Display tabs: [%s] (%d demands total)",
         table.concat(displaySummary, ", "), totalDemands))
-    if #overflowTabsOrdered == 0 then
-        self:Print("  Overflow tabs: none")
+    -- Hidden tabs are named after the brackets, ascending by index and
+    -- without a priority: the point is which tab is missing, not where it
+    -- would have sat in the fill order.
+    local hiddenNote = ""
+    if #hiddenOverflow > 0 then
+        local hidStr = {}
+        for _, t in ipairs(hiddenOverflow) do
+            table.insert(hidStr, tostring(t))
+        end
+        hiddenNote = format(" (not in scan: %s)", table.concat(hidStr, ", "))
+    end
+    if #usableOverflow == 0 then
+        if #hiddenOverflow > 0 then
+            self:Print(format("  Overflow tabs: none usable%s", hiddenNote))
+        else
+            self:Print("  Overflow tabs: none")
+        end
     else
         -- In fill order; a tab shows its priority only when one is set.
         local ovSummary = {}
-        for _, t in ipairs(overflowTabsOrdered) do
+        for _, t in ipairs(usableOverflow) do
             local p = layout.tabs[t] and layout.tabs[t].overflowPriority
             if p ~= nil then
                 table.insert(ovSummary, format("%d (prio %s)", t, tostring(p)))
@@ -2547,7 +2587,8 @@ function GBL:PrintSortPreview()
                 table.insert(ovSummary, tostring(t))
             end
         end
-        self:Print(format("  Overflow tabs: [%s]", table.concat(ovSummary, ", ")))
+        self:Print(format("  Overflow tabs: [%s]%s",
+            table.concat(ovSummary, ", "), hiddenNote))
     end
     if #ignoreTabs > 0 then
         self:Print(format("  Ignore tabs: [%s]",
@@ -2568,7 +2609,6 @@ function GBL:PrintSortPreview()
         self:Print("  Include bags: off")
     end
 
-    local plan = self:PlanSort(snapshot, layout, self:BuildSortPlanOpts())
     local opsN = #(plan.ops or {})
     local defN = 0; for _ in pairs(plan.deficits or {}) do defN = defN + 1 end
     local unpN = #(plan.unplaced or {})
