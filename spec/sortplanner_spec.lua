@@ -2829,6 +2829,11 @@ describe("SortPlanner", function()
             -- Supply order is bank tabs first, bags appended after. At
             -- maxStack 20 each destination seals, so the order is readable
             -- off which slot each source landed in.
+            -- The bag holds exactly one stack, because a bag slot cannot
+            -- hold more than one: an over-stacked bag supply lands whole in
+            -- a slot Phase 4 then has to swap with the bank's stack, which
+            -- makes this fixture about the pivot loop rather than about
+            -- spill order (#147).
             local snap = snapshot({
                 [1] = {},
                 [2] = {},
@@ -2842,7 +2847,7 @@ describe("SortPlanner", function()
                     [3] = displayTab({}, {}),
                 },
             }
-            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 40 } } })
+            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 20 } } })
             local plan = GBL:PlanSort(snap, layout, {
                 bagSnapshot = bags,
                 maxStackByItem = { [100] = 20 },
