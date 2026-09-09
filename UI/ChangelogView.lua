@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.39.3
+    {"0.39.3", "2026-09-09", {
+        Fixed = {
+            "The sort no longer plans moves into an overflow tab it could not see. A tab your rank cannot view, or one the guild has not bought yet, is skipped by the bank scan, and the sort read that gap as an empty tab with 98 free slots: it planned deposits there that the client could not carry out, the rescan between passes was blind in the same way, and the run finished by reporting moves it could not complete rather than saying a tab was invisible. The sort now routes around such a tab. The Sort tab and /gbl sortpreview both name it and say why, and the preview's overflow-tab list shows only the tabs the sort will use.",
+        },
+    }},
     -- v0.39.2
     {"0.39.2", "2026-09-08", {
         Fixed = {
