@@ -2147,6 +2147,259 @@ describe("SortPlanner", function()
     end)
 
     -- ------------------------------------------------------------------
+    -- Overflow tabs outside scan coverage (#137)
+    --
+    -- The scanner skips tabs the player's rank cannot view, so a hidden
+    -- overflow tab is absent from the snapshot and the cold-tab seeding
+    -- loop offers it as 98 free slots. The plan then routes into a tab the
+    -- client cannot deposit into, every move fails, the replan is blind in
+    -- the same way, and the run ends as "converged, N unresolved".
+    --
+    -- opts.coverage is what makes "not scanned" distinguishable from
+    -- "scanned and empty". Absent, nothing changes.
+    -- ------------------------------------------------------------------
+    describe("overflow tabs outside scan coverage", function()
+        local function fullTab(itemID, count, n)
+            local t = {}
+            for s = 1, (n or 98) do
+                t[s] = { itemID = itemID, count = count }
+            end
+            return t
+        end
+
+        --- Tab 2 and tab 5 both declared overflow, display tab 1 empty.
+        local function twoOverflowLayout()
+            return {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                    [5] = overflow(),
+                },
+            }
+        end
+
+        local MAXSTACKS = { [200] = 200, [999] = 10 }
+
+        it("does not route into an overflow tab the scan could not see", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 999, count = 5 } },
+                [2] = fullTab(200, 200),
+            })
+            local opts = { maxStackByItem = MAXSTACKS,
+                           coverage = { viewableTabs = { 1, 2 } } }
+
+            local plan = GBL:PlanSort(snap, twoOverflowLayout(), opts)
+
+            for _, op in ipairs(plan.ops) do
+                assert.is_not.equals(5, op.dstTab,
+                    "planned a move into a tab the scan never saw")
+            end
+            assert.equals(0, #plan.ops)
+            assert.equals(1, #plan.unplaced)
+            assert.equals(1, plan.unplaced[1].tabIndex)
+            assert.equals(1, plan.unplaced[1].slotIndex)
+            assert.equals(5, plan.unplaced[1].count)
+            assert.equals(GBL._sortPlannerReasons.OVERFLOW_FULL,
+                plan.unplaced[1].reason)
+            assert.same({ 2 }, plan.overflowTabs)
+            assert.equals(2, plan.overflowTab)
+            assert.same({ 5 }, plan.unviewableOverflowTabs)
+        end)
+
+        -- Every declared overflow tab hidden is a different fact from a
+        -- layout that declares none, and the player needs to know which:
+        -- one is fixed by a rank change, the other by editing the layout.
+        it("reports overflow-unviewable when every overflow tab is hidden", function()
+            local snap = snapshot({ [1] = { [1] = { itemID = 999, count = 5 } } })
+            local layout = {
+                tabs = { [1] = displayTab({}, {}), [5] = overflow() },
+            }
+            local opts = { maxStackByItem = MAXSTACKS,
+                           coverage = { viewableTabs = { 1 } } }
+
+            local plan = GBL:PlanSort(snap, layout, opts)
+
+            assert.equals(0, #plan.ops)
+            assert.equals(1, #plan.unplaced)
+            assert.equals(GBL._sortPlannerReasons.OVERFLOW_UNVIEWABLE,
+                plan.unplaced[1].reason)
+            assert.same({}, plan.overflowTabs)
+            assert.is_nil(plan.overflowTab)
+            assert.same({ 5 }, plan.unviewableOverflowTabs)
+        end)
+
+        -- Ascending by tab index, not routing order: the message is about
+        -- which tabs are invisible, and a player looking for tab 5 in the
+        -- bank frame reads it by number.
+        it("reports the hidden tabs by index, not in routing order", function()
+            local snap = snapshot({ [1] = {} })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [5] = overflow(),
+                    [7] = { mode = "overflow", overflowPriority = 1 },
+                },
+            }
+            local opts = { coverage = { viewableTabs = { 1 } } }
+
+            local plan = GBL:PlanSort(snap, layout, opts)
+
+            assert.same({ 5, 7 }, plan.unviewableOverflowTabs)
+        end)
+
+        it("routes into a covered tab the scan found empty", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 999, count = 5 } },
+                [2] = fullTab(200, 200),
+                [5] = {},
+            })
+            local opts = { maxStackByItem = MAXSTACKS,
+                           coverage = { viewableTabs = { 1, 2, 5 } } }
+
+            local plan = GBL:PlanSort(snap, twoOverflowLayout(), opts)
+
+            assert.equals(0, #plan.unplaced)
+            assert.same({}, plan.unviewableOverflowTabs)
+            local final = applyPlan(snap, plan)
+            assert.equals(999, final[5][1].itemID)
+            assert.equals(5, final[5][1].count)
+        end)
+
+        -- No coverage means no filter. That is what every existing caller
+        -- does today, and it is what keeps a layout declaring a tab nobody
+        -- has scanned yet usable.
+        it("seeds an unscanned tab as before when no coverage is supplied", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 999, count = 5 } },
+                [2] = fullTab(200, 200),
+            })
+
+            local plan = GBL:PlanSort(snap, twoOverflowLayout(),
+                { maxStackByItem = MAXSTACKS })
+
+            assert.equals(0, #plan.unplaced)
+            assert.same({ 2, 5 }, plan.overflowTabs)
+            assert.same({}, plan.unviewableOverflowTabs)
+            local final = applyPlan(snap, plan)
+            assert.equals(999, final[5][1].itemID)
+        end)
+
+        -- A scan that ran and saw nothing is coverage, not the absence of
+        -- it. Reading an empty list as "no coverage" would put a client
+        -- with no tab visibility straight back on the seeding path.
+        it("treats an empty coverage list as coverage of nothing", function()
+            local snap = snapshot({ [1] = { [1] = { itemID = 999, count = 5 } } })
+            local layout = {
+                tabs = { [1] = displayTab({}, {}), [5] = overflow() },
+            }
+            local opts = { maxStackByItem = MAXSTACKS,
+                           coverage = { viewableTabs = {} } }
+
+            local plan = GBL:PlanSort(snap, layout, opts)
+
+            assert.equals(0, #plan.ops)
+            assert.same({}, plan.overflowTabs)
+            assert.same({ 5 }, plan.unviewableOverflowTabs)
+        end)
+
+        it("exports the reason code", function()
+            assert.equals("overflow-unviewable",
+                GBL._sortPlannerReasons.OVERFLOW_UNVIEWABLE)
+        end)
+
+        -- The invalid-layout early return hands back the plan literal, so
+        -- the field belongs on it too. A reader that walks the list would
+        -- otherwise error on the one path that produces no plan at all.
+        it("carries the field on the invalid-layout early return", function()
+            local plan = GBL:PlanSort({}, nil)
+            assert.same({}, plan.unviewableOverflowTabs)
+        end)
+
+        -- Phase 3 carries its own copy of the no-overflow branch. Reaching
+        -- it needs a blocker that Phase 1B already flagged and Phase 2 then
+        -- parked in an unclaimed display slot, which Phase 3 finds
+        -- unflagged at its new position.
+        --
+        -- The same stack is reported twice, once by 1B at its old slot and
+        -- once here at the pivot slot. That is pre-existing behaviour under
+        -- no-overflow-defined and is not frozen by this spec: only the
+        -- reason on the Phase 3 entry is.
+        it("uses the same reason at the Phase 3 sweep", function()
+            local snap = snapshot({
+                [1] = {
+                    [1] = { itemID = 500, count = 5 },
+                    [2] = { itemID = 100, count = 10 },
+                },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({ [100] = { slots = 1, perSlot = 10 } },
+                                     { [1] = 100 }),
+                    [5] = overflow(),
+                },
+            }
+            local opts = { maxStackByItem = { [100] = 10, [500] = 10 },
+                           coverage = { viewableTabs = { 1 } } }
+
+            local plan = GBL:PlanSort(snap, layout, opts)
+
+            assert.equals(1, plan.diag.phase2Pivots,
+                "fixture no longer reaches Phase 3 through a pivot")
+            local swept
+            for _, u in ipairs(plan.unplaced) do
+                if u.slotIndex == 3 then swept = u end
+            end
+            assert.is_not_nil(swept,
+                "expected the pivoted blocker to be reported at its new slot")
+            assert.equals(500, swept.itemID)
+            assert.equals(GBL._sortPlannerReasons.OVERFLOW_UNVIEWABLE,
+                swept.reason)
+        end)
+
+        describe("plan line", function()
+            local function findLine(needle)
+                for _, e in ipairs(GBL:GetLog("sort") or {}) do
+                    local m = e.message or ""
+                    if m:find(needle, 1, true) then return m end
+                end
+                return nil
+            end
+
+            it("names the hidden tabs", function()
+                local snap = snapshot({
+                    [1] = { [1] = { itemID = 999, count = 5 } },
+                    [2] = {},
+                })
+                GBL:PlanSort(snap, twoOverflowLayout(), {
+                    maxStackByItem = MAXSTACKS,
+                    coverage = { viewableTabs = { 1, 2 } },
+                })
+
+                assert.is_not_nil(findLine("unviewable:T5"),
+                    "the plan line should name the tab it routed around")
+            end)
+
+            -- Present even when nothing was hidden, so a capture can tell
+            -- "coverage checked, all tabs visible" from "coverage absent".
+            it("says none when coverage hid nothing", function()
+                local snap = snapshot({ [1] = {}, [2] = {}, [5] = {} })
+                GBL:PlanSort(snap, twoOverflowLayout(), {
+                    coverage = { viewableTabs = { 1, 2, 5 } },
+                })
+
+                assert.is_not_nil(findLine("unviewable:none"))
+            end)
+
+            it("omits the term entirely when no coverage was supplied", function()
+                local snap = snapshot({ [1] = {}, [2] = {}, [5] = {} })
+                GBL:PlanSort(snap, twoOverflowLayout(), {})
+
+                assert.is_nil(findLine("unviewable:"))
+            end)
+        end)
+    end)
+
+    -- ------------------------------------------------------------------
     -- Per-phase diagnostic counters (v0.30.5)
     -- ------------------------------------------------------------------
     describe("plan.diag counters", function()
