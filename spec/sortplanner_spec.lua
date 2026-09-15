@@ -2446,6 +2446,83 @@ describe("SortPlanner", function()
     end)
 
     -- ------------------------------------------------------------------
+    -- Unplaced reason text (#45)
+    --
+    -- Two surfaces render plan.unplaced: SummarizeSortPlan, which both
+    -- /gbl sortpreview and the sort log print, and the Sort tab's Unplaced
+    -- list. Both read one mapping, so they cannot drift apart the way
+    -- PrintSortPreview and the Sort tab did in #137.
+    -- ------------------------------------------------------------------
+    describe("unplaced reason text (#45)", function()
+        it("gives every shipped reason code its own words", function()
+            local seen = {}
+            for _, code in pairs(GBL._sortPlannerReasons) do
+                local text = GBL:SortReasonText(code)
+                assert.is_string(text)
+                assert.is_true(#text > 0)
+                assert.is_nil(text:find(code, 1, true),
+                    "the text for " .. code .. " should read as words, not echo the code")
+                assert.is_nil(seen[text],
+                    "two reason codes share the same text: " .. text)
+                seen[text] = code
+            end
+        end)
+
+        -- #150 adds a sixth code. A code this table has not learned yet
+        -- must not blank the row or raise; it falls back to the code.
+        it("renders an unrecognised code rather than dropping it", function()
+            assert.equals("over-stack-demand", GBL:SortReasonText("over-stack-demand"))
+        end)
+
+        it("tolerates an entry with no reason recorded", function()
+            local text = GBL:SortReasonText(nil)
+            assert.is_string(text)
+            assert.is_true(#text > 0)
+        end)
+
+        it("carries the reason onto the summary line", function()
+            local R = GBL._sortPlannerReasons
+            local plan = { ops = {}, deficits = {}, unplaced = {
+                { tabIndex = 2, slotIndex = 7, itemID = 100, count = 5,
+                  reason = R.OVERFLOW_UNVIEWABLE },
+            } }
+            local blob = table.concat(GBL:SummarizeSortPlan(plan), "\n")
+
+            assert.is_truthy(blob:find("T2/7", 1, true))
+            assert.is_truthy(blob:find(GBL:SortReasonText(R.OVERFLOW_UNVIEWABLE), 1, true))
+        end)
+
+        -- The bag tail says what happens to the items; the reason says why.
+        -- Both belong on the line and neither replaces the other.
+        it("keeps the stays-in-bags tail alongside the reason", function()
+            local R = GBL._sortPlannerReasons
+            local plan = { ops = {}, deficits = {}, unplaced = {
+                { tabIndex = -1, slotIndex = 5, itemID = 100, count = 3,
+                  reason = R.OVERFLOW_FULL },
+            } }
+            local blob = table.concat(GBL:SummarizeSortPlan(plan), "\n")
+
+            assert.is_truthy(blob:find("stays in bags", 1, true))
+            assert.is_truthy(blob:find("Bag0/5", 1, true))
+            assert.is_truthy(blob:find(GBL:SortReasonText(R.OVERFLOW_FULL), 1, true))
+        end)
+
+        it("distinguishes two entries that differ only by reason", function()
+            local R = GBL._sortPlannerReasons
+            local plan = { ops = {}, deficits = {}, unplaced = {
+                { tabIndex = 2, slotIndex = 7, itemID = 100, count = 5,
+                  reason = R.OVERFLOW_FULL },
+                { tabIndex = 3, slotIndex = 9, itemID = 100, count = 5,
+                  reason = R.OVERFLOW_UNVIEWABLE },
+            } }
+            local blob = table.concat(GBL:SummarizeSortPlan(plan), "\n")
+
+            assert.is_truthy(blob:find(GBL:SortReasonText(R.OVERFLOW_FULL), 1, true))
+            assert.is_truthy(blob:find(GBL:SortReasonText(R.OVERFLOW_UNVIEWABLE), 1, true))
+        end)
+    end)
+
+    -- ------------------------------------------------------------------
     -- Per-phase diagnostic counters (v0.30.5)
     -- ------------------------------------------------------------------
     describe("plan.diag counters", function()

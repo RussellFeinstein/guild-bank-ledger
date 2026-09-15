@@ -125,6 +125,78 @@ describe("SortView", function()
         end)
     end)
 
+    -- The heading used to assert a cause for every entry under it. #137
+    -- shipped a fifth reason, overflow-unviewable, and the tab now draws an
+    -- amber line naming the invisible tab directly above a heading blaming
+    -- full overflow tabs. Both cannot be true, so the cause moves onto the
+    -- rows and the heading stops claiming one.
+    describe("Unplaced reasons (#45)", function()
+        local function planWith(reason, tabIndex, slotIndex)
+            return {
+                ops = {}, deficits = {},
+                unplaced = {
+                    { itemID = 2447, count = 3,
+                      tabIndex = tabIndex or 2, slotIndex = slotIndex or 7,
+                      reason = reason },
+                },
+            }
+        end
+
+        local function renderText(plan)
+            GBL.IsSortRunning = function() return true end
+            GBL._sortLastPlan = plan
+            return table.concat(allText(buildTab()), "\n")
+        end
+
+        it("names the reason on the row", function()
+            local R = GBL._sortPlannerReasons
+            local blob = renderText(planWith(R.OVERFLOW_FULL))
+
+            assert.is_truthy(blob:find(GBL:SortReasonText(R.OVERFLOW_FULL), 1, true))
+        end)
+
+        it("gives a hidden overflow tab its own words", function()
+            local R = GBL._sortPlannerReasons
+            local blob = renderText(planWith(R.OVERFLOW_UNVIEWABLE))
+
+            assert.is_truthy(blob:find(GBL:SortReasonText(R.OVERFLOW_UNVIEWABLE), 1, true))
+        end)
+
+        it("stops the heading blaming full overflow tabs", function()
+            local R = GBL._sortPlannerReasons
+            local blob = renderText(planWith(R.OVERFLOW_UNVIEWABLE))
+
+            assert.is_nil(blob:find("no room in overflow tabs", 1, true),
+                "the heading must not blame full overflow tabs for a hidden one")
+        end)
+
+        it("renders an unrecognised reason rather than dropping the row", function()
+            local blob = renderText(planWith("over-stack-demand"))
+
+            assert.is_truthy(blob:find("over-stack-demand", 1, true))
+            assert.is_truthy(blob:find("T2/7", 1, true))
+        end)
+
+        it("names both reasons on a mixed plan", function()
+            local R = GBL._sortPlannerReasons
+            local plan = planWith(R.OVERFLOW_FULL)
+            table.insert(plan.unplaced, { itemID = 2447, count = 4,
+                tabIndex = 3, slotIndex = 9, reason = R.CYCLE_NO_PIVOT })
+            local blob = renderText(plan)
+
+            assert.is_truthy(blob:find(GBL:SortReasonText(R.OVERFLOW_FULL), 1, true))
+            assert.is_truthy(blob:find(GBL:SortReasonText(R.CYCLE_NO_PIVOT), 1, true))
+        end)
+
+        it("still routes a bag source through FormatSlotRef", function()
+            local R = GBL._sortPlannerReasons
+            local blob = renderText(planWith(R.OVERFLOW_FULL, -1, 5))
+
+            assert.is_truthy(blob:find("Bag0/5", 1, true))
+            assert.is_nil(blob:find("T-", 1, true))
+        end)
+    end)
+
     describe("keyboard activation", function()
         --- The Include bags checkbox, found through the registered focus
         --- order rather than by walking widgets, because the focus order is
