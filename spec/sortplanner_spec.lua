@@ -2448,10 +2448,11 @@ describe("SortPlanner", function()
     -- ------------------------------------------------------------------
     -- Unplaced reason text (#45)
     --
-    -- Two surfaces render plan.unplaced: SummarizeSortPlan, which both
-    -- /gbl sortpreview and the sort log print, and the Sort tab's Unplaced
-    -- list. Both read one mapping, so they cannot drift apart the way
-    -- PrintSortPreview and the Sort tab did in #137.
+    -- Two surfaces render plan.unplaced as prose: SummarizeSortPlan, whose
+    -- lines /gbl sortpreview prints, and the Sort tab's Unplaced list. Both
+    -- read one mapping, so they cannot drift apart the way PrintSortPreview
+    -- and the Sort tab did in #137. The sort log is a third renderer and
+    -- deliberately keeps the raw code; see the REASON_TEXT header comment.
     -- ------------------------------------------------------------------
     describe("unplaced reason text (#45)", function()
         it("gives every shipped reason code its own words", function()
@@ -2468,8 +2469,8 @@ describe("SortPlanner", function()
             end
         end)
 
-        -- #150 adds a sixth code. A code this table has not learned yet
-        -- must not blank the row or raise; it falls back to the code.
+        -- #150 would add a sixth code. A code this table has not learned
+        -- yet must not blank the row or raise; it falls back to the code.
         it("renders an unrecognised code rather than dropping it", function()
             assert.equals("over-stack-demand", GBL:SortReasonText("over-stack-demand"))
         end)
