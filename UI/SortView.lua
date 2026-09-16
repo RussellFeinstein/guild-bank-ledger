@@ -451,7 +451,11 @@ function GBL:_SortView_Preview()
     if unpN > 0 then
         local h = AceGUI:Create("Heading")
         h:SetFullWidth(true)
-        h:SetText("Unplaced (couldn't route - no room in overflow tabs)")
+        -- The heading no longer names a cause. It used to say "no room in
+        -- overflow tabs" for every entry under it, which since #137 can sit
+        -- directly below an amber line saying a tab is invisible. The cause
+        -- is per entry, so it belongs on the rows.
+        h:SetText("Unplaced (couldn't route)")
         content:AddChild(h)
         for _, u in ipairs(plan.unplaced) do
             local lbl = AceGUI:Create("Label")
@@ -460,9 +464,10 @@ function GBL:_SortView_Preview()
             -- Through FormatSlotRef like every other slot ref on this tab:
             -- an unplaced entry can be a bag source (#139), and a bare
             -- "T%d/%d" renders the pseudo-tab as "T-1/5".
-            lbl:SetText(format("  |cffff5555%d x %s at %s|r",
+            lbl:SetText(format("  |cffff5555%d x %s at %s|r |cffaaaaaa(%s)|r",
                 u.count, itemLabel(u.itemID),
-                GBL:FormatSlotRef(u.tabIndex, u.slotIndex)))
+                GBL:FormatSlotRef(u.tabIndex, u.slotIndex),
+                GBL:SortReasonText(u.reason)))
             content:AddChild(lbl)
         end
     end

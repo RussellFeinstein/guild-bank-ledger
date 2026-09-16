@@ -138,6 +138,37 @@ local REASON_NO_OVERFLOW_DEFINED = "no-overflow-defined"
 local REASON_CYCLE_BUDGET        = "cycle-budget-exhausted"
 local REASON_OVERFLOW_UNVIEWABLE = "overflow-unviewable"
 
+-- What each reason code says to a player, in words. The two surfaces that
+-- render plan.unplaced AS PROSE read this one table: SummarizeSortPlan
+-- below, whose lines /gbl sortpreview prints, and the Sort tab Unplaced
+-- list. One table rather than a copy each, because #137 shipped with the
+-- preview and the tab formatting the same field separately and disagreeing
+-- about the same plan.
+--
+-- The sort log is the deliberate third renderer and is NOT prose: the
+-- "bags stay:" line further down prints the raw code, because a capture is
+-- searched by code and a reworded sentence would break that. Two registers,
+-- on purpose. Do not "fix" them into agreement.
+local REASON_TEXT = {
+    [REASON_OVERFLOW_FULL]       = "every usable overflow tab is full",
+    [REASON_NO_OVERFLOW_DEFINED] = "the layout declares no overflow tab",
+    [REASON_OVERFLOW_UNVIEWABLE] = "no overflow tab is visible to this character",
+    [REASON_CYCLE_NO_PIVOT]      = "the sort could not free up the slot it needs",
+    [REASON_CYCLE_BUDGET]        = "the sort ran out of attempts to free up slots",
+}
+
+--- Human text for an unplaced entry reason code.
+-- An unknown code returns the code itself rather than nothing: a reason
+-- added later (#150 would add one) must show something the player can
+-- search for, and a blank row is worse than a raw code. A missing reason
+-- says so plainly.
+-- @param reason string|nil a value from GBL._sortPlannerReasons
+-- @return string always a non-empty string
+function GBL:SortReasonText(reason)
+    if reason == nil then return "reason not recorded" end
+    return REASON_TEXT[reason] or tostring(reason)
+end
+
 -- How many pivot iterations one call of the pivot-break loop may spend.
 -- Each iteration emits one pivot and then re-drains, and a plan holds far
 -- fewer independent swap cycles than this, so no plan is known to reach it
@@ -1779,8 +1810,11 @@ function GBL:SummarizeSortPlan(plan)
         -- player's bags and the sort is not going to come back for them.
         local tail = (type(u.tabIndex) == "number" and u.tabIndex < 0)
             and " (stays in bags)" or ""
-        table.insert(lines, string.format("unplaced: %d x item:%d at %s%s",
-            u.count, u.itemID, slotRef(self, u.tabIndex, u.slotIndex), tail))
+        -- The tail says what happens to the items, the reason says why.
+        -- Neither replaces the other, so both ride the line.
+        table.insert(lines, string.format("unplaced: %d x item:%d at %s: %s%s",
+            u.count, u.itemID, slotRef(self, u.tabIndex, u.slotIndex),
+            self:SortReasonText(u.reason), tail))
     end
     if #lines == 0 then
         table.insert(lines, "Bank already matches layout; no moves needed.")
