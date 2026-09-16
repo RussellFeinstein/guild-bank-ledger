@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.39.4
+    {"0.39.4", "2026-09-15", {
+        Fixed = {
+            "The Sort tab now tells you why each item could not be placed, instead of blaming full overflow tabs for everything. The heading said \"no room in overflow tabs\" over every entry in the list, which since the last release could appear directly below a warning that one of your overflow tabs is not visible to your rank. Those cannot both be true, and the wrong one sends you off to free up space that was never the problem. Each row now carries its own reason, the heading no longer names a cause, and /gbl sortpreview prints the same wording.",
+        },
+    }},
     -- v0.39.3
     {"0.39.3", "2026-09-09", {
         Fixed = {
