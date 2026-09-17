@@ -469,6 +469,49 @@ local function liftFromBag(op)
     return true
 end
 
+--- Lift a bank source slot. Shaped like liftFromBag above, and for the same
+--- reasons: the split is decided from what the slot holds NOW rather than from
+--- the plan-time `op.op`, and a slot that cannot satisfy the op is refused
+--- rather than picked up whole, because the destination was sized for
+--- `op.count` and the destination half cannot tell the difference (#169).
+---
+--- Deciding from the slot is also what makes a mislabelled partial harmless
+--- here (#161): Phase 3 can emit a partial take labelled "move", and nothing
+--- in this path reads the label any more.
+---
+--- These checks are reason quality rather than safety. The cursor guard in
+--- issueOp is what makes a failed lift safe, and it covers the cases no
+--- pre-check can see: a split the server refuses, a slot locked between the
+--- read and the call, a read that was stale in the other direction.
+---
+--- @return boolean lifted, string|nil reason, string|nil detail
+local function liftFromBank(op)
+    if not _G.GetGuildBankItemInfo then return false, "no-api" end
+    local _, have = _G.GetGuildBankItemInfo(op.srcTab, op.srcSlot)
+    have = have or 0
+    if have <= 0 then return false, "empty" end
+
+    -- A want of zero is a malformed op rather than a short stack, but it
+    -- cannot reach here from the planner and the warning prints the wanted
+    -- count anyway, so it shares the reason rather than widening the
+    -- vocabulary with a value nothing can produce.
+    local want = op.count or 0
+    if have < want or want <= 0 then
+        return false, "short-stack", "have " .. tostring(have)
+    end
+
+    if have > want then
+        if not _G.SplitGuildBankItem then return false, "no-api" end
+        SplitGuildBankItem(op.srcTab, op.srcSlot, want)
+    else
+        -- Exactly enough: take the stack whole. What a real client does with
+        -- a split whose count equals the stack is not recorded anywhere here,
+        -- and the whole pickup is the branch we know the shape of.
+        PickupGuildBankItem(op.srcTab, op.srcSlot)
+    end
+    return true
+end
+
 --- @return boolean issued, string|nil reason, string|nil detail
 ---   false when a bag source was refused and the op was skipped without
 ---   touching the destination; the reason and detail come from liftFromBag.
@@ -490,16 +533,8 @@ local function issueOp(op)
             state.bagOpsIssued = (state.bagOpsIssued or 0) + 1
         end
     else
-        local srcCount = 0
-        if _G.GetGuildBankItemInfo then
-            local _, c = _G.GetGuildBankItemInfo(op.srcTab, op.srcSlot)
-            srcCount = c or 0
-        end
-        if op.op == "split" and srcCount > (op.count or 0) then
-            SplitGuildBankItem(op.srcTab, op.srcSlot, op.count)
-        else
-            PickupGuildBankItem(op.srcTab, op.srcSlot)
-        end
+        local lifted, reason, detail = liftFromBank(op)
+        if not lifted then return false, reason, detail end
     end
 
     -- The destination pickup is the dangerous half: on an empty cursor it

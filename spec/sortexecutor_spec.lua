@@ -1300,8 +1300,8 @@ describe("SortExecutor (fire-and-forget pump)", function()
             drainTimers()
 
             assert.equals(1, result.skippedOps)
-            assert.equals(1, (result.skipReasons or {})["lift-failed"])
-            local warn = findLine("skipped: T1/1 lift-failed")
+            assert.equals(1, (result.skipReasons or {})["empty"])
+            local warn = findLine("skipped: T1/1 empty")
             assert.is_not_nil(warn, "no warning naming the refused slot and its reason")
             assert.is_truthy(warn:find("wanted 5 x", 1, true),
                 "the warning should say what it wanted: " .. tostring(warn))
@@ -1343,7 +1343,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.equals(1, result.skippedOps)
             assert.is_not_nil(findLine("skipped=1"),
                 "the run summary should carry a skipped term")
-            assert.is_not_nil(findLine("[lift-failed:1]"),
+            assert.is_not_nil(findLine("[empty:1]"),
                 "the run summary should carry the reason histogram")
         end)
 
@@ -1382,6 +1382,144 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.is_not_nil(result, "run never finished")
             assert.equals(0, result.skippedOps, "no op should be refused on a client we cannot read")
             assert.equals(5, countItem(2, 100))
+        end)
+
+        -- The plan is a snapshot. A stack the player partly spent between
+        -- Preview and Execute cannot satisfy the op, and a whole pickup of
+        -- what is left would deposit the wrong amount into a slot sized for
+        -- the planned one. liftFromBag has always refused here.
+        it("refuses a bank source that no longer holds enough", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 3 } })
+            Helpers.populateTab(2, { [1] = { itemID = 777, name = "Bystander", count = 3 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(1, result.skippedOps)
+            assert.equals(3, countItem(1, 100), "the short stack should be left alone")
+            assert.equals(3, countItem(2, 777), "the destination should be untouched")
+            assert.is_not_nil(findLine("skipped: T1/1 short-stack (have 3)"),
+                "the warning should say how much is actually there")
+        end)
+
+        -- The assertion that demotes #161. Phase 3 can emit a partial take
+        -- labelled "move" (src/SortPlanner.lua), and the executor used to
+        -- branch on that label and pick the whole stack up. Deciding from
+        -- what the slot holds now makes a wrong label harmless here, the
+        -- way it has always been harmless for a bag source.
+        it("takes only op.count from a larger stack even when the op says move", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 20 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(0, result.skippedOps)
+            assert.equals(5, countItem(2, 100), "the destination was sized for five")
+            assert.equals(15, countItem(1, 100), "the rest should stay in the source slot")
+        end)
+
+        -- A spy rather than a state assertion, deliberately: the mock clamps
+        -- a split to the stack size, so a full-count split and a whole pickup
+        -- leave identical state and no fixture can tell them apart. What a
+        -- real client does with a split whose count equals the stack is not
+        -- recorded anywhere in this repo, which is exactly why the whole
+        -- pickup is the branch taken and why the choice is pinned here.
+        it("uses a whole pickup, not a split, when the stack is exactly op.count", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 5 } })
+            local splits, pickups = 0, {}
+            local realSplit, realPickup = _G.SplitGuildBankItem, _G.PickupGuildBankItem
+            _G.SplitGuildBankItem = function(...) splits = splits + 1; return realSplit(...) end
+            _G.PickupGuildBankItem = function(t, s)
+                pickups[#pickups + 1] = { t, s }; return realPickup(t, s)
+            end
+            finally(function()
+                _G.SplitGuildBankItem, _G.PickupGuildBankItem = realSplit, realPickup
+            end)
+
+            GBL:ExecuteSortPlan({
+                ops = { { op = "split", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function() end)
+            drainTimers()
+
+            assert.equals(0, splits, "an exact-count take should not go through the split API")
+            assert.equals(1, pickups[1][1])
+            assert.equals(1, pickups[1][2])
+            assert.equals(5, countItem(2, 100))
+        end)
+
+        -- #160's re-audit: WoW pushes slot updates for the viewed tab only,
+        -- so a non-viewed tab reads back whatever the last query saw. A slot
+        -- an earlier op FILLED therefore reads empty, and the old code turned
+        -- that into a whole-stack pickup into a slot sized for part of it.
+        -- Refusing hands it to the next pass, which re-scans first.
+        --
+        -- This is the first spec anywhere to set viewGatedReads. The flag has
+        -- been wired since v0.32.8 and never exercised.
+        it("refuses a stale-empty read on a tab the client is not viewing", function()
+            MockWoW.guildBank.viewGatedReads = true
+            finally(function() MockWoW.guildBank.viewGatedReads = false end)
+
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 30 } })
+            -- Snapshot tab 2 while slot 5 is empty, then leave tab 1 selected.
+            _G.QueryGuildBankTab(2)
+            MockWoW.guildBank.currentTab = 1
+
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    -- Fills T2/S5. Tab 2 is not viewed, so no push refreshes
+                    -- what a read of it will return.
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 5, itemID = 100, count = 30 },
+                    -- Sources part of what op 1 just put there.
+                    { op = "split", srcTab = 2, srcSlot = 5,
+                      dstTab = 1, dstSlot = 1, itemID = 100, count = 10 },
+                },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(1, result.skippedOps)
+            assert.equals(30, countItem(2, 100), "the stack should stay where op 1 put it")
+            assert.equals(0, countItem(1, 100), "the destination should not receive a whole stack")
+            assert.is_not_nil(findLine("skipped: T2/5 empty"),
+                "a stale-empty read should be named as empty")
+        end)
+
+        -- The guard is not redundant with the pre-checks, and this is the
+        -- case that proves it. A stale-HIGH read passes every pre-check and
+        -- the lift still finds nothing, so only a cursor check after the
+        -- fact can catch it. The same shape covers a split the server
+        -- refuses, which no fixture here can produce.
+        it("catches a lift that fails after the read said it would succeed", function()
+            MockWoW.guildBank.viewGatedReads = true
+            finally(function() MockWoW.guildBank.viewGatedReads = false end)
+
+            Helpers.populateTab(2, { [5] = { itemID = 100, name = "Flask", count = 30 } })
+            Helpers.populateTab(1, { [1] = { itemID = 777, name = "Bystander", count = 3 } })
+            -- Snapshot tab 2 while slot 5 is full, then leave tab 1 selected.
+            _G.QueryGuildBankTab(2)
+            MockWoW.guildBank.currentTab = 1
+            -- The server-side truth moves on without a push to a non-viewed tab.
+            MockWoW.guildBank.tabs[2].slots[5] = nil
+
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "split", srcTab = 2, srcSlot = 5,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 10 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(1, result.skippedOps)
+            assert.equals(1, (result.skipReasons or {})["lift-failed"],
+                "only the cursor guard can see this one")
+            assert.equals(3, countItem(1, 777), "the destination should be untouched")
         end)
     end)
 end)
