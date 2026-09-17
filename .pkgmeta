@@ -33,6 +33,7 @@ externals:
 ignore:
     - spec
     - docs
+    - scripts
     - .busted
     - .luacheckrc
     - .gitignore

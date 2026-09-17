@@ -58,6 +58,7 @@ busted spec/core_spec.lua  # run specific file
 luacheck .                 # lint production code
 ```
 
+- **In-game sort captures**: every sort run in game gets a record in `docs/sort-logs/`, and `scripts/audit-sessions.lua` is how the lines come out of the SavedVariables file. The convention, the nine-load eviction window, and why a session is addressed by index and never by line are all in [docs/sort-logs/README.md](docs/sort-logs/README.md). A record is committed onto whatever branch is open rather than getting a PR of its own.
 - All mocks are in `spec/mock_wow.lua` and `spec/mock_ace.lua`
 - Test helper: `spec/helpers.lua`
 - Pattern: `*_spec.lua`
