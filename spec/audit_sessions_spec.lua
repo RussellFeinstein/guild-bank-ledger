@@ -48,7 +48,7 @@ describe("audit session reader", function()
 
             assert.equals(2, rows[2].index)
             assert.equals("0.39.4", rows[2].addonVersion)
-            assert.equals(14, rows[2].counts.sort)
+            assert.equals(15, rows[2].counts.sort)
         end)
 
         it("reads each session's own dropped counters", function()
@@ -99,14 +99,18 @@ describe("audit session reader", function()
     end)
 
     describe("runs", function()
-        it("groups the sort channel into one run per execution", function()
-            local db = Reader.load(FIXTURE)
-            local groups = Reader.runs(db, 2)
-
+        local function startedRuns(groups)
             local started = {}
             for _, g in ipairs(groups) do
                 if g.started then started[#started + 1] = g end
             end
+            return started
+        end
+
+        it("groups the sort channel into one run per execution", function()
+            local db = Reader.load(FIXTURE)
+            local started = startedRuns(Reader.runs(db, 2))
+
             assert.equals(3, #started)
 
             -- Each run keeps the plan line that belongs to it.
@@ -134,10 +138,25 @@ describe("audit session reader", function()
 
         it("carries the terminal line so a run says how it ended", function()
             local db = Reader.load(FIXTURE)
-            local groups = Reader.runs(db, 2)
+            local started = startedRuns(Reader.runs(db, 2))
 
-            local last = groups[3].lines[#groups[3].lines]
+            local last = started[2].lines[#started[2].lines]
             assert.is_truthy(last.message:find("Sort: aborted", 1, true))
+        end)
+
+        it("keeps a post-run deviations plan line out of the run that ended", function()
+            -- The Sort tab runs /gbl deviations after every executed sort,
+            -- and that writes a plan line of its own. Attaching it to the
+            -- run above would report a plan the run never executed.
+            local db = Reader.load(FIXTURE)
+            local started = startedRuns(Reader.runs(db, 2))
+
+            for _, line in ipairs(started[1].lines) do
+                assert.is_nil(line.message:find("4.8ms", 1, true))
+            end
+            for _, line in ipairs(started[2].lines) do
+                assert.is_nil(line.message:find("4.8ms", 1, true))
+            end
         end)
 
         it("drops sort lines that are not part of the run summary", function()
@@ -151,6 +170,79 @@ describe("audit session reader", function()
                     assert.is_nil(line.message:find("skipped", 1, true))
                 end
             end
+        end)
+    end)
+
+    describe("measures", function()
+        local function measuresOf()
+            local db = Reader.load(FIXTURE)
+            return Reader.measures(Reader.runs(db, 2))
+        end
+
+        it("counts plan lines and how many placed everything", function()
+            local m = measuresOf()
+            assert.equals(5, m.planLines)
+            assert.equals(3, m.planZeroUnplaced)
+        end)
+
+        it("counts phases lines and how many aborted nothing", function()
+            local m = measuresOf()
+            assert.equals(1, m.phaseLines)
+            assert.equals(1, m.phaseZeroAbort)
+        end)
+
+        it("ignores the timing figure when counting distinct plans", function()
+            -- Two of the five plan lines describe the same plan and differ
+            -- only in milliseconds, so the count is four.
+            local m = measuresOf()
+            assert.equals(4, m.distinctPlans)
+        end)
+
+        it("reports the pivot counts ascending so two reads agree", function()
+            local m = measuresOf()
+            assert.equals(1, #m.pivots)
+            assert.equals(1, m.pivots[1].value)
+            assert.equals(1, m.pivots[1].count)
+        end)
+    end)
+
+    describe("skeleton", function()
+        local function skeletonOf()
+            local db = Reader.load(FIXTURE)
+            local rows = Reader.list(db)
+            local groups = Reader.runs(db, 2)
+            return Reader.skeleton(rows[2], groups)
+        end
+
+        it("names each run with its bags mode and how it ended", function()
+            local text = skeletonOf()
+            assert.is_truthy(text:find("Run 1", 1, true))
+            assert.is_truthy(text:find("Run 3", 1, true))
+            assert.is_truthy(text:find("bags=on", 1, true))
+            assert.is_truthy(text:find("aborted", 1, true))
+        end)
+
+        it("embeds the summary lines verbatim", function()
+            local text = skeletonOf()
+            assert.is_truthy(text:find("unviewable:T5", 1, true))
+            assert.is_truthy(text:find("bags:4/9(fill=1", 1, true))
+        end)
+
+        it("carries the counted measures", function()
+            local text = skeletonOf()
+            assert.is_truthy(text:find("Plan lines emitted", 1, true))
+            assert.is_truthy(text:find("| 5 |", 1, true))
+        end)
+
+        it("names no guild, player or realm", function()
+            -- Five of the six committed records name none of the three and
+            -- the convention is that a record never does. A tool that leaks
+            -- one into the skeleton makes that a thing to remember rather
+            -- than a thing that holds.
+            local text = skeletonOf()
+            assert.is_nil(text:find("Tester", 1, true))
+            assert.is_nil(text:find("TestRealm", 1, true))
+            assert.is_nil(text:find("Test Guild", 1, true))
         end)
     end)
 

@@ -12,6 +12,12 @@
 -- Session 2's sort channel carries three complete sort runs plus one
 -- leading `Sort plan:` line with no run of its own, which is what
 -- /gbl sortpreview emits. Run 2 is an abort; run 3 is a bags-on run.
+--
+-- The plan line at 1789172451 sits AFTER run 1's terminal line and repeats
+-- run 1's plan with a different timing figure. That is the /gbl deviations
+-- the Sort tab runs after every executed sort, and it is here for two
+-- reasons: it must not be folded into either neighbouring run, and it is
+-- the pair that proves a plan signature ignores the milliseconds.
 
 GuildBankLedgerAuditDB = {
 	["schemaVersion"] = 1,
@@ -102,6 +108,11 @@ GuildBankLedgerAuditDB = {
 						["ts"] = 1789172450,
 						["level"] = "INFO",
 						["message"] = "Sort: complete in 40.0s - 2 passes, 14 ops issued, 0 remaining, avg 1.10s/op (cursorStuck=0 stalls=0 rescans=1)",
+					},
+					{
+						["ts"] = 1789172451,
+						["level"] = "INFO",
+						["message"] = "Sort plan: 4.8ms, 12 ops, 0 deficits, 0 unplaced (input: 600 slots / 7 tabs) unviewable:none [T1:59]",
 					},
 					{
 						["ts"] = 1789172500,
