@@ -249,9 +249,10 @@ describe("audit session reader", function()
 
         it("gives the run table a header cell per column", function()
             -- The first column holds the row labels, so the header needs a
-            -- leading empty cell or every run's heading sits one column
-            -- left of its own data. Markdown renders the mismatch silently,
-            -- which is why this is asserted rather than looked at.
+            -- leading empty cell. Without it the header is one cell short
+            -- of the delimiter row, and GFM requires those to match: the
+            -- whole block then renders as a paragraph of raw pipes rather
+            -- than a table. Verified against GitHub's /markdown API.
             local text = skeletonOf()
             local header = text:match("\n(|[^\n]*Run 1[^\n]*)\n")
             local divider = text:match("\n|[^\n]*Run 1[^\n]*\n(|[^\n]*)\n")

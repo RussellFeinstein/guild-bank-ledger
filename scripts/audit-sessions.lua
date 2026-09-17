@@ -307,9 +307,11 @@ function M.skeleton(row, groups)
     if #runs == 0 then
         add("No executed run in this session: the lines below are plans only.")
     else
-        -- The leading empty cell is the row-label column. Without it every
-        -- run's heading sits one column left of its own data, and markdown
-        -- renders that without complaining.
+        -- The leading empty cell is the row-label column. Without it the
+        -- header has one cell fewer than the delimiter row, and GFM then
+        -- declines to make a table at all: GitHub renders the whole block
+        -- as a paragraph of raw pipes. Checked against the /markdown API,
+        -- not assumed.
         local header, divider = { "| |" }, { "|---|" }
         local started, bags = { "| Started |" }, { "| Bags |" }
         local planned, ended = { "| Planned |" }, { "| Ended |" }
