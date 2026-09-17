@@ -290,6 +290,8 @@ function finish(ok, reason)
         bagOpsIssued = state.bagOpsIssued or 0,
         bagOpsSkipped = state.bagOpsSkipped or 0,
         bagSkipReasons = state.bagSkipReasons or {},
+        skippedOps = state.skippedOps or 0,
+        skipReasons = state.skipReasons or {},
         -- nil rather than 0 when no replan ran: the caller has to be able to
         -- tell "the bags are empty" from "nothing measured them".
         bagsStillInBags = state.lastBagSupplies,
@@ -299,12 +301,30 @@ function finish(ok, reason)
     local elapsed = (GetTime() and state.startedAt) and (GetTime() - state.startedAt) or 0
     local issued = state.totalIssued or 0
     local avg = issued > 0 and (elapsed / issued) or 0
+    -- Refusals ride the run summary rather than a line of their own: a
+    -- refused op is part of how the run went, unlike what is left in the
+    -- player's bags. Absent at zero, because a term on every clean run is
+    -- a term readers stop seeing.
+    local refusedOps = state.skippedOps or 0
+    local skipTerm, skipHist = "", ""
+    if refusedOps > 0 then
+        skipTerm = string.format(" skipped=%d", refusedOps)
+        local parts = {}
+        for tag, n in pairs(state.skipReasons or {}) do
+            parts[#parts + 1] = string.format("%s:%d", tag, n)
+        end
+        -- Sorted so two captures of the same run read identically rather
+        -- than in pairs order.
+        table.sort(parts)
+        skipHist = " [" .. table.concat(parts, " ") .. "]"
+    end
     GBL:SortInfo(string.format(
         "Sort: %s in %.1fs - %d passes, %d ops issued, %d remaining, avg %.2fs/op"
-        .. " (cursorStuck=%d stalls=%d rescans=%d)",
+        .. " (cursorStuck=%d stalls=%d rescans=%d%s)%s",
         ok and "complete" or ("aborted (" .. (reason or "?") .. ")"),
         elapsed, passes, issued, failed,
-        avg, state.cursorStuck or 0, state.stallCount or 0, state.rescanTicks or 0))
+        avg, state.cursorStuck or 0, state.stallCount or 0, state.rescanTicks or 0,
+        skipTerm, skipHist))
 
     -- Bag deposits get their own line rather than a rider on the summary
     -- above: what is still sitting in the user's bags is the thing they
@@ -482,6 +502,20 @@ local function issueOp(op)
         end
     end
 
+    -- The destination pickup is the dangerous half: on an empty cursor it
+    -- does not place, it picks the destination slot UP. liftFromBag has
+    -- always returned before it for that reason; the bank branch fell
+    -- through, so any lift that put nothing on the cursor harvested a stack
+    -- the plan never named (#169). The guard sits here rather than inside
+    -- each lift because it covers every way a lift can fail at once, the
+    -- ones no pre-check can see included: a split the server refuses, a
+    -- slot locked between the read and the call. An absent CursorHasItem
+    -- cannot run it, and an unreadable cursor is not evidence of failure,
+    -- so that client keeps today's behaviour rather than refusing every op.
+    if _G.CursorHasItem and not _G.CursorHasItem() then
+        return false, "lift-failed"
+    end
+
     PickupGuildBankItem(op.dstTab, op.dstSlot)
     if _G.CursorHasItem and _G.CursorHasItem() then
         ClearCursor()
@@ -551,6 +585,13 @@ pumpOne = function()
         end
     else
         local why = skipReason or "refused"
+        -- Counted for both source kinds. The bag counters stay separate so
+        -- the "Sort bags:" line keeps meaning what it always did; this pair
+        -- is the run total, so it sits at or above the bag figure.
+        state.skippedOps = (state.skippedOps or 0) + 1
+        state.skipReasons = state.skipReasons or {}
+        local tag = skipReason or "refused"
+        state.skipReasons[tag] = (state.skipReasons[tag] or 0) + 1
         if skipDetail then why = why .. " (" .. skipDetail .. ")" end
         GBL:SortWarn(string.format(
             "Sort op %d/%d skipped: %s %s, wanted %d x %s",
@@ -714,6 +755,8 @@ function GBL:ExecuteSortPlan(plan, onComplete, opts)
         bagOpsIssued = 0,
         bagOpsSkipped = 0,
         bagSkipReasons = {},
+        skippedOps = 0,
+        skipReasons = {},
         opIndex = 1,
         passes = 0,
         lastPassOps = nil,

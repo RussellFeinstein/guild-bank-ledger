@@ -1251,4 +1251,137 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.equals(1, result.bagOpsSkipped)
         end)
     end)
+
+    -- A bank source can fail to lift for the same ordinary reasons a bag one
+    -- can: the plan is a snapshot and the player moves things mid-run. The
+    -- bag branch has always returned before the destination pickup for that
+    -- reason (see "bag deposits" above); the bank branch fell through, and
+    -- an empty cursor makes PickupGuildBankItem HARVEST the destination
+    -- rather than place into it (#169).
+    describe("bank source lifts", function()
+        --- The first sort line containing `needle` (literal, never a pattern).
+        local function findLine(needle)
+            for _, e in ipairs(GBL:GetLog("sort") or {}) do
+                local m = e.message or ""
+                if m:find(needle, 1, true) then return m end
+            end
+            return nil
+        end
+
+        -- The red that proves the harvest. The bystander is an innocent
+        -- stack the plan never mentions: nothing in this op names tab 2
+        -- slot 1 as a source, so any change to it is the executor acting
+        -- outside its own plan.
+        it("leaves the destination alone when the bank source slot is empty", function()
+            Helpers.populateTab(2, { [1] = { itemID = 777, name = "Bystander", count = 3 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.is_not_nil(result, "run never finished")
+            assert.equals(3, countItem(2, 777),
+                "the destination stack was picked up by an op that had nothing on the cursor")
+            assert.equals(0, countItem(2, 100))
+        end)
+
+        -- Counting it is what makes it visible in a capture; naming the slot
+        -- and the reason is what makes the capture actionable. "skipped"
+        -- alone is also satisfied by the bags line, so probe the prefix.
+        it("counts a failed lift and names the slot and the reason", function()
+            Helpers.populateTab(2, { [1] = { itemID = 777, name = "Bystander", count = 3 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(1, result.skippedOps)
+            assert.equals(1, (result.skipReasons or {})["lift-failed"])
+            local warn = findLine("skipped: T1/1 lift-failed")
+            assert.is_not_nil(warn, "no warning naming the refused slot and its reason")
+            assert.is_truthy(warn:find("wanted 5 x", 1, true),
+                "the warning should say what it wanted: " .. tostring(warn))
+        end)
+
+        -- A refused op is not an issued op. Both counters live under the
+        -- issued branch for that reason, and the average is derived from
+        -- the issued count, so a run of refusals must not move either.
+        it("does not count a refused op as issued", function()
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 2, dstSlot = 2, itemID = 100, count = 5 },
+                },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(2, result.skippedOps)
+            assert.is_not_nil(findLine("0 ops issued"),
+                "the summary should report no ops issued when every op was refused")
+        end)
+
+        it("rides the run summary as a skipped term with a sorted histogram", function()
+            Helpers.populateTab(1, { [3] = { itemID = 100, name = "Flask", count = 5 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
+                    { op = "move", srcTab = 1, srcSlot = 3,
+                      dstTab = 2, dstSlot = 3, itemID = 100, count = 5 },
+                },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(1, result.skippedOps)
+            assert.is_not_nil(findLine("skipped=1"),
+                "the run summary should carry a skipped term")
+            assert.is_not_nil(findLine("[lift-failed:1]"),
+                "the run summary should carry the reason histogram")
+        end)
+
+        -- Absent at zero. A term that is always present teaches a reader to
+        -- stop seeing it, and every clean run would carry it.
+        it("omits the skipped term when nothing was refused", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 5 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(0, result.skippedOps)
+            assert.is_nil(findLine("skipped="),
+                "a clean run should not carry the term")
+        end)
+
+        -- The guard reads the cursor, so a client without the API cannot run
+        -- it. Degrade to today's behaviour rather than refusing everything:
+        -- an unreadable cursor is not evidence that the lift failed.
+        it("still issues an ordinary op when CursorHasItem is absent", function()
+            local saved = _G.CursorHasItem
+            _G.CursorHasItem = nil
+            finally(function() _G.CursorHasItem = saved end)
+
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 5 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.is_not_nil(result, "run never finished")
+            assert.equals(0, result.skippedOps, "no op should be refused on a client we cannot read")
+            assert.equals(5, countItem(2, 100))
+        end)
+    end)
 end)

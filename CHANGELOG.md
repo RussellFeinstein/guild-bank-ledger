@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The sort no longer disturbs a slot it was not moving anything into. If an op's source stack had been moved, emptied or locked by the time its turn came around, the sort carried on and picked the destination slot up instead, because picking up with an empty hand takes rather than gives. Those ops are now skipped, each one named in the sort log with its slot and the reason, and the run summary counts them. Whatever is left gets picked up by the next pass.
+
 ## [0.39.4] - 2026-09-15
 
 ### Fixed
