@@ -1521,5 +1521,49 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 "only the cursor guard can see this one")
             assert.equals(3, countItem(1, 777), "the destination should be untouched")
         end)
+
+        -- Three distinct reasons in one run, because that is the only
+        -- arrangement in which a sorted histogram and an unsorted one differ.
+        -- Every other spec here produces exactly one reason, so `parts` holds
+        -- one element and table.sort cannot change the string: dropping the
+        -- sort survived the mutation pass until this fixture existed. Three
+        -- rather than two on purpose, since Lua makes a single comparison on
+        -- two elements and whether that catches anything comes down to pairs
+        -- order rather than to the fixture.
+        it("sorts the histogram when a run collects several reasons", function()
+            MockWoW.addTab("Tab 3", nil, true)
+            MockWoW.guildBank.viewGatedReads = true
+            finally(function() MockWoW.guildBank.viewGatedReads = false end)
+
+            -- T1/S1 stays empty. T1/S2 holds less than its op asks for.
+            Helpers.populateTab(1, { [2] = { itemID = 100, name = "Flask", count = 3 } })
+            -- T2/S5 is snapshotted full and then emptied behind the view gate,
+            -- so its read passes every pre-check and the lift still finds
+            -- nothing. Only the cursor guard sees that one.
+            Helpers.populateTab(2, { [5] = { itemID = 100, name = "Flask", count = 30 } })
+            _G.QueryGuildBankTab(2)
+            MockWoW.guildBank.currentTab = 1
+            MockWoW.guildBank.tabs[2].slots[5] = nil
+
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 3, dstSlot = 1, itemID = 100, count = 5 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 3, dstSlot = 2, itemID = 100, count = 5 },
+                    { op = "split", srcTab = 2, srcSlot = 5,
+                      dstTab = 3, dstSlot = 3, itemID = 100, count = 10 },
+                },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(3, result.skippedOps)
+            assert.equals(1, (result.skipReasons or {})["empty"])
+            assert.equals(1, (result.skipReasons or {})["short-stack"])
+            assert.equals(1, (result.skipReasons or {})["lift-failed"])
+            assert.is_not_nil(findLine("[empty:1 lift-failed:1 short-stack:1]"),
+                "the histogram should read in sorted order, not in pairs order")
+        end)
     end)
 end)
