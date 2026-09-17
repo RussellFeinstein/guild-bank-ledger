@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.5] - 2026-09-17
+
 ### Fixed
 - The sort now takes the amount it planned to take. It used to decide whether to split a stack or pick the whole thing up from a label written when the plan was made, so a move whose source stack had grown, or which the planner had labelled loosely, deposited the whole stack into a slot sized for part of it. It now reads the slot and takes exactly what the plan asked for, the way bag deposits have always worked. A stack that no longer holds enough is skipped and named rather than part-deposited.
 - The sort no longer disturbs a slot it was not moving anything into. If an op's source stack had been moved, emptied or locked by the time its turn came around, the sort carried on and picked the destination slot up instead, because picking up with an empty hand takes rather than gives. Those ops are now skipped, each one named in the sort log with its slot and the reason, and the run summary counts them. Whatever is left gets picked up by the next pass.
