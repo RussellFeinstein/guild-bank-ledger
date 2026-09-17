@@ -48,7 +48,7 @@ describe("audit session reader", function()
 
             assert.equals(2, rows[2].index)
             assert.equals("0.39.4", rows[2].addonVersion)
-            assert.equals(15, rows[2].counts.sort)
+            assert.equals(16, rows[2].counts.sort)
         end)
 
         it("reads each session's own dropped counters", function()
@@ -186,9 +186,20 @@ describe("audit session reader", function()
         end)
 
         it("counts phases lines and how many aborted nothing", function()
+            -- The two counts differ on purpose: one of the fixture's two
+            -- phases lines reads abort=1. With both at 1 a count that
+            -- ignored the abort term agreed with a correct one.
             local m = measuresOf()
-            assert.equals(1, m.phaseLines)
+            assert.equals(2, m.phaseLines)
             assert.equals(1, m.phaseZeroAbort)
+        end)
+
+        it("does not read 10 unplaced as 0 unplaced", function()
+            -- "0 unplaced" is a substring of "10 unplaced". Run 2 reads
+            -- 10, and three of the five plan lines placed everything.
+            local m = measuresOf()
+            assert.equals(5, m.planLines)
+            assert.equals(3, m.planZeroUnplaced)
         end)
 
         it("ignores the timing figure when counting distinct plans", function()
@@ -200,9 +211,11 @@ describe("audit session reader", function()
 
         it("reports the pivot counts ascending so two reads agree", function()
             local m = measuresOf()
-            assert.equals(1, #m.pivots)
+            assert.equals(2, #m.pivots)
             assert.equals(1, m.pivots[1].value)
             assert.equals(1, m.pivots[1].count)
+            assert.equals(4, m.pivots[2].value)
+            assert.equals(1, m.pivots[2].count)
         end)
     end)
 

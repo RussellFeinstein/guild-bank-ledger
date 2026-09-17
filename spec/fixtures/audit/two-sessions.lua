@@ -18,6 +18,18 @@
 -- the Sort tab runs after every executed sort, and it is here for two
 -- reasons: it must not be folded into either neighbouring run, and it is
 -- the pair that proves a plan signature ignores the milliseconds.
+--
+-- Three values are chosen so a counting bug cannot hide behind them, each
+-- after a mutation survived on an earlier draft of this file:
+--
+--   * Run 2's plan reads `10 unplaced`, not `2 unplaced`. "0 unplaced" is a
+--     substring of "10 unplaced", so a count that matches without the
+--     leading comma reads this run as having placed everything.
+--   * Run 3 carries a second `phases` line reading `abort=1`, so the count
+--     of phases lines and the count of clean ones differ. With one line
+--     they were both 1 and a count that ignored the abort term agreed.
+--   * That line's `P2 pivot=4` gives the histogram a second entry, so the
+--     ordering is something a reader can get wrong.
 
 GuildBankLedgerAuditDB = {
 	["schemaVersion"] = 1,
@@ -122,7 +134,7 @@ GuildBankLedgerAuditDB = {
 					{
 						["ts"] = 1789172501,
 						["level"] = "INFO",
-						["message"] = "Sort plan: 2.2ms, 5 ops, 1 deficits, 2 unplaced (input: 600 slots / 7 tabs) unviewable:T5 [T1:59]",
+						["message"] = "Sort plan: 2.2ms, 5 ops, 1 deficits, 10 unplaced (input: 600 slots / 7 tabs) unviewable:T5 [T1:59]",
 					},
 					{
 						["ts"] = 1789172520,
@@ -141,6 +153,11 @@ GuildBankLedgerAuditDB = {
 					},
 					{
 						["ts"] = 1789172602,
+						["level"] = "INFO",
+						["message"] = "  phases: P0 merge=2(free=1) P1a assign=5 P1b spill=3(top=1,r=1,l=0,fe=1,unp=0) P2 pivot=4(abort=1) P3 sweep=0 P4 pack=2",
+					},
+					{
+						["ts"] = 1789172603,
 						["level"] = "INFO",
 						["message"] = "  bags stay: item:100 x20 at Bag2/18 (overflow-full)",
 					},
