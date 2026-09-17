@@ -290,6 +290,8 @@ function finish(ok, reason)
         bagOpsIssued = state.bagOpsIssued or 0,
         bagOpsSkipped = state.bagOpsSkipped or 0,
         bagSkipReasons = state.bagSkipReasons or {},
+        skippedOps = state.skippedOps or 0,
+        skipReasons = state.skipReasons or {},
         -- nil rather than 0 when no replan ran: the caller has to be able to
         -- tell "the bags are empty" from "nothing measured them".
         bagsStillInBags = state.lastBagSupplies,
@@ -299,12 +301,30 @@ function finish(ok, reason)
     local elapsed = (GetTime() and state.startedAt) and (GetTime() - state.startedAt) or 0
     local issued = state.totalIssued or 0
     local avg = issued > 0 and (elapsed / issued) or 0
+    -- Refusals ride the run summary rather than a line of their own: a
+    -- refused op is part of how the run went, unlike what is left in the
+    -- player's bags. Absent at zero, because a term on every clean run is
+    -- a term readers stop seeing.
+    local refusedOps = state.skippedOps or 0
+    local skipTerm, skipHist = "", ""
+    if refusedOps > 0 then
+        skipTerm = string.format(" skipped=%d", refusedOps)
+        local parts = {}
+        for tag, n in pairs(state.skipReasons or {}) do
+            parts[#parts + 1] = string.format("%s:%d", tag, n)
+        end
+        -- Sorted so two captures of the same run read identically rather
+        -- than in pairs order.
+        table.sort(parts)
+        skipHist = " [" .. table.concat(parts, " ") .. "]"
+    end
     GBL:SortInfo(string.format(
         "Sort: %s in %.1fs - %d passes, %d ops issued, %d remaining, avg %.2fs/op"
-        .. " (cursorStuck=%d stalls=%d rescans=%d)",
+        .. " (cursorStuck=%d stalls=%d rescans=%d%s)%s",
         ok and "complete" or ("aborted (" .. (reason or "?") .. ")"),
         elapsed, passes, issued, failed,
-        avg, state.cursorStuck or 0, state.stallCount or 0, state.rescanTicks or 0))
+        avg, state.cursorStuck or 0, state.stallCount or 0, state.rescanTicks or 0,
+        skipTerm, skipHist))
 
     -- Bag deposits get their own line rather than a rider on the summary
     -- above: what is still sitting in the user's bags is the thing they
@@ -449,6 +469,49 @@ local function liftFromBag(op)
     return true
 end
 
+--- Lift a bank source slot. Shaped like liftFromBag above, and for the same
+--- reasons: the split is decided from what the slot holds NOW rather than from
+--- the plan-time `op.op`, and a slot that cannot satisfy the op is refused
+--- rather than picked up whole, because the destination was sized for
+--- `op.count` and the destination half cannot tell the difference (#169).
+---
+--- Deciding from the slot is also what makes a mislabelled partial harmless
+--- here (#161): Phase 3 can emit a partial take labelled "move", and nothing
+--- in this path reads the label any more.
+---
+--- These checks are reason quality rather than safety. The cursor guard in
+--- issueOp is what makes a failed lift safe, and it covers the cases no
+--- pre-check can see: a split the server refuses, a slot locked between the
+--- read and the call, a read that was stale in the other direction.
+---
+--- @return boolean lifted, string|nil reason, string|nil detail
+local function liftFromBank(op)
+    if not _G.GetGuildBankItemInfo then return false, "no-api" end
+    local _, have = _G.GetGuildBankItemInfo(op.srcTab, op.srcSlot)
+    have = have or 0
+    if have <= 0 then return false, "empty" end
+
+    -- A want of zero is a malformed op rather than a short stack, but it
+    -- cannot reach here from the planner and the warning prints the wanted
+    -- count anyway, so it shares the reason rather than widening the
+    -- vocabulary with a value nothing can produce.
+    local want = op.count or 0
+    if have < want or want <= 0 then
+        return false, "short-stack", "have " .. tostring(have)
+    end
+
+    if have > want then
+        if not _G.SplitGuildBankItem then return false, "no-api" end
+        SplitGuildBankItem(op.srcTab, op.srcSlot, want)
+    else
+        -- Exactly enough: take the stack whole. What a real client does with
+        -- a split whose count equals the stack is not recorded anywhere here,
+        -- and the whole pickup is the branch we know the shape of.
+        PickupGuildBankItem(op.srcTab, op.srcSlot)
+    end
+    return true
+end
+
 --- @return boolean issued, string|nil reason, string|nil detail
 ---   false when a bag source was refused and the op was skipped without
 ---   touching the destination; the reason and detail come from liftFromBag.
@@ -470,16 +533,22 @@ local function issueOp(op)
             state.bagOpsIssued = (state.bagOpsIssued or 0) + 1
         end
     else
-        local srcCount = 0
-        if _G.GetGuildBankItemInfo then
-            local _, c = _G.GetGuildBankItemInfo(op.srcTab, op.srcSlot)
-            srcCount = c or 0
-        end
-        if op.op == "split" and srcCount > (op.count or 0) then
-            SplitGuildBankItem(op.srcTab, op.srcSlot, op.count)
-        else
-            PickupGuildBankItem(op.srcTab, op.srcSlot)
-        end
+        local lifted, reason, detail = liftFromBank(op)
+        if not lifted then return false, reason, detail end
+    end
+
+    -- The destination pickup is the dangerous half: on an empty cursor it
+    -- does not place, it picks the destination slot UP. liftFromBag has
+    -- always returned before it for that reason; the bank branch fell
+    -- through, so any lift that put nothing on the cursor harvested a stack
+    -- the plan never named (#169). The guard sits here rather than inside
+    -- each lift because it covers every way a lift can fail at once, the
+    -- ones no pre-check can see included: a split the server refuses, a
+    -- slot locked between the read and the call. An absent CursorHasItem
+    -- cannot run it, and an unreadable cursor is not evidence of failure,
+    -- so that client keeps today's behaviour rather than refusing every op.
+    if _G.CursorHasItem and not _G.CursorHasItem() then
+        return false, "lift-failed"
     end
 
     PickupGuildBankItem(op.dstTab, op.dstSlot)
@@ -551,6 +620,13 @@ pumpOne = function()
         end
     else
         local why = skipReason or "refused"
+        -- Counted for both source kinds. The bag counters stay separate so
+        -- the "Sort bags:" line keeps meaning what it always did; this pair
+        -- is the run total, so it sits at or above the bag figure.
+        state.skippedOps = (state.skippedOps or 0) + 1
+        state.skipReasons = state.skipReasons or {}
+        local tag = skipReason or "refused"
+        state.skipReasons[tag] = (state.skipReasons[tag] or 0) + 1
         if skipDetail then why = why .. " (" .. skipDetail .. ")" end
         GBL:SortWarn(string.format(
             "Sort op %d/%d skipped: %s %s, wanted %d x %s",
@@ -714,6 +790,8 @@ function GBL:ExecuteSortPlan(plan, onComplete, opts)
         bagOpsIssued = 0,
         bagOpsSkipped = 0,
         bagSkipReasons = {},
+        skippedOps = 0,
+        skipReasons = {},
         opIndex = 1,
         passes = 0,
         lastPassOps = nil,

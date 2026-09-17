@@ -1251,4 +1251,319 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.equals(1, result.bagOpsSkipped)
         end)
     end)
+
+    -- A bank source can fail to lift for the same ordinary reasons a bag one
+    -- can: the plan is a snapshot and the player moves things mid-run. The
+    -- bag branch has always returned before the destination pickup for that
+    -- reason (see "bag deposits" above); the bank branch fell through, and
+    -- an empty cursor makes PickupGuildBankItem HARVEST the destination
+    -- rather than place into it (#169).
+    describe("bank source lifts", function()
+        --- The first sort line containing `needle` (literal, never a pattern).
+        local function findLine(needle)
+            for _, e in ipairs(GBL:GetLog("sort") or {}) do
+                local m = e.message or ""
+                if m:find(needle, 1, true) then return m end
+            end
+            return nil
+        end
+
+        -- The red that proves the harvest. The bystander is an innocent
+        -- stack the plan never mentions: nothing in this op names tab 2
+        -- slot 1 as a source, so any change to it is the executor acting
+        -- outside its own plan.
+        it("leaves the destination alone when the bank source slot is empty", function()
+            Helpers.populateTab(2, { [1] = { itemID = 777, name = "Bystander", count = 3 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.is_not_nil(result, "run never finished")
+            assert.equals(3, countItem(2, 777),
+                "the destination stack was picked up by an op that had nothing on the cursor")
+            assert.equals(0, countItem(2, 100))
+        end)
+
+        -- Counting it is what makes it visible in a capture; naming the slot
+        -- and the reason is what makes the capture actionable. "skipped"
+        -- alone is also satisfied by the bags line, so probe the prefix.
+        it("counts a failed lift and names the slot and the reason", function()
+            Helpers.populateTab(2, { [1] = { itemID = 777, name = "Bystander", count = 3 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(1, result.skippedOps)
+            assert.equals(1, (result.skipReasons or {})["empty"])
+            local warn = findLine("skipped: T1/1 empty")
+            assert.is_not_nil(warn, "no warning naming the refused slot and its reason")
+            assert.is_truthy(warn:find("wanted 5 x", 1, true),
+                "the warning should say what it wanted: " .. tostring(warn))
+        end)
+
+        -- A refused op is not an issued op. Both counters live under the
+        -- issued branch for that reason, and the average is derived from
+        -- the issued count, so a run of refusals must not move either.
+        it("does not count a refused op as issued", function()
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 2, dstSlot = 2, itemID = 100, count = 5 },
+                },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(2, result.skippedOps)
+            assert.is_not_nil(findLine("0 ops issued"),
+                "the summary should report no ops issued when every op was refused")
+        end)
+
+        it("rides the run summary as a skipped term with a sorted histogram", function()
+            Helpers.populateTab(1, { [3] = { itemID = 100, name = "Flask", count = 5 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
+                    { op = "move", srcTab = 1, srcSlot = 3,
+                      dstTab = 2, dstSlot = 3, itemID = 100, count = 5 },
+                },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(1, result.skippedOps)
+            assert.is_not_nil(findLine("skipped=1"),
+                "the run summary should carry a skipped term")
+            assert.is_not_nil(findLine("[empty:1]"),
+                "the run summary should carry the reason histogram")
+        end)
+
+        -- Absent at zero. A term that is always present teaches a reader to
+        -- stop seeing it, and every clean run would carry it.
+        it("omits the skipped term when nothing was refused", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 5 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(0, result.skippedOps)
+            assert.is_nil(findLine("skipped="),
+                "a clean run should not carry the term")
+        end)
+
+        -- The guard reads the cursor, so a client without the API cannot run
+        -- it. Degrade to today's behaviour rather than refusing everything:
+        -- an unreadable cursor is not evidence that the lift failed.
+        it("still issues an ordinary op when CursorHasItem is absent", function()
+            local saved = _G.CursorHasItem
+            _G.CursorHasItem = nil
+            finally(function() _G.CursorHasItem = saved end)
+
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 5 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.is_not_nil(result, "run never finished")
+            assert.equals(0, result.skippedOps, "no op should be refused on a client we cannot read")
+            assert.equals(5, countItem(2, 100))
+        end)
+
+        -- The plan is a snapshot. A stack the player partly spent between
+        -- Preview and Execute cannot satisfy the op, and a whole pickup of
+        -- what is left would deposit the wrong amount into a slot sized for
+        -- the planned one. liftFromBag has always refused here.
+        it("refuses a bank source that no longer holds enough", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 3 } })
+            Helpers.populateTab(2, { [1] = { itemID = 777, name = "Bystander", count = 3 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(1, result.skippedOps)
+            assert.equals(3, countItem(1, 100), "the short stack should be left alone")
+            assert.equals(3, countItem(2, 777), "the destination should be untouched")
+            assert.is_not_nil(findLine("skipped: T1/1 short-stack (have 3)"),
+                "the warning should say how much is actually there")
+        end)
+
+        -- The assertion that demotes #161. Phase 3 can emit a partial take
+        -- labelled "move" (src/SortPlanner.lua), and the executor used to
+        -- branch on that label and pick the whole stack up. Deciding from
+        -- what the slot holds now makes a wrong label harmless here, the
+        -- way it has always been harmless for a bag source.
+        it("takes only op.count from a larger stack even when the op says move", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 20 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(0, result.skippedOps)
+            assert.equals(5, countItem(2, 100), "the destination was sized for five")
+            assert.equals(15, countItem(1, 100), "the rest should stay in the source slot")
+        end)
+
+        -- A spy rather than a state assertion, deliberately: the mock clamps
+        -- a split to the stack size, so a full-count split and a whole pickup
+        -- leave identical state and no fixture can tell them apart. What a
+        -- real client does with a split whose count equals the stack is not
+        -- recorded anywhere in this repo, which is exactly why the whole
+        -- pickup is the branch taken and why the choice is pinned here.
+        it("uses a whole pickup, not a split, when the stack is exactly op.count", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 5 } })
+            local splits, pickups = 0, {}
+            local realSplit, realPickup = _G.SplitGuildBankItem, _G.PickupGuildBankItem
+            _G.SplitGuildBankItem = function(...) splits = splits + 1; return realSplit(...) end
+            _G.PickupGuildBankItem = function(t, s)
+                pickups[#pickups + 1] = { t, s }; return realPickup(t, s)
+            end
+            finally(function()
+                _G.SplitGuildBankItem, _G.PickupGuildBankItem = realSplit, realPickup
+            end)
+
+            GBL:ExecuteSortPlan({
+                ops = { { op = "split", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function() end)
+            drainTimers()
+
+            assert.equals(0, splits, "an exact-count take should not go through the split API")
+            assert.equals(1, pickups[1][1])
+            assert.equals(1, pickups[1][2])
+            assert.equals(5, countItem(2, 100))
+        end)
+
+        -- #160's re-audit: WoW pushes slot updates for the viewed tab only,
+        -- so a non-viewed tab reads back whatever the last query saw. A slot
+        -- an earlier op FILLED therefore reads empty, and the old code turned
+        -- that into a whole-stack pickup into a slot sized for part of it.
+        -- Refusing hands it to the next pass, which re-scans first.
+        --
+        -- This is the first spec anywhere to set viewGatedReads. The flag has
+        -- been wired since v0.32.8 and never exercised.
+        it("refuses a stale-empty read on a tab the client is not viewing", function()
+            MockWoW.guildBank.viewGatedReads = true
+            finally(function() MockWoW.guildBank.viewGatedReads = false end)
+
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 30 } })
+            -- Snapshot tab 2 while slot 5 is empty, then leave tab 1 selected.
+            _G.QueryGuildBankTab(2)
+            MockWoW.guildBank.currentTab = 1
+
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    -- Fills T2/S5. Tab 2 is not viewed, so no push refreshes
+                    -- what a read of it will return.
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 5, itemID = 100, count = 30 },
+                    -- Sources part of what op 1 just put there.
+                    { op = "split", srcTab = 2, srcSlot = 5,
+                      dstTab = 1, dstSlot = 1, itemID = 100, count = 10 },
+                },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(1, result.skippedOps)
+            assert.equals(30, countItem(2, 100), "the stack should stay where op 1 put it")
+            assert.equals(0, countItem(1, 100), "the destination should not receive a whole stack")
+            assert.is_not_nil(findLine("skipped: T2/5 empty"),
+                "a stale-empty read should be named as empty")
+        end)
+
+        -- The guard is not redundant with the pre-checks, and this is the
+        -- case that proves it. A stale-HIGH read passes every pre-check and
+        -- the lift still finds nothing, so only a cursor check after the
+        -- fact can catch it. The same shape covers a split the server
+        -- refuses, which no fixture here can produce.
+        it("catches a lift that fails after the read said it would succeed", function()
+            MockWoW.guildBank.viewGatedReads = true
+            finally(function() MockWoW.guildBank.viewGatedReads = false end)
+
+            Helpers.populateTab(2, { [5] = { itemID = 100, name = "Flask", count = 30 } })
+            Helpers.populateTab(1, { [1] = { itemID = 777, name = "Bystander", count = 3 } })
+            -- Snapshot tab 2 while slot 5 is full, then leave tab 1 selected.
+            _G.QueryGuildBankTab(2)
+            MockWoW.guildBank.currentTab = 1
+            -- The server-side truth moves on without a push to a non-viewed tab.
+            MockWoW.guildBank.tabs[2].slots[5] = nil
+
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "split", srcTab = 2, srcSlot = 5,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 10 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(1, result.skippedOps)
+            assert.equals(1, (result.skipReasons or {})["lift-failed"],
+                "only the cursor guard can see this one")
+            assert.equals(3, countItem(1, 777), "the destination should be untouched")
+        end)
+
+        -- Three distinct reasons in one run, because that is the only
+        -- arrangement in which a sorted histogram and an unsorted one differ.
+        -- Every other spec here produces exactly one reason, so `parts` holds
+        -- one element and table.sort cannot change the string: dropping the
+        -- sort survived the mutation pass until this fixture existed. Three
+        -- rather than two on purpose, since Lua makes a single comparison on
+        -- two elements and whether that catches anything comes down to pairs
+        -- order rather than to the fixture.
+        it("sorts the histogram when a run collects several reasons", function()
+            MockWoW.addTab("Tab 3", nil, true)
+            MockWoW.guildBank.viewGatedReads = true
+            finally(function() MockWoW.guildBank.viewGatedReads = false end)
+
+            -- T1/S1 stays empty. T1/S2 holds less than its op asks for.
+            Helpers.populateTab(1, { [2] = { itemID = 100, name = "Flask", count = 3 } })
+            -- T2/S5 is snapshotted full and then emptied behind the view gate,
+            -- so its read passes every pre-check and the lift still finds
+            -- nothing. Only the cursor guard sees that one.
+            Helpers.populateTab(2, { [5] = { itemID = 100, name = "Flask", count = 30 } })
+            _G.QueryGuildBankTab(2)
+            MockWoW.guildBank.currentTab = 1
+            MockWoW.guildBank.tabs[2].slots[5] = nil
+
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 3, dstSlot = 1, itemID = 100, count = 5 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 3, dstSlot = 2, itemID = 100, count = 5 },
+                    { op = "split", srcTab = 2, srcSlot = 5,
+                      dstTab = 3, dstSlot = 3, itemID = 100, count = 10 },
+                },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(3, result.skippedOps)
+            assert.equals(1, (result.skipReasons or {})["empty"])
+            assert.equals(1, (result.skipReasons or {})["short-stack"])
+            assert.equals(1, (result.skipReasons or {})["lift-failed"])
+            assert.is_not_nil(findLine("[empty:1 lift-failed:1 short-stack:1]"),
+                "the histogram should read in sorted order, not in pairs order")
+        end)
+    end)
 end)
