@@ -234,6 +234,24 @@ describe("audit session reader", function()
             assert.is_truthy(text:find("| 5 |", 1, true))
         end)
 
+        it("gives the run table a header cell per column", function()
+            -- The first column holds the row labels, so the header needs a
+            -- leading empty cell or every run's heading sits one column
+            -- left of its own data. Markdown renders the mismatch silently,
+            -- which is why this is asserted rather than looked at.
+            local text = skeletonOf()
+            local header = text:match("\n(|[^\n]*Run 1[^\n]*)\n")
+            local divider = text:match("\n|[^\n]*Run 1[^\n]*\n(|[^\n]*)\n")
+
+            local function cells(row)
+                local n = 0
+                for _ in row:gmatch("|") do n = n + 1 end
+                return n
+            end
+            assert.is_string(header)
+            assert.equals(cells(divider), cells(header))
+        end)
+
         it("names no guild, player or realm", function()
             -- Five of the six committed records name none of the three and
             -- the convention is that a record never does. A tool that leaks
