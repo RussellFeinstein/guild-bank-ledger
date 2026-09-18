@@ -58,7 +58,9 @@ Sections, in order:
 - **A short preamble**: one or two sentences on what was run. Name the
   session index and say the lines were read by index.
 - **`## What was run`**: a table with one column per run: started, bags
-  on or off, planned ops, how it ended.
+  on or off, planned ops, how it ended, and what the cursor probe answered.
+  That last row is the one to read first on any run that moved less than it
+  planned (#171).
 - **`## The figures`**: the summary lines verbatim in fenced blocks, then a
   measure table. Count rather than eyeball: a first pass at the 09-12 record
   undercounted its own evidence six times over.
@@ -92,3 +94,4 @@ Three rules:
 | [2026-05-21-viewed-tab-confirmed.md](2026-05-21-viewed-tab-confirmed.md) | The cold tab pinned to the destination tab not being the viewed one. Opens by retracting its own proposed fix. |
 | [2026-08-27-bags-near-full-overflow.md](2026-08-27-bags-near-full-overflow.md) | Bags into two nearly full overflow tabs on v0.39.0. The bag half worked; the pass-cap stop was something else. |
 | [2026-09-12-pivot-convergence-clean.md](2026-09-12-pivot-convergence-clean.md) | Two runs on v0.39.3 converging in two passes. Closed #144 on evidence rather than a build. |
+| [2026-09-17-cursor-predicate-outage-and-probe.md](2026-09-17-cursor-predicate-outage-and-probe.md) | The v0.39.5 outage and the v0.39.6 probe that explained it. 238 lifts that all worked show `CursorHasItem` blind to a guild bank cursor and source drain unreadable in the frame of the lift. |
