@@ -321,6 +321,11 @@ local function canExecute(op, state, getMaxStack)
 end
 
 --- Pick "split" or "move" label based on whether the op fully drains src.
+--- The ONLY writer of `op.op`; all three op producers route through it
+--- (emitAssignment, the Phase 2 pivot, the Phase 3 sweep). Two of those used
+--- to hardcode "move", and the sweep was wrong to: tier 1 caps its take at
+--- the destination partial's capacity (#161). Call it against `state` BEFORE
+--- applyOpToState mutates the source, or the label inverts.
 local function opLabel(state, ass)
     local src = state[ass.srcTab] and state[ass.srcTab][ass.srcSlot]
     if src and src.count > ass.count then return "split" end
@@ -1370,13 +1375,16 @@ function GBL:PlanSort(snapshot, layout, opts)
 
             local blockerSlot = state[stuck.dstTab][stuck.dstSlot]
             local pivotOp = {
-                op = "move",
                 srcTab = stuck.dstTab, srcSlot = stuck.dstSlot,
                 dstTab = pivotTab, dstSlot = pivotSlot,
                 itemID = blockerSlot.itemID, count = blockerSlot.count,
                 plannerSrcAt = snapshotSlot(stuck.dstTab, stuck.dstSlot),
                 plannerDstAt = snapshotSlot(pivotTab, pivotSlot),
             }
+            -- Provably "move": count IS blockerSlot.count, so opLabel's
+            -- `src.count > ass.count` is false. Routed through it anyway so
+            -- opLabel is the single writer of the field (#161).
+            pivotOp.op = opLabel(state, pivotOp)
             table.insert(plan.ops, pivotOp)
             applyOpToState(state, pivotOp, getMaxStack)
             diag.phase2Pivots = diag.phase2Pivots + 1
@@ -1479,13 +1487,18 @@ function GBL:PlanSort(snapshot, layout, opts)
                                 break
                             end
                             local sweepOp = {
-                                op = "move",
                                 srcTab = tabIndex, srcSlot = slotIndex,
                                 dstTab = ovTab, dstSlot = ovSlot,
                                 itemID = slot.itemID, count = take,
                                 plannerSrcAt = snapshotSlot(tabIndex, slotIndex),
                                 plannerDstAt = snapshotSlot(ovTab, ovSlot),
                             }
+                            -- pickOverflowSlot tier 1 caps take at the
+                            -- destination partial's capacity, so this op can
+                            -- leave part of the stack behind and is then a
+                            -- split. Hardcoding "move" here made the preview
+                            -- and the sort log describe it wrongly (#161).
+                            sweepOp.op = opLabel(state, sweepOp)
                             table.insert(plan.ops, sweepOp)
                             applyOpToState(state, sweepOp, getMaxStack)
                             diag.phase3Sweeps = diag.phase3Sweeps + 1
