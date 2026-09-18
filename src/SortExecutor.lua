@@ -121,7 +121,9 @@ local stallTicker = nil
 --   layout = {...},              -- required for end-of-pass re-plan
 --   opIndex = N,                 -- next op to issue in the current pass
 --   passes = P, lastPassOps = N, residual = R,
---   totalIssued = N, cursorStuck = N,
+--   totalIssued = N, cursorStuck = N, skippedOps = N,
+--   lastOutcome* = the previous op's result, riding forward onto the next
+--                  step message and cleared by startPass (#162),
 --   pumping = bool,              -- true while a pass is issuing; the cancel
 --   pumpToken = N,               -- invalidates a stale/late pump timer
 --   onComplete = fn, startedAt = t, lastProgressAt = t,

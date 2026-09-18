@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The Sort tab's move list now marks each move as the sort gets to it. A move that was sent shows a green `+`, a move the sort could not make shows a red `x` with the reason on the row, and one amber `>` sits on the move it is working on. Before this every move it reached kept the amber marker for the rest of the run, so a bag deposit that was refused looked exactly like one that went through, and the only place the reason appeared was the sort log.
+- The Sort tab's "failed" count during a run was counting something else entirely: it reported moves where the destination slot already held a different item, which is a swap and a perfectly good move. The live line now reads "N issued, M refused", and the completion line reports the same numbers the chat message does instead of a second, different set.
+
 ## [0.39.9] - 2026-09-18
 
 ### Fixed
