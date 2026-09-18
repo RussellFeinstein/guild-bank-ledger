@@ -173,6 +173,12 @@ function M.runs(db, index)
     local entries, err = M.channel(db, index, "sort")
     if not entries then return nil, err end
 
+    -- `closed` is the run whose terminal line was the last one seen. It is
+    -- only ever read while `current` is nil, which holds exactly between a
+    -- terminal line and the next line that opens a group, so it never needs
+    -- clearing: anything that is not part of the tail opens a group and takes
+    -- the `current` path instead. Two mutations proved the resets that used to
+    -- sit on the run-start and orphan branches could not change one grouping.
     local groups, current, closed = {}, nil, nil
     for _, entry in ipairs(entries) do
         local message = entry.message or ""
@@ -181,7 +187,6 @@ function M.runs(db, index)
             if isRunStart(message) then
                 current = { started = true, lines = {} }
                 groups[#groups + 1] = current
-                closed = nil
             elseif not current and closed and isTailLine(message) then
                 -- Files against the run that just closed without reopening
                 -- it, so the next `Sort: starting` cannot inherit the tail.
@@ -190,9 +195,6 @@ function M.runs(db, index)
             elseif not current then
                 current = { started = false, lines = {} }
                 groups[#groups + 1] = current
-                -- Any other summary line ends the tail: a preview or a
-                -- deviations plan line means finish() is done writing.
-                closed = nil
             end
 
             if not handled then

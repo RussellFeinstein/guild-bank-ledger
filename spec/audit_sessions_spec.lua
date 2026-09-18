@@ -48,7 +48,7 @@ describe("audit session reader", function()
 
             assert.equals(2, rows[2].index)
             assert.equals("0.39.7", rows[2].addonVersion)
-            assert.equals(22, rows[2].counts.sort)
+            assert.equals(23, rows[2].counts.sort)
         end)
 
         it("reads each session's own dropped counters", function()
@@ -195,6 +195,25 @@ describe("audit session reader", function()
             assert.is_true(has(started[3], "Sort hitch summary:"))
             assert.is_true(has(started[1], "GetCursorInfo [item:14]"),
                 "a bags=off run still emits a probe and a hitch summary")
+        end)
+
+        it("keeps both continuations of a plan line, not just the phases one", function()
+            -- `demands:` is the sibling of `phases:` under the same plan line
+            -- and was simply missing from the pattern list. Every committed
+            -- capture doc quotes it, so a skeleton without it sends the writer
+            -- back to the raw log, which is what the reader exists to avoid.
+            local db = Reader.load(FIXTURE)
+            local started = startedRuns(Reader.runs(db, 2))
+
+            local phases, demands = false, false
+            for _, g in ipairs(started) do
+                for _, line in ipairs(g.lines) do
+                    if line.message:find("^%s+phases:") then phases = true end
+                    if line.message:find("^%s+demands:") then demands = true end
+                end
+            end
+            assert.is_true(phases)
+            assert.is_true(demands, "the demands continuation belongs to its run too")
         end)
 
         it("does not attach one run's tail to the run that follows it", function()

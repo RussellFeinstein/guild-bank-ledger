@@ -172,6 +172,11 @@ GuildBankLedgerAuditDB = {
 						["message"] = "  phases: P0 merge=2(free=1) P1a assign=5 P1b spill=3(top=1,r=1,l=0,fe=1,unp=0) P2 pivot=4(abort=1) P3 sweep=0 P4 pack=2",
 					},
 					{
+						["ts"] = 1789172602,
+						["level"] = "INFO",
+						["message"] = "  demands: 214 total (pinned=12, ext-R=180, ext-L=0, first-empty=22)",
+					},
+					{
 						["ts"] = 1789172603,
 						["level"] = "INFO",
 						["message"] = "  bags stay: item:100 x20 at Bag2/18 (overflow-full)",
