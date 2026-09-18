@@ -47,8 +47,8 @@ describe("audit session reader", function()
             assert.equals(0, rows[1].counts.system)
 
             assert.equals(2, rows[2].index)
-            assert.equals("0.39.4", rows[2].addonVersion)
-            assert.equals(16, rows[2].counts.sort)
+            assert.equals("0.39.7", rows[2].addonVersion)
+            assert.equals(22, rows[2].counts.sort)
         end)
 
         it("reads each session's own dropped counters", function()
@@ -137,11 +137,20 @@ describe("audit session reader", function()
         end)
 
         it("carries the terminal line so a run says how it ended", function()
+            -- This used to read the run's LAST line, which worked only while
+            -- the reader dropped everything finish() writes after the terminal
+            -- line. The terminal line is not last any more and never was in a
+            -- real capture, so the position it sits at is what gets asserted.
             local db = Reader.load(FIXTURE)
             local started = startedRuns(Reader.runs(db, 2))
 
-            local last = started[2].lines[#started[2].lines]
-            assert.is_truthy(last.message:find("Sort: aborted", 1, true))
+            local terminal
+            for i, line in ipairs(started[2].lines) do
+                if line.message:find("Sort: aborted", 1, true) then terminal = i end
+            end
+            assert.is_not_nil(terminal, "a run has to say how it ended")
+            assert.is_true(terminal < #started[2].lines,
+                "the tail finish() writes comes after the terminal line")
         end)
 
         it("keeps a post-run deviations plan line out of the run that ended", function()
@@ -157,6 +166,78 @@ describe("audit session reader", function()
             for _, line in ipairs(started[2].lines) do
                 assert.is_nil(line.message:find("4.8ms", 1, true))
             end
+        end)
+
+        -- THE TAIL. `finish` writes the terminal line FIRST and then up to
+        -- three more summary lines after it (src/SortExecutor.lua: the
+        -- complete/aborted line, then `Sort bags:`, `Sort lift probe:`,
+        -- `Sort hitch summary:`). Closing a run on the terminal line and
+        -- stopping there drops all of them into an orphan group that the
+        -- skeleton labels as a preview, which is where `Sort bags:` landed
+        -- for every real capture until this was pinned. The fixture used to
+        -- put the bags line ABOVE the terminal line, an order no client
+        -- produces, which is why 24 green specs never saw it.
+        it("keeps the tail a run emits after its terminal line inside that run", function()
+            local db = Reader.load(FIXTURE)
+            local started = startedRuns(Reader.runs(db, 2))
+
+            local function has(g, needle)
+                for _, line in ipairs(g.lines) do
+                    if line.message:find(needle, 1, true) then return true end
+                end
+                return false
+            end
+
+            assert.is_true(has(started[3], "Sort bags: 3 deposit(s)"),
+                "the bags line belongs to the run it reports on")
+            assert.is_true(has(started[3], "Sort lift probe:"),
+                "the probe line is the tripwire for the guard; it belongs to its run")
+            assert.is_true(has(started[3], "Sort hitch summary:"))
+            assert.is_true(has(started[1], "GetCursorInfo [item:14]"),
+                "a bags=off run still emits a probe and a hitch summary")
+        end)
+
+        it("does not attach one run's tail to the run that follows it", function()
+            -- Run 2 ends on an abort and run 3 starts straight after, with no
+            -- preview line between them.
+            local db = Reader.load(FIXTURE)
+            local started = startedRuns(Reader.runs(db, 2))
+
+            for _, line in ipairs(started[3].lines) do
+                assert.is_nil(line.message:find("0 hitches", 1, true),
+                    "run 2's hitch summary must not read as run 3's")
+            end
+        end)
+
+        it("still keeps a post-run deviations plan line out, now that a tail exists", function()
+            -- The tail must not be an open door: `Sort plan:` is excluded from
+            -- it, or the plan line /gbl deviations writes after every sort gets
+            -- folded into the run above.
+            local db = Reader.load(FIXTURE)
+            local groups = Reader.runs(db, 2)
+
+            local deviations
+            for _, g in ipairs(groups) do
+                for _, line in ipairs(g.lines) do
+                    if line.message:find("4.8ms", 1, true) then deviations = g end
+                end
+            end
+            assert.is_not_nil(deviations, "the deviations plan line should still be grouped")
+            assert.is_false(deviations.started)
+        end)
+
+        it("carries a mid-run guard WARN like any other summary line", function()
+            local db = Reader.load(FIXTURE)
+            local started = startedRuns(Reader.runs(db, 2))
+
+            local found = false
+            for _, line in ipairs(started[3].lines) do
+                if line.message:find("lift guard disabled", 1, true) then
+                    found = true
+                    assert.equals("WARN", line.level)
+                end
+            end
+            assert.is_true(found, "a run that disabled its guard has to say so in the record")
         end)
 
         it("drops sort lines that are not part of the run summary", function()
@@ -233,6 +314,34 @@ describe("audit session reader", function()
             assert.is_truthy(text:find("Run 3", 1, true))
             assert.is_truthy(text:find("bags=on", 1, true))
             assert.is_truthy(text:find("aborted", 1, true))
+        end)
+
+        it("names what the cursor probe answered for each run", function()
+            -- #171 made this line the tripwire for the whole sort: a capture
+            -- where GetCursorInfo has gone quiet looks exactly like a bank
+            -- full of failed lifts until the record says which it was.
+            local text = skeletonOf()
+            assert.is_truthy(text:find("| Probe |", 1, true), text)
+            assert.is_truthy(text:find("GetCursorInfo [item:14]", 1, true))
+        end)
+
+        it("says so when a run finished with its guard disabled", function()
+            local text = skeletonOf()
+            assert.is_truthy(text:find("guard off", 1, true),
+                "a run that finished unguarded must not read as an ordinary one")
+        end)
+
+        it("renders a run that emitted no probe line at all", function()
+            -- Run 2 aborted without one, and session 1 predates the probe
+            -- entirely. Neither may break the skeleton.
+            local text = skeletonOf()
+            assert.is_truthy(text:find("Run 2", 1, true))
+
+            local db = Reader.load(FIXTURE)
+            local rows = Reader.list(db)
+            local old = Reader.skeleton(rows[1], Reader.runs(db, 1))
+            assert.is_string(old)
+            assert.is_truthy(old:find("No executed run in this session", 1, true))
         end)
 
         it("embeds the summary lines verbatim", function()

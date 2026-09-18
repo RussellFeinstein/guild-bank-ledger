@@ -71,7 +71,7 @@ GuildBankLedgerAuditDB = {
 		},
 		{
 			["startedAt"] = 1789172400,
-			["addonVersion"] = "0.39.4",
+			["addonVersion"] = "0.39.7",
 			["protocolVersion"] = 3,
 			["player"] = "Tester",
 			["realm"] = "TestRealm",
@@ -122,6 +122,16 @@ GuildBankLedgerAuditDB = {
 						["message"] = "Sort: complete in 40.0s - 2 passes, 14 ops issued, 0 remaining, avg 1.10s/op (cursorStuck=0 stalls=0 rescans=1)",
 					},
 					{
+						["ts"] = 1789172501,
+						["level"] = "INFO",
+						["message"] = "Sort lift probe: GetCursorInfo [item:14], CursorHasItem true=0 false=14",
+					},
+					{
+						["ts"] = 1789172502,
+						["level"] = "INFO",
+						["message"] = "Sort hitch summary: 2 hitches, max 180ms [<=250ms:2]",
+					},
+					{
 						["ts"] = 1789172451,
 						["level"] = "INFO",
 						["message"] = "Sort plan: 4.8ms, 12 ops, 0 deficits, 0 unplaced (input: 600 slots / 7 tabs) unviewable:none [T1:59]",
@@ -140,6 +150,11 @@ GuildBankLedgerAuditDB = {
 						["ts"] = 1789172520,
 						["level"] = "INFO",
 						["message"] = "Sort: aborted (bank closed) in 20.0s - 1 passes, 3 ops issued, 2 remaining, avg 1.00s/op (cursorStuck=0 stalls=0 rescans=0)",
+					},
+					{
+						["ts"] = 1789172560,
+						["level"] = "INFO",
+						["message"] = "Sort hitch summary: 0 hitches, max 0ms",
 					},
 					{
 						["ts"] = 1789172600,
@@ -162,14 +177,29 @@ GuildBankLedgerAuditDB = {
 						["message"] = "  bags stay: item:100 x20 at Bag2/18 (overflow-full)",
 					},
 					{
+						["ts"] = 1789172604,
+						["level"] = "WARN",
+						["message"] = "Sort: lift guard disabled after 5 refusals with no op passing - the cursor check looks blind on this client, continuing unguarded (#171)",
+					},
+					{
 						["ts"] = 1789172640,
 						["level"] = "INFO",
-						["message"] = "Sort bags: 3 deposit(s) issued, 0 skipped, still in bags: 20 (20 unplaceable)",
+						["message"] = "Sort: complete in 41.0s - 1 passes, 8 ops issued, 0 remaining, avg 1.20s/op (cursorStuck=0 stalls=0 rescans=0)",
 					},
 					{
 						["ts"] = 1789172641,
 						["level"] = "INFO",
-						["message"] = "Sort: complete in 41.0s - 1 passes, 8 ops issued, 0 remaining, avg 1.20s/op (cursorStuck=0 stalls=0 rescans=0)",
+						["message"] = "Sort bags: 3 deposit(s) issued, 0 skipped, still in bags: 20 (20 unplaceable)",
+					},
+					{
+						["ts"] = 1789172642,
+						["level"] = "INFO",
+						["message"] = "Sort lift probe: GetCursorInfo [item:2 none:6], CursorHasItem true=0 false=8 guard=disabled",
+					},
+					{
+						["ts"] = 1789172643,
+						["level"] = "INFO",
+						["message"] = "Sort hitch summary: 1 hitches, max 3300ms [>1000ms:1]",
 					},
 				},
 			},
