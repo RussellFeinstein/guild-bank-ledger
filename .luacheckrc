@@ -35,6 +35,7 @@ read_globals = {
     "SplitGuildBankItem",
     "ClearCursor",
     "CursorHasItem",
+    "GetCursorInfo",
 
     -- WoW constants and tables
     "Enum",
