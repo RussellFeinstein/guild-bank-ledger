@@ -382,4 +382,227 @@ describe("SortView", function()
             assert.is_not_nil(container)
         end)
     end)
+
+    -- The tab is coded for four row markers and only one has ever drawn.
+    -- 0a368d5 (2026-05-22) replaced the confirmation-based executor with the
+    -- fire-and-forget pump, deleted every producer of completedOpIndex /
+    -- reclassifiedOpIndex / failedOpIndex, and left the consumer standing
+    -- (#162). Nothing went red because neither side had a test: this is the
+    -- first spec _SortView_OnProgress has ever had, and GBL_SORT_PROGRESS had
+    -- never been fired anywhere in the suite.
+    --
+    -- Three setup lines are load-bearing, each with its own early return
+    -- behind it, and each one silently turns a test into a no-op:
+    --   activeTab      the handler returns at :525 without it.
+    --   tabGroup       RefreshSortTab returns at :277 without it, so the
+    --                  planupdated and repaint tests would assert against a
+    --                  tree nothing rebuilt and pass while doing nothing.
+    --   IsSortRunning  _SortView_Preview clears _sortOpStatus at :299 when a
+    --                  sort is NOT running, wiping the markers under test on
+    --                  the way through a rebuild.
+    --
+    -- Every assertion here reads rendered label text. _sortOpStatus is an
+    -- internal flag, and a test naming it passes whether or not a marker ever
+    -- draws, which is exactly how the focus-ring stub shipped.
+    describe("progress markers (#162)", function()
+        -- Anchored on the slot pair, which is unique per row and survives a
+        -- marker being prefixed to the row.
+        local ROW_ANCHOR = { "T1/3 -> T5/1", "Bag0/7 -> T5/2", "Bag1/25 -> T5/3" }
+
+        local function opsPlan()
+            return {
+                ops = {
+                    { op = "move",  srcTab =  1, srcSlot =  3,
+                      dstTab = 5, dstSlot = 1, itemID = 2589, count = 20 },
+                    { op = "split", srcTab = -1, srcSlot =  7,
+                      dstTab = 5, dstSlot = 2, itemID = 2770, count = 12 },
+                    { op = "move",  srcTab = -2, srcSlot = 25,
+                      dstTab = 5, dstSlot = 3, itemID = 4306, count =  8 },
+                },
+                deficits = {},
+                unplaced = {},
+            }
+        end
+
+        --- Rendered text of the move-list row for op `idx`, or nil.
+        local function rowText(container, idx)
+            local lbl = findLabelContaining(container, ROW_ANCHOR[idx])
+            return lbl and lbl._text or nil
+        end
+
+        --- Assert row `idx` renders with `marker` as its prefix.
+        local function assertMarker(container, idx, marker, why)
+            local row = rowText(container, idx)
+            assert.is_not_nil(row, "row " .. idx .. " is not in the move list")
+            assert.equals(marker, row:sub(1, #marker),
+                (why or ("row " .. idx)) .. ": " .. row)
+        end
+
+        local function fire(payload)
+            Helpers.MockAce.fireMessage("GBL_SORT_PROGRESS", payload)
+        end
+
+        before_each(function()
+            GBL.IsSortRunning = function() return true end
+            GBL.activeTab = "sort"
+            GBL._sortLastPlan = opsPlan()
+        end)
+
+        -- The case the markers exist for, and the only route #169's seven
+        -- refusal reasons have to a player who is not reading the sort log.
+        it("marks a refused op and names its reason and detail", function()
+            local MARK = GBL._sortStatusMarkers
+            local container = buildTab()
+
+            fire({ phase = "step", opIndex = 3, total = 3, failedOpIndex = 2,
+                   failedReason = "short-stack", failedDetail = "have 12" })
+
+            assertMarker(container, 2, MARK.failed, "a refused op")
+            local row = rowText(container, 2)
+            assert.is_truthy(row:find("short-stack", 1, true),
+                "a refused row should name the reason: " .. row)
+            assert.is_truthy(row:find("have 12", 1, true),
+                "a refused row should carry the detail: " .. row)
+        end)
+
+        it("marks an issued op and leaves exactly one row current", function()
+            local MARK = GBL._sortStatusMarkers
+            local container = buildTab()
+
+            fire({ phase = "step", opIndex = 1, total = 3 })
+            fire({ phase = "step", opIndex = 2, total = 3, issuedOpIndex = 1 })
+
+            assertMarker(container, 1, MARK.issued, "the op just issued")
+            assertMarker(container, 2, MARK.current, "the op the pump is on")
+
+            local currents = 0
+            for idx = 1, 3 do
+                local row = rowText(container, idx) or ""
+                if row:sub(1, #MARK.current) == MARK.current then
+                    currents = currents + 1
+                end
+            end
+            assert.equals(1, currents, "exactly one row should be current")
+        end)
+
+        it("marks the named op current", function()
+            local MARK = GBL._sortStatusMarkers
+            local container = buildTab()
+
+            fire({ phase = "step", opIndex = 2, total = 3 })
+
+            assertMarker(container, 2, MARK.current)
+        end)
+
+        it("clears markers left by a previous run", function()
+            local MARK = GBL._sortStatusMarkers
+            local container = buildTab()
+            GBL.tabGroup = container
+
+            fire({ phase = "step", opIndex = 2, total = 3, issuedOpIndex = 1 })
+            assertMarker(container, 1, MARK.issued)
+
+            fire({ phase = "start", total = 3 })
+            GBL:RefreshSortTab()
+
+            assertMarker(container, 1, "  ", "a cleared row")
+        end)
+
+        it("renders the finish line from done and failed", function()
+            local container = buildTab()
+
+            fire({ phase = "finish", ok = true, done = 7, failed = 2,
+                   replans = 1, total = 3 })
+
+            assert.is_not_nil(
+                findLabelContaining(container, "7 done, 2 failed, 1 replans"),
+                "the completion line should report the residual-based counts")
+        end)
+
+        it("renders an aborted finish with its reason", function()
+            local container = buildTab()
+
+            fire({ phase = "finish", ok = false, reason = "bank closed",
+                   done = 4, failed = 5, replans = 0, total = 3 })
+
+            local lbl = findLabelContaining(container, "bank closed")
+            assert.is_not_nil(lbl, "an abort should name its reason")
+            assert.is_truthy(lbl._text:find("4 done, 5 failed", 1, true),
+                lbl._text)
+        end)
+
+        -- The file's own comment says these counters accumulate across
+        -- replans while total is the current plan's size, so the numerator
+        -- can outrun the denominator. Nothing pinned the clamp.
+        it("clamps the op counter to the plan size", function()
+            local container = buildTab()
+
+            fire({ phase = "step", opIndex = 5, total = 3, issued = 3,
+                   refused = 0, replans = 0 })
+
+            assert.is_not_nil(findLabelContaining(container, "op 3 / 3"),
+                "the counter should clamp rather than print op 5 / 3")
+        end)
+
+        it("swaps the plan, clears markers and rebuilds on planupdated", function()
+            local MARK = GBL._sortStatusMarkers
+            local container = buildTab()
+            GBL.tabGroup = container
+
+            fire({ phase = "step", opIndex = 2, total = 3, issuedOpIndex = 1 })
+            assertMarker(container, 1, MARK.issued)
+
+            local newPlan = {
+                ops = { { op = "move", srcTab = 7, srcSlot = 1, dstTab = 5,
+                          dstSlot = 9, itemID = 858, count = 4 } },
+                deficits = {}, unplaced = {},
+            }
+            fire({ phase = "planupdated", plan = newPlan, total = 1 })
+
+            assert.equals(newPlan, GBL._sortLastPlan)
+            assert.is_not_nil(findLabelContaining(container, "T7/1 -> T5/9"),
+                "the rebuilt move list should show the new plan")
+            assert.is_nil(rowText(container, 1),
+                "the old plan's rows should be gone")
+        end)
+
+        it("repaints markers and reasons after a rebuild", function()
+            local MARK = GBL._sortStatusMarkers
+            local container = buildTab()
+            GBL.tabGroup = container
+
+            fire({ phase = "step", opIndex = 3, total = 3, issuedOpIndex = 1 })
+            fire({ phase = "step", opIndex = 3, total = 3, failedOpIndex = 2,
+                   failedReason = "locked" })
+            GBL:RefreshSortTab()
+
+            assertMarker(container, 1, MARK.issued)
+            assertMarker(container, 2, MARK.failed)
+            assertMarker(container, 3, MARK.current)
+            local row = rowText(container, 2)
+            assert.is_truthy(row:find("locked", 1, true),
+                "the reason should survive the rebuild too: " .. row)
+        end)
+
+        -- A rescan mid-sort tears the rows down, so an event can land while
+        -- no widget exists for its index. mark() has to record anyway, or the
+        -- repaint loop has nothing to paint back.
+        it("records a marker for a row that does not exist yet", function()
+            local MARK = GBL._sortStatusMarkers
+
+            fire({ phase = "step", opIndex = 2, total = 3, issuedOpIndex = 1 })
+            local container = buildTab()
+
+            assertMarker(container, 1, MARK.issued)
+        end)
+
+        it("tolerates a phase it does not know", function()
+            local container = buildTab()
+
+            fire({ phase = "reclassify", opIndex = 2, total = 3, issued = 1,
+                   refused = 0, replans = 0 })
+
+            assert.is_not_nil(findLabelContaining(container, "op 2 / 3"))
+        end)
+    end)
 end)

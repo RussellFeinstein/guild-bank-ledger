@@ -460,6 +460,192 @@ describe("SortExecutor (fire-and-forget pump)", function()
     end)
 
     ------------------------------------------------------------------
+    -- Progress payload (the other half of the SortView contract, #162)
+    --
+    -- UI/SortView.lua consumed a richer protocol than this file spoke for
+    -- four months, and nothing was red because the two sides have never been
+    -- joined by a test. They still are not joined here, and cannot be:
+    -- MockAce.SendMessage records into sentMessages and does not dispatch,
+    -- while MockAce.fireMessage dispatches and is wired to nothing. So the
+    -- consumer is proven against a hand-built payload in
+    -- spec/ui/sortview_spec.lua and the producer is proven to emit that shape
+    -- here. Neither assertion alone says anything about the other side.
+    -- Making SendMessage dispatch would change every spec in the suite; it is
+    -- filed against #166.
+    ------------------------------------------------------------------
+    describe("progress payload (SortView contract)", function()
+        --- Every GBL_SORT_PROGRESS payload this run emitted, in order.
+        local function progressPayloads()
+            local out = {}
+            for _, m in ipairs(MockAce.sentMessages) do
+                if m.message == "GBL_SORT_PROGRESS" then
+                    out[#out + 1] = m.args[1]
+                end
+            end
+            return out
+        end
+
+        --- The first emitted payload satisfying `pred`.
+        local function firstPayload(pred)
+            for _, p in ipairs(progressPayloads()) do
+                if pred(p) then return p end
+            end
+            return nil
+        end
+
+        --- Enough layout for endOfPass to re-plan against.
+        local function simpleLayout()
+            return {
+                tabs = {
+                    [1] = { mode = "display",
+                            items = { [100] = { slots = 1, perSlot = 20 } },
+                            slotOrder = { [1] = 100 } },
+                    [2] = { mode = "overflow" },
+                },
+            }
+        end
+
+        it("reports an issued op on a later step", function()
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 5 },
+                [2] = { itemID = 100, name = "Flask", count = 5 },
+            })
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 2, dstSlot = 2, itemID = 100, count = 5 },
+                },
+            }, function() end)
+            drainTimers()
+
+            local p = firstPayload(function(m) return m.issuedOpIndex == 1 end)
+            assert.is_not_nil(p, "op 1 was issued and no payload said so")
+            assert.equals("step", p.phase)
+            assert.equals(2, p.opIndex,
+                "the outcome rides the NEXT op's step, so one row is current")
+        end)
+
+        -- The reason and the detail travel as two fields, not as the log
+        -- line's single `why` string: that one already wraps the detail in
+        -- parentheses, so a row rendering it would print nested brackets.
+        it("reports a refusal with reason and detail as separate fields", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 3 } })
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 2, itemID = 100, count = 3 },
+                },
+            }, function() end)
+            drainTimers()
+
+            local p = firstPayload(function(m) return m.failedOpIndex == 1 end)
+            assert.is_not_nil(p, "op 1 was refused and no payload said so")
+            assert.equals("short-stack", p.failedReason)
+            assert.equals("have 3", p.failedDetail)
+        end)
+
+        -- `failed` used to be state.cursorStuck, which counts destination
+        -- pickups that SWAPPED rather than placed: a successful move. The
+        -- two fields have to be separately readable, and this run has one
+        -- refusal and no swap, so equal values would be a coincidence.
+        it("carries issued and refused, with refused distinct from cursorStuck", function()
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 5 },
+                [2] = { itemID = 100, name = "Flask", count = 3 },
+            })
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 2, dstSlot = 2, itemID = 100, count = 9 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 2, dstSlot = 3, itemID = 100, count = 3 },
+                },
+            }, function() end)
+            drainTimers()
+
+            local all = progressPayloads()
+            local last = all[#all]
+            assert.is_not_nil(last)
+            assert.equals(2, last.issued, "two ops were issued")
+            assert.equals(1, last.refused, "one op was refused")
+            assert.equals(0, last.cursorStuck,
+                "no destination swapped, so refused cannot be reading this")
+        end)
+
+        it("finish carries the same done and failed the result does", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 5 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            local fin = firstPayload(function(m) return m.phase == "finish" end)
+            assert.is_not_nil(fin, "no finish payload")
+            assert.equals(result.done, fin.done,
+                "the tab and the chat line must not print two numbers")
+            assert.equals(result.failed, fin.failed)
+        end)
+
+        -- A plan swap renumbers every row, so an index from the old plan
+        -- would paint a marker onto an unrelated move. Two guards: the emit
+        -- carries no outcome field, and startPass clears the stash so the
+        -- next pass's first step cannot carry one either.
+        it("does not carry an outcome index across a plan swap", function()
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 5 },
+                [5] = { itemID = 200, name = "Ore", count = 5 },
+            })
+            local realPlanSort = GBL.PlanSort
+            local calls = 0
+            GBL.PlanSort = function()
+                calls = calls + 1
+                if calls == 1 then
+                    return {
+                        ops = { { op = "move", srcTab = 1, srcSlot = 5,
+                                  dstTab = 2, dstSlot = 5, itemID = 200, count = 5 } },
+                        deficits = {}, unplaced = {},
+                    }
+                end
+                return { ops = {}, deficits = {}, unplaced = {} }
+            end
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 2, itemID = 100, count = 9 },
+                },
+            }, function() end, { layout = simpleLayout() })
+            drainTimers(120)
+            GBL.PlanSort = realPlanSort
+
+            local swap = firstPayload(function(m) return m.phase == "planupdated" end)
+            assert.is_not_nil(swap, "fixture needs a second pass, got " .. calls .. " replan(s)")
+            assert.is_nil(swap.issuedOpIndex, "a plan swap must carry no old index")
+            assert.is_nil(swap.failedOpIndex, "a plan swap must carry no old index")
+
+            local seenSwap = false
+            for _, p in ipairs(progressPayloads()) do
+                if p.phase == "planupdated" then
+                    seenSwap = true
+                elseif seenSwap and p.phase == "step" then
+                    assert.is_nil(p.failedOpIndex,
+                        "pass 2's first step carried pass 1's last outcome")
+                    break
+                end
+            end
+        end)
+    end)
+
+    ------------------------------------------------------------------
     -- Bag deposits (#139)
     --
     -- An op whose srcTab is negative sources from a player bag. The
