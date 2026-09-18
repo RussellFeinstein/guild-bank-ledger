@@ -19,18 +19,35 @@ local function itemLabel(itemID)
     return name or ("item " .. itemID)
 end
 
---- Render an op-row label with an optional status marker. Used both by
---- the live progress handler AND by the Preview rebuild loop when
+--- The three row markers, and the only place their strings are written
+--- (#162). Six literal sites agreed by inspection before this, split across
+--- the repaint loop and the live handler, which is the drift shape #161 fixed
+--- one file over. Each state is told apart by its glyph, so no row state
+--- rides on colour alone; the colours are deliberately not routed through
+--- GBL:GetAccessibleColor, which this tab uses nowhere, and this table is the
+--- single seam a later palette pass would need.
+local STATUS_MARKER = {
+    current = "|cffffaa55>|r ",
+    issued  = "|cff00ff88+|r ",
+    failed  = "|cffff5555x|r ",
+}
+-- Exported for spec/ui/sortview_spec.lua, which has no other way to name a
+-- marker. No production reader.
+GBL._sortStatusMarkers = STATUS_MARKER
+
+--- Render an op-row label with an optional status marker and detail. Used
+--- both by the live progress handler AND by the Preview rebuild loop when
 --- repainting persisted _sortOpStatus markers, so it's defined up here
 --- to be visible to both call sites.
-local function formatOpRow(op, marker)
+local function formatOpRow(op, marker, detail)
     local prefix = marker or "  "
     -- Slot refs go through GBL:FormatSlotRef so a bag source renders as
     -- "Bag0/3" rather than the "T-1/3" a bare tab format would produce (#139).
-    return format("%s%s  %d x %s   %s -> %s",
+    return format("%s%s  %d x %s   %s -> %s%s",
         prefix, op.op, op.count, itemLabel(op.itemID),
         GBL:FormatSlotRef(op.srcTab, op.srcSlot),
-        GBL:FormatSlotRef(op.dstTab, op.dstSlot))
+        GBL:FormatSlotRef(op.dstTab, op.dstSlot),
+        detail and ("  (" .. detail .. ")") or "")
 end
 
 ------------------------------------------------------------------------
@@ -420,14 +437,11 @@ function GBL:_SortView_Preview()
             -- Repaint persisted per-op status. After a mid-sort rebuild
             -- we'd otherwise start from blank rows and only update the
             -- ops that have an event AFTER this rebuild; all prior
-            -- done/failed/current markers would vanish.
-            local status = self._sortOpStatus and self._sortOpStatus[idx]
-            if status == "current" then
-                lbl:SetText(formatOpRow(op, "|cffffaa55>|r "))
-            elseif status == "done" then
-                lbl:SetText(formatOpRow(op, "|cff00ff88+|r "))
-            elseif status == "failed" then
-                lbl:SetText(formatOpRow(op, "|cffff5555x|r "))
+            -- issued/failed/current markers would vanish.
+            local st = self._sortOpStatus and self._sortOpStatus[idx]
+            local marker = st and STATUS_MARKER[st.status]
+            if marker then
+                lbl:SetText(formatOpRow(op, marker, st.detail))
             end
         end
     end
@@ -559,27 +573,27 @@ function GBL:_SortView_OnProgress(_msg, payload)
                 tostring(payload.reason or "?"),
                 payload.done or 0, payload.failed or 0, payload.replans or 0)
         end
-    elseif phase == "replan" then
-        text = format(
-            "|cffffaa55Replan %d|r (%s) - %d done, %d failed so far.",
-            payload.replans or 0, tostring(payload.replanReason or "?"),
-            payload.done or 0, payload.failed or 0)
     elseif phase == "start" then
         text = format("|cffffaa55Starting|r - 0 / %d moves.", payload.total or 0)
     else
-        -- step / complete / failed / reclassify / planupdated — show
-        -- position within the CURRENT plan. We deliberately don't use
-        -- (done+failed)/total here: those counters accumulate across
-        -- replans while total is the current plan's size, so the
-        -- numerator could exceed the denominator ("34/33") after a
+        -- step / planupdated - show position within the CURRENT plan. We
+        -- deliberately don't use (issued+refused)/total here: those counters
+        -- accumulate across replans while total is the current plan's size,
+        -- so the numerator could exceed the denominator ("34/33") after a
         -- replan reissued work.
+        --
+        -- "issued" and "refused" rather than "done" and "failed": the pump
+        -- cannot prove a move landed, and only finish knows the residual
+        -- (#162). Before this the label read `state.cursorStuck` as its
+        -- failure count, which counts destination pickups that swapped
+        -- rather than placed, so it was reporting successful moves.
         local opN = payload.opIndex or 0
         local opT = payload.total or 0
         if opN > opT then opN = opT end  -- clamp at finish
         text = format(
-            "|cffffaa55Executing|r - op %d / %d  (%d done, %d failed, %d replans)",
+            "|cffffaa55Executing|r - op %d / %d  (%d issued, %d refused, %d replans)",
             opN, opT,
-            payload.done or 0, payload.failed or 0, payload.replans or 0)
+            payload.issued or 0, payload.refused or 0, payload.replans or 0)
     end
     -- Cache the last progress text so a rebuild (from Ledger rescan,
     -- tab switch, etc.) can paint the label back to its current state
@@ -594,19 +608,29 @@ function GBL:_SortView_OnProgress(_msg, payload)
     -- optimization that can fail silently if the widget ref is stale
     -- (post-rebuild). On rebuild, the Preview loop re-paints from the
     -- status table, so nothing is lost.
-    local function mark(idx, status, markerColoredAscii)
+    local function mark(idx, status, detail)
         if not idx then return end
-        self._sortOpStatus[idx] = status
+        self._sortOpStatus[idx] = { status = status, detail = detail }
         local row = self._sortOpRows and self._sortOpRows[idx]
         if row then
-            row.widget:SetText(formatOpRow(row.op, markerColoredAscii))
+            row.widget:SetText(
+                formatOpRow(row.op, STATUS_MARKER[status], detail))
         end
     end
-    mark(payload.completedOpIndex,    "done",    "|cff00ff88+|r ")
-    mark(payload.reclassifiedOpIndex, "done",    "|cff00ff88+|r ")
-    mark(payload.failedOpIndex,       "failed",  "|cffff5555x|r ")
+    -- The settled row first, then the current one: a "step" carries the
+    -- PREVIOUS op's outcome alongside this op's index, so the outcome must
+    -- not be able to overwrite the head of the run (#162).
+    mark(payload.issuedOpIndex, "issued")
+    -- "issued" rather than "done": the pump is fire-and-forget and cannot
+    -- prove a move landed. The reason and its detail arrive as two fields
+    -- because the sort log's own string already brackets the detail.
+    local detail = payload.failedReason
+    if detail and payload.failedDetail then
+        detail = detail .. ": " .. payload.failedDetail
+    end
+    mark(payload.failedOpIndex, "failed", detail)
     if phase == "step" and payload.opIndex then
-        mark(payload.opIndex,         "current", "|cffffaa55>|r ")
+        mark(payload.opIndex, "current")
     end
 end
 

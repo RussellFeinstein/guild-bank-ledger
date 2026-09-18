@@ -584,16 +584,30 @@ describe("SortView", function()
                 "the reason should survive the rebuild too: " .. row)
         end)
 
-        -- A rescan mid-sort tears the rows down, so an event can land while
-        -- no widget exists for its index. mark() has to record anyway, or the
-        -- repaint loop has nothing to paint back.
-        it("records a marker for a row that does not exist yet", function()
+        -- mark() records into _sortOpStatus whether or not a widget exists,
+        -- and the nil-row arm is reachable through #163: a planupdated
+        -- dropped while the user is on another tab leaves the rendered plan a
+        -- pass behind, so a step can name an index this move list has no row
+        -- for. Recording anyway is what turns that into a stale display
+        -- rather than an error, and lets the repaint catch up.
+        it("records a marker for an index the move list has no row for", function()
             local MARK = GBL._sortStatusMarkers
-
-            fire({ phase = "step", opIndex = 2, total = 3, issuedOpIndex = 1 })
             local container = buildTab()
+            GBL.tabGroup = container
 
-            assertMarker(container, 1, MARK.issued)
+            fire({ phase = "step", opIndex = 5, total = 5, issuedOpIndex = 4 })
+
+            local bigger = opsPlan()
+            bigger.ops[4] = { op = "move", srcTab = 7, srcSlot = 1,
+                              dstTab = 5, dstSlot = 9, itemID = 858, count = 4 }
+            GBL._sortLastPlan = bigger
+            GBL:RefreshSortTab()
+
+            local lbl = findLabelContaining(container, "T7/1 -> T5/9")
+            assert.is_not_nil(lbl, "row 4 should be in the rebuilt move list")
+            assert.equals(MARK.issued, lbl._text:sub(1, #MARK.issued),
+                "the marker recorded without a widget should repaint: "
+                .. lbl._text)
         end)
 
         it("tolerates a phase it does not know", function()
