@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The sort works again.** Version 0.39.5 stopped it completely: it refused every move and reported them all as skipped, so a sort did nothing at all. The check that caused it has been withdrawn. If you are on 0.39.5, update.
+- Neither of the two fixes announced in 0.39.5 actually worked in game, because that same check refused the moves before they could take effect. They are back in this version, and this time a run will show it.
+
+### Added
+- A one-line diagnostic in the sort log recording what the client reported after each item was picked up. It exists to settle what went wrong in 0.39.5 and will be removed once it has.
+
 ## [0.39.5] - 2026-09-17
 
 ### Fixed

@@ -74,6 +74,9 @@ MockWoW.frames = {}
 
 function MockWoW.reset()
     MockWoW.prints = {}
+    MockWoW.cursor = nil
+    MockWoW.cursorHasItemLies = nil
+    MockWoW.cursorInfoType = nil
     MockWoW.guildBank = {
         tabs = {},
         numTabs = 0,
@@ -440,8 +443,33 @@ function MockWoW.install()
         MockWoW.cursor = nil
     end
 
+    -- These two model the cursor PREDICATES, which is a different thing from
+    -- modelling the cursor. What a real client reports for a guild bank item
+    -- is the open question behind the v0.39.5 outage (#171), so neither of
+    -- these is evidence about retail: they exist so production code can be
+    -- driven through both answers.
+    --
+    -- MockWoW.cursorHasItemLies makes CursorHasItem report an empty cursor
+    -- while one is loaded, which is the shape that took the sort down. Any
+    -- code that gates an action on this predicate should still work with it
+    -- set, and a spec that sets it is the regression pin.
     _G.CursorHasItem = function()
+        if MockWoW.cursorHasItemLies then return false end
         return MockWoW.cursor ~= nil
+    end
+
+    -- First return is the cursor type. Derived from which slot the cursor was
+    -- filled from, since that is all the mock knows; MockWoW.cursorInfoType
+    -- overrides it so a spec can pin a specific answer without faking a lift.
+    _G.GetCursorInfo = function()
+        if MockWoW.cursorInfoType ~= nil then
+            if MockWoW.cursorInfoType == false then return nil end
+            return MockWoW.cursorInfoType
+        end
+        local cur = MockWoW.cursor
+        if not cur then return nil end
+        if cur.src and cur.src.bagID then return "item" end
+        return "guildbankitem"
     end
 
     local function extractItemID(itemLink)

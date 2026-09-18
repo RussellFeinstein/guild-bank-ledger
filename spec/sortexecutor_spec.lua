@@ -1492,12 +1492,17 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 "a stale-empty read should be named as empty")
         end)
 
-        -- The guard is not redundant with the pre-checks, and this is the
-        -- case that proves it. A stale-HIGH read passes every pre-check and
-        -- the lift still finds nothing, so only a cursor check after the
-        -- fact can catch it. The same shape covers a split the server
-        -- refuses, which no fixture here can produce.
-        it("catches a lift that fails after the read said it would succeed", function()
+        -- CHARACTERIZATION, and it documents a known gap rather than a wanted
+        -- behaviour. A stale-HIGH read passes every pre-check and the lift
+        -- still finds nothing, so nothing refuses the op and the destination
+        -- pickup harvests an innocent stack. v0.39.5 guarded this with
+        -- CursorHasItem() and that refused every op in game, so the guard is
+        -- withdrawn until a capture says which predicate works (#171).
+        --
+        -- The assertion that the bystander is destroyed is deliberate: when
+        -- #171 re-lands a guard, this test goes red and forces whoever does it
+        -- to come back here. Do not delete it to make that easier.
+        it("does not yet catch a lift that fails after the read said it would succeed", function()
             MockWoW.guildBank.viewGatedReads = true
             finally(function() MockWoW.guildBank.viewGatedReads = false end)
 
@@ -1516,10 +1521,15 @@ describe("SortExecutor (fire-and-forget pump)", function()
             }, function(r) result = r end)
             drainTimers()
 
-            assert.equals(1, result.skippedOps)
-            assert.equals(1, (result.skipReasons or {})["lift-failed"],
-                "only the cursor guard can see this one")
-            assert.equals(3, countItem(1, 777), "the destination should be untouched")
+            assert.equals(0, result.skippedOps, "nothing refuses this case today")
+            -- The probe sees it even though nothing acts on it. This is the
+            -- signal #171 is waiting on: source drain, which this project
+            -- already established is the authoritative discriminator for a
+            -- completed move.
+            assert.equals(1, (result.liftProbe or {}).notDrained,
+                "the probe should record that the source did not give anything up")
+            assert.equals(0, countItem(1, 777),
+                "KNOWN GAP (#171): the destination is harvested by the unguarded pickup")
         end)
 
         -- Three distinct reasons in one run, because that is the only
@@ -1543,7 +1553,13 @@ describe("SortExecutor (fire-and-forget pump)", function()
             Helpers.populateTab(2, { [5] = { itemID = 100, name = "Flask", count = 30 } })
             _G.QueryGuildBankTab(2)
             MockWoW.guildBank.currentTab = 1
-            MockWoW.guildBank.tabs[2].slots[5] = nil
+            -- The third op needs a partial take and the split API is gone, so
+            -- it refuses as no-api. A client without it cannot take a part of
+            -- a stack at all, and the whole-stack pickup that would otherwise
+            -- happen deposits more than the destination was sized for.
+            local realSplit = _G.SplitGuildBankItem
+            _G.SplitGuildBankItem = nil
+            finally(function() _G.SplitGuildBankItem = realSplit end)
 
             local result
             GBL:ExecuteSortPlan({
@@ -1561,9 +1577,81 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.equals(3, result.skippedOps)
             assert.equals(1, (result.skipReasons or {})["empty"])
             assert.equals(1, (result.skipReasons or {})["short-stack"])
-            assert.equals(1, (result.skipReasons or {})["lift-failed"])
-            assert.is_not_nil(findLine("[empty:1 lift-failed:1 short-stack:1]"),
+            assert.equals(1, (result.skipReasons or {})["no-api"])
+            assert.is_not_nil(findLine("[empty:1 no-api:1 short-stack:1]"),
                 "the histogram should read in sorted order, not in pairs order")
+        end)
+
+        -- THE REGRESSION PIN FOR THE v0.39.5 OUTAGE. Read this before adding
+        -- any guard that reads a cursor predicate.
+        --
+        -- v0.39.5 refused an op when CursorHasItem() reported an empty cursor
+        -- after a lift. In game that refused 207 ops out of 207, because the
+        -- predicate does not report a guild bank item (or the lift is not
+        -- synchronous; #171 is measuring which). The suite could not catch it:
+        -- spec/mock_wow.lua's CursorHasItem returns `MockWoW.cursor ~= nil`,
+        -- which is faithful to the mock's own model of the cursor and not to
+        -- the client's, so the guard always passed here and always failed
+        -- there.
+        --
+        -- MockWoW.cursorHasItemLies exists so that shape is reachable. A run
+        -- must complete and move items with the predicate lying, because no
+        -- action may depend on a predicate whose real behaviour is unverified.
+        it("still sorts when CursorHasItem reports an empty cursor that is not", function()
+            MockWoW.cursorHasItemLies = true
+            finally(function() MockWoW.cursorHasItemLies = nil end)
+
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 5 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.is_not_nil(result, "run never finished")
+            assert.equals(0, result.skippedOps,
+                "a lying cursor predicate must not refuse a good op")
+            assert.equals(5, countItem(2, 100), "the item should have moved")
+            assert.equals(0, countItem(1, 100))
+        end)
+
+        -- The probe is the whole reason this release exists, so its line has
+        -- to actually appear. Drain is first because drain is the signal that
+        -- settles #171; the two cursor predicates ride along as corroboration.
+        it("reports all three lift signals on its own line", function()
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 20 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(1, (result.liftProbe or {}).drained,
+                "a real lift should read as drained")
+            local line = findLine("Sort lift probe:")
+            assert.is_not_nil(line, "the probe line should be written")
+            assert.is_truthy(line:find("src drained=1 not-drained=0", 1, true), line)
+            assert.is_truthy(line:find("guildbankitem:1", 1, true),
+                "GetCursorInfo's answer should be on the line: " .. line)
+        end)
+
+        -- A bag lift is not probed: bags are not the open question, and
+        -- C_Container reads are not view-gated, so including them would dilute
+        -- the counts the capture is being read for.
+        it("does not probe a bag lift", function()
+            Helpers.populateBag(0, { [1] = { itemID = 100, name = "Flask", count = 5 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = -1, srcSlot = 1,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end, { includeBags = true })
+            drainTimers()
+
+            assert.equals(1, result.bagOpsIssued)
+            assert.is_nil(result.liftProbe, "bag lifts should leave the probe untouched")
+            assert.is_nil(findLine("Sort lift probe:"))
         end)
     end)
 end)
