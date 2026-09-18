@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.9] - 2026-09-18
+
+### Fixed
+- A move that only takes part of a stack now says "split" in the move list and in the sort log, instead of calling itself a move. The case is a straggler being swept into an overflow stack that had room for some of it but not all of it. Since 0.39.5 the move itself has been right either way, so this changes what the preview and the log tell you rather than where anything ends up.
+
 ## [0.39.8] - 2026-09-18
 
 ### Removed
