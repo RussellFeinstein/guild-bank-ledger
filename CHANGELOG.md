@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.7] - 2026-09-17
+
 ### Fixed
 - The sort no longer disturbs a slot it was not moving anything into. This was announced in 0.39.5, withdrawn in 0.39.6 because the check behind it refused every move in game, and is back now on a check that has been watched working: one run of 287 moves, every one of them recognised correctly. If a move's source stack has been taken, emptied or locked by the time its turn comes around, that move is skipped and named in the sort log instead of picking the destination slot up.
 - A bag deposit refused at the last moment is now counted as skipped rather than as issued. The "deposit(s) issued" figure in the run summary is what you would read to find out where something went, so it counting a deposit that never happened was the worst place for it.
