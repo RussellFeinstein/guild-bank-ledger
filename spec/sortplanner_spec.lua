@@ -46,7 +46,12 @@ describe("SortPlanner", function()
     --- Count occurrences of itemID in a simulated final bank state after applying plan.ops.
     -- @param bags table|nil Optional opts.bagSnapshot, absorbed under its own
     --   negative pseudo-tabs so a plan that sources from bags can be applied.
-    local function applyPlan(snap, plan, bags)
+    -- @param maxStackByItem table|nil Optional `[itemID] = maxStack` map. When
+    --   given, a same-item merge is held to the same ceiling `applyOpToState`
+    --   enforces in production (#161); without it the simulator stacks without
+    --   limit, which is what let an over-stack end-state test pass on an empty
+    --   plan for as long as it did.
+    local function applyPlan(snap, plan, bags, maxStackByItem)
         -- Deep-ish copy of snapshot into a flat bank[tab][slot] = {itemID,count}
         local bank = {}
         local function absorb(src)
@@ -66,6 +71,17 @@ describe("SortPlanner", function()
             assert(src, "plan op references empty src")
             assert(src.itemID == op.itemID, "plan op itemID mismatch with src")
             assert(src.count >= op.count, "plan op count exceeds src")
+            -- The label has to agree with what the op does to its source,
+            -- which is opLabel's rule verbatim (#161). This is an assertion
+            -- and not a second code path on purpose: #169 stopped the
+            -- executor branching on op.op, and liftFromBank now takes exactly
+            -- op.count whatever the label says, so the simulation below is
+            -- faithful precisely because it is label-blind.
+            local expectedLabel = (src.count > op.count) and "split" or "move"
+            assert(op.op == expectedLabel,
+                "plan op label " .. tostring(op.op) .. " should be "
+                .. expectedLabel .. " (src holds " .. src.count
+                .. ", op takes " .. tostring(op.count) .. ")")
             src.count = src.count - op.count
             if src.count == 0 then
                 bank[op.srcTab][op.srcSlot] = nil
@@ -74,6 +90,10 @@ describe("SortPlanner", function()
             local dst = bank[op.dstTab][op.dstSlot]
             if dst then
                 assert(dst.itemID == op.itemID, "plan op placed on wrong item")
+                local m = maxStackByItem and maxStackByItem[op.itemID]
+                assert(not m or (dst.count + op.count) <= m,
+                    "plan op would exceed maxStack for itemID "
+                    .. tostring(op.itemID))
                 dst.count = dst.count + op.count
             else
                 bank[op.dstTab][op.dstSlot] = { itemID = op.itemID, count = op.count }
@@ -2816,7 +2836,13 @@ describe("SortPlanner", function()
             })
             local opts = { maxStackByItem = { [100] = 200 } }
             local plan = GBL:PlanSort(snap, emptyDisplayOverflow(), opts)
-            local final = applyPlan(snap, plan)
+            -- Without this the loop below passes on an empty plan: two stacks
+            -- already at max stack satisfy "no slot exceeds 200" whether or
+            -- not the packer emitted anything at all (#161). The ceiling
+            -- argument is the other half; the simulator stacked without limit
+            -- until now, so the guard under test was checked nowhere.
+            assert.is_true(#plan.ops > 0, "expected Phase 4 to emit packing ops")
+            local final = applyPlan(snap, plan, nil, opts.maxStackByItem)
             for s = 1, 98 do
                 local sl = final[2] and final[2][s]
                 if sl then
@@ -2825,6 +2851,184 @@ describe("SortPlanner", function()
                         .. " exceeds maxStack 200")
                 end
             end
+        end)
+    end)
+
+    -- ------------------------------------------------------------------
+    -- Op labels (#161)
+    -- ------------------------------------------------------------------
+    describe("op labels (#161)", function()
+        -- Reaching the Phase 3 sweep while overflow is still usable is a
+        -- three-way squeeze, which is why no spec had done it before.
+        --
+        -- Phase 3 only sees a display slot that is occupied, undemanded and
+        -- NOT flagged unplaced. Phase 1B hands every non-overflow supply
+        -- either an assignment or a recordUnplaced at its own slot, and every
+        -- Phase 2 abort flags its source, so the one producer left is
+        -- findPivot priority 1 parking a blocker in an unclaimed display slot
+        -- without flagging it. For that pivot to happen at all the blocker's
+        -- own 1B spill must have failed, which means overflow was full for
+        -- its item and tier 1 had no capacity. And for the label to be wrong
+        -- tier 1 must have capacity again by Phase 3, and less of it than the
+        -- swept stack needs.
+        --
+        -- rebuildOverflowSlotInfo re-reads state after Phase 2, so a slot
+        -- drained during Phase 2 has its capacity back. The rest is that a
+        -- demand in a DIFFERENT display tab prefers an overflow source (p=2)
+        -- to a cross-tab one (p=3), so it drains the overflow partial of the
+        -- very item the blocker is made of.
+        --
+        -- The filler is item 900 and sorts after both items under test. A
+        -- filler that sorts first makes Phase 4 want to move it out of a full
+        -- tab, and the abort entries then swamp the assertion.
+        local function sweepSnapshot()
+            local overflowTab = {
+                [1] = { itemID = 700, count = 8 },   -- capacity 2
+                [2] = { itemID = 800, count = 1 },
+            }
+            for s = 3, 98 do
+                overflowTab[s] = { itemID = 900, count = 1 }
+            end
+            return snapshot({
+                -- 9 of a max stack of 10, so isWholeStack is false and the
+                -- spill walk leaves tier 1 live for it.
+                [1] = { [1] = { itemID = 700, count = 9 } },
+                [2] = {},
+                [5] = overflowTab,
+            })
+        end
+
+        local function sweepLayout()
+            return {
+                tabs = {
+                    [1] = displayTab({ [800] = { slots = 1, perSlot = 1 } },
+                                     { [1] = 800 }),
+                    [2] = displayTab({ [700] = { slots = 1, perSlot = 6 } },
+                                     { [1] = 700 }),
+                    [5] = overflow(),
+                },
+            }
+        end
+
+        local function sweepOpts()
+            return { maxStackByItem = { [700] = 10, [800] = 1, [900] = 1 } }
+        end
+
+        --- The ops Phase 3 emitted for the pivoted blocker at its new slot.
+        local function sweptOps(plan)
+            local out = {}
+            for _, op in ipairs(plan.ops) do
+                if op.srcTab == 1 and op.srcSlot == 2 then
+                    out[#out + 1] = op
+                end
+            end
+            return out
+        end
+
+        it("labels a Phase 3 sweep that leaves part of the stack a split", function()
+            local plan = GBL:PlanSort(sweepSnapshot(), sweepLayout(), sweepOpts())
+
+            assert.equals(1, plan.diag.phase2Pivots,
+                "fixture no longer reaches Phase 3 through a pivot")
+            assert.equals(2, plan.diag.phase3Sweeps,
+                "fixture no longer reaches the Phase 3 tier-1 sweep")
+
+            local swept = sweptOps(plan)
+            assert.equals(2, #swept)
+            assert.equals(6, swept[1].count,
+                "tier 1 should be capped by the partial's capacity")
+            assert.equals("split", swept[1].op,
+                "a sweep that leaves 1 behind is a split, not a move")
+        end)
+
+        it("labels the sweep that does drain its source a move", function()
+            local plan = GBL:PlanSort(sweepSnapshot(), sweepLayout(), sweepOpts())
+            local swept = sweptOps(plan)
+            assert.equals(1, swept[2].count)
+            assert.equals("move", swept[2].op)
+        end)
+
+        it("labels a pivot op a move", function()
+            local plan = GBL:PlanSort(sweepSnapshot(), sweepLayout(), sweepOpts())
+            local pivot
+            for _, op in ipairs(plan.ops) do
+                if op.srcTab == 1 and op.srcSlot == 1
+                   and op.dstTab == 1 and op.dstSlot == 2 then
+                    pivot = op
+                end
+            end
+            assert.is_not_nil(pivot, "fixture no longer emits a pivot")
+            assert.equals(7, pivot.count, "a pivot always carries the whole stack")
+            assert.equals("move", pivot.op)
+        end)
+
+        -- The invariant aimed at real planner output rather than at a
+        -- hand-built plan. This is the half that would have caught the defect
+        -- on its own, from any spec that applied this plan.
+        it("applyPlan accepts the planner's own sweep plan", function()
+            local plan = GBL:PlanSort(sweepSnapshot(), sweepLayout(), sweepOpts())
+            local ok, err = pcall(applyPlan, sweepSnapshot(), plan, nil,
+                                  sweepOpts().maxStackByItem)
+            assert.is_true(ok, tostring(err))
+        end)
+
+        -- Hand-built plans rather than PlanSort output: the point is to prove
+        -- the simulator rejects a known-bad input, not to re-assert whatever
+        -- the planner happens to emit today.
+        it("applyPlan rejects an op that says move but leaves its source", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 10 } },
+                [2] = {},
+            })
+            local ok, err = pcall(applyPlan, snap, {
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 4 } },
+            })
+            assert.is_false(ok)
+            assert.matches("should be split", err)
+        end)
+
+        it("applyPlan rejects an op that says split but drains its source", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 10 } },
+                [2] = {},
+            })
+            local ok, err = pcall(applyPlan, snap, {
+                ops = { { op = "split", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 10 } },
+            })
+            assert.is_false(ok)
+            assert.matches("should be move", err)
+        end)
+
+        it("applyPlan rejects a merge over the item's max stack", function()
+            local snap = snapshot({
+                [1] = {
+                    [1] = { itemID = 100, count = 10 },
+                    [2] = { itemID = 100, count = 15 },
+                },
+            })
+            local ok, err = pcall(applyPlan, snap, {
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 1, dstSlot = 2, itemID = 100, count = 10 } },
+            }, nil, { [100] = 20 })
+            assert.is_false(ok)
+            assert.matches("maxStack", err)
+        end)
+
+        it("applyPlan accepts a merge landing exactly on the max stack", function()
+            local snap = snapshot({
+                [1] = {
+                    [1] = { itemID = 100, count = 5 },
+                    [2] = { itemID = 100, count = 15 },
+                },
+            })
+            local final = applyPlan(snap, {
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 1, dstSlot = 2, itemID = 100, count = 5 } },
+            }, nil, { [100] = 20 })
+            assert.equals(20, final[1][2].count)
+            assert.is_nil(final[1][1])
         end)
     end)
 
