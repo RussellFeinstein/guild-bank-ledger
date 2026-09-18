@@ -143,6 +143,17 @@ git config core.hooksPath scripts/hooks
 
 Override for an intentional WIP push: `git push --no-verify`.
 
+### Reading a saved log session
+
+The addon keeps the last ten sessions of its own logs in SavedVariables, and nothing in game renders a past one: `/gbl sortlog` and `/gbl logs` show the current session only. To read an earlier session, point the reader at the SavedVariables file:
+
+```bash
+lua scripts/audit-sessions.lua "<WoW>/_retail_/WTF/Account/<accountID>/SavedVariables/GuildBankLedger.lua"
+lua scripts/audit-sessions.lua "<path>/GuildBankLedger.lua" --session 9 --md
+```
+
+With no options it lists the saved sessions. `--md` emits the skeleton of a capture record; see [docs/sort-logs/README.md](docs/sort-logs/README.md). Ten sessions is roughly nine loads, and a `/reload` counts, so read a run you care about soon after it happens.
+
 ## Contributing
 
 Bug reports, feature requests, and pull requests are all welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide: quick-start setup, commit / versioning conventions, test expectations, and the PR review process.

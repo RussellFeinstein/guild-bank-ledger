@@ -5,6 +5,7 @@
 - **Bank**: 7 tabs, 557 to 629 slots across the day
 - **Source**: in-game capture from `GuildBankLedgerAuditDB`, sort channel.
 
+Sessions 8 and 10 of the capture store, addressed by index rather than by line.
 Two captures, taken hours apart, that only mean anything read together. The first is a shipped build refusing every op it attempted. The second is the build that withdrew the refusal and measured the predicates instead. Between them they settle which cursor API can be trusted after a guild bank lift, and they refute a finding this project had already written down twice.
 
 ## What was run

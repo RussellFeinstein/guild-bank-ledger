@@ -9,7 +9,10 @@
 
 ## Data points
 
-Two in-game sort logs in-repo:
+Two in-game sort logs in-repo. This list is the two this plan was written
+from and is not maintained; `docs/sort-logs/README.md` indexes all of them
+and says how a new one is made.
+
 
 - `docs/sort-logs/2026-05-14-late-poll-storm.md` — 7-tab / 515-slot bank, v0.32.3. Run A aborted at replan 5/5; Run B completed 64/64 with every op via the 4.0 s late-poll floor. Singleton-chain (Gateway Control Shard) and split desync (Flawless gems) both visible.
 - `docs/sort-logs/2026-05-20-prewarm-success-late-poll-recurrence.md` — 7-tab / 502-slot bank, v0.32.4. Same patterns reproduce six days later. Pre-warm worked; the Phase B issues did not.

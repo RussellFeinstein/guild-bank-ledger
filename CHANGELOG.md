@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.8] - 2026-09-18
+
+### Removed
+- The addon download no longer carries a `scripts/` folder. It held a git hook meant for people working on the addon's source, which did nothing for anyone playing with it.
+
 ## [0.39.7] - 2026-09-17
 
 ### Fixed
