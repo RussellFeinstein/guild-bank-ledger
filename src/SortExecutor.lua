@@ -52,6 +52,17 @@ local SCAN_WAIT_TIMEOUT = 10.0  -- seconds to wait for an end-of-pass scan to fi
 -- timer / client freeze, the same mechanism as the historical op-88 hang).
 local STALL_SLACK = 5.0
 
+-- The source-lift guard (see issueOp) reads GetCursorInfo. That predicate is
+-- verified against one client on one patch, and the guard's failure mode is
+-- total: v0.39.5 gated the same action on CursorHasItem and refused every
+-- op it attempted, across two runs of a 207-op plan that issued nothing at
+-- all, in a build already on CurseForge. So the guard carries a
+-- fuse. This many refusals in a run where it has never once passed reads as a
+-- broken predicate rather than a bank full of failed lifts, and it disables
+-- itself for the rest of the run. Exported for the spec.
+local LIFT_GUARD_FUSE = 5
+GBL.SORT_LIFT_GUARD_FUSE = LIFT_GUARD_FUSE
+
 -- A frame longer than HITCH_THRESHOLD is a "hitch" (client stutter / load
 -- pause). A sampler OnUpdate frame records these during a sort so a capture
 -- shows whether the pump kept the render loop responsive; a freeze surfaces as
@@ -66,6 +77,22 @@ local HITCH_BUCKETS_MS = { 150, 250, 500, 1000 }  -- last bucket is ">1000ms"
 --- A one-line snapshot of network latency from GetNetStats (home + world ms
 --- ping). Logged at sort start and finish so a post-mortem can separate a
 --- laggy session from our cadence.
+--- Is something on the cursor? Returns nil when the client cannot say, which
+--- is not the same answer as "no" and must never be read as one: an
+--- unreadable cursor is not evidence that a lift failed.
+---
+--- GetCursorInfo rather than CursorHasItem, on measurement. The 2026-09-17
+--- capture ran 238 bank lifts that all demonstrably succeeded (the bank
+--- converged and the replan came back empty) and read
+--- `GetCursorInfo [item:238], CursorHasItem true=0 false=238`, so
+--- CursorHasItem is blind to a guild bank cursor and GetCursorInfo is not.
+--- 162 of those lifts sourced the tab that was selected at the time, so this
+--- is not a view-gating artifact (#171).
+local function cursorLoaded()
+    if not _G.GetCursorInfo then return nil end
+    return _G.GetCursorInfo() ~= nil
+end
+
 local function netPingStr()
     if not _G.GetNetStats then return "ping ?" end
     local _, _, lagHome, lagWorld = _G.GetNetStats()
@@ -293,6 +320,7 @@ function finish(ok, reason)
         skippedOps = state.skippedOps or 0,
         skipReasons = state.skipReasons or {},
         liftProbe = state.liftProbe,
+        liftGuardBlown = state.liftGuardBlown,
         -- nil rather than 0 when no replan ran: the caller has to be able to
         -- tell "the bags are empty" from "nothing measured them".
         bagsStillInBags = state.lastBagSupplies,
@@ -360,11 +388,11 @@ function finish(ok, reason)
             stillIn))
     end
 
-    -- The whole point of this release. v0.39.5 refused all 207 ops of a run on
-    -- CursorHasItem() reading false after a bank lift, and whether the lift had
-    -- failed or the predicate was blind is still open. This line carries the
-    -- three signals that settle it, drain first because drain is the
-    -- authoritative one (#171).
+    -- What the two cursor predicates answered across the run's bank lifts.
+    -- This is the tripwire for the guard above: a capture where GetCursorInfo
+    -- has gone quiet looks exactly like a bank full of failed lifts until
+    -- this line separates them. Sorted, so two captures of the same run read
+    -- identically rather than in pairs order.
     if state.liftProbe then
         local pr = state.liftProbe
         local kinds = {}
@@ -373,10 +401,9 @@ function finish(ok, reason)
         end
         table.sort(kinds)
         GBL:SortInfo(string.format(
-            "Sort lift probe: src drained=%d not-drained=%d unknown=%d, "
-            .. "GetCursorInfo [%s], CursorHasItem true=%d false=%d",
-            pr.drained or 0, pr.notDrained or 0, pr.unknown or 0,
-            table.concat(kinds, " "), pr.hasItem or 0, pr.noItem or 0))
+            "Sort lift probe: GetCursorInfo [%s], CursorHasItem true=%d false=%d%s",
+            table.concat(kinds, " "), pr.hasItem or 0, pr.noItem or 0,
+            state.liftGuardBlown and " guard=disabled" or ""))
     end
 
     -- Hitch histogram on its own line: validates the pump kept the loop awake.
@@ -531,50 +558,33 @@ local function liftFromBank(op)
         -- and the whole pickup is the branch we know the shape of.
         PickupGuildBankItem(op.srcTab, op.srcSlot)
     end
-    -- The fourth return is what the slot held before the lift, for the probe
-    -- below. It has no other caller and no effect on the refusal contract.
-    return true, nil, nil, have
+    return true
 end
 
---- Measure, and act on nothing. v0.39.5 gated every op on `CursorHasItem()`
---- and refused all 207 of them; whether the lift had actually failed or the
---- predicate was simply blind to a guild bank cursor is still open, and
---- guessing a second predicate is what produced the outage. So this records
---- three independent signals and the next capture settles it (#171).
+--- Measure, and act on nothing. This started as the instrument that settled
+--- the v0.39.5 outage and it stays as the tripwire for the next one: the
+--- guard below acts on GetCursorInfo, so a capture has to say what that
+--- predicate answered, or a client where it goes blind looks identical to a
+--- bank full of failed lifts.
 ---
---- Order is by authority, not convenience. This project already established
---- that `PickupGuildBankItem` updates the client's slot view optimistically
---- even when the server refuses, so **source drain is the authoritative
---- discriminator for a completed move** (project lessons, and
---- `project_wow_pickup_optimism`). That is signal 1 and it needs no API whose
---- behaviour is in question. The two cursor predicates are corroboration.
----
---- Known limit: a non-viewed tab reads from the client's cache, so the drain
---- signal can be stale exactly where the mystery lives. The in-game protocol
---- for #171 runs once with the source tab selected for that reason.
-local function probeAfterLift(op, haveBefore)
+--- It used to lead with a third signal, the source slot's count re-read after
+--- the lift, on the project finding that `PickupGuildBankItem` updates the
+--- client's slot view optimistically and so source drain is the authoritative
+--- discriminator for a completed move. **That is true across frames and false
+--- here.** The 2026-09-17 capture read `src drained=0 not-drained=238` over
+--- 238 lifts that all succeeded, 162 of them sourcing the tab that was
+--- selected at the time, so it is not the view-gating caveat either: the slot
+--- API simply does not see a lift within the same frame, and the optimistic
+--- update happens at the display layer. The counter reported nothing at this
+--- call site and is gone. Do not add it back (#171).
+local function probeAfterLift()
     if not state then return end
     local p = state.liftProbe
     if not p then
-        p = { drained = 0, notDrained = 0, unknown = 0,
-              hasItem = 0, noItem = 0, types = {} }
+        p = { hasItem = 0, noItem = 0, types = {} }
         state.liftProbe = p
     end
 
-    -- Signal 1: did the source slot give up what we asked for?
-    if haveBefore and _G.GetGuildBankItemInfo then
-        local _, after = _G.GetGuildBankItemInfo(op.srcTab, op.srcSlot)
-        after = after or 0
-        if after <= haveBefore - (op.count or 0) then
-            p.drained = p.drained + 1
-        else
-            p.notDrained = p.notDrained + 1
-        end
-    else
-        p.unknown = p.unknown + 1
-    end
-
-    -- Signals 2 and 3: what each cursor predicate claims.
     local kind = "no-api"
     if _G.GetCursorInfo then
         kind = tostring(_G.GetCursorInfo() or "none")
@@ -586,48 +596,106 @@ local function probeAfterLift(op, haveBefore)
     end
 end
 
+--- Count a refused bag deposit. Shared because a bag source can now be
+--- refused at two places: by liftFromBag's own pre-checks, and by the cursor
+--- guard below, which fires after liftFromBag has already reported success.
+--- Writing the counter at only the first of those makes "Sort bags: N
+--- deposit(s) issued" count ops that never reached the destination.
+local function noteBagSkip(reason)
+    if not state then return end
+    state.bagOpsSkipped = (state.bagOpsSkipped or 0) + 1
+    state.bagSkipReasons = state.bagSkipReasons or {}
+    local key = reason or "unknown"
+    state.bagSkipReasons[key] = (state.bagSkipReasons[key] or 0) + 1
+end
+
 --- @return boolean issued, string|nil reason, string|nil detail
 ---   false when a source was refused and the op was skipped without touching
----   the destination; the reason and detail come from liftFromBag or
----   liftFromBank. A refused source must never fall through to the
----   destination pickup, which on an empty cursor harvests rather than places.
+---   the destination; the reason and detail come from liftFromBag,
+---   liftFromBank, or the cursor guard. A refused source must never fall
+---   through to the destination pickup, which on an empty cursor harvests
+---   rather than places.
 local function issueOp(op)
-    if _G.CursorHasItem and _G.CursorHasItem() then ClearCursor() end
+    -- Unconditional, and that is the point. This was gated on CursorHasItem,
+    -- which does not report a guild bank item, so for a bank source it never
+    -- once ran. It is the recovery path for the op before it: a refused op
+    -- leaves its item on the cursor and a client will not pick a second one
+    -- up while one is held, so a single refusal without this clear turns
+    -- every following lift into a silent no-op. That is the most consistent
+    -- reading of the v0.39.5 capture, where every attempted op refused and not
+    -- one slot changed, and it is a reading rather than a measurement (#171).
+    ClearCursor()
 
-    if (op.srcTab or 0) < 0 then
+    local isBag = (op.srcTab or 0) < 0
+    if isBag then
         local lifted, reason, detail = liftFromBag(op)
         if not lifted then
-            if state then
-                state.bagOpsSkipped = (state.bagOpsSkipped or 0) + 1
-                state.bagSkipReasons = state.bagSkipReasons or {}
-                local key = reason or "unknown"
-                state.bagSkipReasons[key] = (state.bagSkipReasons[key] or 0) + 1
-            end
+            noteBagSkip(reason)
             return false, reason, detail
         end
-        if state then
-            state.bagOpsIssued = (state.bagOpsIssued or 0) + 1
-        end
     else
-        local lifted, reason, detail, haveBefore = liftFromBank(op)
+        local lifted, reason, detail = liftFromBank(op)
         if not lifted then return false, reason, detail end
-        probeAfterLift(op, haveBefore)
+        probeAfterLift()
     end
 
-    -- v0.39.5 refused the op here when CursorHasItem() read false, to stop a
-    -- failed lift from letting the destination pickup HARVEST the destination
-    -- slot (#169). In game that refused every single op: CursorHasItem() does
-    -- not report a guild bank item on the cursor, so a perfectly good split
-    -- read as a failed lift. The 2026-09-17 capture is 207 ops, 0 issued,
-    -- skipped=207 [lift-failed], and the same blind spot explains why
-    -- cursorStuck has read 0 in every capture ever taken.
+    -- THE SOURCE-LIFT GUARD (#169, re-landed on measurement in #171).
     --
-    -- The refusal is gone until the right predicate is known. Guessing a
-    -- second API is what produced the first outage, so this probes both and
-    -- acts on neither; the run summary reports what they said, and the guard
-    -- comes back on that evidence. See #171.
+    -- Nothing may reach the destination pickup on an empty cursor, because
+    -- PickupGuildBankItem does not place there, it picks the destination slot
+    -- up. The pre-checks in both lifts cover a source that is gone or short;
+    -- this covers what no pre-check can see, a split the server refuses or a
+    -- slot locked between the read and the call.
+    --
+    -- GetCursorInfo, never CursorHasItem. v0.39.5 gated this on CursorHasItem
+    -- without watching it run against a guild bank cursor, and in game it
+    -- refused every op it attempted and took the sort down in a shipped build.
+    -- The 2026-09-17 capture measured both against 238 lifts that all
+    -- demonstrably succeeded: GetCursorInfo answered every one correctly and
+    -- CursorHasItem answered none.
+    --
+    -- The fuse is what that outage bought. A predicate that has refused
+    -- LIFT_GUARD_FUSE ops in a run without passing once is broken, not
+    -- reporting a bank full of failed lifts, so it stands down and says so.
+    -- That trades a harvest no capture has ever recorded against an outage
+    -- that has. It is armed by "never passed" and not by the count alone: a
+    -- guard that has demonstrably worked and then starts refusing is seeing
+    -- real failures, and disabling it there is the harvest bug returning
+    -- under another name.
+    -- The refusal itself never depends on the bookkeeping state existing: a
+    -- safety action conditioned on its own telemetry is one missing table
+    -- away from silently not happening.
+    local loaded = cursorLoaded()
+    if loaded == false and not (state and state.liftGuardBlown) then
+        if state then
+            state.liftGuardRefusals = (state.liftGuardRefusals or 0) + 1
+            if not state.liftGuardPassed
+               and state.liftGuardRefusals >= LIFT_GUARD_FUSE then
+                state.liftGuardBlown = true
+                GBL:SortWarn(
+                    "Sort: lift guard disabled after %d refusals with no op "
+                    .. "passing - the cursor check looks blind on this "
+                    .. "client, continuing unguarded (#171)",
+                    state.liftGuardRefusals)
+            end
+        end
+        if isBag then noteBagSkip("lift-failed") end
+        return false, "lift-failed"
+    end
+    if loaded and state then state.liftGuardPassed = true end
+
+    -- Past the guard, so this op reaches its destination and counts.
+    if isBag and state then
+        state.bagOpsIssued = (state.bagOpsIssued or 0) + 1
+    end
+
     PickupGuildBankItem(op.dstTab, op.dstSlot)
-    if _G.CursorHasItem and _G.CursorHasItem() then
+    -- A destination holding a different item swaps rather than places, which
+    -- hands the displaced stack back on the cursor. Counted off GetCursorInfo
+    -- for the same reason the guard reads it: cursorStuck read 0 in every
+    -- capture this project has ever taken, and none of those zeroes was
+    -- evidence.
+    if cursorLoaded() then
         ClearCursor()
         if state then state.cursorStuck = (state.cursorStuck or 0) + 1 end
     end
@@ -873,6 +941,11 @@ function GBL:ExecuteSortPlan(plan, onComplete, opts)
         residual = nil,
         totalIssued = 0,
         cursorStuck = 0,
+        -- Source-lift guard bookkeeping, per run rather than per pass: a
+        -- blind predicate does not get a second chance at the next pass.
+        liftGuardRefusals = 0,
+        liftGuardPassed = false,
+        liftGuardBlown = false,
         pumping = false,
         pumpToken = 0,
         pumpTimer = nil,

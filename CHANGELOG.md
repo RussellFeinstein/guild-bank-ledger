@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.7] - 2026-09-17
+
+### Fixed
+- The sort no longer disturbs a slot it was not moving anything into. This was announced in 0.39.5, withdrawn in 0.39.6 because the check behind it refused every move in game, and is back now on a check that has been watched working: one run of 287 moves, every one of them recognised correctly. If a move's source stack has been taken, emptied or locked by the time its turn comes around, that move is skipped and named in the sort log instead of picking the destination slot up.
+- A bag deposit refused at the last moment is now counted as skipped rather than as issued. The "deposit(s) issued" figure in the run summary is what you would read to find out where something went, so it counting a deposit that never happened was the worst place for it.
+- The stuck-cursor count in the run summary reports for the first time. It has read 0 after every sort this addon has ever run, because it was counted from the same client check that turns out not to see a guild bank item at all.
+
+### Added
+- A safety net on the check above. If a future game patch changes what the client reports, so that the check starts refusing moves without ever once passing, it stands down for the rest of the run and says so in the sort log. A change like that then costs a handful of skipped moves instead of stopping the sort dead, which is what happened in 0.39.5.
+
+### Changed
+- The diagnostic line added in 0.39.6 has done its job and stays, minus the one signal that turned out to report nothing useful. It was going to be removed; it is kept because it is what will show the check above going wrong before that costs anyone a sort.
+
 ## [0.39.6] - 2026-09-17
 
 ### Fixed
