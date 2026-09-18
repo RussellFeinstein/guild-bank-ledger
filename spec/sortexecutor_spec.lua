@@ -1492,17 +1492,16 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 "a stale-empty read should be named as empty")
         end)
 
-        -- CHARACTERIZATION, and it documents a known gap rather than a wanted
-        -- behaviour. A stale-HIGH read passes every pre-check and the lift
-        -- still finds nothing, so nothing refuses the op and the destination
-        -- pickup harvests an innocent stack. v0.39.5 guarded this with
-        -- CursorHasItem() and that refused every op in game, so the guard is
-        -- withdrawn until a capture says which predicate works (#171).
+        -- THE #169 RESIDUAL CASE, guarded again and this time on a measured
+        -- predicate. A stale-HIGH read passes every pre-check and the lift
+        -- still finds nothing, so with no guard nothing refuses the op and the
+        -- destination pickup harvests an innocent stack.
         --
-        -- The assertion that the bystander is destroyed is deliberate: when
-        -- #171 re-lands a guard, this test goes red and forces whoever does it
-        -- to come back here. Do not delete it to make that easier.
-        it("does not yet catch a lift that fails after the read said it would succeed", function()
+        -- Between v0.39.6 and this re-land the same fixture ran as a
+        -- characterization test asserting the bystander WAS destroyed, so that
+        -- re-landing a guard would turn it red and bring whoever did it back
+        -- here. It did exactly that.
+        it("catches a lift that fails after the read said it would succeed", function()
             MockWoW.guildBank.viewGatedReads = true
             finally(function() MockWoW.guildBank.viewGatedReads = false end)
 
@@ -1521,15 +1520,10 @@ describe("SortExecutor (fire-and-forget pump)", function()
             }, function(r) result = r end)
             drainTimers()
 
-            assert.equals(0, result.skippedOps, "nothing refuses this case today")
-            -- The probe sees it even though nothing acts on it. This is the
-            -- signal #171 is waiting on: source drain, which this project
-            -- already established is the authoritative discriminator for a
-            -- completed move.
-            assert.equals(1, (result.liftProbe or {}).notDrained,
-                "the probe should record that the source did not give anything up")
-            assert.equals(0, countItem(1, 777),
-                "KNOWN GAP (#171): the destination is harvested by the unguarded pickup")
+            assert.equals(1, result.skippedOps, "the failed lift should be refused")
+            assert.equals(1, (result.skipReasons or {})["lift-failed"])
+            assert.equals(3, countItem(1, 777),
+                "the bystander at the destination must survive an unplaced lift")
         end)
 
         -- Three distinct reasons in one run, because that is the only
@@ -1586,7 +1580,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
         -- any guard that reads a cursor predicate.
         --
         -- v0.39.5 refused an op when CursorHasItem() reported an empty cursor
-        -- after a lift. In game that refused 207 ops out of 207, because the
+        -- after a lift. In game that refused every op attempted, because the
         -- predicate does not report a guild bank item (or the lift is not
         -- synchronous; #171 is measuring which). The suite could not catch it:
         -- spec/mock_wow.lua's CursorHasItem returns `MockWoW.cursor ~= nil`,
@@ -1616,10 +1610,12 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.equals(0, countItem(1, 100))
         end)
 
-        -- The probe is the whole reason this release exists, so its line has
-        -- to actually appear. Drain is first because drain is the signal that
-        -- settles #171; the two cursor predicates ride along as corroboration.
-        it("reports all three lift signals on its own line", function()
+        -- The probe outlives the question it was built for: it is the tripwire
+        -- that reports a predicate going blind before a guard can refuse a
+        -- whole run of ops again. It keeps the two cursor counters and has
+        -- lost its drain counter, which the same capture proved reports
+        -- nothing at this call site.
+        it("reports both cursor signals on its own line", function()
             Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 20 } })
             local result
             GBL:ExecuteSortPlan({
@@ -1628,13 +1624,60 @@ describe("SortExecutor (fire-and-forget pump)", function()
             }, function(r) result = r end)
             drainTimers()
 
-            assert.equals(1, (result.liftProbe or {}).drained,
-                "a real lift should read as drained")
             local line = findLine("Sort lift probe:")
             assert.is_not_nil(line, "the probe line should be written")
-            assert.is_truthy(line:find("src drained=1 not-drained=0", 1, true), line)
-            assert.is_truthy(line:find("guildbankitem:1", 1, true),
+            -- The whole bracket, not a substring of it: "item:1" is also a
+            -- substring of "guildbankitem:1", so the loose form passed even
+            -- with the mock reporting the type this project measured it does
+            -- not report.
+            assert.is_truthy(line:find("GetCursorInfo [item:1]", 1, true),
                 "GetCursorInfo's answer should be on the line: " .. line)
+            assert.is_truthy(line:find("CursorHasItem true=1 false=0", 1, true), line)
+            assert.is_falsy(line:find("drained", 1, true),
+                "the drain counter reports nothing here and should be gone: " .. line)
+        end)
+
+        -- Two kinds in one run, because one kind is the arrangement in which a
+        -- sorted histogram and an unsorted one cannot differ. A capture is read
+        -- by comparing it against another capture, so pairs order here would
+        -- make two recordings of the same run look like different runs.
+        --
+        -- KNOWN LIMIT, recorded rather than papered over: dropping the
+        -- table.sort survives this fixture. Two kinds is the production
+        -- maximum, since the pre-op clear means the cursor holds our item or
+        -- nothing by the time the probe reads it, and Lua 5.1 hashes strings
+        -- deterministically, so "item" and "none" happen to come out of pairs
+        -- already in order on this build. The sort is insurance against a
+        -- build where they do not, and no fixture using answers a real client
+        -- can give will red it. Reaching a third kind would mean inventing a
+        -- cursor type the client cannot produce, which protects the line
+        -- rather than the behaviour.
+        it("sorts the cursor histogram when a run collects more than one kind", function()
+            MockWoW.guildBank.viewGatedReads = true
+            finally(function() MockWoW.guildBank.viewGatedReads = false end)
+
+            -- T1/1 is live and lifts. T2/5 is snapshotted full, emptied behind
+            -- the view gate, and lifts nothing, so GetCursorInfo reads "none".
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 5 } })
+            Helpers.populateTab(2, { [5] = { itemID = 101, name = "Ghost", count = 5 } })
+            _G.QueryGuildBankTab(2)
+            MockWoW.guildBank.currentTab = 1
+            MockWoW.guildBank.tabs[2].slots[5] = nil
+
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 3, dstSlot = 1, itemID = 100, count = 5 },
+                    { op = "move", srcTab = 2, srcSlot = 5,
+                      dstTab = 3, dstSlot = 2, itemID = 101, count = 5 },
+                },
+            }, function() end)
+            drainTimers()
+
+            local line = findLine("Sort lift probe:")
+            assert.is_not_nil(line)
+            assert.is_truthy(line:find("GetCursorInfo [item:1 none:1]", 1, true),
+                "the histogram should read in sorted order, not in pairs order: " .. line)
         end)
 
         -- A bag lift is not probed: bags are not the open question, and
@@ -1652,6 +1695,199 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.equals(1, result.bagOpsIssued)
             assert.is_nil(result.liftProbe, "bag lifts should leave the probe untouched")
             assert.is_nil(findLine("Sort lift probe:"))
+        end)
+
+        -- The guard covers both source kinds. liftFromBag pre-checks more than
+        -- liftFromBank can, but a split the server refuses is invisible to any
+        -- pre-check, so the cursor read is what stops the destination pickup.
+        it("refuses a bag lift that left the cursor empty", function()
+            MockWoW.cursorInfoType = false
+            finally(function() MockWoW.cursorInfoType = nil end)
+
+            Helpers.populateBag(0, { [1] = { itemID = 100, name = "Flask", count = 5 } })
+            Helpers.populateTab(1, { [1] = { itemID = 777, name = "Bystander", count = 3 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = -1, srcSlot = 1,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end, { includeBags = true })
+            drainTimers()
+
+            assert.equals(1, result.skippedOps)
+            assert.equals(1, (result.skipReasons or {})["lift-failed"])
+            assert.equals(3, countItem(1, 777), "the bystander must survive")
+        end)
+
+        -- A guard refusal lands AFTER liftFromBag has already reported success,
+        -- so the bag counters have to be written on the far side of the guard
+        -- or a refused deposit reads as an issued one. That mis-count is what
+        -- makes "Sort bags: N deposit(s) issued" a lie, and it is the number a
+        -- player checks to find out where their consumables went.
+        it("counts a guard refusal of a bag source as a skip, not a deposit", function()
+            MockWoW.cursorInfoType = false
+            finally(function() MockWoW.cursorInfoType = nil end)
+
+            Helpers.populateBag(0, { [1] = { itemID = 100, name = "Flask", count = 5 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = -1, srcSlot = 1,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end, { includeBags = true })
+            drainTimers()
+
+            assert.equals(0, result.bagOpsIssued, "a refused op is not a deposit")
+            assert.equals(1, result.bagOpsSkipped)
+            assert.equals(1, (result.bagSkipReasons or {})["lift-failed"])
+        end)
+
+        -- An unreadable cursor is not evidence that the lift failed, so a
+        -- client without the API keeps the pre-guard behaviour rather than
+        -- refusing everything. Same rule the CursorHasItem-absent spec pins.
+        it("still issues every op on a client with no GetCursorInfo", function()
+            local real = _G.GetCursorInfo
+            _G.GetCursorInfo = nil
+            finally(function() _G.GetCursorInfo = real end)
+
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 5 } })
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(0, result.skippedOps)
+            assert.equals(5, countItem(2, 100))
+        end)
+
+        -- THE FUSE. The guard is verified on one client on one patch and its
+        -- failure mode is total: v0.39.5 refused every op it attempted across
+        -- two runs of a 207-op plan, issued nothing either time, and did that
+        -- in a build that was already on CurseForge. A predicate that has refused a run of ops without ever
+        -- once passing is a broken predicate, not a bank full of failed lifts,
+        -- so the guard turns itself off and says so rather than taking the
+        -- feature down. That trades a theoretical harvest, never once observed
+        -- in a capture, against an outage that has now happened.
+        it("disables the guard after a run of refusals that never once passed", function()
+            MockWoW.cursorInfoType = false
+            finally(function() MockWoW.cursorInfoType = nil end)
+
+            local ops, items = {}, {}
+            for i = 1, 8 do
+                items[i] = { itemID = 100 + i, name = "Thing" .. i, count = 5 }
+                ops[i] = { op = "move", srcTab = 1, srcSlot = i,
+                           dstTab = 2, dstSlot = i, itemID = 100 + i, count = 5 }
+            end
+            Helpers.populateTab(1, items)
+
+            local result
+            GBL:ExecuteSortPlan({ ops = ops }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(GBL.SORT_LIFT_GUARD_FUSE, result.skippedOps,
+                "exactly the fuse's worth of ops should be refused")
+            assert.is_true(result.liftGuardBlown)
+            assert.is_not_nil(findLine("lift guard disabled"),
+                "blowing the fuse has to be loud, or the next outage is silent")
+            -- Everything past the fuse goes through.
+            assert.equals(5, countItem(2, 108), "the last op should have moved")
+        end)
+
+        -- The fuse is armed by "never passed", not by a count alone. A run
+        -- where the guard demonstrably works and then starts refusing is a run
+        -- of real failed lifts, and turning the guard off there would be the
+        -- harvest bug coming back under a different name.
+        it("keeps the guard when it has passed at least once in the run", function()
+            MockWoW.addTab("Tab 3", nil, true)
+            MockWoW.guildBank.viewGatedReads = true
+            finally(function() MockWoW.guildBank.viewGatedReads = false end)
+
+            -- Six slots on tab 2 are snapshotted full and then emptied behind
+            -- the view gate: each read passes every pre-check and each lift
+            -- finds nothing, so only the cursor guard sees them.
+            local stale = {}
+            for i = 1, 6 do
+                stale[i] = { itemID = 200 + i, name = "Ghost" .. i, count = 5 }
+            end
+            Helpers.populateTab(2, stale)
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 5 } })
+            _G.QueryGuildBankTab(2)
+            MockWoW.guildBank.currentTab = 1
+            for i = 1, 6 do MockWoW.guildBank.tabs[2].slots[i] = nil end
+
+            -- Op 1 sources the viewed tab and works, which arms nothing.
+            local ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                            dstTab = 3, dstSlot = 1, itemID = 100, count = 5 } }
+            for i = 1, 6 do
+                ops[#ops + 1] = { op = "move", srcTab = 2, srcSlot = i,
+                                  dstTab = 3, dstSlot = i + 1,
+                                  itemID = 200 + i, count = 5 }
+            end
+
+            local result
+            GBL:ExecuteSortPlan({ ops = ops }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(6, result.skippedOps,
+                "every failed lift should stay refused once the guard has proven it works")
+            assert.is_falsy(result.liftGuardBlown)
+            assert.equals(5, countItem(3, 100), "the good op should still have moved")
+        end)
+
+        -- The pre-op clear is what recovers from the op before it. A refused
+        -- op leaves its item on the cursor, and the next lift cannot pick
+        -- anything up while one is held, so a blind CursorHasItem gating this
+        -- clear is how one refusal turns into a whole dead run.
+        it("clears a loaded cursor before lifting even when CursorHasItem is blind", function()
+            MockWoW.cursorHasItemLies = true
+            finally(function()
+                MockWoW.cursorHasItemLies = nil
+                MockWoW.cursor = nil
+            end)
+
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 5 } })
+            MockWoW.cursor = {
+                itemLink = "|cffffffff|Hitem:999::::::::70:::::|h[Junk]|h|r",
+                itemID = 999, count = 1,
+                src = { tabIndex = 2, slotIndex = 40 },
+            }
+
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(0, result.skippedOps)
+            assert.equals(5, countItem(2, 100), "the op should still have moved")
+            assert.equals(0, countItem(1, 999),
+                "the held item must never be placed into the source slot")
+        end)
+
+        -- cursorStuck has read 0 in every capture this project has ever taken,
+        -- because it was counted off the blind predicate. Counting it off
+        -- GetCursorInfo is what makes the number mean something.
+        it("counts a stuck cursor from GetCursorInfo", function()
+            -- Blind the old predicate, or it answers this on its own and the
+            -- test proves nothing about which one the counter reads.
+            MockWoW.cursorHasItemLies = true
+            finally(function() MockWoW.cursorHasItemLies = nil end)
+
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 5 } })
+            -- A different item at the destination swaps rather than places, so
+            -- the displaced stack comes back on the cursor.
+            Helpers.populateTab(2, { [1] = { itemID = 777, name = "Other", count = 2 } })
+
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 1, srcSlot = 1,
+                          dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(1, result.cursorStuck,
+                "the displaced stack left on the cursor should be counted")
         end)
     end)
 end)

@@ -445,9 +445,10 @@ function MockWoW.install()
 
     -- These two model the cursor PREDICATES, which is a different thing from
     -- modelling the cursor. What a real client reports for a guild bank item
-    -- is the open question behind the v0.39.5 outage (#171), so neither of
-    -- these is evidence about retail: they exist so production code can be
-    -- driven through both answers.
+    -- was the open question behind the v0.39.5 outage, and the 2026-09-17
+    -- capture settled it over 238 lifts that all demonstrably succeeded:
+    -- GetCursorInfo answered "item" every time and CursorHasItem answered
+    -- false every time (#171). Both are modelled to match that.
     --
     -- MockWoW.cursorHasItemLies makes CursorHasItem report an empty cursor
     -- while one is loaded, which is the shape that took the sort down. Any
@@ -458,18 +459,20 @@ function MockWoW.install()
         return MockWoW.cursor ~= nil
     end
 
-    -- First return is the cursor type. Derived from which slot the cursor was
-    -- filled from, since that is all the mock knows; MockWoW.cursorInfoType
-    -- overrides it so a spec can pin a specific answer without faking a lift.
+    -- First return is the cursor type. A bank lift reports "item", not
+    -- "guildbankitem": the 2026-09-17 capture read `GetCursorInfo [item:238]`
+    -- across 238 guild bank lifts, so a bag source and a bank source are
+    -- indistinguishable here, which is why production code tests only for a
+    -- non-nil answer. MockWoW.cursorInfoType overrides it (false means nil)
+    -- so a spec can pin an answer without faking a lift; that is the lever
+    -- for driving a predicate that has gone blind.
     _G.GetCursorInfo = function()
         if MockWoW.cursorInfoType ~= nil then
             if MockWoW.cursorInfoType == false then return nil end
             return MockWoW.cursorInfoType
         end
-        local cur = MockWoW.cursor
-        if not cur then return nil end
-        if cur.src and cur.src.bagID then return "item" end
-        return "guildbankitem"
+        if not MockWoW.cursor then return nil end
+        return "item"
     end
 
     local function extractItemID(itemLink)
