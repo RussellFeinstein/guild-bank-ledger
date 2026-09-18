@@ -110,12 +110,41 @@ local SUMMARY_PATTERNS = {
     "^Sort: starting",
     "^Sort plan:",
     "^%s+phases:",
+    "^%s+demands:",
     "^Sort: pass %d+ left",
+    "^Sort: lift guard disabled",
     "^Sort bags:",
     "^%s+bags stay:",
     "^Sort: complete",
     "^Sort: aborted",
+    "^Sort lift probe:",
+    "^Sort hitch summary:",
 }
+
+-- The lines `finish` writes AFTER the terminal line. A run's summary does not
+-- end where the run does: src/SortExecutor.lua emits the complete/aborted line
+-- first and then up to three more. Closing a run on its terminal line and
+-- stopping there files all of them under a group the skeleton labels as a
+-- preview, which is where `Sort bags:` went for every real capture until this
+-- existed.
+--
+-- `Sort plan:` is deliberately absent. The Sort tab runs /gbl deviations after
+-- every executed sort and that writes a plan line, so admitting it here would
+-- report a plan the run never executed, which is the case the grouping comment
+-- below was written to protect. Nothing can interleave into the tail, because
+-- finish() emits the whole of it synchronously in one frame.
+local TAIL_PATTERNS = {
+    "^Sort bags:",
+    "^Sort lift probe:",
+    "^Sort hitch summary:",
+}
+
+local function isTailLine(message)
+    for _, pattern in ipairs(TAIL_PATTERNS) do
+        if message:find(pattern) then return true end
+    end
+    return false
+end
 
 local function isSummaryLine(message)
     for _, pattern in ipairs(SUMMARY_PATTERNS) do
@@ -144,19 +173,35 @@ function M.runs(db, index)
     local entries, err = M.channel(db, index, "sort")
     if not entries then return nil, err end
 
-    local groups, current = {}, nil
+    local groups, current, closed = {}, nil, nil
     for _, entry in ipairs(entries) do
         local message = entry.message or ""
         if isSummaryLine(message) then
+            local handled = false
             if isRunStart(message) then
                 current = { started = true, lines = {} }
                 groups[#groups + 1] = current
+                closed = nil
+            elseif not current and closed and isTailLine(message) then
+                -- Files against the run that just closed without reopening
+                -- it, so the next `Sort: starting` cannot inherit the tail.
+                closed.lines[#closed.lines + 1] = entry
+                handled = true
             elseif not current then
                 current = { started = false, lines = {} }
                 groups[#groups + 1] = current
+                -- Any other summary line ends the tail: a preview or a
+                -- deviations plan line means finish() is done writing.
+                closed = nil
             end
-            current.lines[#current.lines + 1] = entry
-            if isTerminal(message) then current = nil end
+
+            if not handled then
+                current.lines[#current.lines + 1] = entry
+                if isTerminal(message) then
+                    closed = current
+                    current = nil
+                end
+            end
         end
     end
     return groups
@@ -260,6 +305,19 @@ local function plannedOf(group)
     return ops and (ops .. " ops") or "?"
 end
 
+--- What the cursor probe answered for a run, for the record's header table.
+-- #171 made this the tripwire for the whole sort: a client where
+-- GetCursorInfo has gone quiet looks exactly like a bank full of failed lifts
+-- until a capture says which it was. A run from before v0.39.6, or one that
+-- lifted nothing from the bank, has no probe line and reads "-".
+local function probeOf(group)
+    local message = firstMatch(group, "^Sort lift probe:")
+    if not message then return "-" end
+    local kinds = message:match("GetCursorInfo %[([^%]]*)%]") or "?"
+    local guard = message:find("guard=disabled", 1, true) and " (guard off)" or ""
+    return "GetCursorInfo [" .. kinds .. "]" .. guard
+end
+
 local function endedOf(group)
     local message = firstMatch(group, "^Sort: aborted")
     if message then
@@ -315,6 +373,7 @@ function M.skeleton(row, groups)
         local header, divider = { "| |" }, { "|---|" }
         local started, bags = { "| Started |" }, { "| Bags |" }
         local planned, ended = { "| Planned |" }, { "| Ended |" }
+        local probe = { "| Probe |" }
         for i, run in ipairs(runs) do
             header[#header + 1] = string.format(" Run %d |", i)
             divider[#divider + 1] = "---|"
@@ -323,6 +382,7 @@ function M.skeleton(row, groups)
             bags[#bags + 1] = string.format(" %s |", bagsModeOf(run))
             planned[#planned + 1] = string.format(" %s |", plannedOf(run))
             ended[#ended + 1] = string.format(" %s |", endedOf(run))
+            probe[#probe + 1] = string.format(" %s |", probeOf(run))
         end
         add(table.concat(header))
         add(table.concat(divider))
@@ -330,6 +390,7 @@ function M.skeleton(row, groups)
         add(table.concat(bags))
         add(table.concat(planned))
         add(table.concat(ended))
+        add(table.concat(probe))
     end
 
     add("")
