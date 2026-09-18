@@ -578,6 +578,45 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 "no destination swapped, so refused cannot be reading this")
         end)
 
+        -- The consumer settles the outcome row before marking the current
+        -- one, and that order is free ONLY because these can never name the
+        -- same op: the outcome rides one tick forward. A mutation that
+        -- reversed the consumer's two marks survived, which is this invariant
+        -- being unstated rather than the order mattering. Move the emit after
+        -- issueOp and this goes red, which is where the order would start to
+        -- matter.
+        it("never names one op as both current and settled", function()
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 5 },
+                [2] = { itemID = 100, name = "Flask", count = 3 },
+            })
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 1, itemID = 100, count = 5 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 2, dstSlot = 2, itemID = 100, count = 9 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 2, dstSlot = 3, itemID = 100, count = 3 },
+                },
+            }, function() end)
+            drainTimers()
+
+            local checked = 0
+            for _, p in ipairs(progressPayloads()) do
+                if p.issuedOpIndex then
+                    assert.are_not.equals(p.opIndex, p.issuedOpIndex)
+                    checked = checked + 1
+                end
+                if p.failedOpIndex then
+                    assert.are_not.equals(p.opIndex, p.failedOpIndex)
+                    checked = checked + 1
+                end
+            end
+            assert.is_true(checked >= 2,
+                "fixture needs an issued AND a refused outcome, got " .. checked)
+        end)
+
         it("finish carries the same done and failed the result does", function()
             Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 5 } })
             local result

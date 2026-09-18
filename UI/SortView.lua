@@ -617,9 +617,12 @@ function GBL:_SortView_OnProgress(_msg, payload)
                 formatOpRow(row.op, STATUS_MARKER[status], detail))
         end
     end
-    -- The settled row first, then the current one: a "step" carries the
-    -- PREVIOUS op's outcome alongside this op's index, so the outcome must
-    -- not be able to overwrite the head of the run (#162).
+    -- Settled row first, then the current one. That order is reading order
+    -- rather than a guard: a "step" carries the PREVIOUS op's outcome, so the
+    -- two indices are never the same op and neither can overwrite the other
+    -- (pinned on the producer side, "never names one op as both current and
+    -- settled"). It WOULD become a guard if the emit ever moved after
+    -- issueOp, which is one of the reasons it has not.
     mark(payload.issuedOpIndex, "issued")
     -- "issued" rather than "done": the pump is fire-and-forget and cannot
     -- prove a move landed. The reason and its detail arrive as two fields

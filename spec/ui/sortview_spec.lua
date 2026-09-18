@@ -448,6 +448,23 @@ describe("SortView", function()
             GBL._sortLastPlan = opsPlan()
         end)
 
+        -- Every other assertion in this describe names a STATUS and reads its
+        -- glyph back out of the same export, so swapping two entries in that
+        -- table reads as correct to all of them: a mutation proved it. The
+        -- glyph is also the accessibility-load-bearing half, since it is what
+        -- tells the states apart when the colour does not reach the reader,
+        -- so it is pinned literally here and nowhere else.
+        it("gives each state its own ASCII glyph", function()
+            local MARK = GBL._sortStatusMarkers
+
+            assert.is_truthy(MARK.current:find(">", 1, true), MARK.current)
+            assert.is_truthy(MARK.issued:find("+", 1, true), MARK.issued)
+            assert.is_truthy(MARK.failed:find("x", 1, true), MARK.failed)
+            assert.are_not.equals(MARK.issued, MARK.failed)
+            assert.are_not.equals(MARK.issued, MARK.current)
+            assert.are_not.equals(MARK.current, MARK.failed)
+        end)
+
         -- The case the markers exist for, and the only route #169's seven
         -- refusal reasons have to a player who is not reading the sort log.
         it("marks a refused op and names its reason and detail", function()
