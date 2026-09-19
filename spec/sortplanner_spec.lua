@@ -1809,16 +1809,22 @@ describe("SortPlanner", function()
             assert.equals(5, plan.overflowTab)
         end)
 
-        it("Phase 0 merges partials within each overflow tab and never pours across tabs", function()
+        it("Phase 0 pours partials across overflow tabs as one space", function()
+            -- #145: the overflow tabs are one space in routing order, so a
+            -- same-item run spans them and Phase 0 pours across the tab
+            -- boundary. The counts are chosen so both pours cross: count
+            -- DESC pairs 40 with 20 and 30 with 30, and the old {30, 30} /
+            -- {40, 20} fixture paired off within each tab even in one
+            -- space, so it could not tell the two designs apart.
             local snap = snapshot({
                 [1] = {},
                 [2] = {
                     [1] = { itemID = 100, count = 30 },
-                    [2] = { itemID = 100, count = 30 },
+                    [2] = { itemID = 100, count = 20 },
                 },
                 [5] = {
                     [1] = { itemID = 100, count = 40 },
-                    [2] = { itemID = 100, count = 20 },
+                    [2] = { itemID = 100, count = 30 },
                 },
             })
             local layout = {
@@ -1830,18 +1836,18 @@ describe("SortPlanner", function()
             }
             local opts = { maxStackByItem = { [100] = 60 } }
             local plan = GBL:PlanSort(snap, layout, opts)
-            assert.equals(2, #plan.ops)
-            for _, op in ipairs(plan.ops) do
-                assert.equals(op.srcTab, op.dstTab,
-                    "overflow-internal op crossed tabs: " .. op.srcTab .. "->" .. op.dstTab)
-            end
             assert.equals(2, plan.diag.phase0Merges)
             assert.equals(2, plan.diag.phase0SlotsFreed)
-            local final = applyPlan(snap, plan)
+            assert.equals(2, plan.diag.phase0CrossTabPours)
+            assert.equals(3, #plan.ops, "two pours and one pack move")
+            for i = 1, 2 do
+                assert.is_not.equals(plan.ops[i].srcTab, plan.ops[i].dstTab,
+                    "pour " .. i .. " should cross the tab boundary")
+            end
+            local final = applyPlan(snap, plan, nil, opts.maxStackByItem)
             assert.equals(60, final[2][1].count)
-            assert.is_nil(final[2][2])
-            assert.equals(60, final[5][1].count)
-            assert.is_nil(final[5][2])
+            assert.equals(60, final[2][2].count)
+            assert.is_nil(next(final[5] or {}), "the pack brings the merged stack forward")
         end)
 
         -- Build a full overflow tab: n stacks of itemID at count, slots 1..n.
@@ -1899,10 +1905,12 @@ describe("SortPlanner", function()
             assert.equals(5, final[5][1].count)
         end)
 
-        it("tab-major: a first-empty in the first tab beats a topup in the second", function()
-            -- Deliberate design (#57): all four placement tiers run in tab A
-            -- before any tier in tab B, because routing priority means
-            -- "fill A first", even at the cost of a cross-tab partial.
+        it("a topup in a later tab beats a first-empty in an earlier one", function()
+            -- #145 reversed #57's tab-major walk: the overflow tabs are one
+            -- space, so the four tiers run once over it and a same-item
+            -- partial anywhere in the space is topped up before a fresh
+            -- slot is opened. The pack then brings the merged stack forward
+            -- to the first routing slot, so the space ends with one stack.
             local snap = snapshot({
                 [1] = { [1] = { itemID = 100, count = 20 } },
                 [2] = {},
@@ -1915,20 +1923,35 @@ describe("SortPlanner", function()
                     [5] = overflow(),
                 },
             }
-            local plan = GBL:PlanSort(snap, layout, { maxStackByItem = { [100] = 60 } })
+            local opts = { maxStackByItem = { [100] = 60 } }
+            local plan = GBL:PlanSort(snap, layout, opts)
             local spill
             for _, op in ipairs(plan.ops) do
                 if op.srcTab == 1 then spill = op end
             end
             assert.is_not_nil(spill, "expected the display stack to spill")
-            assert.equals(2, spill.dstTab)
+            assert.equals(5, spill.dstTab)
+            assert.equals(1, spill.dstSlot)
             assert.equals(20, spill.count)
+            assert.equals(1, plan.diag.phase1bTopup)
+            assert.equals(0, plan.diag.phase1bFirstEmpty)
+            local final = applyPlan(snap, plan, nil, opts.maxStackByItem)
+            assert.equals(100, final[2][1].itemID)
+            assert.equals(50, final[2][1].count)
+            assert.is_nil(final[5][1], "the pack brings the merged stack forward")
         end)
 
-        it("splits one supply across the tab boundary: topup in A, first-empty in B", function()
-            -- Tab 2 is canonical and nearly full: item 100 partial at slot 1
-            -- (capacity 10), item 200 full stacks at slots 2-98. The 30-count
-            -- supply tops up 10 in tab 2 and overflows 20 into tab 5.
+        it("splits one supply across the tab boundary, and the pack closes the run in three moves", function()
+            -- Tab 2 is nearly full: item 100 partial at slot 1 (capacity
+            -- 10), item 200 full stacks at slots 2-98. The 30-count supply
+            -- tops up 10 in tab 2 and, with no slot free before it, opens
+            -- 20 at the first empty slot of the space, tab 5 slot 1. The
+            -- pack then wants that stack at the second slot of the space.
+            -- Under #140's stay-put rule the 97 identical stacks of item
+            -- 200 keep their places except the one that fell outside the
+            -- run's new range, so the reshuffle is two assignments resolved
+            -- through one pivot: three moves, not ninety-eight. That is the
+            -- cost model #145 accepted, pinned by count.
             local tab2 = { [1] = { itemID = 100, count = 50 } }
             for s = 2, 98 do
                 tab2[s] = { itemID = 200, count = 200 }
@@ -1948,13 +1971,26 @@ describe("SortPlanner", function()
             local opts = { maxStackByItem = { [100] = 60, [200] = 200 } }
             local plan = GBL:PlanSort(snap, layout, opts)
             assert.equals(0, #plan.unplaced)
-            assert.equals(2, #plan.ops)
             assert.equals(1, plan.diag.phase1bTopup)
             assert.equals(1, plan.diag.phase1bFirstEmpty)
-            local final = applyPlan(snap, plan)
+            assert.equals(2, plan.diag.phase4PositionShifts)
+            assert.equals(1, plan.diag.phase2Pivots)
+            assert.equals(5, #plan.ops, "two spill ops, two pack moves, one pivot")
+            local final = applyPlan(snap, plan, nil, opts.maxStackByItem)
             assert.equals(60, final[2][1].count)
-            assert.equals(100, final[5][1].itemID)
-            assert.equals(20, final[5][1].count)
+            assert.equals(100, final[2][2].itemID)
+            assert.equals(20, final[2][2].count)
+            assert.equals(200, final[5][1].itemID)
+            assert.is_nil(final[5][2], "the pivot slot is empty again")
+            local desc = {}
+            for t, slots in pairs(final) do
+                desc[t] = {}
+                for s, v in pairs(slots) do
+                    desc[t][s] = { itemID = v.itemID, count = v.count }
+                end
+            end
+            local plan2 = GBL:PlanSort(snapshot(desc), layout, opts)
+            assert.equals(0, #plan2.ops, "a replan on the packed result should be empty")
         end)
 
         it("reports overflow-full only when every overflow tab is full", function()
@@ -2087,7 +2123,10 @@ describe("SortPlanner", function()
             end
         end)
 
-        it("packs each overflow tab into its own contiguous run, never across tabs", function()
+        it("packs every overflow tab into one contiguous run from the first routing slot", function()
+            -- #145: one space, so the four stacks pack into slots 1-4 of the
+            -- first routing tab and the second tab empties. Two of the four
+            -- moves cross the boundary, and the count says so.
             local snap = snapshot({
                 [1] = {},
                 [2] = {
@@ -2112,20 +2151,16 @@ describe("SortPlanner", function()
             local plan = GBL:PlanSort(snap, layout, opts)
             assert.equals(4, #plan.ops)
             assert.equals(4, plan.diag.phase4PositionShifts)
-            for _, op in ipairs(plan.ops) do
-                assert.equals(op.srcTab, op.dstTab,
-                    "Phase 4 op crossed tabs: " .. op.srcTab .. "->" .. op.dstTab)
-            end
+            assert.equals(2, plan.diag.phase4CrossTabShifts)
             local final = applyPlan(snap, plan)
             assert.equals(100, final[2][1].itemID)
-            assert.equals(200, final[2][2].itemID)
-            assert.is_nil(final[2][3]); assert.is_nil(final[2][7])
-            assert.equals(150, final[5][1].itemID)
-            assert.equals(175, final[5][2].itemID)
-            assert.is_nil(final[5][4]); assert.is_nil(final[5][9])
+            assert.equals(150, final[2][2].itemID)
+            assert.equals(175, final[2][3].itemID)
+            assert.equals(200, final[2][4].itemID)
+            assert.is_nil(final[2][7])
+            assert.is_nil(next(final[5] or {}), "the second tab should be empty")
 
-            -- Replanning on the packed result is a no-op (idempotence
-            -- composed across tabs).
+            -- Replanning on the packed result is a no-op.
             local desc = {}
             for t, slots in pairs(final) do
                 desc[t] = {}
@@ -2134,10 +2169,38 @@ describe("SortPlanner", function()
                 end
             end
             local plan2 = GBL:PlanSort(snapshot(desc), layout, opts)
-            assert.equals(0, #plan2.ops)
+            assert.equals(0, #plan2.ops, "a replan on the packed result should be empty")
         end)
 
-        it("is idempotent on a canonical two-tab overflow state", function()
+        it("is idempotent on a canonical one-space overflow state", function()
+            -- The canonical state runs from the first routing slot across
+            -- the space; a later tab holds nothing until the first is full.
+            local snap = snapshot({
+                [1] = {},
+                [2] = {
+                    [1] = { itemID = 100, count = 5 },
+                    [2] = { itemID = 100, count = 3 },
+                    [3] = { itemID = 150, count = 8 },
+                    [4] = { itemID = 200, count = 10 },
+                },
+                [5] = {},
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                    [5] = overflow(),
+                },
+            }
+            local plan = GBL:PlanSort(snap, layout)
+            assert.equals(0, #plan.ops)
+        end)
+
+        it("packs the old two-tab canonical state into one space", function()
+            -- Before #145 this exact arrangement (item 150 alone in the
+            -- second tab) was the canonical two-tab state and planned no
+            -- move. In one space item 150 ranks third, so it comes forward
+            -- and item 200 steps aside for it.
             local snap = snapshot({
                 [1] = {},
                 [2] = {
@@ -2157,10 +2220,18 @@ describe("SortPlanner", function()
                 },
             }
             local plan = GBL:PlanSort(snap, layout)
-            assert.equals(0, #plan.ops)
+            assert.equals(2, #plan.ops)
+            assert.equals(1, plan.diag.phase4CrossTabShifts)
+            local final = applyPlan(snap, plan)
+            assert.equals(150, final[2][3].itemID)
+            assert.equals(200, final[2][4].itemID)
+            assert.is_nil(final[5][1])
         end)
 
-        it("leaves already-packed stock in a later overflow tab alone (no rebalancing)", function()
+        it("brings stock in a later overflow tab forward into the first", function()
+            -- #57 left a later tab's stock alone (no rebalancing). #145
+            -- reverses that: the space packs from its first slot, so both
+            -- stacks cross into tab 2.
             local snap = snapshot({
                 [1] = {},
                 [2] = {},
@@ -2178,7 +2249,122 @@ describe("SortPlanner", function()
             }
             local opts = { maxStackByItem = { [100] = 60 } }
             local plan = GBL:PlanSort(snap, layout, opts)
-            assert.equals(0, #plan.ops)
+            assert.equals(2, #plan.ops)
+            assert.equals(2, plan.diag.phase4CrossTabShifts)
+            for _, op in ipairs(plan.ops) do
+                assert.equals(5, op.srcTab)
+                assert.equals(2, op.dstTab)
+            end
+            local final = applyPlan(snap, plan, nil, opts.maxStackByItem)
+            assert.equals(60, final[2][1].count)
+            assert.equals(15, final[2][2].count)
+            assert.is_nil(next(final[5] or {}))
+        end)
+
+        it("extends a run to the right across the tab boundary", function()
+            -- Tab 2 ends in a full stack of item 100 at slot 98; the next
+            -- slot of the space is tab 5 slot 1, so a right-extend lands
+            -- there rather than opening a first-empty elsewhere. The pack
+            -- then lays the item out from the first slot.
+            local tab2 = {}
+            for s = 1, 97 do tab2[s] = { itemID = 900, count = 200 } end
+            tab2[98] = { itemID = 100, count = 60 }
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 20 } },
+                [2] = tab2,
+                [5] = {},
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                    [5] = overflow(),
+                },
+            }
+            local opts = { maxStackByItem = { [100] = 60, [900] = 200 } }
+            local plan = GBL:PlanSort(snap, layout, opts)
+            local spill
+            for _, op in ipairs(plan.ops) do
+                if op.srcTab == 1 then spill = op end
+            end
+            assert.is_not_nil(spill, "expected the display stack to spill")
+            assert.equals(5, spill.dstTab)
+            assert.equals(1, spill.dstSlot)
+            assert.equals(1, plan.diag.phase1bExtendRight)
+            assert.equals(0, plan.diag.phase1bFirstEmpty)
+            local final = applyPlan(snap, plan, nil, opts.maxStackByItem)
+            assert.equals(100, final[2][1].itemID)
+            assert.equals(60, final[2][1].count)
+            assert.equals(100, final[2][2].itemID)
+            assert.equals(20, final[2][2].count)
+        end)
+
+        it("extends a run to the left across the tab boundary", function()
+            -- Item 100 sits at the first slot of tab 5 with the space
+            -- occupied on its right; the free slot on its left is tab 2
+            -- slot 98, the last slot of the previous tab. Tab-major landed
+            -- there too, but as a first-empty; the count is the pin.
+            local tab2 = {}
+            for s = 1, 97 do tab2[s] = { itemID = 900, count = 200 } end
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 20 } },
+                [2] = tab2,
+                [5] = {
+                    [1] = { itemID = 100, count = 60 },
+                    [2] = { itemID = 900, count = 200 },
+                },
+            })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                    [5] = overflow(),
+                },
+            }
+            local opts = { maxStackByItem = { [100] = 60, [900] = 200 } }
+            local plan = GBL:PlanSort(snap, layout, opts)
+            local spill
+            for _, op in ipairs(plan.ops) do
+                if op.srcTab == 1 then spill = op end
+            end
+            assert.is_not_nil(spill, "expected the display stack to spill")
+            assert.equals(2, spill.dstTab)
+            assert.equals(98, spill.dstSlot)
+            assert.equals(1, plan.diag.phase1bExtendLeft)
+            assert.equals(0, plan.diag.phase1bFirstEmpty)
+        end)
+
+        it("keeps an interchangeable run in place when its range crosses the boundary", function()
+            -- 103 identical stacks of item 900 run from tab 2 slot 1 to tab
+            -- 5 slot 5, and one stack of item 50 sits at tab 5 slot 6. Item
+            -- 50 ranks first, so the run's range shifts by one and still
+            -- straddles the boundary. #140's rule over virtual slots: every
+            -- stack still inside the range stays, only the one at tab 2
+            -- slot 1 moves, into the slot item 50 vacates. Two assignments,
+            -- one pivot, three moves.
+            local tab2 = {}
+            for s = 1, 98 do tab2[s] = { itemID = 900, count = 200 } end
+            local tab5 = {}
+            for s = 1, 5 do tab5[s] = { itemID = 900, count = 200 } end
+            tab5[6] = { itemID = 50, count = 1 }
+            local snap = snapshot({ [1] = {}, [2] = tab2, [5] = tab5 })
+            local layout = {
+                tabs = {
+                    [1] = displayTab({}, {}),
+                    [2] = overflow(),
+                    [5] = overflow(),
+                },
+            }
+            local opts = { maxStackByItem = { [900] = 200, [50] = 20 } }
+            local plan = GBL:PlanSort(snap, layout, opts)
+            assert.equals(2, plan.diag.phase4PositionShifts)
+            assert.equals(3, #plan.ops)
+            local final = applyPlan(snap, plan, nil, opts.maxStackByItem)
+            assert.equals(50, final[2][1].itemID)
+            assert.equals(900, final[5][6].itemID)
+            for s = 2, 98 do
+                assert.equals(900, final[2][s].itemID, "tab 2 slot " .. s .. " should stay")
+            end
         end)
     end)
 
@@ -4411,14 +4597,21 @@ describe("SortPlanner", function()
             assert.equals(400, plan.unplaced[1].itemID)
         end)
 
-        it("uses the room in every tab's partial when no tab has a free slot", function()
+        it("uses the room in every partial when no slot is free, after Phase 0 has pooled them", function()
             -- Two overflow tabs, each holding a x5 partial of item 100 and
-            -- nothing else free. Three whole x20 stacks arrive. Deferring
-            -- a whole stack must not strand the room a second tab's
-            -- partial still has: once no tab can take a stack whole, a
-            -- deferred stack tops up after all, and because nothing is
-            -- free that top-up can never open a new partial. Both partials
-            -- end full, 30 placed and 30 left behind, as before the change.
+            -- nothing else free. Three whole x20 stacks arrive. Since #145
+            -- Phase 0 pools the two partials across the space first, which
+            -- frees one slot: the first whole stack (deferred, two more
+            -- behind it) takes that slot; the second finds nothing free and
+            -- tops up the pooled partial after all; the third has nowhere.
+            -- 30 placed and 30 left behind, as before, by a different route.
+            --
+            -- Both tabs are then 98/98, and a space with no free slot cannot
+            -- be reordered: the pack wants the tab-3 stack forward at the
+            -- second slot, the two-cycle that needs has no pivot anywhere,
+            -- and it aborts cleanly as cycle-no-pivot. That is the
+            -- full-space limit #145 widened from a full tab to a full space,
+            -- pinned here rather than hidden.
             local function fullTabWithPartial()
                 local t = { [1] = { itemID = 100, count = 5 } }
                 for s = 2, 98 do t[s] = { itemID = 900, count = 200 } end
@@ -4442,15 +4635,28 @@ describe("SortPlanner", function()
                     [4] = displayTab({}, {}),
                 },
             }
-            local plan = GBL:PlanSort(snap, layout,
-                { maxStackByItem = { [100] = 20, [900] = 200 } })
+            local opts = { maxStackByItem = { [100] = 20, [900] = 200 } }
+            local plan = GBL:PlanSort(snap, layout, opts)
 
-            local placed, left = 0, 0
-            for _, op in ipairs(plan.ops) do placed = placed + op.count end
-            for _, u in ipairs(plan.unplaced) do left = left + u.count end
+            assert.equals(1, plan.diag.phase0Merges)
+            assert.equals(1, plan.diag.phase0CrossTabPours)
+            local placed = 0
+            for _, op in ipairs(plan.ops) do
+                if op.srcTab == 4 then placed = placed + op.count end
+            end
             assert.equals(30, placed)
+            local left, aborted = 0, 0
+            for _, u in ipairs(plan.unplaced) do
+                if u.reason == GBL._sortPlannerReasons.OVERFLOW_FULL then
+                    left = left + u.count
+                elseif u.reason == GBL._sortPlannerReasons.CYCLE_NO_PIVOT then
+                    aborted = aborted + 1
+                end
+            end
             assert.equals(30, left)
-            local final = applyPlan(snap, plan)
+            assert.equals(2, aborted, "the pack's two-cycle has no pivot in a full space")
+            assert.equals(1, plan.diag.phase2CycleAborts)
+            local final = applyPlan(snap, plan, nil, opts.maxStackByItem)
             assert.equals(20, final[2][1].count)
             assert.equals(20, final[3][1].count)
         end)
