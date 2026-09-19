@@ -5369,7 +5369,9 @@ describe("SortPlanner", function()
         describe("emission order", function()
             -- The audit reader's pins (spec/audit_sessions_spec.lua) record
             -- this order by hand, ahead of the producer; this is the
-            -- producer-side half of that pin.
+            -- producer-side half of that pin. GetLog is newest first, so
+            -- emission order reads as descending indices here, while a
+            -- saved session (what the reader parses) holds it ascending.
             it("follows demands: and precedes the clamp WARN", function()
                 -- A 50-stack spilling into fresh slots at max 20 clamps
                 -- (#151); T6 already fragmented so the split line renders.
@@ -5384,8 +5386,8 @@ describe("SortPlanner", function()
                 assert.is_not_nil(phases); assert.is_not_nil(demands)
                 assert.is_not_nil(overflow); assert.is_not_nil(split)
                 assert.is_not_nil(clamp, table.concat(sortLines(), "\n"))
-                assert.is_true(phases < demands and demands < overflow
-                    and overflow < split and split < clamp,
+                assert.is_true(phases > demands and demands > overflow
+                    and overflow > split and split > clamp,
                     table.concat(sortLines(), "\n"))
             end)
 
@@ -5395,7 +5397,7 @@ describe("SortPlanner", function()
                 -- layout writes on its final replan.
                 plan({ [6] = { [1] = { itemID = 100, count = 20 } } })
                 assert.is_nil(lineIndex("  phases:"))
-                assert.equals(lineIndex("Sort plan:") + 1, lineIndex("  overflow:"))
+                assert.equals(lineIndex("Sort plan:") - 1, lineIndex("  overflow:"))
             end)
         end)
     end)

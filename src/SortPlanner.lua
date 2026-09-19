@@ -180,8 +180,9 @@ local PIVOT_BUDGET = 500
 GBL.SORT_PIVOT_BUDGET = PIVOT_BUDGET
 
 -- How many stacks the "bags stay:" plan-line continuation names before it
--- switches to a count. A bag full of one item would otherwise turn a single
--- log entry into a page.
+-- switches to a count, and how many items "overflow split:" names (#181).
+-- A bag full of one item would otherwise turn a single log entry into a
+-- page.
 local STAY_LINE_MAX_NAMED = 10
 
 --- Render one slot reference. Routes through GBL:FormatSlotRef (Scanner.lua,
@@ -421,6 +422,14 @@ function GBL:PlanSort(snapshot, layout, opts)
         -- real slot holds more than a stack, so a non-zero count means the
         -- input was not a real bank.
         overflowClamps = 0,
+        -- How fragmented the overflow tabs were on INPUT (#181), read
+        -- before any phase runs: items present, items whose stacks form
+        -- more than one run in routing-order virtual slots, partial stacks,
+        -- partials beyond the first per item, and items with no usable max
+        -- stack. Nothing in the planner reads these; they are the baseline
+        -- #145 is measured against, from the final replan of a capture.
+        overflowItems = 0, overflowFragmented = 0, overflowPartials = 0,
+        overflowExtraPartials = 0, overflowUnknownStack = 0,
     }
     -- Assigned across rather than computed here: the snapshot walk that
     -- produces it runs before this literal, and reordering the two to keep
@@ -600,6 +609,69 @@ function GBL:PlanSort(snapshot, layout, opts)
             return GBL:GetMaxStack(itemID)
         end
         return nil
+    end
+
+    -- --------------------------------------------------------------
+    -- Overflow fragmentation on input (#181).
+    -- --------------------------------------------------------------
+    -- Walk the usable overflow tabs in routing order, slots 1..MAX_SLOTS,
+    -- so every stack has a virtual index and "one run" means consecutive
+    -- virtual slots: an empty slot or a foreign stack between two stacks
+    -- of one item starts a second run, and T6/98 followed by T7/1 does
+    -- not. That is the order #145 packs to, so the pre-#145 steady state
+    -- reads two runs for an item held in two tabs (Phase 4 packs each tab
+    -- from slot 1) and the post-#145 state reads one. Read off `bank`, the
+    -- input, over overflowTabsOrdered, which is already coverage-filtered
+    -- and positive-only: hidden tabs and bag pseudo-tabs never enter.
+    -- Partials use #151's rule (a max stack below one is unknown).
+    local fragmentedItems = {}
+    do
+        local perItem, order = {}, {}
+        for rank, ovTab in ipairs(overflowTabsOrdered) do
+            for s = 1, MAX_SLOTS do
+                local slot = bank[ovTab] and bank[ovTab][s]
+                if slot then
+                    local v = (rank - 1) * MAX_SLOTS + s
+                    local it = perItem[slot.itemID]
+                    if not it then
+                        it = { itemID = slot.itemID, runs = 0, partials = 0,
+                               lastV = nil, perTab = {} }
+                        perItem[slot.itemID] = it
+                        order[#order + 1] = slot.itemID
+                    end
+                    if it.lastV ~= v - 1 then it.runs = it.runs + 1 end
+                    it.lastV = v
+                    it.perTab[ovTab] = (it.perTab[ovTab] or 0) + 1
+                    local m = getMaxStack(slot.itemID)
+                    if m and m >= 1 then
+                        if slot.count < m then it.partials = it.partials + 1 end
+                    else
+                        it.unknown = true
+                    end
+                end
+            end
+        end
+        for _, itemID in ipairs(order) do
+            local it = perItem[itemID]
+            diag.overflowItems = diag.overflowItems + 1
+            if it.runs > 1 then
+                diag.overflowFragmented = diag.overflowFragmented + 1
+                fragmentedItems[#fragmentedItems + 1] = it
+            end
+            if it.unknown then
+                diag.overflowUnknownStack = diag.overflowUnknownStack + 1
+            else
+                diag.overflowPartials = diag.overflowPartials + it.partials
+                diag.overflowExtraPartials = diag.overflowExtraPartials
+                    + math.max(0, it.partials - 1)
+            end
+        end
+        -- Most split first, then by item, so two captures of one bank name
+        -- the same item first.
+        table.sort(fragmentedItems, function(a, b)
+            if a.runs ~= b.runs then return a.runs > b.runs end
+            return a.itemID < b.itemID
+        end)
     end
 
     -- Snapshot what the planner sees at a slot RIGHT NOW (before applying
@@ -1852,6 +1924,40 @@ function GBL:PlanSort(snapshot, layout, opts)
                 "  demands: %d total (pinned=%d, ext-R=%d, ext-L=%d, first-empty=%d)",
                 totalDemands, diag.demandPinned, diag.demandExtendRight,
                 diag.demandExtendLeft, diag.demandFirstEmpty))
+        end
+        -- Overflow fragmentation on input (#181). Present whenever a usable
+        -- overflow tab existed, zero included, on the #139 rule; its own
+        -- gate rather than the phases block's, so a converged overflow-only
+        -- layout still writes it. The split line names what frag= counts,
+        -- since a count alone cannot be checked against the bank, and it
+        -- is absent at zero because the total above already carries it.
+        if #overflowTabsOrdered > 0 then
+            self:SortInfo(string.format(
+                "  overflow: items=%d frag=%d partials=%d extra=%d unknown=%d",
+                diag.overflowItems, diag.overflowFragmented,
+                diag.overflowPartials, diag.overflowExtraPartials,
+                diag.overflowUnknownStack))
+            if #fragmentedItems > 0 then
+                local parts = {}
+                for _, it in ipairs(fragmentedItems) do
+                    if #parts < STAY_LINE_MAX_NAMED then
+                        local desc = self.DescribeItem and self:DescribeItem(it.itemID)
+                            or ("it:" .. tostring(it.itemID))
+                        local tabs = {}
+                        for _, ovTab in ipairs(overflowTabsOrdered) do
+                            if it.perTab[ovTab] then
+                                tabs[#tabs + 1] = string.format("T%dx%d",
+                                    ovTab, it.perTab[ovTab])
+                            end
+                        end
+                        table.insert(parts, desc .. " " .. table.concat(tabs, " "))
+                    end
+                end
+                local more = #fragmentedItems - #parts
+                self:SortInfo(string.format("  overflow split: %s%s",
+                    table.concat(parts, ", "),
+                    (more > 0) and string.format(", and %d more", more) or ""))
+            end
         end
         -- Only ever non-zero on an input no real bank produces (#151), so
         -- the line is the loud part of a guard that should stay silent,
