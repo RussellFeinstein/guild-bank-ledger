@@ -326,6 +326,26 @@ describe("audit session reader", function()
                 "one of these two aborted nothing, whichever form it is written in")
         end)
 
+        -- #178 puts two terms inside the plan line's input bracket. The
+        -- reader takes three things off that line and none of them is a
+        -- field parse, so this is a check that the three survive rather
+        -- than a new capability. The frozen fixture above carries the
+        -- pre-#178 form and keeps carrying it.
+        it("reads a plan line that carries the bank skip terms", function()
+            local m = measuresOfLines(
+                "Sort plan: 4.2ms, 0 ops, 0 deficits, 0 unplaced "
+                .. "(input: 603 slots / 7 tabs, locked=2) unviewable:none "
+                .. "[T1:59 T2:98(locked=2)]",
+                "Sort plan: 4.2ms, 0 ops, 0 deficits, 10 unplaced "
+                .. "(input: 603 slots / 7 tabs, locked=0) unviewable:none "
+                .. "[T1:59 T2:98]")
+            assert.equals(2, m.planLines)
+            assert.equals(1, m.planZeroUnplaced,
+                "the zero-unplaced probe reads the term after unplaced")
+            assert.equals(2, m.distinctPlans,
+                "a locked count is part of what makes two plans distinct")
+        end)
+
         it("does not read 10 unplaced as 0 unplaced", function()
             -- "0 unplaced" is a substring of "10 unplaced". Run 2 reads
             -- 10, and three of the five plan lines placed everything.

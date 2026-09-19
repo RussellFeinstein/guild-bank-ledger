@@ -453,6 +453,146 @@ describe("Scanner", function()
             assert.same({ 1 }, coverage.viewableTabs)
         end)
     end)
+
+    -- The link-less probe (#178). A bank slot with no item link falls out of
+    -- the snapshot as if it were empty, and the scan has never been able to
+    -- tell those two apart: ScanTab gates on GetGuildBankItemLink and never
+    -- reaches GetGuildBankItemInfo when the link is nil. This measures
+    -- whether the info call reports anything for such a slot, so the bank
+    -- nolink counter #178 wants can be built on an observed predicate rather
+    -- than on a guess. See the v0.39.5 cursor outage for the cost of the
+    -- other order.
+    --
+    -- These tests prove the tally arithmetic and NOTHING about the API. The
+    -- mock returns whatever the slot table holds, so all four arms pass here
+    -- whatever a real client does. The in-game capture is the evidence, and
+    -- it has to be taken on a cold item cache to mean anything.
+    describe("link-less slot probe (#178)", function()
+        -- The shared before_each fires PLAYER_INTERACTION_MANAGER_FRAME_SHOW,
+        -- autoScan defaults on, and with no tab added that scan short-circuits
+        -- straight into FinalizeScan. So a probe line already exists before
+        -- the first line of any test here runs. Clearing inside the helper is
+        -- what makes probeLine() read this scan's line rather than that one.
+        local function scanTabWith(slots)
+            MockWoW.addTab("Tab 1", nil, true)
+            MockWoW.guildBank.tabs[1].slots = slots
+            GBL:CancelPendingScan()
+            GBL.scanInProgress = false
+            GBL.bankOpen = true
+            GBL:ClearLog("system")
+            GBL:StartFullScan()
+            MockWoW.fireTimers()
+        end
+
+        local function probeLine()
+            local entries = GBL:GetLog("system") or {}
+            for i = #entries, 1, -1 do
+                local m = entries[i].message or ""
+                if m:find("^Scan linkless:") then return m end
+            end
+            return nil
+        end
+
+        it("counts a link-less slot that reports only a texture", function()
+            scanTabWith({ [1] = { texture = "icon" } })
+
+            local m = probeLine()
+            assert.is_not_nil(m, "no probe line in the system log")
+            assert.is_truthy(m:find("texture-only=1", 1, true), m)
+            assert.is_truthy(m:find("count-only=0", 1, true), m)
+            assert.is_truthy(m:find("both=0", 1, true), m)
+        end)
+
+        it("counts a link-less slot that reports only a count", function()
+            scanTabWith({ [1] = { count = 4 } })
+
+            local m = probeLine()
+            assert.is_not_nil(m, "no probe line in the system log")
+            assert.is_truthy(m:find("texture-only=0", 1, true), m)
+            assert.is_truthy(m:find("count-only=1", 1, true), m)
+            assert.is_truthy(m:find("both=0", 1, true), m)
+        end)
+
+        it("counts a link-less slot that reports both", function()
+            scanTabWith({ [1] = { texture = "icon", count = 4 } })
+
+            local m = probeLine()
+            assert.is_not_nil(m, "no probe line in the system log")
+            assert.is_truthy(m:find("texture-only=0", 1, true), m)
+            assert.is_truthy(m:find("count-only=0", 1, true), m)
+            assert.is_truthy(m:find("both=1", 1, true), m)
+        end)
+
+        -- A count of zero is an empty slot, not an occupancy signal. Without
+        -- this the arm reads every empty slot on the tab as data.
+        it("reads a zero count as no data rather than as a count signal", function()
+            scanTabWith({ [1] = { count = 0 } })
+
+            local m = probeLine()
+            assert.is_not_nil(m, "no probe line in the system log")
+            assert.is_truthy(m:find("0 with data", 1, true), m)
+            assert.is_truthy(m:find("neither=98", 1, true), m)
+        end)
+
+        -- The whole format, pinned once. Every other test here names one arm,
+        -- so a swapped pair of labels would read as correct to all of them.
+        it("renders both totals and all four arms, and they reconcile", function()
+            scanTabWith({
+                [1] = {
+                    itemLink = Helpers.makeItemLink(100, "Real Item"),
+                    texture = "icon", count = 2,
+                },
+                [2] = { texture = "icon" },
+                [3] = { count = 4 },
+                [4] = { texture = "icon", count = 4 },
+            })
+
+            -- 98 slots, one of them linked, so 97 have no link. Three of those
+            -- reported something; the other 94 are ordinary empty slots, which
+            -- is why the denominator is never the interesting number.
+            assert.equals(
+                "Scan linkless: 97 no-link slot(s), 3 with data "
+                .. "[texture-only=1 count-only=1 both=1 neither=94]",
+                probeLine())
+        end)
+
+        it("does not carry one scan's tally into the next", function()
+            scanTabWith({ [1] = { texture = "icon" } })
+            assert.is_truthy(probeLine():find("texture-only=1", 1, true))
+
+            MockWoW.guildBank.tabs[1].slots = {}
+            GBL:CancelPendingScan()
+            GBL.scanInProgress = false
+            GBL.bankOpen = true
+            GBL:ClearLog("system")
+            GBL:StartFullScan()
+            MockWoW.fireTimers()
+
+            local m = probeLine()
+            assert.is_not_nil(m, "no probe line in the system log")
+            assert.is_truthy(m:find("texture-only=0", 1, true), m)
+            assert.is_truthy(m:find("0 with data", 1, true), m)
+        end)
+
+        -- The probe observes and changes nothing. A link-less slot stays out
+        -- of the snapshot, and it must not reach lockedSkips either: that
+        -- counter means "holds an item we could identify and could not read",
+        -- and widening it would silently change what the new plan-line term
+        -- reports.
+        it("admits nothing and leaves lockedSkips alone", function()
+            scanTabWith({
+                [1] = { texture = "icon", count = 4 },
+                [2] = { texture = "icon", count = 4, locked = true },
+            })
+
+            local results = GBL:GetLastScanResults()
+            assert.equals(0, results[1].itemCount)
+            assert.is_nil(results[1].slots[1])
+            assert.equals(0, results[1].lockedSkips,
+                "a link-less slot was counted as a locked skip")
+            assert.is_truthy(probeLine():find("both=2", 1, true))
+        end)
+    end)
 end)
 
 ------------------------------------------------------------------------

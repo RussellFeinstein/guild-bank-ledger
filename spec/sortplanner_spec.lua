@@ -3728,11 +3728,11 @@ describe("SortPlanner", function()
             local logged
             for _, e in ipairs(GBL:GetLog("sort") or {}) do
                 local m = e.message or ""
-                if m:find("tabs) bags:", 1, true) then logged = m end
+                if m:find("tabs, locked=0) bags:", 1, true) then logged = m end
             end
             assert.is_truthy(logged, "expected a plan line with a bags term")
             assert.is_truthy(logged:find(
-                "tabs) bags:1/1(stay=0,ignored=0,bound=0,locked=0,nolink=0,fillops=0,spillops=1)",
+                "tabs, locked=0) bags:1/1(stay=0,ignored=0,bound=0,locked=0,nolink=0,fillops=0,spillops=1)",
                 1, true), logged)
         end)
 
@@ -3791,7 +3791,7 @@ describe("SortPlanner", function()
                 })
 
                 assert.is_truthy(findLine(
-                    "tabs) bags:2/7(stay=0,ignored=1,bound=2,locked=1,nolink=1,fillops=1,spillops=1)"),
+                    "tabs, locked=0) bags:2/7(stay=0,ignored=1,bound=2,locked=1,nolink=1,fillops=1,spillops=1)"),
                     table.concat(sortLines(), "\n"))
             end)
 
@@ -3799,13 +3799,13 @@ describe("SortPlanner", function()
                 local snap = snapshot({ [1] = {}, [2] = {} })
                 GBL:PlanSort(snap, oneDemandLayout(20), { bagSnapshot = {} })
                 assert.is_truthy(findLine(
-                    "tabs) bags:0/0(stay=0,ignored=0,bound=0,locked=0,nolink=0,fillops=0,spillops=0)"),
+                    "tabs, locked=0) bags:0/0(stay=0,ignored=0,bound=0,locked=0,nolink=0,fillops=0,spillops=0)"),
                     table.concat(sortLines(), "\n"))
 
                 GBL:ClearLog("sort")
                 GBL:PlanSort(snap, oneDemandLayout(20))
                 GBL:PlanSort(snap, oneDemandLayout(20), {})
-                assert.is_nil(findLine("tabs) bags:"), table.concat(sortLines(), "\n"))
+                assert.is_nil(findLine("tabs, locked=0) bags:"), table.concat(sortLines(), "\n"))
             end)
 
             it("counts only bag-origin unplaced entries as stay", function()
@@ -3828,7 +3828,7 @@ describe("SortPlanner", function()
                 assert.equals(2, #plan.unplaced)
                 assert.equals(1, plan.diag.bagStay)
                 assert.is_truthy(findLine(
-                    "tabs) bags:1/1(stay=1,ignored=0,bound=0,locked=0,nolink=0,fillops=0,spillops=0)"),
+                    "tabs, locked=0) bags:1/1(stay=1,ignored=0,bound=0,locked=0,nolink=0,fillops=0,spillops=0)"),
                     table.concat(sortLines(), "\n"))
             end)
 
@@ -3888,6 +3888,135 @@ describe("SortPlanner", function()
                 local _, named = line:gsub(" at Bag0/", "")
                 assert.equals(10, named, line)
                 assert.is_truthy(line:find(", and 1 more", 1, true), line)
+            end)
+        end)
+
+        -- The bank half of the same promise (#178). The bag term says why a
+        -- bag stack was not a candidate; "input: N slots" could drop by any
+        -- amount with nothing beside it, because the scan's locked counter
+        -- only ever printed to the SYSTEM channel and a sort gets diagnosed
+        -- from the sort one.
+        describe("plan line bank skip term (#178)", function()
+            local function sortLines()
+                local out = {}
+                for _, e in ipairs(GBL:GetLog("sort") or {}) do
+                    out[#out + 1] = e.message or ""
+                end
+                return out
+            end
+
+            local function planLine()
+                for _, m in ipairs(sortLines()) do
+                    if m:find("^Sort plan:") then return m end
+                end
+                return nil
+            end
+
+            -- snapshot() builds tab results without the scan's skip counters,
+            -- because nothing read them before this. ScanTab always sets
+            -- lockedSkips, so stamping it on is the production shape.
+            local function withLocked(snap, byTab)
+                for tabIndex, n in pairs(byTab) do
+                    snap[tabIndex].lockedSkips = n
+                end
+                return snap
+            end
+
+            it("sums the scan's locked skips across every tab", function()
+                GBL:ClearLog("sort")
+                local snap = withLocked(snapshot({ [1] = {}, [2] = {} }),
+                    { [1] = 2, [2] = 3 })
+
+                local plan = GBL:PlanSort(snap, oneDemandLayout(20))
+
+                local m = planLine()
+                assert.is_not_nil(m, table.concat(sortLines(), "\n"))
+                assert.is_truthy(m:find("tabs, locked=5)", 1, true), m)
+                -- The structural figure and the rendered one are the same
+                -- number, so a renderer reading the wrong field cannot pass.
+                assert.equals(5, plan.diag.bankLocked)
+            end)
+
+            -- Present at zero, on the #139 rule the bags term follows:
+            -- "checked, nothing skipped" and "not reported" are different
+            -- states and a capture needs to tell them apart.
+            it("renders locked=0 when the scan skipped nothing", function()
+                GBL:ClearLog("sort")
+                local snap = snapshot({ [1] = {}, [2] = {} })
+
+                GBL:PlanSort(snap, oneDemandLayout(20))
+
+                local m = planLine()
+                assert.is_truthy(m:find("tabs, locked=0)", 1, true), m)
+            end)
+
+            -- Both halves in one literal: the tab that skipped something
+            -- carries the suffix and the tab that did not carries none. Two
+            -- separate tests would each pass against a renderer that got the
+            -- other half wrong.
+            it("marks only the tabs that skipped something in the breakdown", function()
+                GBL:ClearLog("sort")
+                local snap = withLocked(snapshot({
+                    [1] = { [1] = { itemID = 100, count = 5 } },
+                    [2] = {},
+                }), { [1] = 2, [2] = 0 })
+
+                GBL:PlanSort(snap, oneDemandLayout(20))
+
+                local m = planLine()
+                assert.is_truthy(m:find("[T1:1(locked=2) T2:0]", 1, true), m)
+            end)
+
+            -- Both snapshot shapes carry a field called lockedSkips and only
+            -- the table it sits in tells them apart, so this is the pin that
+            -- catches a walk over the wrong one. Both sides non-zero and
+            -- different, or a summing bug reads as correct.
+            it("leaves a bag snapshot's locked skips out of the bank total", function()
+                GBL:ClearLog("sort")
+                local snap = withLocked(snapshot({ [1] = {}, [2] = {} }), { [1] = 2 })
+                local bags = {
+                    [-1] = {
+                        slots = {}, itemCount = 0,
+                        boundSkips = 0, lockedSkips = 7, noLink = 0,
+                    },
+                }
+
+                local plan = GBL:PlanSort(snap, oneDemandLayout(20),
+                    { bagSnapshot = bags })
+
+                local m = planLine()
+                assert.is_truthy(m:find("tabs, locked=2)", 1, true), m)
+                assert.is_truthy(m:find("locked=7,", 1, true),
+                    "the bags bracket lost its own locked count: " .. tostring(m))
+                assert.equals(2, plan.diag.bankLocked)
+                assert.equals(7, plan.diag.bagLocked)
+            end)
+
+            -- An ignore tab's slots are inside "input:" today, because the
+            -- walk runs over the whole snapshot and ignoreSet is not built
+            -- until later. So its skips are inside the total too, or the two
+            -- halves of one bracket would mean different things. Pinned
+            -- because it is a decision, not an accident.
+            it("counts an ignore tab's skips, as input: counts its slots", function()
+                GBL:ClearLog("sort")
+                local snap = withLocked(snapshot({
+                    [1] = {},
+                    [2] = {},
+                    [3] = { [1] = { itemID = 999, count = 1 } },
+                }), { [3] = 4 })
+                local layout = {
+                    tabs = {
+                        [1] = displayTab({ [100] = { slots = 1, perSlot = 20 } },
+                            { [1] = 100 }),
+                        [2] = overflow(),
+                        [3] = { mode = "ignore" },
+                    },
+                }
+
+                GBL:PlanSort(snap, layout)
+
+                local m = planLine()
+                assert.is_truthy(m:find("input: 1 slots / 3 tabs, locked=4)", 1, true), m)
             end)
         end)
 
