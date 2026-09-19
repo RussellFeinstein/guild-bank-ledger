@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.39.17
+    {"0.39.17", "2026-09-19", {
+        Changed = {
+            "Several overflow tabs now act as one space, in the fill order the Layout tab shows: an item is kept together across them, a partial stack is merged wherever it sits, and a stack moves from one overflow tab to another when its place in that order crosses a tab boundary. Every move still names the real tab and slot. The first sort after updating moves stock between the overflow tabs once to lay the space out. A space with no free slot cannot be reordered; the sort reports the moves it could not make and finishes them once a slot frees.",
+        },
+    }},
     -- v0.39.16
     {"0.39.16", "2026-09-19", {
         Fixed = {

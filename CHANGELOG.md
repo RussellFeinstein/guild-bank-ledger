@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.39.17] - 2026-09-19
 
 ### Changed
 - When a layout declares more than one overflow tab, the sort now treats them as one continuous space and keeps each item's stock together across it. The fill order the Layout editor already shows (routing priority where one is set, otherwise tab number) is now the slot order as well: partial stacks of an item are merged wherever they sit, a run of one item can continue from the last slot of one tab into the first slot of the next, and the space is packed from the first slot of the first tab onward. A stack therefore moves from one overflow tab to another when its place in that order crosses a tab boundary. Every planned move still names the real tab and slot. The first sort after updating moves stock between overflow tabs once to lay the space out; after that, sorts settle as before. A space with no free slot cannot be reordered: the sort reports the moves it could not make and finishes them once a slot frees. In the sort log, the phases line gains `cross=` counts inside its `merge=` and `pack=` brackets, saying how many of those moves crossed a tab.
