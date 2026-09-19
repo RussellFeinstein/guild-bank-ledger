@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.39.14
+    {"0.39.14", "2026-09-19", {
+        Added = {
+            "The sort log's plan line gains two lines under it saying how fragmented the overflow tabs were when the plan was built: how many items sit in overflow, how many of them are split into more than one run, how many partial stacks there are and how many of those are beyond the first for their item, and how many items the addon does not yet know the stack size of. A second line names the split items with their stacks per tab, most split first.",
+            "The figures describe the bank the planner was handed, so on a run's first plan they include partials the sort merges in that same pass. The last plan of a run is the one to read: by then each tab has been packed and what remains is what one tab cannot fix on its own. That last reading is the baseline for the planned change that treats the overflow tabs as one space.",
+        },
+    }},
     -- v0.39.13
     {"0.39.13", "2026-09-19", {
         Fixed = {
