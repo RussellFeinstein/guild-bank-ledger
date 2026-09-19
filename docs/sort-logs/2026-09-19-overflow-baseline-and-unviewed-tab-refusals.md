@@ -124,7 +124,7 @@ Run A read the same way: `items=52 frag=5 partials=51 extra=2` going in,
   baseline would overstate #145's target by a factor of six.
 - **Every refusal came from a slot the run itself had written, on a tab it
   was not viewing, and read the count that slot held at that tab's last
-  query.** All eight refusals are on `T7`, all while `T6` was the viewed tab,
+  query (#191).** All eight refusals are on `T7`, all while `T6` was the viewed tab,
   and none is on a slot the run had left alone. In run A's first pass the
   pivot slot `T7/69` was first written at op 85 (`move T6/3->T7/69 Gateway
   Control Shard x1`) while `T7` was on screen (`T7` was the viewed tab for
@@ -178,6 +178,8 @@ in one shape and zero outside it is strong, but no line here reads the same
 slot with the tab on screen and off it. A capture that does that, or a spec
 against a mock whose non-viewed tabs answer from their last query (the mock
 already has `viewGatedReads`), is what turns the inference into a finding.
+#191's build added the spec; the capture half is still owed, and its
+`stalesrc=` term is where to read it.
 
 **The bags-on pair's bank was not the bags-off pair's bank.** Stacks were
 withdrawn by hand between them, so run B's `frag=5` and run D's `frag=4` are
