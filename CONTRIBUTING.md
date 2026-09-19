@@ -66,13 +66,15 @@ This axis is the one that pays off later. Milestones are chronological arcs: the
 
 `good first issue`, `help wanted`, `question`, `duplicate`, `invalid` and `wontfix` are GitHub's defaults. They sit outside both axes and neither invariant applies to them.
 
+`tracking issue` marks the one open build-order issue. It holds the cross-milestone order and no work of its own, it is pinned at the top of the Issues page, and it is the quickest way to see what is being worked on and what comes next.
+
 **What this means for you as a contributor:**
 
 - **You do not need to apply labels, and GitHub will not let you.** Applying labels needs triage permission on the repo, so the control is absent from the UI and `gh issue edit --add-label` returns 403. That is expected, not a misconfiguration. An unlabeled new issue is the normal starting state; the maintainer labels it during triage.
 - **Put in the body what a label would have carried.** Which part of the addon it affects, whether it is a defect or a request, and anything that blocks it.
 - **Pull requests label themselves.** [.github/workflows/labeler.yml](.github/workflows/labeler.yml) applies `type:` from your branch prefix and `area:` from the files you changed, with rules in [.github/labeler.yml](.github/labeler.yml). The path globs are coarse, so a PR spanning subsystems picks up several area labels. The maintainer corrects what the globs get wrong; you do not need to.
 
-Milestones are release arcs, and membership means the work gates that arc rather than that it is urgent. `Sort rework`, `Restock rework`, `Data model integrity`, `Sync reliability`, `Accessibility to v1.0` and `Codebase refactor` are the current set. An issue with no milestone is not neglected; it is unscheduled on purpose.
+Milestones are release arcs, and membership means the work gates that arc rather than that it is urgent. `Sort rework`, `Restock rework`, `Data model integrity`, `Codebase refactor`, `Sync reliability`, `Accessibility to v1.0`, `Test suite refactor`, `Sort suite hardening` and `Ledger export` are the current set. An issue with no milestone is not neglected; it is unscheduled on purpose.
 
 ## Commit message format
 

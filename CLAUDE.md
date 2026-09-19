@@ -171,7 +171,7 @@ Recorded as available options, not current practice. The caveat that matters: ch
 
 ## Issue and PR labels
 
-20 labels in two namespaces: 6 `type:`, 8 `area:`, and GitHub's 6 remaining defaults. Adopted 2026-08-14 (#73), backfilled in one pass across all 42 issues and all 68 PRs, closed and merged included. Each label's GitHub description carries its own rule, so the meaning cannot drift into someone's head. The contributor-facing version lives in [CONTRIBUTING.md](CONTRIBUTING.md); this section is the maintainer's copy and carries the reasons.
+21 labels: 6 `type:`, 8 `area:`, one `tracking issue`, and GitHub's 6 remaining defaults. Adopted 2026-08-14 (#73), backfilled in one pass across all 42 issues and all 68 PRs, closed and merged included. Each label's GitHub description carries its own rule, so the meaning cannot drift into someone's head. The contributor-facing version lives in [CONTRIBUTING.md](CONTRIBUTING.md); this section is the maintainer's copy and carries the reasons.
 
 **Invariant, after triage: exactly one `type:` and at least one `area:`.** A second `area:` only where the item has separate acceptance criteria in two places (#44, #52, #77, #93 are the four). An unlabeled inbound issue from an outside contributor is the normal starting state, not a miss: applying labels needs triage permission, so a contributor cannot do it.
 
@@ -184,6 +184,7 @@ Recorded as available options, not current practice. The caveat that matters: ch
 - **No priority axis.** The scope addition on #73's comment stays recorded there until an issue actually needs it.
 - **Milestones are not duplicated as labels.** Areas overlapping milestones is deliberate: milestones are chronological arcs that close and stop being lookup tools, so `gh issue list --state all --label "area: sync"` is the only thing that assembles a subsystem's whole history across them. That is why closed issues and merged PRs are labelled at all.
 - **PRs label themselves** via [.github/workflows/labeler.yml](.github/workflows/labeler.yml), rules in [.github/labeler.yml](.github/labeler.yml). It runs on **`pull_request_target`**, unlike the WoW-Economy-Forecaster copy it was modelled on, because a `pull_request` run for a fork PR gets a read-only token whatever the `permissions:` block says. Never add a checkout step to that workflow, and never change the action version and the config file in the same PR: the run reads config from base while the action comes from head. `sync-labels` stays off, so it only adds and never removes a hand-applied label.
+- **`tracking issue` is a third axis: one label and one open issue, added 2026-09-19 (Russell's call) for the build-order issue #188, modelled on WGA-Raid-Hub's #1155.** It holds the cross-milestone order and no work of its own; each milestone description keeps its within-milestone order, and the issue is pinned so it sits at the top of the Issues page. It carries `type: chore` and `area: repo` as well, so the one-type-one-area invariant holds on it; the label exists so a search for it finds the current order in one hit, which neither axis can do. Not on the labeler: no path predicts it. When the body nears GitHub's 64 KB cap, open a successor that names the old one and close the old one, which is what the hub did with #947 and #1155.
 
 ## Sync subsystem notes
 
