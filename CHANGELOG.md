@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Five figures in the sort log reported something other than what their name said. The sort log is what a bank problem gets diagnosed from, so each of these could send a reader to the wrong conclusion. Nothing about sorting itself changes.
+  - `rescans=` is now `flushes=`. It was counting the sort's own transaction-log flushes, not rescans competing with it: the sort stops the periodic rescan while it runs, so the number was always the op count divided by fifteen. A rescan genuinely started during a sort (by ticking Auto re-scan while one is running) is now named once and counted as `extrescans=`.
+  - The sort said "resumed the periodic rescan" after closing the bank, where it had not resumed anything. It says so now only when the rescan actually restarted.
+  - `abort=` on the phases line counted stacks given up on, not the times the sort gave up, so one cycle abandoning eight stacks read as eight aborts. It counts aborts now, and the stack count sits beside it as `stranded=`.
+  - The `bags:` breakdown mixed two things in one bracket: most of its terms count bag slots, but `fill=` and `spill=` counted moves, so one bag stack split across two destinations read as 2. They are `fillops=` and `spillops=` now and sit at the end of the bracket.
+  - Deficits printed in whatever order they happened to come out of the table, in both the preview and the Sort tab, so two runs on the same bank could list them differently. They are sorted by item now.
+
+**Reading an older capture:** a sort log written before this release still uses the old names and the old meanings. `rescans=` in one of those is a flush count, and `abort=` is a stack count.
+
 ## [0.39.10] - 2026-09-18
 
 ### Fixed
