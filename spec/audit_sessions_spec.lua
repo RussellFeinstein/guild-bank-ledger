@@ -284,6 +284,84 @@ describe("audit session reader", function()
             assert.is_true(found, "the clamp continuation belongs to its run")
         end)
 
+        -- #181 adds two more continuations under the plan line, the
+        -- fragmentation term and the list of split items. Hand-built like
+        -- the #151 pin above, because the recorded fixture predates them
+        -- and stays a recording. Each case asserts the whole kept sequence
+        -- rather than the presence of one line, so a pattern that swallows
+        -- a neighbour or drops one reads as a different sequence.
+        local function line(message)
+            return { message = message, level = "INFO", t = 1 }
+        end
+
+        local function keptMessages(group)
+            local out = {}
+            for _, entry in ipairs(group.lines) do
+                out[#out + 1] = entry.message
+            end
+            return out
+        end
+
+        it("keeps both overflow continuations with their plan line, in emitted order (#181)", function()
+            -- The order is the one src/SortPlanner.lua emits: the pair,
+            -- then the two overflow lines, then the clamp WARN.
+            local messages = {
+                "Sort: starting 2 ops, bags=off",
+                "Sort plan: 1.0ms, 2 ops, 0 deficits, 0 unplaced (input: 4 slots / 3 tabs, locked=0) [T1:1 T6:2 T7:1]",
+                "  phases: P0 merge=0(free=0) P1a assign=0 P1b spill=2(top=0,r=1,l=0,fe=1,unp=0) P2 pivot=0(abort=0,stranded=0) P3 sweep=0 P4 pack=0",
+                "  demands: 0 total (pinned=0, ext-R=0, ext-L=0, first-empty=0)",
+                "  overflow: items=42 frag=7 partials=9 extra=4 unknown=0",
+                "  overflow split: it:12345 T6x2 T7x1",
+                "  overflow clamp: 1 take(s) held to max stack",
+                "Sort: complete, 2 ops issued",
+            }
+            local sort = {}
+            for _, m in ipairs(messages) do sort[#sort + 1] = line(m) end
+            local db = { sessions = { { entries = { sort = sort } } } }
+
+            local started = startedRuns(Reader.runs(db, 1))
+            assert.equals(1, #started)
+            assert.same(messages, keptMessages(started[1]))
+        end)
+
+        it("keeps a zero-op replan's overflow line with its plan line when no phases pair follows (#181)", function()
+            -- The planner skips the phases/demands pair on a plan with no
+            -- ops and no demands, and the overflow line renders anyway (it
+            -- is gated on the layout, not on activity). The final replan
+            -- of a run is exactly that shape, and it is the reading #145 is
+            -- judged against, so the line must land inside the run beside
+            -- the plan line it continues. The per-op WARN between them is
+            -- the noise the reader exists to drop.
+            local kept = {
+                "Sort: starting execution of 12 ops, cadence 1.0s (ping 40ms) bags=off",
+                "Sort plan: 5.1ms, 12 ops, 0 deficits, 0 unplaced (input: 600 slots / 7 tabs, locked=0) [T1:59 T6:93 T7:68]",
+                "  phases: P0 merge=0(free=0) P1a assign=12 P1b spill=0(top=0,r=0,l=0,fe=0,unp=0) P2 pivot=1(abort=0,stranded=0) P3 sweep=0 P4 pack=0",
+                "  demands: 214 total (pinned=12, ext-R=180, ext-L=0, first-empty=22)",
+                "  overflow: items=42 frag=7 partials=9 extra=4 unknown=0",
+                "  overflow split: it:12345 T6x7 T7x6",
+                "Sort plan: 4.8ms, 0 ops, 0 deficits, 0 unplaced (input: 600 slots / 7 tabs, locked=0) [T1:59 T6:93 T7:68]",
+                "  overflow: items=42 frag=7 partials=9 extra=4 unknown=0",
+                "Sort: complete in 40.0s - 1 passes, 12 ops issued, 0 remaining, avg 1.10s/op (cursorStuck=0 stalls=0 flushes=0)",
+            }
+            local sort = {}
+            for i, m in ipairs(kept) do
+                sort[#sort + 1] = line(m)
+                if i == 6 then
+                    sort[#sort + 1] = { message = "Sort op 3/12 skipped: T1/5 empty, wanted 20 x it:100",
+                                        level = "WARN", t = 1 }
+                end
+            end
+            local db = { sessions = { { entries = { sort = sort } } } }
+
+            local started = startedRuns(Reader.runs(db, 1))
+            assert.equals(1, #started)
+            local got = keptMessages(started[1])
+            assert.same(kept, got)
+            assert.is_truthy(got[7]:find("^Sort plan: 4.8ms, 0 ops"))
+            assert.is_truthy(got[8]:find("^  overflow:"),
+                "the replan's overflow line follows its plan line directly")
+        end)
+
         it("drops sort lines that are not part of the run summary", function()
             -- Session 1 holds a per-op WARN. The record skeleton is a
             -- summary, so op-level noise stays out of it.
