@@ -362,6 +362,14 @@ function GBL:PlanSort(snapshot, layout, opts)
     local profileStart = debugprofilestop and debugprofilestop() or nil
     local inputSlots, inputTabs = 0, 0
     local perTabOccupied = {}
+    -- What the scan could not hand over (#178). The bag term has said why a
+    -- bag stack was not a candidate since #139; the bank side had the counter
+    -- and printed it only to the SYSTEM channel, where a sort capture pulled
+    -- with /gbl sortlog never sees it. This walk covers the whole snapshot,
+    -- ignore tabs included, because inputSlots does too: the two halves of one
+    -- bracket have to mean the same thing.
+    local inputLocked = 0
+    local perTabLocked = {}
     for tabIndex, tabResult in pairs(snapshot or {}) do
         inputTabs = inputTabs + 1
         local n = 0
@@ -372,6 +380,9 @@ function GBL:PlanSort(snapshot, layout, opts)
         end
         perTabOccupied[tabIndex] = n
         inputSlots = inputSlots + n
+        local locked = (tabResult or {}).lockedSkips or 0
+        perTabLocked[tabIndex] = locked
+        inputLocked = inputLocked + locked
     end
 
     -- Per-phase counters. Populated as each phase runs and dumped to the
@@ -407,6 +418,11 @@ function GBL:PlanSort(snapshot, layout, opts)
         bagIgnored = 0, bagBound = 0, bagLocked = 0, bagNoLink = 0,
         bagStay = 0,
     }
+    -- Assigned across rather than computed here: the snapshot walk that
+    -- produces it runs before this literal, and reordering the two to keep
+    -- the field with its siblings would move the walk past the early return
+    -- above it. bankLocked is the bank counterpart of bagLocked (#178).
+    diag.bankLocked = inputLocked
 
     -- v0.32.8 B4a: Phase 2 instrumentation. SortDebug emissions are
     -- gated by db.profile.sort.debugChat in Logger.lua, so normal users
@@ -1704,8 +1720,15 @@ function GBL:PlanSort(snapshot, layout, opts)
         table.sort(tabKeys)
         local breakdownParts = {}
         for _, tabIndex in ipairs(tabKeys) do
-            table.insert(breakdownParts,
-                string.format("T%d:%d", tabIndex, perTabOccupied[tabIndex]))
+            -- The skip detail rides the tab it belongs to, and only where
+            -- there is any (#178). Staying quiet at zero is safe here and
+            -- nowhere else, because the total in the bracket below is
+            -- present unconditionally and already carries the zero.
+            local seg = string.format("T%d:%d", tabIndex, perTabOccupied[tabIndex])
+            if (perTabLocked[tabIndex] or 0) > 0 then
+                seg = seg .. string.format("(locked=%d)", perTabLocked[tabIndex])
+            end
+            table.insert(breakdownParts, seg)
         end
         -- The breakdown is built from perTabOccupied, which was filled from
         -- `snapshot` before bags were admitted, so it stays bank-only and no
@@ -1745,11 +1768,14 @@ function GBL:PlanSort(snapshot, layout, opts)
                 coveragePart = " unviewable:" .. table.concat(names, ",")
             end
         end
+        -- locked= is present at zero, on the same #139 rule the bags term
+        -- follows: "checked, nothing skipped" and "not reported" are
+        -- different states and a capture has to tell them apart.
         self:SortInfo(string.format(
             "Sort plan: %.1fms, %d ops, %d deficits, %d unplaced "
-            .. "(input: %d slots / %d tabs)%s%s [%s]",
+            .. "(input: %d slots / %d tabs, locked=%d)%s%s [%s]",
             elapsed, #plan.ops, deficitCount, #plan.unplaced,
-            inputSlots, inputTabs, bagsPart, coveragePart,
+            inputSlots, inputTabs, inputLocked, bagsPart, coveragePart,
             table.concat(breakdownParts, " ")))
 
         -- Which admitted bag stacks stay behind, and why. The term above
