@@ -635,9 +635,9 @@ function GBL:_LayoutEditor_RenderOverflowDetails(parent, tabIndex, writable)
     desc:SetFullWidth(true)
     desc:SetFontObject(GameFontNormalSmall)
     desc:SetText("Overflow tabs hold the bulk stock the sort routes out of " ..
-        "display tabs. With more than one, stock fills them in the order " ..
-        "below. Routing priority is optional: lower fills first, and a tab " ..
-        "without one uses its tab number.")
+        "display tabs. With more than one, they act as one space and stock " ..
+        "fills them in the order below. Routing priority is optional: lower " ..
+        "fills first, and a tab without one uses its tab number.")
     parent:AddChild(desc)
 
     local current = tab.overflowPriority
