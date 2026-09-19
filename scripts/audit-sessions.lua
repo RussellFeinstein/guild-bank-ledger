@@ -111,6 +111,11 @@ local SUMMARY_PATTERNS = {
     "^Sort plan:",
     "^%s+phases:",
     "^%s+demands:",
+    -- The colon right after the word keeps the three overflow lines apart:
+    -- `overflow:` is the fragmentation term (#181), the other two name the
+    -- split items and the #151 clamp.
+    "^%s+overflow:",
+    "^%s+overflow split:",
     "^%s+overflow clamp:",
     "^Sort: pass %d+ left",
     "^Sort: lift guard disabled",
