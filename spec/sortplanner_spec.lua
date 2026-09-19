@@ -3389,13 +3389,14 @@ describe("SortPlanner", function()
 
         it("splits one bag stack across an overflow top-up and a fresh slot", function()
             -- Demand already satisfied in-tab, so the whole bag stack is
-            -- surplus: 5 tops up the partial at T2/1, the remaining 20 opens
-            -- T2/2. One supply, two destinations.
+            -- surplus: 5 tops up the partial at T2/1, the remaining 15 opens
+            -- T2/2. One supply, two destinations. The bag holds exactly one
+            -- stack, because a bag slot cannot hold more (#151).
             local snap = snapshot({
                 [1] = { [1] = { itemID = 100, count = 10 } },
                 [2] = { [1] = { itemID = 100, count = 15 } },
             })
-            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 25 } } })
+            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 20 } } })
             local plan = GBL:PlanSort(snap, oneDemandLayout(10), {
                 bagSnapshot = bags,
                 maxStackByItem = { [100] = 20 },
@@ -3406,7 +3407,7 @@ describe("SortPlanner", function()
                 if op.srcTab == -1 then byDst[op.dstSlot] = op.count end
             end
             assert.equals(5, byDst[1])
-            assert.equals(20, byDst[2])
+            assert.equals(15, byDst[2])
             -- The remainder extends the item's existing group rather than
             -- opening a first-empty: T2/1 already holds item 100, so T2/2
             -- is a right-extension of that run.
@@ -3418,15 +3419,16 @@ describe("SortPlanner", function()
             -- Supply order is bank tabs first, bags appended after. At
             -- maxStack 20 each destination seals, so the order is readable
             -- off which slot each source landed in.
-            -- The bag holds exactly one stack, because a bag slot cannot
-            -- hold more than one: an over-stacked bag supply lands whole in
-            -- a slot Phase 4 then has to swap with the bank's stack, which
-            -- makes this fixture about the pivot loop rather than about
-            -- spill order (#147).
+            -- Both sources hold exactly one stack, because no slot holds
+            -- more than one (#151): an over-stacked bag supply lands whole
+            -- in a slot Phase 4 then has to swap with the bank's stack,
+            -- which makes this fixture about the pivot loop rather than
+            -- about spill order (#147). The demand at T1/1 is already
+            -- satisfied so the bank stack is surplus in full.
             local snap = snapshot({
-                [1] = {},
+                [1] = { [1] = { itemID = 100, count = 10 } },
                 [2] = {},
-                [3] = { [1] = { itemID = 100, count = 30 } },
+                [3] = { [1] = { itemID = 100, count = 20 } },
             })
             local layout = {
                 tabs = {
