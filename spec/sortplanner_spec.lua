@@ -96,6 +96,10 @@ describe("SortPlanner", function()
                     .. tostring(op.itemID))
                 dst.count = dst.count + op.count
             else
+                local m = maxStackByItem and maxStackByItem[op.itemID]
+                assert(not m or op.count <= m,
+                    "plan op opens a slot with more than one stack of itemID "
+                    .. tostring(op.itemID))
                 bank[op.dstTab][op.dstSlot] = { itemID = op.itemID, count = op.count }
             end
         end
@@ -3389,13 +3393,14 @@ describe("SortPlanner", function()
 
         it("splits one bag stack across an overflow top-up and a fresh slot", function()
             -- Demand already satisfied in-tab, so the whole bag stack is
-            -- surplus: 5 tops up the partial at T2/1, the remaining 20 opens
-            -- T2/2. One supply, two destinations.
+            -- surplus: 5 tops up the partial at T2/1, the remaining 15 opens
+            -- T2/2. One supply, two destinations. The bag holds exactly one
+            -- stack, because a bag slot cannot hold more (#151).
             local snap = snapshot({
                 [1] = { [1] = { itemID = 100, count = 10 } },
                 [2] = { [1] = { itemID = 100, count = 15 } },
             })
-            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 25 } } })
+            local bags = bagSnapshot({ [0] = { [1] = { itemID = 100, count = 20 } } })
             local plan = GBL:PlanSort(snap, oneDemandLayout(10), {
                 bagSnapshot = bags,
                 maxStackByItem = { [100] = 20 },
@@ -3406,7 +3411,7 @@ describe("SortPlanner", function()
                 if op.srcTab == -1 then byDst[op.dstSlot] = op.count end
             end
             assert.equals(5, byDst[1])
-            assert.equals(20, byDst[2])
+            assert.equals(15, byDst[2])
             -- The remainder extends the item's existing group rather than
             -- opening a first-empty: T2/1 already holds item 100, so T2/2
             -- is a right-extension of that run.
@@ -3418,15 +3423,16 @@ describe("SortPlanner", function()
             -- Supply order is bank tabs first, bags appended after. At
             -- maxStack 20 each destination seals, so the order is readable
             -- off which slot each source landed in.
-            -- The bag holds exactly one stack, because a bag slot cannot
-            -- hold more than one: an over-stacked bag supply lands whole in
-            -- a slot Phase 4 then has to swap with the bank's stack, which
-            -- makes this fixture about the pivot loop rather than about
-            -- spill order (#147).
+            -- Both sources hold exactly one stack, because no slot holds
+            -- more than one (#151): an over-stacked bag supply lands whole
+            -- in a slot Phase 4 then has to swap with the bank's stack,
+            -- which makes this fixture about the pivot loop rather than
+            -- about spill order (#147). The demand at T1/1 is already
+            -- satisfied so the bank stack is surplus in full.
             local snap = snapshot({
-                [1] = {},
+                [1] = { [1] = { itemID = 100, count = 10 } },
                 [2] = {},
-                [3] = { [1] = { itemID = 100, count = 30 } },
+                [3] = { [1] = { itemID = 100, count = 20 } },
             })
             local layout = {
                 tabs = {
@@ -3455,7 +3461,7 @@ describe("SortPlanner", function()
                 [1] = { [1] = { itemID = 100, count = 10 } },
                 [2] = fullTab(200, 200),
             })
-            local bags = bagSnapshot({ [0] = { [4] = { itemID = 100, count = 50 } } })
+            local bags = bagSnapshot({ [0] = { [4] = { itemID = 100, count = 20 } } })
             local plan = GBL:PlanSort(snap, oneDemandLayout(10), {
                 bagSnapshot = bags,
                 maxStackByItem = { [100] = 20, [200] = 200 },
@@ -3466,7 +3472,7 @@ describe("SortPlanner", function()
             assert.equals(GBL._sortPlannerReasons.OVERFLOW_FULL, u.reason)
             assert.equals(-1, u.tabIndex)
             assert.equals(4, u.slotIndex)
-            assert.equals(50, u.count)
+            assert.equals(20, u.count)
         end)
 
         it("still fills demands from bags when the layout has no overflow tab", function()
@@ -4904,6 +4910,187 @@ describe("SortPlanner", function()
                 if id then order[#order + 1] = tonumber(id) end
             end
             assert.same(SORTED, order)
+        end)
+    end)
+    -- Overflow placement tiers 2 to 4 used to return the caller's whole
+    -- remaining supply, so a supply larger than one stack landed in a single
+    -- empty slot as an illegal over-stack that neither canExecute nor
+    -- applyOpToState could see (both only look at merges into an occupied
+    -- destination). No real bank or bag slot can hold more than a stack, so
+    -- nothing reaches it today; the fixtures here are impossible inputs on
+    -- purpose, which is the only way to reach the branch. Tier 1 already
+    -- clamped to the destination's capacity.
+    describe("overflow tier clamp (#151)", function()
+        local MAX = { [100] = 20 }
+
+        local function sortLines()
+            local out = {}
+            for _, e in ipairs(GBL:GetLog("sort") or {}) do
+                out[#out + 1] = e.message or ""
+            end
+            return out
+        end
+
+        local function findLine(needle)
+            for _, m in ipairs(sortLines()) do
+                if m:find(needle, 1, true) then return m end
+            end
+            return nil
+        end
+
+        local function findEntry(needle)
+            for _, e in ipairs(GBL:GetLog("sort") or {}) do
+                if (e.message or ""):find(needle, 1, true) then return e end
+            end
+            return nil
+        end
+
+        local function layout()
+            return { tabs = { [1] = displayTab({}, {}), [2] = overflow() } }
+        end
+
+        --- Where the display-tab supply landed, in op order. Phase 4 packs
+        --- the tab afterwards, so the applied bank cannot say which tier
+        --- placed a stack; the spill ops can.
+        local function spillDsts(plan)
+            local out = {}
+            for _, op in ipairs(plan.ops) do
+                if op.srcTab == 1 then
+                    out[#out + 1] = { slot = op.dstSlot, count = op.count }
+                end
+            end
+            return out
+        end
+
+        --- Every overflow stack in the applied bank is legal and the item
+        --- total is preserved.
+        local function assertLegal(bank, total)
+            local sum = 0
+            for _, slot in pairs(bank[2] or {}) do
+                assert.equals(100, slot.itemID)
+                assert.is_true(slot.count <= MAX[100],
+                    "overflow holds an over-stack of " .. slot.count)
+                sum = sum + slot.count
+            end
+            assert.equals(total, sum)
+            assert.is_nil(next(bank[1] or {}), "display tab was not emptied")
+        end
+
+        it("first-empty takes one stack at a time from an oversized supply", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 40 } },
+                [2] = {},
+            })
+            local plan = GBL:PlanSort(snap, layout(), { maxStackByItem = MAX })
+            assert.same({ { slot = 1, count = 20 }, { slot = 2, count = 20 } },
+                spillDsts(plan))
+            assertLegal(applyPlan(snap, plan, nil, MAX), 40)
+        end)
+
+        it("extend-right takes one stack at a time from an oversized supply", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 40 } },
+                [2] = { [1] = { itemID = 100, count = 20 } },
+            })
+            local plan = GBL:PlanSort(snap, layout(), { maxStackByItem = MAX })
+            assert.same({ { slot = 2, count = 20 }, { slot = 3, count = 20 } },
+                spillDsts(plan))
+            assert.equals(2, plan.diag.phase1bExtendRight)
+            assertLegal(applyPlan(snap, plan, nil, MAX), 60)
+        end)
+
+        it("extend-left takes one stack at a time from an oversized supply", function()
+            -- A full stack at slot 98 leaves no right-extension, so the
+            -- walk falls to tier 3.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 40 } },
+                [2] = { [98] = { itemID = 100, count = 20 } },
+            })
+            local plan = GBL:PlanSort(snap, layout(), { maxStackByItem = MAX })
+            assert.same({ { slot = 97, count = 20 }, { slot = 96, count = 20 } },
+                spillDsts(plan))
+            assert.equals(2, plan.diag.phase1bExtendLeft)
+            assertLegal(applyPlan(snap, plan, nil, MAX), 60)
+        end)
+
+        it("counts each clamped take and names the count on the plan line", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 50 } },
+                [2] = {},
+            })
+            local plan = GBL:PlanSort(snap, layout(), { maxStackByItem = MAX })
+            -- 50 -> 20 (clamped), 30 -> 20 (clamped), 10 (not clamped).
+            assert.equals(2, plan.diag.overflowClamps)
+            local entry = findEntry("  overflow clamp:")
+            assert.equals("  overflow clamp: 2 take(s) held to max stack",
+                entry and entry.message)
+            -- The line only ever fires on an input no real bank produces,
+            -- which is what WARN means on this channel.
+            assert.equals("WARN", entry and entry.level)
+        end)
+
+        it("is silent when nothing was clamped", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 20 } },
+                [2] = {},
+            })
+            local plan = GBL:PlanSort(snap, layout(), { maxStackByItem = MAX })
+            assert.equals(0, plan.diag.overflowClamps)
+            -- The plan line is there, so the absence below is measured
+            -- rather than an empty log.
+            assert.is_not_nil(findLine("Sort plan:"))
+            assert.is_nil(findLine("  overflow clamp:"),
+                table.concat(sortLines(), "\n"))
+        end)
+
+        it("treats a max stack below one as unknown", function()
+            -- GetItemInfo never reports 0, so only a test override reaches
+            -- this; a clamp to nothing would record the stack as unplaced
+            -- against an empty tab, with the wrong reason.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 5 } },
+                [2] = {},
+            })
+            local plan = GBL:PlanSort(snap, layout(), {
+                maxStackByItem = { [100] = 0 },
+            })
+            assert.equals(0, #plan.unplaced)
+            assert.same({ { slot = 1, count = 5 } }, spillDsts(plan))
+            assert.equals(0, plan.diag.overflowClamps)
+        end)
+
+        it("lets a clamped stack's remainder top up once it is a partial (#146)", function()
+            -- Two whole stacks of one item, walked whole-first, with a
+            -- partial already in overflow. The 50 defers its top-up while
+            -- the 20 is still behind it, is clamped to 20 and 20, and its
+            -- 10 remainder is then a partial: it tops up the existing 10
+            -- rather than opening a slot the deferral was meant to prevent.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 50 },
+                        [2] = { itemID = 100, count = 20 } },
+                [2] = { [1] = { itemID = 100, count = 10 } },
+            })
+            local plan = GBL:PlanSort(snap, layout(), { maxStackByItem = MAX })
+            assert.equals(4, #spillDsts(plan))
+            assert.equals(1, plan.diag.phase1bTopup)
+            local bank = applyPlan(snap, plan, nil, MAX)
+            assertLegal(bank, 80)
+            local stacks = 0
+            for _ in pairs(bank[2]) do stacks = stacks + 1 end
+            assert.equals(4, stacks)
+        end)
+
+        it("leaves an item with unknown max stack unclamped", function()
+            -- Cold cache: the planner already falls back to grouping for
+            -- that item, and a clamp to nothing would place nothing.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 40 } },
+                [2] = {},
+            })
+            local plan = GBL:PlanSort(snap, layout(), { maxStackByItem = {} })
+            assert.equals(1, #plan.ops)
+            assert.equals(40, plan.ops[1].count)
+            assert.equals(0, plan.diag.overflowClamps)
         end)
     end)
 end)

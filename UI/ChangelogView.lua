@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.39.13
+    {"0.39.13", "2026-09-19", {
+        Fixed = {
+            "When the sort planner opens a fresh overflow slot for a supply, it now takes at most one stack and routes the rest to the next slot, the way it already did when topping up a partial. No real bank or bag slot holds more than one stack, so nothing a player does reaches this; it is a guard for the day a bad input does. If it ever fires, the sort log says so with an overflow clamp: warning under the plan line.",
+        },
+    }},
     -- v0.39.12
     {"0.39.12", "2026-09-19", {
         Fixed = {

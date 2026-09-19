@@ -417,6 +417,10 @@ function GBL:PlanSort(snapshot, layout, opts)
         -- counted from plan.unplaced once every phase has run.
         bagIgnored = 0, bagBound = 0, bagLocked = 0, bagNoLink = 0,
         bagStay = 0,
+        -- Takes that overflow tiers 2 to 4 held to one stack (#151). No
+        -- real slot holds more than a stack, so a non-zero count means the
+        -- input was not a real bank.
+        overflowClamps = 0,
     }
     -- Assigned across rather than computed here: the snapshot walk that
     -- produces it runs before this literal, and reordering the two to keep
@@ -1058,27 +1062,48 @@ function GBL:PlanSort(snapshot, layout, opts)
                 end
             end
         end
+        -- Tiers 2 to 4 open a slot the item is not in yet. They share one
+        -- exit so the take is held to one stack in one place (#151); the
+        -- callers loop, so the rest goes to the next pick.
+        local slot, mode
         -- 2. Right-extend an existing same-item group.
         for s = 2, MAX_SLOTS do
             local prev = info[s - 1]
             if not info[s] and prev and prev.itemID == itemID then
-                return s, want, "extend-right"
+                slot, mode = s, "extend-right"
+                break
             end
         end
         -- 3. Left-extend if no right-extension is possible.
-        for s = MAX_SLOTS - 1, 1, -1 do
-            local nextInfo = info[s + 1]
-            if not info[s] and nextInfo and nextInfo.itemID == itemID then
-                return s, want, "extend-left"
+        if not slot then
+            for s = MAX_SLOTS - 1, 1, -1 do
+                local nextInfo = info[s + 1]
+                if not info[s] and nextInfo and nextInfo.itemID == itemID then
+                    slot, mode = s, "extend-left"
+                    break
+                end
             end
         end
         -- 4. First empty slot (new item in this tab).
-        for s = 1, MAX_SLOTS do
-            if not info[s] then
-                return s, want, "first-empty"
+        if not slot then
+            for s = 1, MAX_SLOTS do
+                if not info[s] then
+                    slot, mode = s, "first-empty"
+                    break
+                end
             end
         end
-        return nil
+        if not slot then return nil end
+        -- A max stack below one is treated as unknown, like nil: the
+        -- planner already falls back to grouping for that item, and a
+        -- cap of nothing would place nothing and call the tab full.
+        local take = want
+        local m = getMaxStack(itemID)
+        if type(m) == "number" and m >= 1 and want > m then
+            take = m
+            diag.overflowClamps = diag.overflowClamps + 1
+        end
+        return slot, take, mode
     end
 
     -- Tab-major walk in routing order: all four tiers in one tab before
@@ -1177,6 +1202,13 @@ function GBL:PlanSort(snapshot, layout, opts)
             diag.phase1bUnplaced = diag.phase1bUnplaced + 1
         else
             while sup.available > 0 do
+                -- A deferral covers a whole stack. Once a clamped take has
+                -- left a partial behind (#151), the remainder is walked as
+                -- the partial it now is, or it opens the second partial
+                -- the deferral exists to prevent.
+                if deferTopup and not isWholeStack(sup) then
+                    deferTopup = false
+                end
                 local ovTab, ovSlot, take, mode =
                     pickOverflowSlot(sup.itemID, sup.available, deferTopup)
                 if not ovTab and deferTopup then
@@ -1820,6 +1852,14 @@ function GBL:PlanSort(snapshot, layout, opts)
                 "  demands: %d total (pinned=%d, ext-R=%d, ext-L=%d, first-empty=%d)",
                 totalDemands, diag.demandPinned, diag.demandExtendRight,
                 diag.demandExtendLeft, diag.demandFirstEmpty))
+        end
+        -- Only ever non-zero on an input no real bank produces (#151), so
+        -- the line is the loud part of a guard that should stay silent,
+        -- and WARN is what this channel says about that kind of state.
+        if diag.overflowClamps > 0 and self.SortWarn then
+            self:SortWarn(string.format(
+                "  overflow clamp: %d take(s) held to max stack",
+                diag.overflowClamps))
         end
     end
 
