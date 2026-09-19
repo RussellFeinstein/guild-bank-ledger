@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.39.15
+    {"0.39.15", "2026-09-19", {
+        Removed = {
+            "The scan no longer writes the per-scan line recording what a bank slot with no item link reported. It was a temporary measurement for a count that is not being built: the line read zero on a warm client and zero after a full client relaunch with the bank opened first, which says nothing about what the game answers for such a slot, so the question closed as a decision rather than a finding. The slot read that fed it went back behind the item link check, one call per occupied slot instead of one per slot.",
+        },
+    }},
     -- v0.39.14
     {"0.39.14", "2026-09-19", {
         Added = {
