@@ -592,6 +592,27 @@ describe("Scanner", function()
                 "a link-less slot was counted as a locked skip")
             assert.is_truthy(probeLine():find("both=2", 1, true))
         end)
+
+        -- Found by the mutation pass: adding noteLinkless to the locked
+        -- branch survived the whole suite. A slot that HAS a link is not the
+        -- case this measures, whatever else is true of it, and counting one
+        -- would inflate the denominator with slots the nolink term will never
+        -- describe. The existing "skips locked items" test covers the locked
+        -- counter and says nothing about the probe, so nothing tied the two
+        -- together until now.
+        it("counts no-link slots only, not a linked slot that is locked", function()
+            scanTabWith({
+                [1] = {
+                    itemLink = Helpers.makeItemLink(100, "Locked Item"),
+                    texture = "icon", count = 3, locked = true,
+                },
+            })
+
+            assert.equals(1, GBL:GetLastScanResults()[1].lockedSkips)
+            local m = probeLine()
+            assert.is_truthy(
+                m:find("Scan linkless: 97 no-link slot(s), 0 with data", 1, true), m)
+        end)
     end)
 end)
 
