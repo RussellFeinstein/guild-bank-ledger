@@ -832,6 +832,8 @@ local function issueOp(op)
     -- guard, for the reason bagOpsIssued is: a refused op reached no
     -- destination, and flagging one would wave a later lift from it past
     -- the pre-check on the strength of a write that never happened (#191).
+    -- Under a blown guard this records a fallen-through op's destination
+    -- too; that is the fuse's accepted trade, deliberately not gated here.
     if state and state.wroteThisPass then
         state.wroteThisPass[slotKey(op.dstTab, op.dstSlot)] = true
     end
