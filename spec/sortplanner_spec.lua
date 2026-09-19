@@ -3724,7 +3724,7 @@ describe("SortPlanner", function()
             end
             assert.is_truthy(logged, "expected a plan line with a bags term")
             assert.is_truthy(logged:find(
-                "tabs) bags:1/1(fill=0,spill=1,stay=0,ignored=0,bound=0,locked=0,nolink=0)",
+                "tabs) bags:1/1(stay=0,ignored=0,bound=0,locked=0,nolink=0,fillops=0,spillops=1)",
                 1, true), logged)
         end)
 
@@ -3783,7 +3783,7 @@ describe("SortPlanner", function()
                 })
 
                 assert.is_truthy(findLine(
-                    "tabs) bags:2/7(fill=1,spill=1,stay=0,ignored=1,bound=2,locked=1,nolink=1)"),
+                    "tabs) bags:2/7(stay=0,ignored=1,bound=2,locked=1,nolink=1,fillops=1,spillops=1)"),
                     table.concat(sortLines(), "\n"))
             end)
 
@@ -3791,7 +3791,7 @@ describe("SortPlanner", function()
                 local snap = snapshot({ [1] = {}, [2] = {} })
                 GBL:PlanSort(snap, oneDemandLayout(20), { bagSnapshot = {} })
                 assert.is_truthy(findLine(
-                    "tabs) bags:0/0(fill=0,spill=0,stay=0,ignored=0,bound=0,locked=0,nolink=0)"),
+                    "tabs) bags:0/0(stay=0,ignored=0,bound=0,locked=0,nolink=0,fillops=0,spillops=0)"),
                     table.concat(sortLines(), "\n"))
 
                 GBL:ClearLog("sort")
@@ -3820,7 +3820,7 @@ describe("SortPlanner", function()
                 assert.equals(2, #plan.unplaced)
                 assert.equals(1, plan.diag.bagStay)
                 assert.is_truthy(findLine(
-                    "tabs) bags:1/1(fill=0,spill=0,stay=1,ignored=0,bound=0,locked=0,nolink=0)"),
+                    "tabs) bags:1/1(stay=1,ignored=0,bound=0,locked=0,nolink=0,fillops=0,spillops=0)"),
                     table.concat(sortLines(), "\n"))
             end)
 
@@ -4630,7 +4630,11 @@ describe("SortPlanner", function()
             -- The second cycle's two assignments are named by slot, with a
             -- reason that tells budget exhaustion from a genuine no-pivot.
             assert.equals(2, #plan.unplaced)
-            assert.equals(2, plan.diag.phase2CycleAborts)
+            -- One abort, two assignments stranded by it. The counter used to
+            -- read 2 under the name "aborts", so a capture of a single cycle
+            -- giving up on eight pending assignments said abort=8 (#165).
+            assert.equals(1, plan.diag.phase2CycleAborts)
+            assert.equals(2, plan.diag.phase2StrandedAssignments)
             local at = {}
             for _, u in ipairs(plan.unplaced) do
                 assert.equals(1, u.tabIndex)
@@ -4643,6 +4647,17 @@ describe("SortPlanner", function()
             -- Recording them also stops Phase 3 sweeping to overflow the
             -- very stacks the plan has just said it could not move.
             assert.equals(0, plan.diag.phase3Sweeps)
+
+            -- And the phases line carries both numbers under names that mean
+            -- what they say. Asserted on the rendered string rather than only
+            -- the diag fields, because the string is what a capture holds.
+            local phases
+            for _, e in ipairs(GBL:GetLog("sort") or {}) do
+                local m = e.message or ""
+                if m:find("  phases:", 1, true) then phases = m end
+            end
+            assert.is_truthy(phases, "expected a phases line")
+            assert.is_truthy(phases:find("(abort=1,stranded=2)", 1, true), phases)
         end)
 
         it("never moves what it reported, once Phase 4 runs the loop again", function()
@@ -4681,6 +4696,68 @@ describe("SortPlanner", function()
             local final = applyPlan(snap, plan)
             assert.equals(600, final[2][1].itemID)
             assert.equals(700, final[2][2].itemID)
+        end)
+    end)
+    -- #165 item 5: deficits were the only pairs-ordered output in an otherwise
+    -- fully ordered pipeline, so two runs on identical input could print the
+    -- same deficits in a different order and two people reading one capture
+    -- would write different rows.
+    --
+    -- The itemIDs here are load-bearing and were probed, not guessed. Lua
+    -- iterates small integer keys in ascending order often enough that a
+    -- careless fixture makes the sorted and unsorted implementations agree,
+    -- which is the 2026-09-06 recurrence of the degenerate-fixture entry: a
+    -- sorted histogram whose two keys were already in sorted order pinned
+    -- nothing. This set iterates 2589, 271883, 3371, 190329 under pairs and
+    -- sorts to 2589, 3371, 190329, 271883, so the two differ.
+    describe("deficit ordering (#165)", function()
+        local DEFICITS = { [2589] = 4, [271883] = 2, [3371] = 7, [190329] = 1 }
+        local SORTED = { 2589, 3371, 190329, 271883 }
+
+        --- Guard against the fixture quietly becoming degenerate: if pairs
+        --- ever hands these keys back already ascending, the tests below stop
+        --- proving anything and this says so instead of passing.
+        it("uses a key set whose pairs order is not already sorted", function()
+            local seen = {}
+            for k in pairs(DEFICITS) do seen[#seen + 1] = k end
+            local ascending = true
+            for i = 2, #seen do
+                if seen[i] < seen[i - 1] then ascending = false end
+            end
+            assert.is_false(ascending,
+                "fixture is degenerate: pick itemIDs whose pairs order differs")
+        end)
+
+        it("returns the deficits ascending by itemID", function()
+            local got = {}
+            for _, d in ipairs(GBL:OrderedDeficits({ deficits = DEFICITS })) do
+                got[#got + 1] = d.itemID
+            end
+            assert.same(SORTED, got)
+        end)
+
+        it("carries each count with its itemID", function()
+            for _, d in ipairs(GBL:OrderedDeficits({ deficits = DEFICITS })) do
+                assert.equals(DEFICITS[d.itemID], d.count)
+            end
+        end)
+
+        it("returns an empty list for an empty or absent deficits table", function()
+            assert.same({}, GBL:OrderedDeficits({ deficits = {} }))
+            assert.same({}, GBL:OrderedDeficits({}))
+            assert.same({}, GBL:OrderedDeficits(nil))
+        end)
+
+        it("renders the summary's deficit lines in that order", function()
+            local lines = GBL:SummarizeSortPlan({
+                ops = {}, deficits = DEFICITS, unplaced = {},
+            })
+            local order = {}
+            for _, line in ipairs(lines) do
+                local id = line:match("^deficit: %d+ x item:(%d+)")
+                if id then order[#order + 1] = tonumber(id) end
+            end
+            assert.same(SORTED, order)
         end)
     end)
 end)

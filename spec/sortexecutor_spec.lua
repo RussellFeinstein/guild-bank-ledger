@@ -225,6 +225,12 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.is_false(rec(nil, 5.0))
         end)
 
+        -- Ticks driven straight in, so they are external by definition: nothing
+        -- here is inside the executor's own flush. Before #165 this asserted
+        -- result.rescanTicks, a counter whose name claimed the rescans had
+        -- competed with the pump when every real one was the sort's own flush.
+        -- The pair that tells the two apart is in the "diagnostics say what
+        -- they count" describe; this one just keeps the count wired up.
         it("rescan ticks fired during a sort are counted", function()
             Helpers.populateTab(1, {
                 [1] = { itemID = 100, name = "Flask", count = 5 },
@@ -240,7 +246,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             GBL:_sortNoteRescanTick()
             GBL:_sortNoteRescanTick()
             drainTimers()
-            assert.equals(2, result.rescanTicks)
+            assert.equals(2, result.externalRescans)
         end)
 
         it("stall watchdog re-kicks the pump when no tick has fired in too long", function()
@@ -287,16 +293,41 @@ describe("SortExecutor (fire-and-forget pump)", function()
     describe("periodic rescan throttle (preserves ledger capture without slowing the pump)", function()
         --- Spy-wrap the three rescan APIs as no-op counters so the test env does
         --- not run the real Ledger periodic chain.
-        local function spyRescanFns()
+        ---
+        --- Two behaviours here mirror the real functions rather than stubbing
+        --- them flat, because #165 turns on both. StartPeriodicRescan honours
+        --- bankOpen the way Ledger.lua:476 does, so a bank-close abort leaves
+        --- the rescan stopped and the resume line has something to read.
+        --- RescanTransactionLogs calls _sortNoteRescanTick the way
+        --- Ledger.lua:426 does, so the executor's own flush reaches the
+        --- counter that counts it. A spy that omits either one cannot fail on
+        --- the defect it is standing in for.
+        ---
+        --- `opts.refuse` models the two early returns ABOVE that note
+        --- (not bankOpen, no guildData): the call happens and the note never
+        --- fires, which is exactly the case that separates counting an
+        --- outcome from counting an intent.
+        local function spyRescanFns(opts)
+            opts = opts or {}
             local s = {
                 startCalls = 0, stopCalls = 0, rescanCalls = 0,
                 origStart = GBL.StartPeriodicRescan,
                 origStop = GBL.StopPeriodicRescan,
                 origRescan = GBL.RescanTransactionLogs,
             }
-            GBL.StartPeriodicRescan = function(self) s.startCalls = s.startCalls + 1; self._rescanActive = true end
+            GBL.StartPeriodicRescan = function(self)
+                s.startCalls = s.startCalls + 1
+                if not self.bankOpen then return end
+                self._rescanActive = true
+            end
             GBL.StopPeriodicRescan = function(self) s.stopCalls = s.stopCalls + 1; self._rescanActive = false end
-            GBL.RescanTransactionLogs = function() s.rescanCalls = s.rescanCalls + 1 end
+            GBL.RescanTransactionLogs = function(self)
+                s.rescanCalls = s.rescanCalls + 1
+                if opts.refuse then return end
+                if self.IsSortRunning and self:IsSortRunning() and self._sortNoteRescanTick then
+                    self:_sortNoteRescanTick()
+                end
+            end
             return s
         end
         local function restoreRescanFns(s)
@@ -436,6 +467,186 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.equals(0, s.rescanCalls,
                 "should not flush when rescanWasActive=false")
             restoreRescanFns(s)
+        end)
+    end)
+
+    -- #165: the run summary's rescan term counted the sort's OWN transaction
+    -- log flushes. ExecuteSortPlan stops Ledger's periodic rescan for the
+    -- run, so nothing else calls RescanTransactionLogs, and the figure was
+    -- floor(issued / 15) rather than a measure of anything competing.
+    --
+    -- Both counters live in _sortNoteRescanTick and not at the flush call
+    -- site, which is the point rather than a detail: RescanTransactionLogs
+    -- returns early on `not bankOpen` and on missing guild data BEFORE it
+    -- reaches the note, so counting where the flush is issued would record an
+    -- intent. That is the 2026-08-21 lesson from #90's round line, where
+    -- reply=sent was recorded whenever a reply was merely attempted.
+    describe("diagnostics say what they count (#165)", function()
+        local function spyRescan(opts)
+            opts = opts or {}
+            local s = {
+                startCalls = 0, rescanCalls = 0,
+                origStart = GBL.StartPeriodicRescan,
+                origStop = GBL.StopPeriodicRescan,
+                origRescan = GBL.RescanTransactionLogs,
+            }
+            GBL.StartPeriodicRescan = function(self)
+                s.startCalls = s.startCalls + 1
+                if not self.bankOpen then return end
+                self._rescanActive = true
+            end
+            GBL.StopPeriodicRescan = function(self) self._rescanActive = false end
+            GBL.RescanTransactionLogs = function(self)
+                s.rescanCalls = s.rescanCalls + 1
+                if opts.refuse then return end
+                if self.IsSortRunning and self:IsSortRunning() and self._sortNoteRescanTick then
+                    self:_sortNoteRescanTick()
+                end
+            end
+            drainTimers()
+            s.startCalls, s.rescanCalls = 0, 0
+            return s
+        end
+        local function restore(s)
+            GBL.StartPeriodicRescan = s.origStart
+            GBL.StopPeriodicRescan = s.origStop
+            GBL.RescanTransactionLogs = s.origRescan
+            GBL._rescanActive = false
+        end
+
+        --- Count sort-log entries containing `sub` (plain substring).
+        local function sortLines(sub)
+            local n = 0
+            for _, e in ipairs(GBL:GetLog("sort") or {}) do
+                if e.message and e.message:find(sub, 1, true) then n = n + 1 end
+            end
+            return n
+        end
+
+        --- Build an N-op single-tab plan and populate its source slots.
+        local function nOpPlan(n)
+            local ops, slots = {}, {}
+            for i = 1, n do
+                ops[i] = { op = "move", srcTab = 1, srcSlot = i,
+                           dstTab = 2, dstSlot = i, itemID = 100, count = 5 }
+                slots[i] = { itemID = 100, name = "Flask", count = 5 }
+            end
+            Helpers.populateTab(1, slots)
+            return { ops = ops }
+        end
+
+        it("reports flushes on the summary where it used to report rescans", function()
+            local s = spyRescan()
+            GBL._rescanActive = true
+            local result
+            GBL:ExecuteSortPlan(nOpPlan(30), function(r) result = r end)
+            drainTimers(120)
+            assert.is_true(result.ok, result.reason)
+            assert.equals(1, sortLines("flushes=2"),
+                "30 issued ops at flush-every-15 is two flushes")
+            assert.equals(0, sortLines("rescans="),
+                "the old term named something the sort cannot measure")
+            restore(s)
+        end)
+
+        -- Both counters asserted in each direction. Asserting only the one
+        -- under test lets a mutation that bumps both on every tick survive.
+        it("counts its own flush as a flush and not as an external rescan", function()
+            local s = spyRescan()
+            GBL._rescanActive = true
+            local result
+            GBL:ExecuteSortPlan(nOpPlan(30), function(r) result = r end)
+            drainTimers(120)
+            assert.equals(2, result.flushes)
+            assert.equals(0, result.externalRescans)
+            restore(s)
+        end)
+
+        it("counts a tick arriving outside a flush as external and not as a flush", function()
+            local s = spyRescan()
+            GBL._rescanActive = false  -- nothing the executor stops, so no flushes
+            local result
+            GBL:ExecuteSortPlan(nOpPlan(2), function(r) result = r end)
+            GBL:_sortNoteRescanTick()
+            drainTimers(120)
+            assert.equals(1, result.externalRescans)
+            assert.equals(0, result.flushes)
+            restore(s)
+        end)
+
+        -- The outcome-not-intent pin. The call is made and refused above the
+        -- note, so a flush that never ran reaches neither counter.
+        it("does not count a flush the rescan refused before it began", function()
+            local s = spyRescan({ refuse = true })
+            GBL._rescanActive = true
+            local result
+            GBL:ExecuteSortPlan(nOpPlan(30), function(r) result = r end)
+            drainTimers(120)
+            assert.equals(2, s.rescanCalls, "the executor did issue two flushes")
+            assert.equals(0, result.flushes, "neither of them actually ran")
+            assert.equals(0, result.externalRescans)
+            restore(s)
+        end)
+
+        it("leaves extrescans off the summary at zero and prints it above zero", function()
+            local s = spyRescan()
+            GBL._rescanActive = true
+            GBL:ExecuteSortPlan(nOpPlan(2), function() end)
+            drainTimers(120)
+            assert.equals(0, sortLines("extrescans="),
+                "a quiet run should not carry the term at all")
+            assert.equals(1, sortLines("flushes=0"),
+                "but flushes rides every run, including at zero")
+            GBL:ClearLog("sort")
+
+            GBL._rescanActive = false
+            GBL:ExecuteSortPlan(nOpPlan(2), function() end)
+            GBL:_sortNoteRescanTick()
+            drainTimers(120)
+            assert.equals(1, sortLines("extrescans=1"))
+            restore(s)
+        end)
+
+        it("logs an external rescan once however many arrive", function()
+            local s = spyRescan()
+            GBL._rescanActive = false
+            local result
+            GBL:ExecuteSortPlan(nOpPlan(2), function(r) result = r end)
+            for _ = 1, 10 do GBL:_sortNoteRescanTick() end
+            drainTimers(120)
+            assert.equals(10, result.externalRescans, "all ten counted")
+            assert.equals(1, sortLines("Sort env: a periodic rescan fired"),
+                "but named once, because the count carries the rest")
+            restore(s)
+        end)
+
+        it("says it resumed the periodic rescan when it actually did", function()
+            local s = spyRescan()
+            GBL._rescanActive = true
+            GBL:ExecuteSortPlan(nOpPlan(2), function() end)
+            drainTimers(120)
+            assert.equals(1, s.startCalls)
+            assert.is_true(GBL:IsPeriodicRescanActive())
+            assert.equals(1, sortLines("Sort: resumed the periodic rescan"))
+            restore(s)
+        end)
+
+        -- OnBankClosed clears bankOpen before aborting the sort, so finish's
+        -- StartPeriodicRescan hits Ledger's own `not bankOpen` guard and does
+        -- nothing. The line used to be printed regardless.
+        it("does not claim a resume after a bank-close abort", function()
+            local s = spyRescan()
+            GBL._rescanActive = true
+            local result
+            GBL:ExecuteSortPlan(nOpPlan(4), function(r) result = r end)
+            GBL.bankOpen = false
+            GBL:_SortExecutorOnBankClosed()
+            drainTimers(120)
+            assert.is_false(result.ok)
+            assert.equals(1, s.startCalls, "finish still tries")
+            assert.is_false(GBL:IsPeriodicRescanActive(), "and Ledger refuses")
+            assert.equals(0, sortLines("Sort: resumed the periodic rescan"))
+            restore(s)
         end)
     end)
 
