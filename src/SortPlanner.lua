@@ -385,7 +385,11 @@ function GBL:PlanSort(snapshot, layout, opts)
         phase1bTopup = 0, phase1bExtendRight = 0,
         phase1bExtendLeft = 0, phase1bFirstEmpty = 0,
         phase1bUnplaced = 0,
-        phase2Pivots = 0, phase2CycleAborts = 0,
+        -- phase2CycleAborts counts abort EVENTS; phase2StrandedAssignments
+        -- counts the assignments those aborts gave up on. They used to be one
+        -- field under the first name, so a single cycle abandoning eight
+        -- pending assignments reported itself as eight aborts (#165).
+        phase2Pivots = 0, phase2CycleAborts = 0, phase2StrandedAssignments = 0,
         phase3Sweeps = 0,
         phase4PositionShifts = 0,
         demandPinned = 0, demandExtendRight = 0,
@@ -1321,13 +1325,15 @@ function GBL:PlanSort(snapshot, layout, opts)
                 phase2Debug(string.format(
                     "sort plan Phase 2: no-stuck abort with %d remaining "
                     .. "(unexpected src drift)", remainingCount))
+                diag.phase2CycleAborts = diag.phase2CycleAborts + 1
                 for i = 1, #assignments do
                     if remaining[i] then
                         local a = assignments[i]
                         recordUnplaced(a.srcTab, a.srcSlot, a.itemID, a.count,
                             REASON_CYCLE_NO_PIVOT)
                         remaining[i] = nil
-                        diag.phase2CycleAborts = diag.phase2CycleAborts + 1
+                        diag.phase2StrandedAssignments =
+                            diag.phase2StrandedAssignments + 1
                     end
                 end
                 break
@@ -1361,13 +1367,15 @@ function GBL:PlanSort(snapshot, layout, opts)
                     "sort plan Phase 2: no-pivot abort for cycle at T%d/S%d "
                     .. "(%d remaining ops unplaced)",
                     stuck.dstTab, stuck.dstSlot, remainingCount))
+                diag.phase2CycleAborts = diag.phase2CycleAborts + 1
                 for i = 1, #assignments do
                     if remaining[i] then
                         local a = assignments[i]
                         recordUnplaced(a.srcTab, a.srcSlot, a.itemID, a.count,
                             REASON_CYCLE_NO_PIVOT)
                         remaining[i] = nil
-                        diag.phase2CycleAborts = diag.phase2CycleAborts + 1
+                        diag.phase2StrandedAssignments =
+                            diag.phase2StrandedAssignments + 1
                     end
                 end
                 break
@@ -1427,13 +1435,15 @@ function GBL:PlanSort(snapshot, layout, opts)
             phase2Debug(string.format(
                 "sort plan Phase 2: pivot budget exhausted with %d remaining",
                 remainingCount))
+            diag.phase2CycleAborts = diag.phase2CycleAborts + 1
             for i = 1, #assignments do
                 if remaining[i] then
                     local a = assignments[i]
                     recordUnplaced(a.srcTab, a.srcSlot, a.itemID, a.count,
                         REASON_CYCLE_BUDGET)
                     remaining[i] = nil
-                    diag.phase2CycleAborts = diag.phase2CycleAborts + 1
+                    diag.phase2StrandedAssignments =
+                        diag.phase2StrandedAssignments + 1
                 end
             end
         end
@@ -1708,11 +1718,18 @@ function GBL:PlanSort(snapshot, layout, opts)
         if opts and type(opts.bagSnapshot) == "table" then
             local seen = diag.bagSupplies + diag.bagIgnored + diag.bagBound
                 + diag.bagLocked + diag.bagNoLink
+            -- Two units in one bracket, grouped and named (#165). admitted,
+            -- seen and the five terms after it count SLOTS; fillops and
+            -- spillops count assignments, so one bag stack split across two
+            -- overflow destinations reads as 2. They used to lead the bracket
+            -- under the bare names fill= and spill=, where they read as slots
+            -- like everything beside them.
             bagsPart = string.format(
-                " bags:%d/%d(fill=%d,spill=%d,stay=%d,ignored=%d,bound=%d,locked=%d,nolink=%d)",
-                diag.bagSupplies, seen, diag.bagDemandFills, diag.bagSpills,
+                " bags:%d/%d(stay=%d,ignored=%d,bound=%d,locked=%d,nolink=%d"
+                .. ",fillops=%d,spillops=%d)",
+                diag.bagSupplies, seen,
                 diag.bagStay, diag.bagIgnored, diag.bagBound, diag.bagLocked,
-                diag.bagNoLink)
+                diag.bagNoLink, diag.bagDemandFills, diag.bagSpills)
         end
         -- Coverage term (#137), present whenever coverage was handed in,
         -- including when it hid nothing: "checked, all visible" and "not
@@ -1762,7 +1779,7 @@ function GBL:PlanSort(snapshot, layout, opts)
             self:SortInfo(string.format(
                 "  phases: P0 merge=%d(free=%d) P1a assign=%d "
                 .. "P1b spill=%d(top=%d,r=%d,l=%d,fe=%d,unp=%d) "
-                .. "P2 pivot=%d(abort=%d) P3 sweep=%d P4 pack=%d",
+                .. "P2 pivot=%d(abort=%d,stranded=%d) P3 sweep=%d P4 pack=%d",
                 diag.phase0Merges, diag.phase0SlotsFreed,
                 diag.phase1aAssignments,
                 diag.phase1bTopup + diag.phase1bExtendRight
@@ -1771,6 +1788,7 @@ function GBL:PlanSort(snapshot, layout, opts)
                 diag.phase1bExtendLeft, diag.phase1bFirstEmpty,
                 diag.phase1bUnplaced,
                 diag.phase2Pivots, diag.phase2CycleAborts,
+                diag.phase2StrandedAssignments,
                 diag.phase3Sweeps, diag.phase4PositionShifts))
             self:SortInfo(string.format(
                 "  demands: %d total (pinned=%d, ext-R=%d, ext-L=%d, first-empty=%d)",
@@ -1790,6 +1808,26 @@ end
 ------------------------------------------------------------------------
 -- Summarize a plan for preview UIs and /gbl sortpreview.
 ------------------------------------------------------------------------
+
+--- The plan's deficits, ascending by itemID.
+---
+--- Two surfaces render them (this file's summary and the Sort tab's Deficits
+--- list) and both walked the map with pairs, which is the only unordered
+--- output in an otherwise fully ordered pipeline: two runs on identical input
+--- could print the same deficits in a different order, so two people reading
+--- one capture wrote different rows (#165). One accessor rather than a sort
+--- at each site, for the reason SortReasonText exists: #137 shipped with two
+--- surfaces formatting one field separately and disagreeing about it.
+--- @param plan table|nil
+--- @return table array of { itemID = N, count = N }, ascending by itemID
+function GBL:OrderedDeficits(plan)
+    local out = {}
+    for itemID, count in pairs(plan and plan.deficits or {}) do
+        out[#out + 1] = { itemID = itemID, count = count }
+    end
+    table.sort(out, function(a, b) return a.itemID < b.itemID end)
+    return out
+end
 
 function GBL:SummarizeSortPlan(plan)
     local lines = {}
@@ -1814,8 +1852,9 @@ function GBL:SummarizeSortPlan(plan)
             slotRef(self, op.srcTab, op.srcSlot),
             slotRef(self, op.dstTab, op.dstSlot), suffix))
     end
-    for itemID, count in pairs(plan.deficits or {}) do
-        table.insert(lines, string.format("deficit: %d x item:%d (need more)", count, itemID))
+    for _, d in ipairs(self:OrderedDeficits(plan)) do
+        table.insert(lines, string.format("deficit: %d x item:%d (need more)",
+            d.count, d.itemID))
     end
     for _, u in ipairs(plan.unplaced or {}) do
         -- A bag-origin entry says what actually happens to the items rather

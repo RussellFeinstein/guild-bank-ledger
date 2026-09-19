@@ -258,7 +258,18 @@ function M.measures(groups)
                 end
             elseif message:find("^%s+phases:") then
                 phaseLines = phaseLines + 1
-                local pivot, abort = message:match("P2 pivot=(%d+)%(abort=(%d+)%)")
+                -- No closing paren in the pattern, so both forms of the term
+                -- parse: the pre-#165 `(abort=8)` and the current
+                -- `(abort=1,stranded=8)`. Captures rotate out of
+                -- SavedVariables after ten logins, but a file handed over by a
+                -- guildmate can be older than their client, and the committed
+                -- capture records are older still.
+                --
+                -- phaseZeroAbort means the same thing across the change: the
+                -- old term counted stranded assignments and the new one counts
+                -- abort events, and zero of either is the same event, since
+                -- the counter only moves inside an abort path.
+                local pivot, abort = message:match("P2 pivot=(%d+)%(abort=(%d+)")
                 if abort == "0" then phaseZeroAbort = phaseZeroAbort + 1 end
                 if pivot then
                     local value = tonumber(pivot)
