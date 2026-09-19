@@ -29,6 +29,16 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.39.12
+    {"0.39.12", "2026-09-19", {
+        Fixed = {
+            "The sort log's plan line now says how many bank slots the scan could not read, as locked=N beside the slot and tab counts, with the tab it happened on marked in the per-tab breakdown. The count has existed for a long time but only ever appeared in a different log, so a plan built from 601 slots instead of 603 looked exactly like a plan built from all of them. It is printed even when nothing was skipped, because \"checked, nothing skipped\" and \"not reported\" need to look different.",
+        },
+        Added = {
+            "The scan writes one line per run recording what a bank slot with no item link reported, if anything. A slot like that is skipped exactly as an empty slot is, and nothing in the addon could tell the two apart, so there is no way to count them yet. This measures whether the information is there to count. It is a temporary line and it goes when the count lands.",
+            "Reading a sort log from before this release: the plan line has no locked= term at all, so a missing term means an older version rather than a scan that read everything.",
+        },
+    }},
     -- v0.39.11
     {"0.39.11", "2026-09-19", {
         Fixed = {

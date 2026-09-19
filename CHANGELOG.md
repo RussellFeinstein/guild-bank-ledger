@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.39.12] - 2026-09-19
 
 ### Fixed
 - The sort log's plan line now says how many bank slots the scan could not read, as `locked=N` beside the slot and tab counts, with the tab it happened on marked in the per-tab breakdown. The count has existed for a long time but only ever appeared in a different log, so a plan built from 601 slots instead of 603 looked exactly like a plan built from all of them. It is printed even when nothing was skipped, because "checked, nothing skipped" and "not reported" need to look different.
