@@ -99,10 +99,22 @@ local function netPingStr()
     return string.format("ping home %dms / world %dms", lagHome or -1, lagWorld or -1)
 end
 
---- The currently-viewed guild bank tab, stamped on the per-op line. Pure read.
+--- The currently-viewed guild bank tab, or nil when the client cannot say.
+--- Pure read. A read of any other tab's slots answers as of that tab's last
+--- query, which is what liftFromBank's ledger check is about (#191).
+local function viewedTab()
+    return _G.GetCurrentGuildBankTab and _G.GetCurrentGuildBankTab() or nil
+end
+
+--- The viewed tab as the per-op line stamps it.
 local function viewedTabStr()
-    local v = _G.GetCurrentGuildBankTab and _G.GetCurrentGuildBankTab()
+    local v = viewedTab()
     return v and ("T" .. tostring(v)) or "T?"
+end
+
+--- Key for the per-pass ledger of slots this run has written (#191).
+local function slotKey(tabIndex, slotIndex)
+    return tostring(tabIndex) .. "/" .. tostring(slotIndex)
 end
 
 ------------------------------------------------------------------------
@@ -122,6 +134,9 @@ local stallTicker = nil
 --   opIndex = N,                 -- next op to issue in the current pass
 --   passes = P, lastPassOps = N, residual = R,
 --   totalIssued = N, cursorStuck = N, skippedOps = N,
+--   staleSourceLifts = N,        -- bank lifts taken on the plan's word (#191)
+--   wroteThisPass = { ["T/S"] = true },  -- slots this pass has written; reset
+--                                        -- by startPass, read by liftFromBank
 --   lastOutcome* = the previous op's result, riding forward onto the next
 --                  step message and cleared by startPass (#162),
 --   pumping = bool,              -- true while a pass is issuing; the cancel
@@ -348,6 +363,7 @@ function finish(ok, reason)
         bagSkipReasons = state.bagSkipReasons or {},
         skippedOps = state.skippedOps or 0,
         skipReasons = state.skipReasons or {},
+        staleSourceLifts = state.staleSourceLifts or 0,
         liftProbe = state.liftProbe,
         liftGuardBlown = state.liftGuardBlown,
         -- nil rather than 0 when no replan ran: the caller has to be able to
@@ -383,13 +399,21 @@ function finish(ok, reason)
     if (state.externalRescans or 0) > 0 then
         extTerm = string.format(" extrescans=%d", state.externalRescans)
     end
+    -- Bank lifts taken on the plan's word because the read was the run's
+    -- own write on a tab that was off screen (#191). Absent at zero like
+    -- skipped=; present whenever a pivot sat on a tab that was not on
+    -- screen, which is what the next capture reads it for.
+    local staleTerm = ""
+    if (state.staleSourceLifts or 0) > 0 then
+        staleTerm = string.format(" stalesrc=%d", state.staleSourceLifts)
+    end
     GBL:SortInfo(string.format(
         "Sort: %s in %.1fs - %d passes, %d ops issued, %d remaining, avg %.2fs/op"
-        .. " (cursorStuck=%d stalls=%d flushes=%d%s%s)%s",
+        .. " (cursorStuck=%d stalls=%d flushes=%d%s%s%s)%s",
         ok and "complete" or ("aborted (" .. (reason or "?") .. ")"),
         elapsed, passes, issued, failed,
         avg, state.cursorStuck or 0, state.stallCount or 0, state.flushes or 0,
-        extTerm, skipTerm, skipHist))
+        staleTerm, extTerm, skipTerm, skipHist))
 
     -- Bag deposits get their own line rather than a rider on the summary
     -- above: what is still sitting in the user's bags is the thing they
@@ -576,33 +600,89 @@ local function liftFromBag(op)
     return true
 end
 
+--- Lift a bank source the run itself wrote on a tab that is off screen, on
+--- the plan's word rather than the read's (#191). See liftFromBank's header
+--- for why the read cannot be trusted there. The label is the only thing
+--- consulted: "split" takes `want` and anything else takes the stack whole,
+--- which is opLabel's rule read back. The read is logged beside the plan so
+--- the next capture can say what would have been refused.
+---
+--- @return boolean lifted, string|nil reason
+local function liftPerPlan(op, have, want)
+    state.staleSourceLifts = (state.staleSourceLifts or 0) + 1
+    local label = (op.op == "split") and "split" or "move"
+    -- INFO rather than WARN: this is the fix working, not a refusal. The
+    -- read rides along so the next capture can compare it with what the run
+    -- put there, which is the measurement #191 asks for.
+    GBL:SortInfo(string.format(
+        "Sort op %d/%d: stale source %s (written this pass, viewing %s)"
+        .. " reads %d, lifting %d per plan as %s",
+        state.opIndex or 0, #state.plan.ops,
+        GBL:FormatSlotRef(op.srcTab, op.srcSlot), viewedTabStr(),
+        have, want, label))
+    if label == "split" then
+        if not _G.SplitGuildBankItem then return false, "no-api" end
+        SplitGuildBankItem(op.srcTab, op.srcSlot, want)
+    else
+        PickupGuildBankItem(op.srcTab, op.srcSlot)
+    end
+    return true
+end
+
 --- Lift a bank source slot. Shaped like liftFromBag above, and for the same
 --- reasons: the split is decided from what the slot holds NOW rather than from
 --- the plan-time `op.op`, and a slot that cannot satisfy the op is refused
 --- rather than picked up whole, because the destination was sized for
 --- `op.count` and the destination half cannot tell the difference (#169).
 ---
---- Deciding from the slot is also what makes a mislabelled partial harmless
---- here (#161): Phase 3 can emit a partial take labelled "move", and nothing
---- in this path reads the label any more.
+--- Deciding from the slot is what makes a mislabelled partial harmless here
+--- (#161): Phase 3 can emit a partial take labelled "move", and this path
+--- reads the label in exactly one case, liftPerPlan below.
 ---
 --- These checks are reason quality rather than safety. The cursor guard in
 --- issueOp is what makes a failed lift safe, and it covers the cases no
 --- pre-check can see: a split the server refuses, a slot locked between the
---- read and the call, a read that was stale in the other direction.
+--- read and the call, a read that was stale HIGH.
+---
+--- A read that is stale LOW is the case nothing covered, and it has one
+--- producer (#191). A tab the client is not viewing answers a slot read as
+--- of that tab's last query, so a slot this run wrote earlier in the pass,
+--- on a tab that is off screen, reads whatever it held when that tab was
+--- last queried or viewed. The 2026-09-19 capture refused eight ops in that
+--- shape and none outside it, every one a pivot on the overflow tab with
+--- another tab on screen, and a three-op pivot cycle lost its third op
+--- every time. So a source in state.wroteThisPass whose tab is not the
+--- viewed one is not judged by the count: liftPerPlan lets the plan's
+--- label decide split or whole (the single-writer label #161 made, pinned
+--- by applyPlan's assertion in spec/sortplanner_spec.lua), logs the read
+--- beside it so a capture can say what would have been refused, and leaves
+--- a lift that really fails to the guard. The ledger is per pass because
+--- every pass after the first starts with a full scan that re-queries
+--- every tab, and it is written past the guard, so a refused op flags
+--- nothing.
 ---
 --- @return boolean lifted, string|nil reason, string|nil detail
 local function liftFromBank(op)
     if not _G.GetGuildBankItemInfo then return false, "no-api" end
     local _, have = _G.GetGuildBankItemInfo(op.srcTab, op.srcSlot)
     have = have or 0
+    local want = op.count or 0
+
+    -- The run's own write, off screen: the read is the last query's, so the
+    -- plan decides and the read is only reported (#191). A want of zero
+    -- stays with the checks below, which name it.
+    local ledger = state and state.wroteThisPass
+    if want > 0 and ledger and ledger[slotKey(op.srcTab, op.srcSlot)]
+       and viewedTab() ~= op.srcTab then
+        return liftPerPlan(op, have, want)
+    end
+
     if have <= 0 then return false, "empty" end
 
     -- A want of zero is a malformed op rather than a short stack, but it
     -- cannot reach here from the planner and the warning prints the wanted
     -- count anyway, so it shares the reason rather than widening the
     -- vocabulary with a value nothing can produce.
-    local want = op.count or 0
     if have < want or want <= 0 then
         return false, "short-stack", "have " .. tostring(have)
     end
@@ -748,6 +828,15 @@ local function issueOp(op)
     end
 
     PickupGuildBankItem(op.dstTab, op.dstSlot)
+    -- The destination is now the run's own write. Recorded here, past the
+    -- guard, for the reason bagOpsIssued is: a refused op reached no
+    -- destination, and flagging one would wave a later lift from it past
+    -- the pre-check on the strength of a write that never happened (#191).
+    -- Under a blown guard this records a fallen-through op's destination
+    -- too; that is the fuse's accepted trade, deliberately not gated here.
+    if state and state.wroteThisPass then
+        state.wroteThisPass[slotKey(op.dstTab, op.dstSlot)] = true
+    end
     -- A destination holding a different item swaps rather than places, which
     -- hands the displaced stack back on the cursor. Counted off GetCursorInfo
     -- for the same reason the guard reads it: cursorStuck read 0 in every
@@ -888,6 +977,9 @@ local function startPass(plan)
     state.lastOutcomeFailed = nil
     state.lastOutcomeReason = nil
     state.lastOutcomeDetail = nil
+    -- Every pass follows a full scan that re-queried every tab, so what the
+    -- run wrote last pass reads true again and the ledger starts empty (#191).
+    state.wroteThisPass = {}
     noteProgress()
     -- After pass 1 the plan changed; tell SortView to rebuild its move list.
     if state.passes > 1 then
@@ -1030,6 +1122,7 @@ function GBL:ExecuteSortPlan(plan, onComplete, opts)
         bagSkipReasons = {},
         skippedOps = 0,
         skipReasons = {},
+        staleSourceLifts = 0,
         opIndex = 1,
         passes = 0,
         lastPassOps = nil,
