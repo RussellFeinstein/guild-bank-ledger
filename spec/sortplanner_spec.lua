@@ -76,7 +76,11 @@ describe("SortPlanner", function()
             -- and not a second code path on purpose: #169 stopped the
             -- executor branching on op.op, and liftFromBank now takes exactly
             -- op.count whatever the label says, so the simulation below is
-            -- faithful precisely because it is label-blind.
+            -- faithful precisely because it is label-blind. #191 put one
+            -- branch on the label back, for a source the run wrote on a tab
+            -- that is off screen, where the slot read is known stale; this
+            -- assertion is what makes that branch safe, so it is load-bearing
+            -- at execution as well as here.
             local expectedLabel = (src.count > op.count) and "split" or "move"
             assert(op.op == expectedLabel,
                 "plan op label " .. tostring(op.op) .. " should be "

@@ -1890,15 +1890,80 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.equals(5, countItem(2, 100))
         end)
 
-        -- #160's re-audit: WoW pushes slot updates for the viewed tab only,
-        -- so a non-viewed tab reads back whatever the last query saw. A slot
-        -- an earlier op FILLED therefore reads empty, and the old code turned
-        -- that into a whole-stack pickup into a slot sized for part of it.
-        -- Refusing hands it to the next pass, which re-scans first.
+        -- #191, THE PIVOT ON THE TAB THAT IS NOT ON SCREEN. A tab the client
+        -- is not viewing answers a slot read as of that tab's last query, so
+        -- a slot the run itself wrote earlier in the pass reads whatever it
+        -- held when the tab was last queried or viewed. The 2026-09-19
+        -- capture (docs/sort-logs/2026-09-19-overflow-baseline-and-unviewed-
+        -- tab-refusals.md) refused eight ops in that one shape and none
+        -- outside it: run A parked six stacks in T7/69 with T6 on screen and
+        -- every lift back out read `have 1`, the count of a shard that had
+        -- sat there when T7 was last on screen. The fixture copies that
+        -- shape: the pivot is occupied when its tab is snapshotted, emptied
+        -- and refilled with the view elsewhere, then lifted.
         --
-        -- This is the first spec anywhere to set viewGatedReads. The flag has
-        -- been wired since v0.32.8 and never exercised.
-        it("refuses a stale-empty read on a tab the client is not viewing", function()
+        -- The pre-check cannot tell a stale-low read from a real short
+        -- stack, so for a slot the run wrote on a tab that is off screen it
+        -- steps aside and the plan's label decides split or whole; the
+        -- cursor guard still catches a lift that really fails. The split
+        -- counter is what pins "whole": the mock clamps a split to the stack,
+        -- so a full-count split leaves the same state as a pickup.
+        it("lifts a stack the run parked on a tab it is not viewing", function()
+            MockWoW.guildBank.viewGatedReads = true
+            finally(function() MockWoW.guildBank.viewGatedReads = false end)
+
+            Helpers.populateTab(2, { [5] = { itemID = 200, name = "Shard", count = 1 } })
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 14 } })
+            -- Snapshot tab 2 with the shard in the pivot, then view tab 1.
+            _G.QueryGuildBankTab(2)
+            MockWoW.guildBank.currentTab = 1
+
+            local splits = 0
+            local realSplit = _G.SplitGuildBankItem
+            _G.SplitGuildBankItem = function(...) splits = splits + 1; return realSplit(...) end
+            finally(function() _G.SplitGuildBankItem = realSplit end)
+
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    -- Empties the pivot. Off screen, so the snapshot keeps
+                    -- saying Shard x1.
+                    { op = "move", srcTab = 2, srcSlot = 5,
+                      dstTab = 1, dstSlot = 2, itemID = 200, count = 1 },
+                    -- Parks the flask stack in the pivot, invisibly.
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 5, itemID = 100, count = 14 },
+                    -- Lifts it back out. The read says 1; the run put 14 there.
+                    { op = "move", srcTab = 2, srcSlot = 5,
+                      dstTab = 1, dstSlot = 3, itemID = 100, count = 14 },
+                },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(0, result.skippedOps,
+                "the run's own write must not be refused on a stale read")
+            assert.equals(14, countItem(1, 100), "the flask stack should reach T1/3")
+            assert.equals(0, countItem(2, 100), "the pivot should be empty again")
+            assert.equals(1, countItem(1, 200), "the shard stays where op 1 put it")
+            assert.equals(0, splits, "a move label lifts the whole stack")
+            assert.equals(1, result.staleSourceLifts)
+            local line = findLine("stale source T2/5")
+            assert.is_not_nil(line, "the bypass should name the slot it did not trust")
+            assert.is_truthy(line:find("reads 1", 1, true), line)
+            assert.is_truthy(line:find("lifting 14", 1, true), line)
+            assert.is_not_nil(findLine("stalesrc=1"),
+                "the run summary should count the bypass")
+        end)
+
+        -- The `empty` shape of the same finding: the pivot's last query
+        -- showed it empty (a pass-start scan, in run A pass 2 and run D), the
+        -- run fills it off screen, and the lift back reads nothing. Until
+        -- #191 this test asserted the refusal, on the reasoning that the
+        -- next pass re-scans first and finishes the job. It does not: the
+        -- replan builds the same pivot cycle on the same off-screen tab and
+        -- refuses it again, and run A stopped with 23 moves remaining that
+        -- way. A split label takes the part the plan asked for.
+        it("lifts part of a stack the run put on a tab it is not viewing", function()
             MockWoW.guildBank.viewGatedReads = true
             finally(function() MockWoW.guildBank.viewGatedReads = false end)
 
@@ -1921,11 +1986,159 @@ describe("SortExecutor (fire-and-forget pump)", function()
             }, function(r) result = r end)
             drainTimers()
 
+            assert.equals(0, result.skippedOps)
+            assert.equals(20, countItem(2, 100), "the split leaves the rest in the pivot")
+            assert.equals(10, countItem(1, 100), "the destination receives the part asked for")
+            assert.is_nil(findLine("skipped: T2/5 empty"))
+            assert.is_not_nil(findLine("stale source T2/5"))
+        end)
+
+        -- The ledger's scope. A source the run did not write reads through
+        -- the pre-check as before, stale or not: nothing in the executor can
+        -- tell a slot the player filled from one the last query missed, and
+        -- the refusal is the reason a capture reader wants named there.
+        it("still refuses a source it did not write on a tab it is not viewing", function()
+            MockWoW.guildBank.viewGatedReads = true
+            finally(function() MockWoW.guildBank.viewGatedReads = false end)
+
+            -- Snapshot tab 2 empty, then fill T2/5 behind the gate: the
+            -- player's doing, not the run's.
+            _G.QueryGuildBankTab(2)
+            Helpers.populateTab(2, { [5] = { itemID = 100, name = "Flask", count = 30 } })
+            MockWoW.guildBank.currentTab = 1
+
+            local result
+            GBL:ExecuteSortPlan({
+                ops = { { op = "move", srcTab = 2, srcSlot = 5,
+                          dstTab = 1, dstSlot = 1, itemID = 100, count = 30 } },
+            }, function(r) result = r end)
+            drainTimers()
+
             assert.equals(1, result.skippedOps)
-            assert.equals(30, countItem(2, 100), "the stack should stay where op 1 put it")
-            assert.equals(0, countItem(1, 100), "the destination should not receive a whole stack")
-            assert.is_not_nil(findLine("skipped: T2/5 empty"),
-                "a stale-empty read should be named as empty")
+            assert.equals(1, (result.skipReasons or {})["empty"])
+            assert.equals(0, result.staleSourceLifts or 0)
+            assert.is_nil(findLine("stalesrc="), "the term is absent at zero")
+        end)
+
+        -- The other half of the proxy. A slot the run wrote on the tab that
+        -- IS on screen reads live, so the pre-check keeps its say there: the
+        -- player can take from a viewed slot mid-run and the read shows it.
+        -- Tab 1 is off screen in this one and needs a snapshot of its own,
+        -- or op 1 refuses `empty` before the viewed-tab lift ever runs.
+        it("reads the source live when its tab is on screen, written or not", function()
+            MockWoW.guildBank.viewGatedReads = true
+            finally(function() MockWoW.guildBank.viewGatedReads = false end)
+
+            Helpers.populateTab(1, { [1] = { itemID = 100, name = "Flask", count = 30 } })
+            _G.QueryGuildBankTab(1)
+            MockWoW.guildBank.currentTab = 2
+
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 5, itemID = 100, count = 30 },
+                    { op = "split", srcTab = 2, srcSlot = 5,
+                      dstTab = 1, dstSlot = 1, itemID = 100, count = 10 },
+                },
+            }, function(r) result = r end)
+            -- Op 1 ran on the way in. The player now takes 27 of the 30 out
+            -- of the viewed slot before op 2's tick.
+            assert.equals(30, countItem(2, 100), "fixture: op 1 should have landed")
+            MockWoW.guildBank.tabs[2].slots[5].count = 3
+            drainTimers()
+
+            assert.equals(1, result.skippedOps)
+            assert.is_not_nil(findLine("skipped: T2/5 short-stack (have 3)"),
+                "a live read on the viewed tab keeps the pre-check")
+            assert.equals(0, result.staleSourceLifts or 0)
+        end)
+
+        -- The ledger is per pass, because every pass after the first begins
+        -- with a full scan that re-queries every tab: what the run wrote last
+        -- pass is what this pass's plan was built from, and the read is good
+        -- again. Two passes, the second plan stubbed in.
+        it("starts each pass with an empty ledger", function()
+            MockWoW.guildBank.viewGatedReads = true
+            finally(function() MockWoW.guildBank.viewGatedReads = false end)
+
+            Helpers.populateTab(1, {
+                [1] = { itemID = 100, name = "Flask", count = 5 },
+                [2] = { itemID = 100, name = "Flask", count = 5 },
+            })
+            _G.QueryGuildBankTab(2)
+            MockWoW.guildBank.currentTab = 1
+
+            local realPlanSort = GBL.PlanSort
+            local calls = 0
+            GBL.PlanSort = function()
+                calls = calls + 1
+                if calls == 1 then
+                    return {
+                        ops = { { op = "move", srcTab = 2, srcSlot = 5,
+                                  dstTab = 1, dstSlot = 1, itemID = 100, count = 5 } },
+                        deficits = {}, unplaced = {},
+                    }
+                end
+                return { ops = {}, deficits = {}, unplaced = {} }
+            end
+            finally(function() GBL.PlanSort = realPlanSort end)
+
+            local result
+            GBL:ExecuteSortPlan({
+                -- Pass 1 writes T2/5 and T2/6 off screen. Pass 2 lifts T2/5
+                -- back after the end-of-pass scan has re-queried tab 2. Two
+                -- ops here so a one-op replan reads as progress rather than
+                -- as the non-decreasing stop.
+                ops = {
+                    { op = "move", srcTab = 1, srcSlot = 1,
+                      dstTab = 2, dstSlot = 5, itemID = 100, count = 5 },
+                    { op = "move", srcTab = 1, srcSlot = 2,
+                      dstTab = 2, dstSlot = 6, itemID = 100, count = 5 },
+                },
+            }, function(r) result = r end, { layout = { tabs = {} } })
+            drainTimers(120)
+
+            assert.equals(2, calls, "fixture needs a second pass")
+            assert.equals(2, result.passes)
+            assert.equals(0, result.skippedOps)
+            assert.equals(5, countItem(1, 100), "pass 2 should lift T2/5 back")
+            assert.equals(5, countItem(2, 100), "T2/6 stays parked")
+            assert.equals(0, result.staleSourceLifts or 0,
+                "pass 2's source was scanned at the start of that pass, so its read is trusted")
+        end)
+
+        -- Only an op that reached its destination is a write. The guard
+        -- refuses after the lift and before the drop, so that op's
+        -- destination holds nothing new, and a later lift from it is judged
+        -- by the read rather than waved through as the run's own work.
+        it("flags no destination for an op the guard refused", function()
+            MockWoW.guildBank.viewGatedReads = true
+            finally(function() MockWoW.guildBank.viewGatedReads = false end)
+
+            -- T2/5 is snapshotted full and emptied behind the gate, so its
+            -- lift passes the pre-check and leaves the cursor empty.
+            Helpers.populateTab(2, { [5] = { itemID = 100, name = "Flask", count = 30 } })
+            _G.QueryGuildBankTab(2)
+            MockWoW.guildBank.currentTab = 1
+            MockWoW.guildBank.tabs[2].slots[5] = nil
+
+            local result
+            GBL:ExecuteSortPlan({
+                ops = {
+                    { op = "split", srcTab = 2, srcSlot = 5,
+                      dstTab = 2, dstSlot = 7, itemID = 100, count = 10 },
+                    { op = "move", srcTab = 2, srcSlot = 7,
+                      dstTab = 1, dstSlot = 1, itemID = 100, count = 10 },
+                },
+            }, function(r) result = r end)
+            drainTimers()
+
+            assert.equals(2, result.skippedOps)
+            assert.equals(1, (result.skipReasons or {})["lift-failed"])
+            assert.equals(1, (result.skipReasons or {})["empty"],
+                "op 2's source was never written, so the pre-check judges it")
+            assert.equals(0, result.staleSourceLifts or 0)
         end)
 
         -- THE #169 RESIDUAL CASE, guarded again and this time on a measured
