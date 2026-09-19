@@ -233,16 +233,33 @@ local function stopStallWatchdog()
     stallTicker = nil
 end
 
---- Called by Ledger's RescanTransactionLogs when a periodic rescan fires while
---- a sort runs. Counts the ticks (surfaced in the finish summary) and logs the
---- first 40 so a capture shows whether rescans competed with the sort.
+--- Called by Ledger's RescanTransactionLogs whenever a rescan actually starts
+--- while a sort runs. That covers the executor's own transaction-log flush and
+--- any rescan begun from outside, and this is the only place either is counted.
+---
+--- Counting here rather than at the flush call site is the whole point (#165).
+--- RescanTransactionLogs returns early on a closed bank and on missing guild
+--- data BEFORE it reaches this call, so a counter at the call site records an
+--- intent rather than an outcome, which is #90's reply=sent under another name.
+---
+--- The executor stops Ledger's ticker for the run, so an external rescan is an
+--- anomaly rather than routine: the reachable path is the Auto re-scan checkbox
+--- (UI/UI.lua) ticked mid-sort on a run that began with the rescan already off,
+--- which is the one case the stop never covers because there was nothing to
+--- stop. It is named once and counted after that. The old code logged the first
+--- 40 under a name that claimed they competed with the pump, and every one of
+--- them was the sort's own flush.
 function GBL:_sortNoteRescanTick()
     if not state then return end
-    state.rescanTicks = (state.rescanTicks or 0) + 1
-    if state.rescanTicks <= 40 then
-        GBL:SortInfo(string.format(
-            "Sort env: periodic rescan fired during sort (#%d, op %d/%d)",
-            state.rescanTicks, state.opIndex or 0, #state.plan.ops))
+    if state.inOwnFlush then
+        state.flushes = (state.flushes or 0) + 1
+        return
+    end
+    state.externalRescans = (state.externalRescans or 0) + 1
+    if state.externalRescans == 1 then
+        GBL:SortWarn(
+            "Sort env: a periodic rescan fired during the sort (op %d/%d)",
+            state.opIndex or 0, #state.plan.ops)
     end
 end
 
@@ -319,7 +336,8 @@ function finish(ok, reason)
         replans = math.max(0, passes - 1),
         passes = passes,
         cursorStuck = state.cursorStuck,
-        rescanTicks = state.rescanTicks,
+        flushes = state.flushes or 0,
+        externalRescans = state.externalRescans or 0,
         hitchCount = state.hitchCount,
         hitchMaxMs = state.hitchMaxMs,
         hitchByBucket = state.hitchByBucket,
@@ -358,13 +376,20 @@ function finish(ok, reason)
         table.sort(parts)
         skipHist = " [" .. table.concat(parts, " ") .. "]"
     end
+    -- extrescans rides only when non-zero: under the stop-the-ticker design
+    -- it is normally 0, and a term that is always 0 trains a reader to skip
+    -- the one capture where it is not (#165).
+    local extTerm = ""
+    if (state.externalRescans or 0) > 0 then
+        extTerm = string.format(" extrescans=%d", state.externalRescans)
+    end
     GBL:SortInfo(string.format(
         "Sort: %s in %.1fs - %d passes, %d ops issued, %d remaining, avg %.2fs/op"
-        .. " (cursorStuck=%d stalls=%d rescans=%d%s)%s",
+        .. " (cursorStuck=%d stalls=%d flushes=%d%s%s)%s",
         ok and "complete" or ("aborted (" .. (reason or "?") .. ")"),
         elapsed, passes, issued, failed,
-        avg, state.cursorStuck or 0, state.stallCount or 0, state.rescanTicks or 0,
-        skipTerm, skipHist))
+        avg, state.cursorStuck or 0, state.stallCount or 0, state.flushes or 0,
+        extTerm, skipTerm, skipHist))
 
     -- Bag deposits get their own line rather than a rider on the summary
     -- above: what is still sitting in the user's bags is the thing they
@@ -452,11 +477,20 @@ function finish(ok, reason)
     stopStallWatchdog()
     -- Restore the user's periodic rescan if we paused it at sort start. Ledger's
     -- StartPeriodicRescan self-guards on bankOpen / _initialScanComplete /
-    -- rescanEnabled / already-active (Ledger.lua:472-475), so a bank-close exit
-    -- safely no-ops here.
+    -- rescanEnabled / already-active, so a bank-close exit safely no-ops here.
+    --
+    -- The line reports the outcome, not the attempt (#165). OnBankClosed clears
+    -- bankOpen BEFORE aborting the sort, so on that path the restart no-ops and
+    -- the old unconditional line claimed a resume that never happened. Reading
+    -- IsPeriodicRescanActive covers all four of those guards without restating
+    -- any of them, which is what keeps it from drifting when they change.
+    -- Silence when it did not resume: the abort reason is already on the
+    -- summary line above, so a second line explaining it is noise.
     if state.rescanWasActive and GBL.StartPeriodicRescan then
         GBL:StartPeriodicRescan()
-        GBL:SortInfo("Sort: resumed the periodic rescan")
+        if GBL.IsPeriodicRescanActive and GBL:IsPeriodicRescanActive() then
+            GBL:SortInfo("Sort: resumed the periodic rescan")
+        end
     end
     state = nil
     if cb then
@@ -795,11 +829,18 @@ pumpOne = function()
         -- synchronous QueryGuildBankLog burst.
         if state.rescanWasActive
            and state.totalIssued % TRANSACTION_LOG_FLUSH_OPS == 0 then
+            -- Flag the call so _sortNoteRescanTick can tell our own flush from
+            -- a rescan started elsewhere. The note fires synchronously near the
+            -- top of RescanTransactionLogs, before its debounce, so the flag
+            -- cannot outlive this pcall. The clear is guarded because a
+            -- teardown inside the call would leave `state` nil.
+            state.inOwnFlush = true
             pcall(function()
                 if GBL.RescanTransactionLogs then
                     GBL:RescanTransactionLogs(function() end)
                 end
             end)
+            if state then state.inOwnFlush = false end
         end
     else
         local why = skipReason or "refused"
@@ -1006,7 +1047,9 @@ function GBL:ExecuteSortPlan(plan, onComplete, opts)
         onComplete = onComplete,
         startedAt = GetTime(),
         lastProgressAt = GetTime(),
-        rescanTicks = 0,
+        flushes = 0,
+        externalRescans = 0,
+        inOwnFlush = false,
         syncActiveAtStart = (GBL.IsSyncing and GBL:IsSyncing()) and true or false,
         hitchCount = 0,
         hitchMaxMs = 0,

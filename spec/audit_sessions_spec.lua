@@ -294,6 +294,38 @@ describe("audit session reader", function()
             assert.equals(1, m.phaseZeroAbort)
         end)
 
+        -- #165 split the phases line's abort term into an abort count and a
+        -- stranded-assignment count. The reader has to keep parsing both, and
+        -- the committed fixture cannot prove it: that file is a frozen
+        -- recording of a real pre-#165 capture, on the same principle as
+        -- spec/fixtures/wire, so it carries the old form forever and would
+        -- stay green while the live format stopped parsing. These two cases
+        -- sit beside it rather than replacing it.
+        local function measuresOfLines(...)
+            local lines = {}
+            for _, message in ipairs({ ... }) do
+                lines[#lines + 1] = { message = message }
+            end
+            return Reader.measures({ { lines = lines } })
+        end
+
+        it("reads the abort count from the pre-#165 phases line", function()
+            local m = measuresOfLines(
+                "  phases: P0 merge=0(free=0) P2 pivot=4(abort=0) P4 pack=2",
+                "  phases: P0 merge=0(free=0) P2 pivot=1(abort=8) P4 pack=0")
+            assert.equals(2, m.phaseLines)
+            assert.equals(1, m.phaseZeroAbort)
+        end)
+
+        it("reads it from the post-#165 line, where a stranded count follows", function()
+            local m = measuresOfLines(
+                "  phases: P0 merge=0(free=0) P2 pivot=4(abort=0,stranded=0) P4 pack=2",
+                "  phases: P0 merge=0(free=0) P2 pivot=1(abort=1,stranded=8) P4 pack=0")
+            assert.equals(2, m.phaseLines)
+            assert.equals(1, m.phaseZeroAbort,
+                "one of these two aborted nothing, whichever form it is written in")
+        end)
+
         it("does not read 10 unplaced as 0 unplaced", function()
             -- "0 unplaced" is a substring of "10 unplaced". Run 2 reads
             -- 10, and three of the five plan lines placed everything.

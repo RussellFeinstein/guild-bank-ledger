@@ -125,6 +125,50 @@ describe("SortView", function()
         end)
     end)
 
+    -- #165 item 5: the Sort tab is the second renderer of plan.deficits and it
+    -- walked the map with pairs too, so fixing only the planner's summary
+    -- would have left this list shuffling between rebuilds. The itemIDs are
+    -- chosen so pairs order and sorted order differ, and the first test says
+    -- so rather than letting the fixture go quietly degenerate.
+    describe("Deficit ordering (#165)", function()
+        local DEFICITS = { [2589] = 4, [271883] = 2, [3371] = 7, [190329] = 1 }
+        local SORTED = { 2589, 3371, 190329, 271883 }
+
+        local function deficitPlan()
+            return { ops = {}, deficits = DEFICITS, unplaced = {} }
+        end
+
+        --- The order the rows were drawn in, read back off the labels.
+        local function renderedOrder(container)
+            local order = {}
+            for _, text in ipairs(allText(container)) do
+                local id = text:match("missing %d+ x .-(%d%d%d+)")
+                if text:find("missing", 1, true) and id then
+                    order[#order + 1] = tonumber(id)
+                end
+            end
+            return order
+        end
+
+        it("uses a key set whose pairs order is not already sorted", function()
+            local seen = {}
+            for k in pairs(DEFICITS) do seen[#seen + 1] = k end
+            local ascending = true
+            for i = 2, #seen do
+                if seen[i] < seen[i - 1] then ascending = false end
+            end
+            assert.is_false(ascending,
+                "fixture is degenerate: pick itemIDs whose pairs order differs")
+        end)
+
+        it("renders the deficit rows ascending by itemID", function()
+            GBL.IsSortRunning = function() return true end
+            GBL._sortLastPlan = deficitPlan()
+
+            assert.same(SORTED, renderedOrder(buildTab()))
+        end)
+    end)
+
     -- The heading used to assert a cause for every entry under it. #137
     -- shipped a fifth reason, overflow-unviewable, and the tab now draws an
     -- amber line naming the invisible tab directly above a heading blaming

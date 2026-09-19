@@ -452,7 +452,10 @@ function GBL:_SortView_Preview()
         h:SetFullWidth(true)
         h:SetText("Deficits (items needed that aren't in the bank)")
         content:AddChild(h)
-        for itemID, count in pairs(plan.deficits) do
+        -- Ascending by itemID through the shared accessor, so this list
+        -- and the planner's summary cannot drift (#165).
+        for _, d in ipairs(GBL:OrderedDeficits(plan)) do
+            local itemID, count = d.itemID, d.count
             local lbl = AceGUI:Create("Label")
             lbl:SetFullWidth(true)
             lbl:SetFontObject(GameFontNormalSmall)
