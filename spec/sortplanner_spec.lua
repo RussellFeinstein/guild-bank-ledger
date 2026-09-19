@@ -4936,6 +4936,19 @@ describe("SortPlanner", function()
             return { tabs = { [1] = displayTab({}, {}), [2] = overflow() } }
         end
 
+        --- Where the display-tab supply landed, in op order. Phase 4 packs
+        --- the tab afterwards, so the applied bank cannot say which tier
+        --- placed a stack; the spill ops can.
+        local function spillDsts(plan)
+            local out = {}
+            for _, op in ipairs(plan.ops) do
+                if op.srcTab == 1 then
+                    out[#out + 1] = { slot = op.dstSlot, count = op.count }
+                end
+            end
+            return out
+        end
+
         --- Every overflow stack in the applied bank is legal and the item
         --- total is preserved.
         local function assertLegal(bank, total)
@@ -4956,11 +4969,9 @@ describe("SortPlanner", function()
                 [2] = {},
             })
             local plan = GBL:PlanSort(snap, layout(), { maxStackByItem = MAX })
-            local bank = applyPlan(snap, plan, nil, MAX)
-            assertLegal(bank, 40)
-            assert.equals(20, bank[2][1].count)
-            assert.equals(20, bank[2][2].count)
-            assert.equals(2, #plan.ops)
+            assert.same({ { slot = 1, count = 20 }, { slot = 2, count = 20 } },
+                spillDsts(plan))
+            assertLegal(applyPlan(snap, plan, nil, MAX), 40)
         end)
 
         it("extend-right takes one stack at a time from an oversized supply", function()
@@ -4969,10 +4980,10 @@ describe("SortPlanner", function()
                 [2] = { [1] = { itemID = 100, count = 20 } },
             })
             local plan = GBL:PlanSort(snap, layout(), { maxStackByItem = MAX })
-            local bank = applyPlan(snap, plan, nil, MAX)
-            assertLegal(bank, 60)
-            assert.equals(20, bank[2][2].count)
-            assert.equals(20, bank[2][3].count)
+            assert.same({ { slot = 2, count = 20 }, { slot = 3, count = 20 } },
+                spillDsts(plan))
+            assert.equals(2, plan.diag.phase1bExtendRight)
+            assertLegal(applyPlan(snap, plan, nil, MAX), 60)
         end)
 
         it("extend-left takes one stack at a time from an oversized supply", function()
@@ -4983,11 +4994,10 @@ describe("SortPlanner", function()
                 [2] = { [98] = { itemID = 100, count = 20 } },
             })
             local plan = GBL:PlanSort(snap, layout(), { maxStackByItem = MAX })
-            local bank = applyPlan(snap, plan, nil, MAX)
-            assertLegal(bank, 60)
-            assert.equals(20, bank[2][97].count)
-            assert.equals(20, bank[2][96].count)
-            assert.equals(1, plan.diag.phase1bExtendLeft + 0)
+            assert.same({ { slot = 97, count = 20 }, { slot = 96, count = 20 } },
+                spillDsts(plan))
+            assert.equals(2, plan.diag.phase1bExtendLeft)
+            assertLegal(applyPlan(snap, plan, nil, MAX), 60)
         end)
 
         it("counts each clamped take and names the count on the plan line", function()
