@@ -4906,4 +4906,124 @@ describe("SortPlanner", function()
             assert.same(SORTED, order)
         end)
     end)
+    -- Overflow placement tiers 2 to 4 used to return the caller's whole
+    -- remaining supply, so a supply larger than one stack landed in a single
+    -- empty slot as an illegal over-stack that neither canExecute nor
+    -- applyOpToState could see (both only look at merges into an occupied
+    -- destination). No real bank or bag slot can hold more than a stack, so
+    -- nothing reaches it today; the fixtures here are impossible inputs on
+    -- purpose, which is the only way to reach the branch. Tier 1 already
+    -- clamped to the destination's capacity.
+    describe("overflow tier clamp (#151)", function()
+        local MAX = { [100] = 20 }
+
+        local function sortLines()
+            local out = {}
+            for _, e in ipairs(GBL:GetLog("sort") or {}) do
+                out[#out + 1] = e.message or ""
+            end
+            return out
+        end
+
+        local function findLine(needle)
+            for _, m in ipairs(sortLines()) do
+                if m:find(needle, 1, true) then return m end
+            end
+            return nil
+        end
+
+        local function layout()
+            return { tabs = { [1] = displayTab({}, {}), [2] = overflow() } }
+        end
+
+        --- Every overflow stack in the applied bank is legal and the item
+        --- total is preserved.
+        local function assertLegal(bank, total)
+            local sum = 0
+            for _, slot in pairs(bank[2] or {}) do
+                assert.equals(100, slot.itemID)
+                assert.is_true(slot.count <= MAX[100],
+                    "overflow holds an over-stack of " .. slot.count)
+                sum = sum + slot.count
+            end
+            assert.equals(total, sum)
+            assert.is_nil(next(bank[1] or {}), "display tab was not emptied")
+        end
+
+        it("first-empty takes one stack at a time from an oversized supply", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 40 } },
+                [2] = {},
+            })
+            local plan = GBL:PlanSort(snap, layout(), { maxStackByItem = MAX })
+            local bank = applyPlan(snap, plan, nil, MAX)
+            assertLegal(bank, 40)
+            assert.equals(20, bank[2][1].count)
+            assert.equals(20, bank[2][2].count)
+            assert.equals(2, #plan.ops)
+        end)
+
+        it("extend-right takes one stack at a time from an oversized supply", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 40 } },
+                [2] = { [1] = { itemID = 100, count = 20 } },
+            })
+            local plan = GBL:PlanSort(snap, layout(), { maxStackByItem = MAX })
+            local bank = applyPlan(snap, plan, nil, MAX)
+            assertLegal(bank, 60)
+            assert.equals(20, bank[2][2].count)
+            assert.equals(20, bank[2][3].count)
+        end)
+
+        it("extend-left takes one stack at a time from an oversized supply", function()
+            -- A full stack at slot 98 leaves no right-extension, so the
+            -- walk falls to tier 3.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 40 } },
+                [2] = { [98] = { itemID = 100, count = 20 } },
+            })
+            local plan = GBL:PlanSort(snap, layout(), { maxStackByItem = MAX })
+            local bank = applyPlan(snap, plan, nil, MAX)
+            assertLegal(bank, 60)
+            assert.equals(20, bank[2][97].count)
+            assert.equals(20, bank[2][96].count)
+            assert.equals(1, plan.diag.phase1bExtendLeft + 0)
+        end)
+
+        it("counts each clamped take and names the count on the plan line", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 50 } },
+                [2] = {},
+            })
+            local plan = GBL:PlanSort(snap, layout(), { maxStackByItem = MAX })
+            -- 50 -> 20 (clamped), 30 -> 20 (clamped), 10 (not clamped).
+            assert.equals(2, plan.diag.overflowClamps)
+            assert.equals("  overflow clamp: 2 take(s) held to max stack",
+                findLine("  overflow clamp:"))
+        end)
+
+        it("is silent when nothing was clamped", function()
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 20 } },
+                [2] = {},
+            })
+            local plan = GBL:PlanSort(snap, layout(), { maxStackByItem = MAX })
+            assert.equals(0, plan.diag.overflowClamps)
+            assert.is_nil(findLine("  overflow clamp:"),
+                table.concat(sortLines(), "\n"))
+        end)
+
+        it("leaves an item with unknown max stack unclamped", function()
+            -- Cold cache: the planner already falls back to grouping for
+            -- that item, and a clamp to nothing would place nothing.
+            local snap = snapshot({
+                [1] = { [1] = { itemID = 100, count = 40 } },
+                [2] = {},
+            })
+            local plan = GBL:PlanSort(snap, layout(), { maxStackByItem = {} })
+            assert.equals(1, #plan.ops)
+            assert.equals(40, plan.ops[1].count)
+            assert.equals(0, plan.diag.overflowClamps)
+        end)
+    end)
 end)
