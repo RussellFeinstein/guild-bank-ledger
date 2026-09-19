@@ -849,6 +849,14 @@ describe("SortPlanner", function()
             end
             assert.is_true(sawNoPivot,
                 "expected no-pivot abort debug line; got nothing")
+
+            -- And the counters behind that line. The debug string was the
+            -- only thing pinned here, so deleting the abort increment at this
+            -- site changed nothing the suite could see (#165).
+            local plan = GBL:PlanSort(snap, layout)
+            assert.equals(1, plan.diag.phase2CycleAborts)
+            assert.is_true(plan.diag.phase2StrandedAssignments >= 1,
+                "an abort strands at least the assignment it gave up on")
         end)
 
         it("does not emit Phase 2 lines when sort.debugChat is off", function()
@@ -4449,6 +4457,15 @@ describe("SortPlanner", function()
             assert.equals(1, u.slotIndex)
             assert.equals(20, u.count)
             assert.equals(GBL._sortPlannerReasons.CYCLE_NO_PIVOT, u.reason)
+
+            -- One abort, one assignment stranded by it. This fixture reaches
+            -- the no-stuck abort path, whose counters nothing asserted until
+            -- a mutation deleting the abort increment survived the suite
+            -- (#165). The budget-exhaustion path had a pin; these did not,
+            -- which is coverage following ease of setup.
+            assert.equals(1, plan.diag.phase2CycleAborts)
+            assert.equals(1, plan.diag.phase2StrandedAssignments)
+
             for _, op in ipairs(plan.ops) do
                 assert.is_not.equals(1, op.srcTab,
                     "the stack already in the demand slot must not move")
