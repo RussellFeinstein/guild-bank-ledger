@@ -417,6 +417,10 @@ function GBL:PlanSort(snapshot, layout, opts)
         -- counted from plan.unplaced once every phase has run.
         bagIgnored = 0, bagBound = 0, bagLocked = 0, bagNoLink = 0,
         bagStay = 0,
+        -- Takes that overflow tiers 2 to 4 held to one stack (#151). No
+        -- real slot holds more than a stack, so a non-zero count means the
+        -- input was not a real bank.
+        overflowClamps = 0,
     }
     -- Assigned across rather than computed here: the snapshot walk that
     -- produces it runs before this literal, and reordering the two to keep
@@ -1058,24 +1062,37 @@ function GBL:PlanSort(snapshot, layout, opts)
                 end
             end
         end
+        -- Tiers 2 to 4 open a slot the item is not in yet, so the take is
+        -- one stack at most (#151); the callers loop, so the rest goes to
+        -- the next pick. Unknown max stack is left alone: the planner
+        -- already falls back to grouping for that item, and a cap of
+        -- nothing would place nothing.
+        local function capped()
+            local m = getMaxStack(itemID)
+            if type(m) == "number" and want > m then
+                diag.overflowClamps = diag.overflowClamps + 1
+                return m
+            end
+            return want
+        end
         -- 2. Right-extend an existing same-item group.
         for s = 2, MAX_SLOTS do
             local prev = info[s - 1]
             if not info[s] and prev and prev.itemID == itemID then
-                return s, want, "extend-right"
+                return s, capped(), "extend-right"
             end
         end
         -- 3. Left-extend if no right-extension is possible.
         for s = MAX_SLOTS - 1, 1, -1 do
             local nextInfo = info[s + 1]
             if not info[s] and nextInfo and nextInfo.itemID == itemID then
-                return s, want, "extend-left"
+                return s, capped(), "extend-left"
             end
         end
         -- 4. First empty slot (new item in this tab).
         for s = 1, MAX_SLOTS do
             if not info[s] then
-                return s, want, "first-empty"
+                return s, capped(), "first-empty"
             end
         end
         return nil
@@ -1820,6 +1837,13 @@ function GBL:PlanSort(snapshot, layout, opts)
                 "  demands: %d total (pinned=%d, ext-R=%d, ext-L=%d, first-empty=%d)",
                 totalDemands, diag.demandPinned, diag.demandExtendRight,
                 diag.demandExtendLeft, diag.demandFirstEmpty))
+        end
+        -- Only ever non-zero on an input no real bank produces (#151), so
+        -- the line is the loud part of a guard that should stay silent.
+        if diag.overflowClamps > 0 then
+            self:SortInfo(string.format(
+                "  overflow clamp: %d take(s) held to max stack",
+                diag.overflowClamps))
         end
     end
 

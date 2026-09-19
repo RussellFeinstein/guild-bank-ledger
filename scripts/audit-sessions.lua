@@ -111,6 +111,7 @@ local SUMMARY_PATTERNS = {
     "^Sort plan:",
     "^%s+phases:",
     "^%s+demands:",
+    "^%s+overflow clamp:",
     "^Sort: pass %d+ left",
     "^Sort: lift guard disabled",
     "^Sort bags:",

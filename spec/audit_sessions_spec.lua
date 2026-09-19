@@ -259,6 +259,31 @@ describe("audit session reader", function()
             assert.is_true(found, "a run that disabled its guard has to say so in the record")
         end)
 
+        it("keeps the overflow clamp continuation with its plan line (#151)", function()
+            -- Hand-built rather than added to the recorded fixture: the line
+            -- only ever fires on an input no real bank produces, so no
+            -- capture will ever carry it, and the recording stays a
+            -- recording. The order is the one the client emits.
+            local function entry(message)
+                return { message = message, level = "INFO", t = 1 }
+            end
+            local db = { sessions = { { entries = { sort = {
+                entry("Sort: starting 2 ops, bags=off"),
+                entry("Sort plan: 1.0ms, 2 ops, 0 deficits, 0 unplaced (input: 1 slots / 2 tabs) [T1:1]"),
+                entry("  phases: P0 merge=0(free=0) P1a assign=0 P1b spill=2(top=0,r=1,l=0,fe=1,unp=0) P2 pivot=0(abort=0,stranded=0) P3 sweep=0 P4 pack=0"),
+                entry("  demands: 0 total (pinned=0, ext-R=0, ext-L=0, first-empty=0)"),
+                entry("  overflow clamp: 1 take(s) held to max stack"),
+                entry("Sort: complete, 2 ops issued"),
+            } } } } }
+            local started = startedRuns(Reader.runs(db, 1))
+            assert.equals(1, #started)
+            local found = false
+            for _, line in ipairs(started[1].lines) do
+                if line.message:find("overflow clamp:", 1, true) then found = true end
+            end
+            assert.is_true(found, "the clamp continuation belongs to its run")
+        end)
+
         it("drops sort lines that are not part of the run summary", function()
             -- Session 1 holds a per-op WARN. The record skeleton is a
             -- summary, so op-level noise stays out of it.
