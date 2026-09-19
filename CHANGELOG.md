@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- The sort planner can no longer plan a single overflow stack larger than the item's stack size. When it opens a fresh overflow slot for a supply, it now takes at most one stack and routes the rest to the next slot, the way it already did when topping up a partial. No real bank or bag slot holds more than one stack, so nothing a player does reaches this; it closes the one path where a bad input became a wrong plan instead of an error. If it ever does fire, the sort log says so with an `overflow clamp:` line under the plan line.
+- When the sort planner opens a fresh overflow slot for a supply, it now takes at most one stack and routes the rest to the next slot, the way it already did when topping up a partial. No real bank or bag slot holds more than one stack, so nothing a player does reaches this; it is a guard for the day a bad input does. If it ever fires, the sort log says so with an `overflow clamp:` warning under the plan line.
 
 ## [0.39.12] - 2026-09-19
 
