@@ -2175,6 +2175,8 @@ describe("SortPlanner", function()
         it("is idempotent on a canonical one-space overflow state", function()
             -- The canonical state runs from the first routing slot across
             -- the space; a later tab holds nothing until the first is full.
+            -- No max-stack map on purpose: with one, Phase 0 would pour the
+            -- 3 into the 5 and the state would not be canonical.
             local snap = snapshot({
                 [1] = {},
                 [2] = {
@@ -2200,7 +2202,8 @@ describe("SortPlanner", function()
             -- Before #145 this exact arrangement (item 150 alone in the
             -- second tab) was the canonical two-tab state and planned no
             -- move. In one space item 150 ranks third, so it comes forward
-            -- and item 200 steps aside for it.
+            -- and item 200 steps aside for it. No max-stack map, as above,
+            -- so the two partials of item 100 stay as they are.
             local snap = snapshot({
                 [1] = {},
                 [2] = {

@@ -1234,7 +1234,9 @@ function GBL:PlanSort(snapshot, layout, opts)
 
     -- Mirror a placement into overflowSlotInfo so the next pick sees
     -- the new capacity. Required for split-across-multiple-destinations;
-    -- shared by Phase 1B and the Phase 3 sweep.
+    -- shared by Phase 1B and the Phase 3 sweep. The tab has to be in the
+    -- space (#145): both callers hand back what pickOverflowSlot returned,
+    -- and realToV answers nil for anything else.
     local function notePlacement(ovTab, ovSlot, itemID, take)
         local v = realToV(ovTab, ovSlot)
         local info = overflowSlotInfo[v]
