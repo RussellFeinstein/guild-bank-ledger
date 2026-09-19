@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.39.15] - 2026-09-19
 
 ### Removed
 - The per-scan `Scan linkless:` line is gone. It existed to learn what the game reports for a bank slot with no item link, so that a `nolink=` count could be built beside `locked=` on the sort log's plan line. It read zero on a warm client and zero again after a full client relaunch with the bank opened first (2026-09-19, on #178), which says nothing about the game's answer, and the question was closed as a decision to stop measuring rather than as a finding, so no count is being built. The slot read that fed the line went back behind the item-link check, where it costs one call per occupied slot instead of one per slot.
