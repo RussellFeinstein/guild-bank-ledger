@@ -5093,4 +5093,310 @@ describe("SortPlanner", function()
             assert.equals(0, plan.diag.overflowClamps)
         end)
     end)
+    -- The two overflow continuation lines (#181): the fragmentation baseline
+    -- #145 is judged against. Every assertion reads the rendered line, and
+    -- plan.diag is checked against those figures rather than the reverse.
+    -- Needles carry the colon: "  overflow clamp:" (#151) shares the prefix.
+    describe("overflow fragmentation term (#181)", function()
+        local MAX = { [100] = 20, [200] = 20, [2589] = 20, [271883] = 20,
+                      [3371] = 20, [190329] = 20 }
+
+        local function sortLines()
+            local out = {}
+            for _, e in ipairs(GBL:GetLog("sort") or {}) do
+                out[#out + 1] = e.message or ""
+            end
+            return out
+        end
+
+        local function findLine(needle)
+            for _, m in ipairs(sortLines()) do
+                if m:find(needle, 1, true) then return m end
+            end
+            return nil
+        end
+
+        local function lineIndex(needle)
+            for i, m in ipairs(sortLines()) do
+                if m:find(needle, 1, true) then return i end
+            end
+            return nil
+        end
+
+        --- Display tab 1 empty, T6 and T7 overflow in index order.
+        local function layout()
+            return { tabs = {
+                [1] = displayTab({}, {}),
+                [6] = overflow(),
+                [7] = overflow(),
+            } }
+        end
+
+        local function plan(tabs, opts)
+            opts = opts or {}
+            if opts.maxStackByItem == nil then opts.maxStackByItem = MAX end
+            return GBL:PlanSort(snapshot(tabs), opts.layout or layout(), opts)
+        end
+
+        it("counts one item as two partials in two tabs as fragmented", function()
+            plan({ [6] = { [1] = { itemID = 100, count = 5 } },
+                   [7] = { [1] = { itemID = 100, count = 5 } } })
+            assert.equals("  overflow: items=1 frag=1 partials=2 extra=1 unknown=0",
+                findLine("  overflow:"))
+            assert.equals("  overflow split: it:100 T6x1 T7x1",
+                findLine("  overflow split:"))
+        end)
+
+        it("reads an empty slot between two stacks as a gap", function()
+            plan({ [6] = { [1] = { itemID = 100, count = 5 },
+                           [3] = { itemID = 100, count = 5 } } })
+            assert.equals("  overflow: items=1 frag=1 partials=2 extra=1 unknown=0",
+                findLine("  overflow:"))
+        end)
+
+        it("reads a foreign stack between two stacks as a gap", function()
+            plan({ [6] = { [1] = { itemID = 100, count = 20 },
+                           [2] = { itemID = 200, count = 20 },
+                           [3] = { itemID = 100, count = 20 } } })
+            assert.equals("  overflow: items=2 frag=1 partials=0 extra=0 unknown=0",
+                findLine("  overflow:"))
+            assert.equals("  overflow split: it:100 T6x2",
+                findLine("  overflow split:"))
+        end)
+
+        it("reads two stacks adjacent across the tab boundary as one run", function()
+            -- T6/98 and T7/1 are consecutive in virtual order: this is the
+            -- definition #145 packs to, and a tab-count metric would call
+            -- it fragmented forever.
+            plan({ [6] = { [98] = { itemID = 100, count = 20 } },
+                   [7] = { [1] = { itemID = 100, count = 20 } } })
+            assert.equals("  overflow: items=1 frag=0 partials=0 extra=0 unknown=0",
+                findLine("  overflow:"))
+            assert.is_nil(findLine("  overflow split:"))
+        end)
+
+        it("counts partials beyond the first per item, in one tab too", function()
+            -- Input state, not steady state: Phase 0 merges these in this
+            -- very plan. The line describes what the planner was handed.
+            plan({ [6] = { [1] = { itemID = 100, count = 5 },
+                           [2] = { itemID = 100, count = 5 },
+                           [3] = { itemID = 100, count = 5 } } })
+            assert.equals("  overflow: items=1 frag=0 partials=3 extra=2 unknown=0",
+                findLine("  overflow:"))
+        end)
+
+        it("does not count a whole stack as a partial", function()
+            plan({ [6] = { [1] = { itemID = 100, count = 20 } } })
+            assert.equals("  overflow: items=1 frag=0 partials=0 extra=0 unknown=0",
+                findLine("  overflow:"))
+        end)
+
+        it("counts an item with no known max stack as unknown and still as present", function()
+            plan({ [6] = { [1] = { itemID = 300, count = 5 },
+                           [3] = { itemID = 300, count = 5 } } })
+            assert.equals("  overflow: items=1 frag=1 partials=0 extra=0 unknown=1",
+                findLine("  overflow:"))
+        end)
+
+        it("treats a max stack below one as unknown (#151)", function()
+            plan({ [6] = { [1] = { itemID = 300, count = 5 },
+                           [3] = { itemID = 300, count = 5 } } },
+                 { maxStackByItem = { [300] = 0 } })
+            assert.equals("  overflow: items=1 frag=1 partials=0 extra=0 unknown=1",
+                findLine("  overflow:"))
+        end)
+
+        it("does not count a tab the scan could not see", function()
+            plan({ [6] = { [1] = { itemID = 100, count = 5 } },
+                   [7] = { [1] = { itemID = 100, count = 5 } } },
+                 { coverage = { viewableTabs = { 1, 6 } } })
+            assert.equals("  overflow: items=1 frag=0 partials=1 extra=0 unknown=0",
+                findLine("  overflow:"))
+            local planLine = findLine("Sort plan:")
+            assert.is_not_nil(planLine and planLine:find(" unviewable:T7", 1, true))
+        end)
+
+        it("renders nothing when the layout declares no overflow tab", function()
+            plan({ [1] = { [1] = { itemID = 100, count = 5 } } },
+                 { layout = { tabs = { [1] = displayTab({}, {}) } } })
+            assert.is_not_nil(findLine("Sort plan:"))
+            assert.is_nil(findLine("  overflow:"))
+            assert.is_nil(findLine("  overflow split:"))
+        end)
+
+        it("renders nothing when every declared overflow tab is hidden", function()
+            plan({ [6] = { [1] = { itemID = 100, count = 5 } } },
+                 { coverage = { viewableTabs = { 1 } } })
+            assert.is_not_nil(findLine("Sort plan:"))
+            assert.is_nil(findLine("  overflow:"))
+        end)
+
+        it("renders at zero when the overflow tabs are usable and empty", function()
+            plan({ [6] = {}, [7] = {} })
+            assert.equals("  overflow: items=0 frag=0 partials=0 extra=0 unknown=0",
+                findLine("  overflow:"))
+            assert.is_nil(findLine("  overflow split:"))
+        end)
+
+        it("never counts a bag pseudo-tab", function()
+            -- The layout names the item so the bag stack is admitted into
+            -- the working bank under tab -1; a walk over pairs(bank) would
+            -- see it as a second run.
+            plan({ [6] = { [1] = { itemID = 100, count = 20 } } }, {
+                layout = { tabs = {
+                    [1] = displayTab({ [100] = { slots = 1, perSlot = 20 } }, { 100 }),
+                    [6] = overflow(),
+                    [7] = overflow(),
+                } },
+                bagSnapshot = { [-1] = { slots = {
+                    [1] = { itemID = 100, count = 20 } } } },
+            })
+            assert.equals("  overflow: items=1 frag=0 partials=0 extra=0 unknown=0",
+                findLine("  overflow:"))
+            assert.is_nil(findLine("  overflow split:"))
+        end)
+
+        describe("split line order", function()
+            -- Runs per item: 2589 -> 2, 271883 -> 2, 3371 -> 3, 190329 -> 3.
+            -- Sorted by runs descending then itemID ascending that is
+            -- 3371, 190329, 2589, 271883. Under this Lua the key set walks
+            -- 190329, 2589, 3371, 271883, so the whole differs from the
+            -- sorted order and the 3371/190329 tie arrives id-descending;
+            -- the self-check below says so if either ever stops being true.
+            local RUNS = { [2589] = 2, [271883] = 2, [3371] = 3, [190329] = 3 }
+            local SORTED = { 3371, 190329, 2589, 271883 }
+
+            local function fragmentedTab()
+                -- Every stack separated by an empty slot so each is its
+                -- own run; the order of appearance is deliberately not the
+                -- sorted order either.
+                return { [1] = { itemID = 2589, count = 20 },
+                         [3] = { itemID = 271883, count = 20 },
+                         [5] = { itemID = 3371, count = 20 },
+                         [7] = { itemID = 190329, count = 20 },
+                         [9] = { itemID = 2589, count = 20 },
+                         [11] = { itemID = 271883, count = 20 },
+                         [13] = { itemID = 3371, count = 20 },
+                         [15] = { itemID = 190329, count = 20 },
+                         [17] = { itemID = 3371, count = 20 },
+                         [19] = { itemID = 190329, count = 20 } }
+            end
+
+            --- The #165 self-check, on both sort keys: the pairs walk over
+            --- this key set must not already be runs-descending, and some
+            --- pair of equal-run items must come out id-descending, or the
+            --- sorted and unsorted implementations agree and nothing below
+            --- proves anything.
+            it("uses a key set whose pairs order is not already the sorted order", function()
+                local seen = {}
+                for k in pairs(RUNS) do seen[#seen + 1] = k end
+                local sameAsSorted = #seen == #SORTED
+                for i = 1, #SORTED do
+                    if seen[i] ~= SORTED[i] then sameAsSorted = false end
+                end
+                assert.is_false(sameAsSorted,
+                    "fixture is degenerate: pairs order is already the sorted order")
+                local tieDescending = false
+                for i = 1, #seen do
+                    for j = i + 1, #seen do
+                        if RUNS[seen[i]] == RUNS[seen[j]] and seen[j] < seen[i] then
+                            tieDescending = true
+                        end
+                    end
+                end
+                assert.is_true(tieDescending,
+                    "fixture is degenerate: no equal-run pair arrives id-descending")
+            end)
+
+            it("names fragmented items by run count descending then itemID ascending", function()
+                plan({ [6] = fragmentedTab() })
+                assert.equals("  overflow: items=4 frag=4 partials=0 extra=0 unknown=0",
+                    findLine("  overflow:"))
+                assert.equals(
+                    "  overflow split: it:3371 T6x3, it:190329 T6x3, it:2589 T6x2, it:271883 T6x2",
+                    findLine("  overflow split:"))
+            end)
+
+            it("names ten items and counts the rest", function()
+                local tab = {}
+                local max = {}
+                for i = 1, 11 do
+                    local id = 1000 + i
+                    tab[i] = { itemID = id, count = 20 }
+                    tab[i + 40] = { itemID = id, count = 20 }
+                    max[id] = 20
+                end
+                plan({ [6] = tab }, { maxStackByItem = max })
+                local names = {}
+                for i = 1, 10 do names[i] = "it:" .. (1000 + i) .. " T6x2" end
+                assert.equals("  overflow split: " .. table.concat(names, ", ")
+                    .. ", and 1 more", findLine("  overflow split:"))
+            end)
+        end)
+
+        it("walks the overflow tabs in routing order, not tab order", function()
+            -- overflowPriority puts T7 ahead of T6, so T7/98 and T6/1 are
+            -- the adjacent pair and the split line lists T7 first.
+            plan({ [7] = { [1] = { itemID = 200, count = 20 },
+                           [98] = { itemID = 100, count = 20 } },
+                   [6] = { [1] = { itemID = 100, count = 20 },
+                           [5] = { itemID = 200, count = 20 } } }, {
+                layout = { tabs = {
+                    [1] = displayTab({}, {}),
+                    [6] = { mode = "overflow", overflowPriority = 2 },
+                    [7] = { mode = "overflow", overflowPriority = 1 },
+                } },
+            })
+            assert.equals("  overflow: items=2 frag=1 partials=0 extra=0 unknown=0",
+                findLine("  overflow:"))
+            assert.equals("  overflow split: it:200 T7x1 T6x1",
+                findLine("  overflow split:"))
+        end)
+
+        it("publishes the same figures on plan.diag", function()
+            local p = plan({ [6] = { [1] = { itemID = 100, count = 5 },
+                                     [3] = { itemID = 100, count = 5 },
+                                     [5] = { itemID = 300, count = 5 } } })
+            assert.equals("  overflow: items=2 frag=1 partials=2 extra=1 unknown=1",
+                findLine("  overflow:"))
+            assert.equals(2, p.diag.overflowItems)
+            assert.equals(1, p.diag.overflowFragmented)
+            assert.equals(2, p.diag.overflowPartials)
+            assert.equals(1, p.diag.overflowExtraPartials)
+            assert.equals(1, p.diag.overflowUnknownStack)
+        end)
+
+        describe("emission order", function()
+            -- The audit reader's pins (spec/audit_sessions_spec.lua) record
+            -- this order by hand, ahead of the producer; this is the
+            -- producer-side half of that pin.
+            it("follows demands: and precedes the clamp WARN", function()
+                -- A 50-stack spilling into fresh slots at max 20 clamps
+                -- (#151); T6 already fragmented so the split line renders.
+                plan({ [1] = { [1] = { itemID = 100, count = 50 } },
+                       [6] = { [1] = { itemID = 100, count = 20 },
+                               [3] = { itemID = 100, count = 20 } } })
+                local phases = lineIndex("  phases:")
+                local demands = lineIndex("  demands:")
+                local overflow = lineIndex("  overflow:")
+                local split = lineIndex("  overflow split:")
+                local clamp = lineIndex("  overflow clamp:")
+                assert.is_not_nil(phases); assert.is_not_nil(demands)
+                assert.is_not_nil(overflow); assert.is_not_nil(split)
+                assert.is_not_nil(clamp, table.concat(sortLines(), "\n"))
+                assert.is_true(phases < demands and demands < overflow
+                    and overflow < split and split < clamp,
+                    table.concat(sortLines(), "\n"))
+            end)
+
+            it("sits directly under the plan line when there is no phases pair", function()
+                -- No display demands and nothing to move: the phases block
+                -- is gated off, and this is what a converged overflow-only
+                -- layout writes on its final replan.
+                plan({ [6] = { [1] = { itemID = 100, count = 20 } } })
+                assert.is_nil(lineIndex("  phases:"))
+                assert.equals(lineIndex("Sort plan:") + 1, lineIndex("  overflow:"))
+            end)
+        end)
+    end)
 end)
