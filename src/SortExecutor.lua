@@ -121,7 +121,9 @@ local stallTicker = nil
 --   layout = {...},              -- required for end-of-pass re-plan
 --   opIndex = N,                 -- next op to issue in the current pass
 --   passes = P, lastPassOps = N, residual = R,
---   totalIssued = N, cursorStuck = N,
+--   totalIssued = N, cursorStuck = N, skippedOps = N,
+--   lastOutcome* = the previous op's result, riding forward onto the next
+--                  step message and cleared by startPass (#162),
 --   pumping = bool,              -- true while a pass is issuing; the cancel
 --   pumpToken = N,               -- invalidates a stale/late pump timer
 --   onComplete = fn, startedAt = t, lastProgressAt = t,
@@ -245,16 +247,25 @@ function GBL:_sortNoteRescanTick()
 end
 
 --- Emit a progress message for UI subscribers (notably UI/SortView). SortView
---- rebuilds its move list on "planupdated" (payload.plan) and highlights the
---- active row on "step" (payload.opIndex); its onComplete reads the result
---- table from finish, not this payload.
+--- rebuilds its move list on "planupdated" (payload.plan), highlights the
+--- active row on "step" (payload.opIndex), and settles the row behind it from
+--- the issuedOpIndex / failedOpIndex a "step" carries forward; its onComplete
+--- reads the result table from finish, not this payload.
+---
+--- Every field here means what it says (#162). `issued` is not `done`: the
+--- pump is fire-and-forget, so issuing an op is not proof it landed, and only
+--- finish knows the residual-based done/failed, which it attaches itself.
+--- `refused` counts ops issueOp declined; it used to read `cursorStuck`, which
+--- counts destination pickups that SWAPPED rather than placed and is therefore
+--- a successful move. That field is still here, under its own name.
 local function emitProgress(phase, extras)
     if not state then return end
     local payload = {
         phase = phase,
         opIndex = state.opIndex,
-        done = state.totalIssued,
-        failed = state.cursorStuck,
+        issued = state.totalIssued,
+        refused = state.skippedOps or 0,
+        cursorStuck = state.cursorStuck or 0,
         replans = math.max(0, (state.passes or 1) - 1),
         total = #state.plan.ops,
         currentOp = state.plan.ops[state.opIndex],
@@ -420,8 +431,21 @@ function finish(ok, reason)
     GBL:SortInfo("Sort: net at finish - " .. netPingStr())
 
     -- Emit the final progress message BEFORE clearing state so listeners get
-    -- the completion summary.
-    emitProgress("finish", { ok = ok, reason = reason })
+    -- the completion summary. done/failed are the residual-based locals the
+    -- result table uses, so the Sort tab's completion line and the chat print
+    -- cannot report two different numbers under one word (#162). The stash
+    -- rides out here too: the last op of the run has no following step to
+    -- carry its outcome forward.
+    emitProgress("finish", {
+        ok = ok,
+        reason = reason,
+        done = done,
+        failed = failed,
+        issuedOpIndex = state.lastOutcomeIssued,
+        failedOpIndex = state.lastOutcomeFailed,
+        failedReason = state.lastOutcomeReason,
+        failedDetail = state.lastOutcomeDetail,
+    })
     ClearCursor()
     if state.pumpTimer and state.pumpTimer.Cancel then state.pumpTimer:Cancel() end
     stopHitchSampler()
@@ -726,7 +750,22 @@ pumpOne = function()
     end
 
     noteProgress()
-    emitProgress("step", { opIndex = state.opIndex })
+    -- One message per op, carrying the PREVIOUS op's outcome (#162). This
+    -- emit fires before issueOp, so this op's outcome is not known yet, and a
+    -- second emit after it would have to mark one index both current and
+    -- settled, which the consumer cannot order. Riding the outcome one tick
+    -- forward leaves exactly one row current with the settled run behind it.
+    emitProgress("step", {
+        opIndex = state.opIndex,
+        issuedOpIndex = state.lastOutcomeIssued,
+        failedOpIndex = state.lastOutcomeFailed,
+        failedReason = state.lastOutcomeReason,
+        failedDetail = state.lastOutcomeDetail,
+    })
+    state.lastOutcomeIssued = nil
+    state.lastOutcomeFailed = nil
+    state.lastOutcomeReason = nil
+    state.lastOutcomeDetail = nil
     local itemDesc = (op.itemID and GBL.DescribeItem)
         and GBL:DescribeItem(op.itemID) or ("it:" .. tostring(op.itemID))
     -- Slot refs go through GBL:FormatSlotRef so a bag source reads "Bag0/3"
@@ -745,6 +784,7 @@ pumpOne = function()
     local issued, skipReason, skipDetail = issueOp(op)
     if issued then
         state.totalIssued = (state.totalIssued or 0) + 1
+        state.lastOutcomeIssued = state.opIndex
         -- Flush the transaction log every N issued ops while we have Ledger's
         -- periodic rescan paused, so the per-tab bank log doesn't overflow
         -- before we capture its older entries. Gated on rescanWasActive: if the
@@ -770,6 +810,13 @@ pumpOne = function()
         state.skipReasons = state.skipReasons or {}
         local tag = skipReason or "refused"
         state.skipReasons[tag] = (state.skipReasons[tag] or 0) + 1
+        -- Reason and detail stay apart on the wire, because `why` below folds
+        -- the detail into parentheses for the log line and a row rendering
+        -- that would print nested brackets (#162). `tag` rather than
+        -- skipReason, which can be nil.
+        state.lastOutcomeFailed = state.opIndex
+        state.lastOutcomeReason = tag
+        state.lastOutcomeDetail = skipDetail
         if skipDetail then why = why .. " (" .. skipDetail .. ")" end
         GBL:SortWarn(string.format(
             "Sort op %d/%d skipped: %s %s, wanted %d x %s",
@@ -793,6 +840,13 @@ local function startPass(plan)
     state.passes = (state.passes or 0) + 1
     state.pumping = true
     state.pumpToken = (state.pumpToken or 0) + 1
+    -- A new plan renumbers every row, so the previous pass's trailing outcome
+    -- would settle an unrelated move (#162). Two guards, both needed: this
+    -- clear, and the planupdated emit below carrying no outcome field.
+    state.lastOutcomeIssued = nil
+    state.lastOutcomeFailed = nil
+    state.lastOutcomeReason = nil
+    state.lastOutcomeDetail = nil
     noteProgress()
     -- After pass 1 the plan changed; tell SortView to rebuild its move list.
     if state.passes > 1 then

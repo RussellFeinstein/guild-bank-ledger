@@ -95,3 +95,4 @@ Three rules:
 | [2026-08-27-bags-near-full-overflow.md](2026-08-27-bags-near-full-overflow.md) | Bags into two nearly full overflow tabs on v0.39.0. The bag half worked; the pass-cap stop was something else. |
 | [2026-09-12-pivot-convergence-clean.md](2026-09-12-pivot-convergence-clean.md) | Two runs on v0.39.3 converging in two passes. Closed #144 on evidence rather than a build. |
 | [2026-09-17-cursor-predicate-outage-and-probe.md](2026-09-17-cursor-predicate-outage-and-probe.md) | The v0.39.5 outage and the v0.39.6 probe that explained it. 238 lifts that all worked show `CursorHasItem` blind to a guild bank cursor and source drain unreadable in the frame of the lift. |
+| [2026-09-18-refusals-the-tab-reported-as-zero.md](2026-09-18-refusals-the-tab-reported-as-zero.md) | Two clean runs that refused 17 ops between them while `cursorStuck` read 0 in both, which is the counter defect #162 fixes arriving as a measurement. |
