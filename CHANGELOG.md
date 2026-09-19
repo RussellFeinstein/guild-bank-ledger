@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.39.16] - 2026-09-19
 
 ### Fixed
 - A sort no longer refuses to move a stack it put down a moment earlier on a bank tab that is not the one on screen. The game reports the contents of a tab you are not looking at as they were the last time that tab was loaded, so the sort's own deposits into such a tab read as empty or short and the move back out was skipped, which left stacks parked in an overflow slot and stopped runs short with moves remaining (all eight refusals in the 2026-09-19 capture had this shape). The sort now remembers which slots it has filled during a pass and, for one of those on a tab that is off screen, moves what the plan says is there rather than what the stale read says; a move that really finds nothing is still caught and counted. The sort log names each such move (`stale source`) and the run summary carries `stalesrc=N` when it happened.

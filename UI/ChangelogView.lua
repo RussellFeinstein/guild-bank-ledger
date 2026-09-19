@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.39.16
+    {"0.39.16", "2026-09-19", {
+        Fixed = {
+            "A sort no longer refuses to move a stack it put down a moment earlier on a bank tab that is not the one on screen. The game reports a tab you are not looking at as it was when that tab was last loaded, so the sort's own deposits there read as empty or short and the move back out was skipped, which left stacks parked in an overflow slot and stopped runs short with moves remaining. The sort now remembers which slots it filled during a pass and moves what the plan says is in one of those on an off-screen tab, and a move that really finds nothing is still caught and counted. The sort log names each such move and the run summary carries stalesrc=N when it happened.",
+        },
+    }},
     -- v0.39.15
     {"0.39.15", "2026-09-19", {
         Removed = {
