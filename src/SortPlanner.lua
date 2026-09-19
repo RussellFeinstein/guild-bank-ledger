@@ -392,7 +392,7 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- merged 4 stacks" from "Phase 1B spilled 4 fresh stacks to overflow"
     -- when both produce 4 ops.
     local diag = {
-        phase0Merges = 0, phase0SlotsFreed = 0,
+        phase0Merges = 0, phase0SlotsFreed = 0, phase0CrossTabPours = 0,
         phase1aAssignments = 0,
         phase1bTopup = 0, phase1bExtendRight = 0,
         phase1bExtendLeft = 0, phase1bFirstEmpty = 0,
@@ -403,7 +403,7 @@ function GBL:PlanSort(snapshot, layout, opts)
         -- pending assignments reported itself as eight aborts (#165).
         phase2Pivots = 0, phase2CycleAborts = 0, phase2StrandedAssignments = 0,
         phase3Sweeps = 0,
-        phase4PositionShifts = 0,
+        phase4PositionShifts = 0, phase4CrossTabShifts = 0,
         demandPinned = 0, demandExtendRight = 0,
         demandExtendLeft = 0, demandFirstEmpty = 0,
         -- #139 bag sourcing: supplies admitted from bags, how many filled
@@ -674,6 +674,39 @@ function GBL:PlanSort(snapshot, layout, opts)
         end)
     end
 
+    -- --------------------------------------------------------------
+    -- The overflow space (#145).
+    -- --------------------------------------------------------------
+    -- Every usable overflow tab is one contiguous space in routing order:
+    -- the first tab in OrderedOverflowTabs is virtual slots 1..MAX_SLOTS,
+    -- the next is MAX_SLOTS+1..2*MAX_SLOTS, and so on. Phase 0, the Phase
+    -- 1B tiers and Phase 4 run over `v`, and every op they emit is mapped
+    -- back through vToReal, so nothing outside this function sees a
+    -- virtual index: ops, deficits, unplaced entries and log lines all
+    -- carry the real (tab, slot). The #181 walk above keeps its own
+    -- arithmetic on purpose: it is the ruler this design is measured
+    -- with, and a ruler that shares code with what it measures cannot
+    -- catch that thing being wrong. #57 shipped these tabs as separate
+    -- spaces; #145 reversed that decision on the 2026-09-19 baseline,
+    -- which read frag=4 extra=2 on a converged bank for exactly the four
+    -- items held in both tabs.
+    local V = #overflowTabsOrdered * MAX_SLOTS
+    local rankOf = {}
+    for rank, ovTab in ipairs(overflowTabsOrdered) do rankOf[ovTab] = rank end
+    local function vToReal(v)
+        local rank = math.floor((v - 1) / MAX_SLOTS) + 1
+        return overflowTabsOrdered[rank], (v - 1) % MAX_SLOTS + 1
+    end
+    local function realToV(tabIndex, slotIndex)
+        local rank = rankOf[tabIndex]
+        if not rank then return nil end
+        return (rank - 1) * MAX_SLOTS + slotIndex
+    end
+    local function vSlot(v)
+        local t, sl = vToReal(v)
+        return state[t] and state[t][sl]
+    end
+
     -- Snapshot what the planner sees at a slot RIGHT NOW (before applying
     -- the op). The returned table is independent of state, so subsequent
     -- mutations don't disturb it. Returning nil means the planner expected
@@ -709,20 +742,21 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- Before Phase 1 builds supplies and Phase 1B routes spills to
     -- overflow, walk each same-item run on each overflow tab and pour
     -- partial stacks together up to the per-item max stack size.
-    -- This compacts each overflow tab to its minimum slot count so
-    -- pickOverflowSlot has maximum free slots to work with — fixes
+    -- This compacts the space to its minimum slot count so
+    -- pickOverflowSlot has maximum free slots to work with; fixes
     -- the "out of space" cascade where partial stacks consumed slots
     -- that could be merged. Items with unknown maxStack (cold cache)
     -- skip the merge for that item only and fall back to grouping.
-    -- Merging is per tab: pours are always srcTab == dstTab, so Phase 0
-    -- never moves stock between overflow tabs (no rebalancing).
-    for _, ovTab in ipairs(overflowTabsOrdered) do
+    -- Merging runs over the whole space (#145): a same-item run spans
+    -- the tab boundary, so a pour can cross tabs, and the receiving
+    -- stack is the larger one, earlier in the space on a tie.
+    do
         local ovStacks = {}
-        for s = 1, MAX_SLOTS do
-            local slot = state[ovTab] and state[ovTab][s]
+        for v = 1, V do
+            local slot = vSlot(v)
             if slot then
                 table.insert(ovStacks, {
-                    origSlot = s, itemID = slot.itemID, count = slot.count,
+                    origSlot = v, itemID = slot.itemID, count = slot.count,
                 })
             end
         end
@@ -750,14 +784,19 @@ function GBL:PlanSort(snapshot, layout, opts)
                     else
                         local pour = math.min(maxStack - left.count,
                                               right.count)
+                        local srcTab, srcSlot = vToReal(right.origSlot)
+                        local dstTab, dstSlot = vToReal(left.origSlot)
                         emitAssignment({
-                            srcTab = ovTab, srcSlot = right.origSlot,
-                            dstTab = ovTab, dstSlot = left.origSlot,
+                            srcTab = srcTab, srcSlot = srcSlot,
+                            dstTab = dstTab, dstSlot = dstSlot,
                             itemID = left.itemID, count = pour,
                         })
                         left.count  = left.count  + pour
                         right.count = right.count - pour
                         diag.phase0Merges = diag.phase0Merges + 1
+                        if srcTab ~= dstTab then
+                            diag.phase0CrossTabPours = diag.phase0CrossTabPours + 1
+                        end
                         if right.count == 0 then
                             diag.phase0SlotsFreed = diag.phase0SlotsFreed + 1
                         end
@@ -1068,14 +1107,16 @@ function GBL:PlanSort(snapshot, layout, opts)
 
     -- Phase 1B — route leftover non-overflow supply to overflow.
     --
-    -- Capacity-aware virtual overflow: starts from POST-Phase-0 state
-    -- and tracks {itemID, count, capacity} per overflow tab per slot.
-    -- Within one tab the preference is (1) top up an existing same-item
+    -- Capacity-aware overflow space: starts from POST-Phase-0 state
+    -- and tracks {itemID, count, capacity} per virtual slot. Over the
+    -- whole space the preference is (1) top up an existing same-item
     -- partial with remaining capacity, then (2) right-extend,
-    -- (3) left-extend, (4) first-empty. The supply loop iterates while
+    -- (3) left-extend, (4) first-empty; a run continues from the last
+    -- slot of one tab into the first of the next, so tiers 2 and 3 cross
+    -- the boundary (#145). The supply loop iterates while
     -- sup.available > 0 so a single supply can split across a
-    -- partial-target plus a fresh slot (possibly in the next overflow
-    -- tab) when one destination doesn't fully absorb it.
+    -- partial-target plus a fresh slot when one destination doesn't
+    -- fully absorb it.
     --
     -- A whole stack skips tier 1 while more whole stacks of its item are
     -- still to come (#146). Topping up from a whole stack splits it and
@@ -1087,9 +1128,10 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- stack that no tab can take whole tops up after all: with nothing
     -- free its remainder cannot open a new partial, so that cannot
     -- restart the cascade, and skipping it would strand the room a
-    -- second tab's partial still has (Phase 0 merges within a tab, so
-    -- two tabs can each hold one) or spend a deposit on a top-up a bank
-    -- stack should have made. And within one source (the bank tabs as
+    -- second tab's partial still had (Phase 0 merged within a tab then;
+    -- since #145 it pools across the space, so that reason is gone) or
+    -- spend a deposit on a top-up a bank stack should have made, which
+    -- keeps the branch. And within one source (the bank tabs as
     -- one source, then each bag) whole stacks are
     -- walked before partials, so an odd stack sitting ahead of whole
     -- stacks in slot order lands after them instead of opening the run
@@ -1102,35 +1144,32 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- branch instead of always extending.
     local overflowSlotInfo = {}
     local function rebuildOverflowSlotInfo()
-        for _, ovTab in ipairs(overflowTabsOrdered) do
-            local tabInfo = {}
-            for s = 1, MAX_SLOTS do
-                local slot = state[ovTab] and state[ovTab][s]
-                if slot then
-                    local m = getMaxStack(slot.itemID)
-                    tabInfo[s] = {
-                        itemID = slot.itemID,
-                        count = slot.count,
-                        capacity = m and math.max(0, m - slot.count) or 0,
-                    }
-                end
+        for k in pairs(overflowSlotInfo) do overflowSlotInfo[k] = nil end
+        for v = 1, V do
+            local slot = vSlot(v)
+            if slot then
+                local m = getMaxStack(slot.itemID)
+                overflowSlotInfo[v] = {
+                    itemID = slot.itemID,
+                    count = slot.count,
+                    capacity = m and math.max(0, m - slot.count) or 0,
+                }
             end
-            overflowSlotInfo[ovTab] = tabInfo
         end
     end
     rebuildOverflowSlotInfo()
 
-    -- The four-tier preference within ONE overflow tab. deferTopup skips
-    -- tier 1 (see the #146 note above): the caller passes it for a whole
-    -- stack that is not the last of its item.
-    local function pickOverflowSlotInTab(ovTab, itemID, want, deferTopup)
-        local info = overflowSlotInfo[ovTab]
+    -- The four-tier preference over the whole space, in virtual slots.
+    -- deferTopup skips tier 1 (see the #146 note above): the caller passes
+    -- it for a whole stack that is not the last of its item.
+    local function pickOverflowSlotV(itemID, want, deferTopup)
+        local info = overflowSlotInfo
         -- 1. Top up an existing same-item partial with capacity.
         if not deferTopup then
-            for s = 1, MAX_SLOTS do
-                local slot = info[s]
+            for v = 1, V do
+                local slot = info[v]
                 if slot and slot.itemID == itemID and slot.capacity > 0 then
-                    return s, math.min(want, slot.capacity), "topup"
+                    return v, math.min(want, slot.capacity), "topup"
                 end
             end
         end
@@ -1138,29 +1177,31 @@ function GBL:PlanSort(snapshot, layout, opts)
         -- exit so the take is held to one stack in one place (#151); the
         -- callers loop, so the rest goes to the next pick.
         local slot, mode
-        -- 2. Right-extend an existing same-item group.
-        for s = 2, MAX_SLOTS do
-            local prev = info[s - 1]
-            if not info[s] and prev and prev.itemID == itemID then
-                slot, mode = s, "extend-right"
+        -- 2. Right-extend an existing same-item group. v - 1 can be the
+        -- last slot of the previous tab: that is the boundary a run
+        -- crosses (#145).
+        for v = 2, V do
+            local prev = info[v - 1]
+            if not info[v] and prev and prev.itemID == itemID then
+                slot, mode = v, "extend-right"
                 break
             end
         end
         -- 3. Left-extend if no right-extension is possible.
         if not slot then
-            for s = MAX_SLOTS - 1, 1, -1 do
-                local nextInfo = info[s + 1]
-                if not info[s] and nextInfo and nextInfo.itemID == itemID then
-                    slot, mode = s, "extend-left"
+            for v = V - 1, 1, -1 do
+                local nextInfo = info[v + 1]
+                if not info[v] and nextInfo and nextInfo.itemID == itemID then
+                    slot, mode = v, "extend-left"
                     break
                 end
             end
         end
-        -- 4. First empty slot (new item in this tab).
+        -- 4. First empty slot of the space (new item).
         if not slot then
-            for s = 1, MAX_SLOTS do
-                if not info[s] then
-                    slot, mode = s, "first-empty"
+            for v = 1, V do
+                if not info[v] then
+                    slot, mode = v, "first-empty"
                     break
                 end
             end
@@ -1168,7 +1209,7 @@ function GBL:PlanSort(snapshot, layout, opts)
         if not slot then return nil end
         -- A max stack below one is treated as unknown, like nil: the
         -- planner already falls back to grouping for that item, and a
-        -- cap of nothing would place nothing and call the tab full.
+        -- cap of nothing would place nothing and call the space full.
         local take = want
         local m = getMaxStack(itemID)
         if type(m) == "number" and m >= 1 and want > m then
@@ -1178,31 +1219,31 @@ function GBL:PlanSort(snapshot, layout, opts)
         return slot, take, mode
     end
 
-    -- Tab-major walk in routing order: all four tiers in one tab before
-    -- any tier in the next. Deliberate (#57): priority means "fill this
-    -- tab first", so a first-empty in tab A beats topping up a same-item
-    -- partial sitting in tab B, even though that can leave a partial in
-    -- each of two tabs. Do not "fix" this into a cross-tab topup-first
-    -- scan; the tab order is the contract the layout editor shows.
+    -- The space is the contract the Layout editor's fill-order label
+    -- shows: routing order is slot order, so a same-item partial in a
+    -- later tab is topped up before a fresh slot opens in an earlier one.
+    -- #57's tab-major walk (all four tiers in one tab before any tier in
+    -- the next) is what #145 reversed. Real (tab, slot) out, so Phase 1B
+    -- and the Phase 3 sweep never see a virtual index.
     local function pickOverflowSlot(itemID, want, deferTopup)
-        for _, ovTab in ipairs(overflowTabsOrdered) do
-            local s, take, mode = pickOverflowSlotInTab(ovTab, itemID, want, deferTopup)
-            if s then return ovTab, s, take, mode end
-        end
-        return nil
+        local v, take, mode = pickOverflowSlotV(itemID, want, deferTopup)
+        if not v then return nil end
+        local ovTab, ovSlot = vToReal(v)
+        return ovTab, ovSlot, take, mode
     end
 
     -- Mirror a placement into overflowSlotInfo so the next pick sees
     -- the new capacity. Required for split-across-multiple-destinations;
     -- shared by Phase 1B and the Phase 3 sweep.
     local function notePlacement(ovTab, ovSlot, itemID, take)
-        local info = overflowSlotInfo[ovTab][ovSlot]
+        local v = realToV(ovTab, ovSlot)
+        local info = overflowSlotInfo[v]
         if info then
             info.count    = info.count + take
             info.capacity = math.max(0, info.capacity - take)
         else
             local m = getMaxStack(itemID)
-            overflowSlotInfo[ovTab][ovSlot] = {
+            overflowSlotInfo[v] = {
                 itemID = itemID, count = take,
                 capacity = m and math.max(0, m - take) or 0,
             }
@@ -1644,34 +1685,40 @@ function GBL:PlanSort(snapshot, layout, opts)
     -- --------------------------------------------------------------
     -- PHASE 4: Overflow Position Compaction
     -- --------------------------------------------------------------
-    -- Pack each overflow tab's stacks into a contiguous run from slot 1,
-    -- sorted by (itemID ASC, count DESC, origSlot ASC). Phase 0 has
-    -- already merged same-item partials within each tab, and Phase 1B has
-    -- topped up existing partials before extending, so by the time this
-    -- phase runs the only work left is positional: shifting stacks into a
-    -- deterministic per-tab packing. Packing never moves a stack between
-    -- overflow tabs; a pivot may park a blocker in another tab
-    -- transiently, but every destination is within the stack's own tab,
-    -- so per-tab idempotence composes. Reuses the Phase-2 greedy drain
-    -- and pivot-break loop by appending new assignments to
-    -- `assignments` / `remaining` and re-running both once for all tabs.
+    -- Pack the space into one contiguous run from virtual slot 1, sorted
+    -- by (itemID ASC, count DESC, virtual position ASC). Phase 0 has
+    -- already pooled same-item partials across the space, and Phase 1B
+    -- has topped up existing partials before extending, so by the time
+    -- this phase runs the only work left is positional: shifting stacks
+    -- into a deterministic packing. A stack moves between real tabs when
+    -- its rank crosses a tab boundary (#145); that is the whole point,
+    -- and it is what makes an item held in two tabs one run. The cost is
+    -- one move per run whose range moves, not one per stack, because of
+    -- the stay-put rule below. A space with no free slot cannot be
+    -- reordered at all: every cycle here needs a pivot, so the pack
+    -- aborts as cycle-no-pivot and the residual repeats until a slot
+    -- frees, which is the limit a full tab already had. Reuses the
+    -- Phase-2 greedy drain and pivot-break loop by appending new
+    -- assignments to `assignments` / `remaining` and re-running both once.
     local phase4Added = false
-    for _, ovTab in ipairs(overflowTabsOrdered) do
+    do
+        local function strandedV(v)
+            local t, sl = vToReal(v)
+            return unplacedSlots[t] and unplacedSlots[t][sl]
+        end
         -- A stranded slot (one of Phase 2's aborts gave up on an assignment
         -- reading from it, so it is already reported unplaced) is left out
         -- of the packing entirely: out of ovStacks here, and out of the
         -- target list below, so nothing is aimed at it either. Moving a
         -- stack the plan has already told the player it could not place
-        -- would contradict the report and, at the tab's own abort, could
-        -- name the same slot twice.
+        -- would contradict the report and, at the abort, could name the
+        -- same slot twice.
         local ovStacks = {}
-        for s = 1, MAX_SLOTS do
-            local slot = state[ovTab] and state[ovTab][s]
-            local isUnplaced = unplacedSlots[ovTab]
-                and unplacedSlots[ovTab][s]
-            if slot and not isUnplaced then
+        for v = 1, V do
+            local slot = vSlot(v)
+            if slot and not strandedV(v) then
                 table.insert(ovStacks, {
-                    origSlot = s, itemID = slot.itemID, count = slot.count,
+                    origSlot = v, itemID = slot.itemID, count = slot.count,
                 })
             end
         end
@@ -1682,35 +1729,36 @@ function GBL:PlanSort(snapshot, layout, opts)
         -- ovStacks above but stays occupied, so packing rank i to slot i
         -- would aim some other stack at it and pivot the abandoned stack
         -- away, which is the one thing the skip exists to prevent (#143).
-        -- The target list is the leading slots that are NOT stranded, so
-        -- the run closes around such a slot instead of through it. With
-        -- nothing stranded targets[i] == i and this is the old behaviour.
+        -- The target list is the leading virtual slots that are NOT
+        -- stranded, so the run closes around such a slot instead of
+        -- through it. With nothing stranded targets[i] == i.
         local targets = {}
-        for s = 1, MAX_SLOTS do
+        for v = 1, V do
             if #targets >= #ovStacks then break end
-            local isUnplaced = unplacedSlots[ovTab]
-                and unplacedSlots[ovTab][s]
-            if not isUnplaced then
-                targets[#targets + 1] = s
+            if not strandedV(v) then
+                targets[#targets + 1] = v
             end
         end
 
         -- Within a run of indistinguishable stacks (same itemID AND same
         -- count) it does not matter which stack lands in which slot: the
-        -- resulting tab is identical either way, so any move between two of
-        -- them is work with no observable result. The comparator ranks them
-        -- by origSlot, which makes the target depend on where they are now,
-        -- and executing a plan rewrites exactly that. A pass that ends early
-        -- therefore re-aims the rest of the plan instead of shortening it,
-        -- the next plan comes back larger than the work that was left, and
-        -- the executor's non-decreasing rule stops the sort with a residual
-        -- (#140: 28 ops issued, 124-op replan, on a bank whose overflow tab
-        -- held dozens of identical full stacks).
+        -- resulting space is identical either way, so any move between two
+        -- of them is work with no observable result. The comparator ranks
+        -- them by position, which makes the target depend on where they
+        -- are now, and executing a plan rewrites exactly that. A pass that
+        -- ends early therefore re-aims the rest of the plan instead of
+        -- shortening it, the next plan comes back larger than the work
+        -- that was left, and the executor's non-decreasing rule stops the
+        -- sort with a residual (#140: 28 ops issued, 124-op replan, on a
+        -- bank whose overflow tab held dozens of identical full stacks).
         --
         -- So assign each run to minimise movement: a stack already sitting
         -- inside the run's slot range stays where it is, and only the rest
         -- fill the gaps. The packing contract is unchanged, because the
-        -- contract is about which item and count occupies each slot.
+        -- contract is about which item and count occupies each slot. Over
+        -- virtual slots the range can straddle a tab boundary, and that is
+        -- deliberate: comparing against real slots would make the boundary
+        -- a place where interchangeable stacks churn (#145).
         local runStart = 1
         while runStart <= #ovStacks do
             local runEnd = runStart
@@ -1758,12 +1806,14 @@ function GBL:PlanSort(snapshot, layout, opts)
         end
 
         for i, stack in ipairs(ovStacks) do
-            local dstSlot = targets[i]
-            if stack.origSlot ~= dstSlot then
+            local dstV = targets[i]
+            if stack.origSlot ~= dstV then
+                local srcTab, srcSlot = vToReal(stack.origSlot)
+                local dstTab, dstSlot = vToReal(dstV)
                 local idx = #assignments + 1
                 assignments[idx] = {
-                    srcTab = ovTab, srcSlot = stack.origSlot,
-                    dstTab = ovTab, dstSlot = dstSlot,
+                    srcTab = srcTab, srcSlot = srcSlot,
+                    dstTab = dstTab, dstSlot = dstSlot,
                     itemID = stack.itemID, count = stack.count,
                     -- Marks this as position packing rather than a demand
                     -- fill, which is what lets the pivot loop treat a
@@ -1773,6 +1823,9 @@ function GBL:PlanSort(snapshot, layout, opts)
                 remaining[idx] = true
                 phase4Added = true
                 diag.phase4PositionShifts = diag.phase4PositionShifts + 1
+                if srcTab ~= dstTab then
+                    diag.phase4CrossTabShifts = diag.phase4CrossTabShifts + 1
+                end
             end
         end
     end
@@ -1907,10 +1960,10 @@ function GBL:PlanSort(snapshot, layout, opts)
             + diag.demandExtendLeft + diag.demandFirstEmpty
         if #plan.ops > 0 or totalDemands > 0 then
             self:SortInfo(string.format(
-                "  phases: P0 merge=%d(free=%d) P1a assign=%d "
+                "  phases: P0 merge=%d(free=%d,cross=%d) P1a assign=%d "
                 .. "P1b spill=%d(top=%d,r=%d,l=%d,fe=%d,unp=%d) "
-                .. "P2 pivot=%d(abort=%d,stranded=%d) P3 sweep=%d P4 pack=%d",
-                diag.phase0Merges, diag.phase0SlotsFreed,
+                .. "P2 pivot=%d(abort=%d,stranded=%d) P3 sweep=%d P4 pack=%d(cross=%d)",
+                diag.phase0Merges, diag.phase0SlotsFreed, diag.phase0CrossTabPours,
                 diag.phase1aAssignments,
                 diag.phase1bTopup + diag.phase1bExtendRight
                     + diag.phase1bExtendLeft + diag.phase1bFirstEmpty,
@@ -1919,7 +1972,8 @@ function GBL:PlanSort(snapshot, layout, opts)
                 diag.phase1bUnplaced,
                 diag.phase2Pivots, diag.phase2CycleAborts,
                 diag.phase2StrandedAssignments,
-                diag.phase3Sweeps, diag.phase4PositionShifts))
+                diag.phase3Sweeps, diag.phase4PositionShifts,
+                diag.phase4CrossTabShifts))
             self:SortInfo(string.format(
                 "  demands: %d total (pinned=%d, ext-R=%d, ext-L=%d, first-empty=%d)",
                 totalDemands, diag.demandPinned, diag.demandExtendRight,
