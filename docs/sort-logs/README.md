@@ -32,6 +32,24 @@ counts and dropped counters. `--session N --md` prints the skeleton of a
 record with the run lines already grouped, which is what you paste into a new
 file here. `--session N --channel sync` prints one channel in full.
 
+**The grouping reads the sort channel only**, so a scan diagnostic never
+reaches a `--md` skeleton. From v0.39.12 the scan writes one line per scan
+that a capture should carry by hand:
+
+```bash
+lua scripts/audit-sessions.lua "<path>/GuildBankLedger.lua" --session N --channel system
+```
+
+`Scan linkless: N no-link slot(s), M with data [...]` is the one to look for.
+It measures whether a bank slot with no item link reports anything through
+`GetGuildBankItemInfo`, which is the open half of #178. Two things about
+reading it. The denominator is every slot with no link, so on any real bank it
+is mostly ordinary empty slots and the figure that matters is `M`. And **`M`
+at zero answers nothing**: the case is produced by a cold item cache, so a
+capture taken after an hour of play reads zero whatever the API can do. A
+reading meant to settle #178 is taken on a fresh login with the guild bank
+opened before anything else, and the record says which it was.
+
 **Do this within a few loads of the run.** The store keeps ten sessions and a
 `/reload` that logs anything consumes one, so a capture is about nine loads
 from being overwritten. The 2026-09-12 record was written with two loads to
