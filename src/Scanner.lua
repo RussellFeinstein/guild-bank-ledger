@@ -23,15 +23,7 @@ local scanState = {
     startTime = 0,
     pendingTimer = nil,
     waitingForData = false,
-    -- #178 probe tally for the current scan. See noteLinkless below. It sits
-    -- here rather than on the tab result so the snapshot shape stays exactly
-    -- as it is, and so removing the probe is a pure delete.
-    linkless = nil,
 }
-
-local function freshLinkless()
-    return { total = 0, textureOnly = 0, countOnly = 0, both = 0, neither = 0 }
-end
 
 local function resetScanState()
     scanState.inProgress = false
@@ -43,41 +35,6 @@ local function resetScanState()
     scanState.startTime = 0
     scanState.pendingTimer = nil
     scanState.waitingForData = false
-    scanState.linkless = freshLinkless()
-end
-
---- Record what a slot with no item link reported (#178).
--- Such a slot is skipped exactly as an empty slot is, and nothing in ScanTab
--- can tell the two apart: the item link is the only signal the admit path has
--- ever read, so it never reaches GetGuildBankItemInfo when the link is nil.
--- This measures whether the info call answers for such a slot, so the bank
--- `nolink` counter #178 asks for can be built on an observed predicate rather
--- than on a guess about the API.
---
--- **A zero reading is a statement about the client's item cache, not about the
--- API.** The case is produced by a cold cache, so a capture taken on a warm
--- client reads zero whatever GetGuildBankItemInfo is capable of. Only a
--- reading above zero closes the question.
---
--- Temporary by design: it goes when the counter lands.
-local function noteLinkless(texture, count)
-    local lk = scanState.linkless
-    if not lk then return end
-
-    lk.total = lk.total + 1
-    local hasTexture = texture ~= nil
-    -- A count of zero is an empty slot, not an occupancy signal.
-    local hasCount = (count or 0) > 0
-
-    if hasTexture and hasCount then
-        lk.both = lk.both + 1
-    elseif hasTexture then
-        lk.textureOnly = lk.textureOnly + 1
-    elseif hasCount then
-        lk.countOnly = lk.countOnly + 1
-    else
-        lk.neither = lk.neither + 1
-    end
 end
 
 ------------------------------------------------------------------------
@@ -187,14 +144,9 @@ function GBL:ScanTab(tabIndex)
     local tabResult = { slots = {}, itemCount = 0, lockedSkips = 0 }
 
     for slotIndex = 1, MAX_SLOTS do
-        -- Read the info first so the link-less branch can say whether the slot
-        -- reported anything (#178). For a linked slot this is the same call
-        -- the admit path always made, so nothing about admission moves: the
-        -- link still gates it, and a locked slot is still only counted when it
-        -- has a link.
-        local texture, count, locked = GetGuildBankItemInfo(tabIndex, slotIndex)
         local itemLink = GetGuildBankItemLink(tabIndex, slotIndex)
         if itemLink then
+            local texture, count, locked = GetGuildBankItemInfo(tabIndex, slotIndex)
             if not locked then
                 tabResult.slots[slotIndex] = {
                     itemLink = itemLink,
@@ -210,8 +162,6 @@ function GBL:ScanTab(tabIndex)
                 -- sort planned against this scan can be diagnosed.
                 tabResult.lockedSkips = tabResult.lockedSkips + 1
             end
-        else
-            noteLinkless(texture, count)
         end
     end
 
@@ -286,19 +236,6 @@ function GBL:FinalizeScan()
     end
     self:SystemInfo("Scan: %s (%d total, %ds)",
         table.concat(parts, " "), totalItems, elapsed)
-
-    -- #178 probe. The denominator is every slot with no item link, which on
-    -- any real bank is mostly ordinary empty slots, so the figure that matters
-    -- leads: how many of them reported occupancy anyway. Read it back from a
-    -- capture with:
-    --   lua scripts/audit-sessions.lua <path> --session N --channel system
-    local lk = scanState.linkless or {}
-    local withData = (lk.textureOnly or 0) + (lk.countOnly or 0) + (lk.both or 0)
-    self:SystemInfo(
-        "Scan linkless: %d no-link slot(s), %d with data "
-        .. "[texture-only=%d count-only=%d both=%d neither=%d]",
-        lk.total or 0, withData, lk.textureOnly or 0, lk.countOnly or 0,
-        lk.both or 0, lk.neither or 0)
 
     self:SendMessage("GBL_SCAN_COMPLETE", results, totalItems)
 end
