@@ -50,6 +50,14 @@ capture taken after an hour of play reads zero whatever the API can do. A
 reading meant to settle #178 is taken on a fresh login with the guild bank
 opened before anything else, and the record says which it was.
 
+From v0.39.14 the plan line carries two more continuations, `  overflow: items=
+frag= partials= extra= unknown=` and `  overflow split: ...`, saying how fragmented
+the overflow tabs were when that plan was built. **Quote the final replan's
+`overflow:` line** as the #145 baseline: a run's earlier plans count partials the
+sort merges in that same pass, and only the last plan shows what one tab cannot
+fix on its own. Both lines are in `SUMMARY_PATTERNS`, so the `--md` skeleton
+carries them.
+
 **Do this within a few loads of the run.** The store keeps ten sessions and a
 `/reload` that logs anything consumes one, so a capture is about nine loads
 from being overwritten. The 2026-09-12 record was written with two loads to

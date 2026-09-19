@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- The sort log's plan line gains two lines under it saying how fragmented the overflow tabs were when the plan was built: how many items sit in overflow, how many of them are split into more than one run, how many partial stacks there are and how many of those are beyond the first for their item, and how many items the addon does not yet know the stack size of. A second line names the split items with their stacks per tab, most split first. The figures describe the bank the planner was handed, so on a run's first plan they include partials the sort merges in that same pass; the last plan of a run is the one to read, since by then each tab has been packed and what remains is what one tab cannot fix on its own. That last reading is the baseline for the planned change that treats the overflow tabs as one space.
+
 ## [0.39.13] - 2026-09-19
 
 ### Fixed
