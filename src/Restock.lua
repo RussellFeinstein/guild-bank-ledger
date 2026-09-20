@@ -157,7 +157,9 @@ function GBL:GetRestockBudget()
     return data.budget or 0
 end
 
---- Set the per-run gold budget cap (clamped to >= 0).
+--- Set the per-run gold budget cap (clamped to >= 0). A change brings back
+-- the rows the open search skipped for the budget (#199): a skip carries its
+-- reason, and the budget ones are the only ones a new budget can answer.
 -- @param n number
 -- @return boolean ok, string|nil err
 function GBL:SetRestockBudget(n)
@@ -165,7 +167,17 @@ function GBL:SetRestockBudget(n)
     if not data then return false, "no active guild" end
     n = tonumber(n) or 0
     if n < 0 then n = 0 end
-    data.budget = math.floor(n)
+    n = math.floor(n)
+    local changed = (data.budget or 0) ~= n
+    data.budget = n
+    local st = self._restock
+    if changed and st and type(st.skipped) == "table" then
+        for i, reason in pairs(st.skipped) do
+            if type(reason) == "string" and reason:find("budget", 1, true) == 1 then
+                st.skipped[i] = nil
+            end
+        end
+    end
     return true, nil
 end
 
@@ -314,7 +326,7 @@ end
 -- Session state on self._restock (NOT persisted, NOT synced):
 --   { state, activeItems = { {itemID, needed} }, resultRows = { [i]=row },
 --     searchGen, listenerRegistered, foundCount,                 -- search
---     bought, skipped, pendingIndex, pendingItemID, pendingQty,  -- buy
+--     bought, skipped = { [i] = reason }, pendingIndex, pendingItemID, pendingQty,  -- buy
 --     pendingTotal, priceIn, confirmIssued, errorNote, stepStartedAt,   -- one step
 --     buyAll, throttleBusy, stepTimer, unanswered,                       -- the run
 --     buyEventsRegistered, runStartMoney, spentEstimate }
@@ -815,7 +827,7 @@ local function failStep(self, reason, chatText)
     end
     if st.buyAll and st.pendingIndex then
         st.skipped = st.skipped or {}
-        st.skipped[st.pendingIndex] = true
+        st.skipped[st.pendingIndex] = reason
     end
     self:Print(format("Did not buy %s: %s", itemName(self, st.pendingItemID), chatText))
     ahLog(self, "step failed", reason)
@@ -870,7 +882,7 @@ function GBL:_RestockBeginPurchase(index)
     local override = self:GetRestockItemOverride(ref.itemID)
     local maxPrice = override and override.maxPrice
     if maxPrice and maxPrice > 0 and row.minPrice and row.minPrice > maxPrice * COPPER_PER_GOLD then
-        st.skipped[index] = true
+        st.skipped[index] = "max price"
         self:Print(format("Skipped %s: lowest price is over your max of %d g.",
             itemName(self, ref.itemID), maxPrice))
         ahLog(self, "skip", format("it:%d max price", ref.itemID))
@@ -892,7 +904,7 @@ function GBL:_RestockBeginPurchase(index)
         self:Print(format("Skipping %s: it would exceed your budget of %d g.",
             itemName(self, ref.itemID), budget))
         ahLog(self, "skip", format("it:%d budget on this buy", ref.itemID))
-        if st.buyAll then st.skipped[index] = true end
+        if st.buyAll then st.skipped[index] = "budget on this buy" end
         return false
     end
 
@@ -905,7 +917,7 @@ function GBL:_RestockBeginPurchase(index)
         self:Print(format("Not enough gold for %s: need about %s, have %s.",
             itemName(self, ref.itemID), self:FormatMoney(estCost), self:FormatMoney(money)))
         ahLog(self, "skip", format("it:%d cannot afford", ref.itemID))
-        if st.buyAll then st.skipped[index] = true end
+        if st.buyAll then st.skipped[index] = "cannot afford" end
         return false
     end
 

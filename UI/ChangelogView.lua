@@ -32,7 +32,7 @@ GBL.CHANGELOG_DATA = {
     -- v0.39.19
     {"0.39.19", "2026-09-20", {
         Changed = {
-            "Buy all is now Buy next: one purchase per click, walking the list from the top and skipping rows over your budget or beyond your gold. The button shows how many rows are left.",
+            "Buy all is now Buy next: one purchase per click, walking the list from the top and skipping rows over your budget or beyond your gold. The button shows how many rows are left. Changing the budget brings back the rows it had skipped, and the banner shows what the search has spent whether or not a budget is set.",
         },
         Fixed = {
             "Buy all stopped on Confirming purchase after its first purchase. The addon was confirming a purchase when the auction house reported its message system ready rather than when it sent back the price, and it was starting the next purchase of a sweep from inside the previous one's result, which the game ignores: a purchase can only be started by a click. It now confirms each purchase once the auction house has priced it and reported ready, and checks that price against your gold and your budget before spending. A purchase the auction house does not price, or does not answer, is given up on with a chat line after a few seconds; if a confirmed purchase gets no answer, the run stops and the line says to check your mail before buying that item again. Cancel now also tells the auction house to drop a purchase that has not been confirmed yet.",

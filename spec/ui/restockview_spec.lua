@@ -271,7 +271,7 @@ describe("RestockView", function()
             MockWoW.money = 900000  -- spent 10g, no budget
             banner = findChild(build(), "Label")
             assert.truthy(banner._text:find("Spent " .. GBL:FormatMoney(100000) .. ".", 1, true))
-            assert.is_nil(banner._text:find(" of ", 1, true))
+            assert.is_nil(banner._text:find(GBL:FormatMoney(100000) .. " of ", 1, true))  -- "1 of 1 found" is the count
 
             GBL:SetRestockBudget(100)
             banner = findChild(build(), "Label")

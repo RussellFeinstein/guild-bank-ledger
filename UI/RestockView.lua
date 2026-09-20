@@ -107,10 +107,12 @@ function GBL:BuildRestockTab(container)
         local line = format("Search complete: %d of %d found.",
             self._restock.foundCount or 0,
             self._restock.activeItems and #self._restock.activeItems or 0)
+        local spent = self:_RestockSpent(self._restock.runStartMoney,
+            (GetMoney and GetMoney()) or 0)
         if budget > 0 then
-            local spent = self:_RestockSpent(self._restock.runStartMoney,
-                (GetMoney and GetMoney()) or 0)
             line = line .. format("  Spent %s of %d g.", self:FormatMoney(spent), budget)
+        elseif spent > 0 then
+            line = line .. format("  Spent %s.", self:FormatMoney(spent))
         end
         line = line .. format("  Gold: %s.", self:FormatMoney((GetMoney and GetMoney()) or 0))
         status:SetText(line)
