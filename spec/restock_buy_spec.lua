@@ -402,7 +402,11 @@ describe("Restock buy", function()
             local before = #ahLines()
             MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
             assert.equals(before + 1, #ahLines())
-            assert.is_not_nil(findLine("ignored (state=READY)"))
+            local ignored = findLine("ignored (state=READY)")
+            assert.is_not_nil(ignored)
+            -- The prefix carries the state every line is read by, so pin it
+            -- once on a line outside CONFIRMING (a hardcoded prefix survived).
+            assert.equals(1, ignored:find("Restock AH: COMMODITY_PURCHASE_SUCCEEDED state=READY ", 1, true))
             assert.is_true(GBL._restock.bought[1])
             assert.equals(1, #MockWoW.commodityPurchases.confirm)
 
