@@ -184,6 +184,15 @@ describe("RestockView", function()
             assert.is_not_nil(findButton(container, "Cancel"))
         end)
 
+        it("renders a waiting message and a Cancel button in WAITING (#199)", function()
+            GBL._restock = { state = "WAITING", activeItems = {}, resultRows = {}, sweepNext = 2 }
+            local container = build()
+            local scroll = findChild(container, "ScrollFrame")
+            assert.is_not_nil(findLabelContaining(scroll, "Waiting for the auction house"))
+            assert.is_not_nil(findButton(container, "Cancel"))
+            assert.is_nil(findButton(container, "Buy all"))
+        end)
+
         it("wires each per-row Buy button to that row's item", function()
             GBL._restock = {
                 state = "READY",

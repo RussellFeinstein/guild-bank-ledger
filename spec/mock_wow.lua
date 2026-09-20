@@ -119,7 +119,7 @@ function MockWoW.reset()
     MockWoW.queuedBankEvents = {}
     -- Restock buy flow: settable wallet + recorder for C_AuctionHouse calls.
     MockWoW.money = 0
-    MockWoW.commodityPurchases = { start = {}, confirm = {} }
+    MockWoW.commodityPurchases = { start = {}, confirm = {}, cancel = {} }
 end
 
 ---------------------------------------------------------------------------
@@ -230,6 +230,11 @@ function MockWoW.install()
         end,
         ConfirmCommoditiesPurchase = function(itemID, quantity)
             table.insert(MockWoW.commodityPurchases.confirm, { itemID = itemID, quantity = quantity })
+        end,
+        -- Takes no arguments in the live API: it drops whatever purchase is
+        -- pending between a start and its confirm.
+        CancelCommoditiesPurchase = function()
+            table.insert(MockWoW.commodityPurchases.cancel, { at = #MockWoW.commodityPurchases.start })
         end,
     }
 
