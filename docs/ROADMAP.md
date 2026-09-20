@@ -25,9 +25,9 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 - Intake validation and repair (v0.37.0): type, enum, and shape checks on every synced record, `classID`/`subclassID` recomputed from `itemID` when damaged in transit, rejects counted separately from duplicates
 
 **UI** (v0.3.0--v0.32.x):
-- Tabbed interface: Transactions, Gold Log, Consumption, Sort, Layout, Sync, Changelog, About
-- Filter bar (date range, category, type, player, tab, hide moves)
-- Sortable columns, virtual scrolling, minimap button
+- Tabbed interface: Transactions, Gold Log, Consumption, Sort, Layout, Restock, Sync, Changelog, About
+- Filter bar (date range, category, type, hide moves)
+- Sortable columns, minimap button
 - Consumption dashboard: guild totals, top 10 consumers, top 15 items with trend columns
 - Changelog tab with pagination (10 versions/page)
 - Version label with update-available detection
@@ -92,6 +92,7 @@ Items below block the v1.0 release.
 - **Sync convergence demonstration**: the per-peer budgeting this gate was written for has shipped in pieces (the 1.0s inter-chunk gap floor, the 300-record session cap with whole-bucket slicing, and the 60s superset-nudge throttle), so what remains is not a mechanism but a measurement: a capture from a whole guild showing a backfill converging without starving a peer. Reframed from "rate limiting pending" in v0.39.0 because that wording had outlived the work.
 - **Security hardening**: a threat-model pass over every path that acts on a message another client sent, since an AceComm payload is attacker-controlled input: `HandleHello`, `HandleSyncData`, `AdoptRemoteBankLayout` and `MigrateSortAccessShape`. The plan for it is to be re-derived into `docs/PLAN-security-hardening.md` when the gate opens; it belongs on this list and was missing from it.
 - **Restock rework** (milestone): the buy flow shipped working but never designed, thirteen steps behind five preconditions that fail into chat, and it is close to unusable as it stands. The flow gets designed end to end (#56) and rebuilt in gated steps before this signal; the order is in the milestone description and the cross-milestone tracker (#188).
+- **History views rework** (milestone): the Transactions, Gold Log and Consumption tabs shipped as data layers with rendering added later and were never designed as a set. Pagination is computed with no controls, the player and tab filters the README advertises have no widget, the Type column drops the color and icon the triple-encoding claim rests on, none of the three registers a focusable, and none has a render spec. The set gets designed end to end (#204) and rebuilt in gated steps; the order is in the milestone description and the cross-milestone tracker (#188).
 - **Performance audit**: SavedVariables size profile and a UI debouncing pass on the heavy tabs. Compaction verification came off this list when compaction itself was retired.
 - **Community feedback iteration**: address reports from active guild testers before the production-readiness signal.
 
