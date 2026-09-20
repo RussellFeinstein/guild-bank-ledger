@@ -257,6 +257,27 @@ describe("RestockView", function()
             assert.truthy(banner._text:find("Gold", 1, true))  -- current wallet shown
         end)
 
+        it("shows what the search has spent even without a budget, and nothing before anything was spent (#199)", function()
+            GBL._restock = {
+                state = "READY",
+                activeItems = { { itemID = 111, needed = 5 } },
+                resultRows = { [1] = { itemKey = { itemID = 111 }, minPrice = 1000 } },
+                bought = {}, skipped = {}, runStartMoney = 1000000,
+            }
+            MockWoW.money = 1000000  -- spent 0, no budget
+            local banner = findChild(build(), "Label")
+            assert.is_nil(banner._text:find("Spent", 1, true))
+
+            MockWoW.money = 900000  -- spent 10g, no budget
+            banner = findChild(build(), "Label")
+            assert.truthy(banner._text:find("Spent " .. GBL:FormatMoney(100000) .. ".", 1, true))
+            assert.is_nil(banner._text:find(" of ", 1, true))
+
+            GBL:SetRestockBudget(100)
+            banner = findChild(build(), "Label")
+            assert.truthy(banner._text:find("Spent " .. GBL:FormatMoney(100000) .. " of 100 g.", 1, true))
+        end)
+
         it("shows the empty-state pointing at the Layout tab when no layout is set", function()
             local container = build()
             local scroll = findChild(container, "ScrollFrame")

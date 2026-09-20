@@ -897,6 +897,83 @@ describe("Restock buy", function()
         end)
     end)
 
+    describe("a budget change brings back the rows it skipped (#199)", function()
+        local function twoOverBudget()
+            MockWoW.money = 100000000
+            GBL:SetRestockBudget(10)  -- 10 gold
+            readyState(
+                { { itemID = 100, needed = 100 }, { itemID = 200, needed = 100 } },  -- 500g each row
+                { [1] = { itemKey = { itemID = 100 }, minPrice = 50000 },
+                  [2] = { itemKey = { itemID = 200 }, minPrice = 50000 } },
+                { runStartMoney = 100000000 })
+        end
+
+        it("records why a row was skipped", function()
+            twoOverBudget()
+            GBL:StartRestockBuyNext()
+            assert.equals(0, #MockWoW.commodityPurchases.start)
+            assert.equals("budget on this buy", GBL._restock.skipped[1])
+            assert.equals("budget on this buy", GBL._restock.skipped[2])
+            assert.equals(0, GBL:_RestockBuyableCount(GBL._restock))
+        end)
+
+        it("clears budget skips when the budget changes, and the next click buys them", function()
+            twoOverBudget()
+            GBL:StartRestockBuyNext()
+            GBL:SetRestockBudget(10000)
+            assert.is_nil(GBL._restock.skipped[1])
+            assert.is_nil(GBL._restock.skipped[2])
+            assert.equals(2, GBL:_RestockBuyableCount(GBL._restock))
+            GBL:StartRestockBuyNext()
+            assert.equals(1, #MockWoW.commodityPurchases.start)
+            assert.equals(100, MockWoW.commodityPurchases.start[1].itemID)
+        end)
+
+        it("clears a refusal at price for the budget too, and leaves the other reasons alone", function()
+            MockWoW.money = 100000000
+            GBL:SetRestockBudget(10)
+            GBL:SetRestockItemOverride(300, { maxPrice = 1 })
+            readyState(
+                { { itemID = 100, needed = 5 },    -- estimate 2.1g, quoted 15g: refused at price
+                  { itemID = 200, needed = 1 },    -- no price comes: timeout
+                  { itemID = 300, needed = 1 } },  -- over its max price
+                { [1] = { itemKey = { itemID = 100 }, minPrice = 4200 },
+                  [2] = { itemKey = { itemID = 200 }, minPrice = 4200 },
+                  [3] = { itemKey = { itemID = 300 }, minPrice = 50000 } },
+                { runStartMoney = 100000000 })
+            GBL:StartRestockBuyNext()
+            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 30000, 150000)  -- 15g, past 10g
+            assert.equals("budget at price", GBL._restock.skipped[1])
+            GBL:StartRestockBuyNext()
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            fireStepTimers()
+            assert.equals("no price within 5s", GBL._restock.skipped[2])
+            GBL:StartRestockBuyNext()
+            assert.equals("max price", GBL._restock.skipped[3])
+            assert.equals(2, #MockWoW.commodityPurchases.start)
+
+            GBL:SetRestockBudget(10000)
+            assert.is_nil(GBL._restock.skipped[1])
+            assert.equals("no price within 5s", GBL._restock.skipped[2])
+            assert.equals("max price", GBL._restock.skipped[3])
+        end)
+
+        it("leaves skips alone when the budget is set to what it already was", function()
+            twoOverBudget()
+            GBL:StartRestockBuyNext()
+            GBL:SetRestockBudget(10)
+            assert.equals("budget on this buy", GBL._restock.skipped[1])
+            assert.equals("budget on this buy", GBL._restock.skipped[2])
+        end)
+
+        it("survives a budget change with no search open", function()
+            GBL._restock = nil
+            assert.is_true((GBL:SetRestockBudget(5)))
+            GBL._restock = { state = "IDLE" }
+            assert.is_true((GBL:SetRestockBudget(6)))
+        end)
+    end)
+
     describe("pure buy helpers", function()
         it("_RestockSpent clamps at 0", function()
             assert.equals(0, GBL:_RestockSpent(100, 200))
