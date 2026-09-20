@@ -1170,12 +1170,12 @@ function GBL:_RestockBeginPurchase(index)
     end
 
     -- The gate (#211): a start at the bank would go into nothing and the step
-    -- timer would give the row up five seconds later. Marks nothing and ends
-    -- a Buy next walk, since the next row would be refused the same way.
+    -- timer would give the row up five seconds later. Marks nothing, like the
+    -- no-API exit below, so a Buy next walk ends on the same row coming back
+    -- (the tried guard in StartRestockBuyNext) rather than refusing every row.
     if not self:_RestockAuctionHouseOpen() then
         self:Print("Open the Auction House to buy.")
         ahLog(self, "skip", format("it:%d auction house closed", ref.itemID))
-        st.buyAll = false
         return false
     end
     if not (C_AuctionHouse and C_AuctionHouse.StartCommoditiesPurchase) then

@@ -1591,6 +1591,26 @@ describe("Restock buy", function()
             assert.equals(1, #MockWoW.commodityPurchases.confirm)
             assert.equals(0, livePauseTimers())
         end)
+
+        it("Confirm and Cancel do nothing outside a purchase", function()
+            -- The buttons only render in PRICED and CONFIRMING, but a click
+            -- handler outlives the rebuild it was made in; neither call may
+            -- confirm or cancel a purchase that is not there.
+            twoItems()
+            GBL:ConfirmRestockPurchase()
+            assert.equals("READY", GBL._restock.state)
+            assert.equals(0, #MockWoW.commodityPurchases.confirm)
+            assert.equals(0, liveStepTimers())
+            GBL:CancelRestockPurchase()
+            assert.equals("READY", GBL._restock.state)
+            assert.equals(0, #MockWoW.commodityPurchases.cancel)
+            assert.equals(2, #GBL._restock.activeItems)
+
+            GBL:StartRestockBuyNext()  -- CONFIRMING, before the price
+            GBL:ConfirmRestockPurchase()
+            assert.equals("CONFIRMING", GBL._restock.state)
+            assert.equals(0, #MockWoW.commodityPurchases.confirm)
+        end)
     end)
 
     ------------------------------------------------------------------------
