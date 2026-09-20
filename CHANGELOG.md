@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.39.20] - 2026-09-20
 
 ### Fixed
 - Restock offered a row again while its purchase was still in the mailbox, so a second search after Cancel or Done bought the same items twice. A purchase is now remembered per guild until the bank ledger records you depositing it: the row shows "in the mail N" beside the bank count, the shortfall counts what is in the mail as stock, and the entry clears when a deposit of that item by the buying character is recorded, in full or in part. A Clear button on the row covers a deposit made from another character or items that went somewhere else. A confirmed purchase whose result never arrived, or that Cancel abandoned after the confirm went out, is kept the same way and the row says to check your mail. Every change to the store is a line on the system log (`/gbl logs`).
