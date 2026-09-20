@@ -288,9 +288,10 @@ describe("Restock buy", function()
         it("settles to READY when the budget is reached after a purchase, and refuses the next click", function()
             GBL:SetRestockBudget(100)  -- 100 gold cap
             readyState(
-                { { itemID = 100, needed = 5 }, { itemID = 200, needed = 3 } },
+                { { itemID = 100, needed = 5 }, { itemID = 200, needed = 3 }, { itemID = 300, needed = 1 } },
                 { [1] = { itemKey = { itemID = 100 }, minPrice = 1000 },
-                  [2] = { itemKey = { itemID = 200 }, minPrice = 1000 } },
+                  [2] = { itemKey = { itemID = 200 }, minPrice = 1000 },
+                  [3] = { itemKey = { itemID = 300 }, minPrice = 1000 } },
                 { runStartMoney = 2000000 })  -- 200 gold on hand
             MockWoW.money = 2000000
 
@@ -312,8 +313,11 @@ describe("Restock buy", function()
             assert.equals(1, #MockWoW.commodityPurchases.start)  -- refused pre-start
             assert.equals("READY", GBL._restock.state)
             assert.is_false(GBL._restock.buyAll)
+            -- The refusal ends the walk: row 3 is not tried and told the same thing.
             assert.equals(1, count("Restock AH: skip "))
-            assert.is_true(Helpers.printContains("Budget of 100 g reached"))
+            assert.equals(1, printCount("Budget of 100 g reached"))
+            assert.is_nil(GBL._restock.skipped[3])
+            assert.equals(0, printCount("Nothing left to buy"))
         end)
 
         it("skips an item whose estimated cost would exceed the budget", function()
@@ -328,6 +332,7 @@ describe("Restock buy", function()
             assert.is_true(GBL._restock.skipped[1])
             assert.equals("READY", GBL._restock.state)
             assert.equals(0, #MockWoW.commodityPurchases.start)  -- never started
+            assert.equals(0, printCount("Nothing left to buy"))    -- a row was tried and refused, which is not that
         end)
 
         it("says so when a click finds nothing to buy", function()
@@ -535,6 +540,7 @@ describe("Restock buy", function()
             assert.equals(1, count("no auction-house API"))
             assert.equals(1, printCount("Open the Auction House to buy"))
             assert.is_nil(GBL._restock.skipped[1])   -- not the row's fault
+            assert.equals(0, printCount("Nothing left to buy"))
         end)
 
         it("refuses the click once while a result is outstanding", function()
