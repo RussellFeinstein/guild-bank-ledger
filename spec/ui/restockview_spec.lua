@@ -184,13 +184,30 @@ describe("RestockView", function()
             assert.is_not_nil(findButton(container, "Cancel"))
         end)
 
-        it("renders a waiting message and a Cancel button in WAITING (#199)", function()
-            GBL._restock = { state = "WAITING", activeItems = {}, resultRows = {}, sweepNext = 2 }
+        it("renders Buy next with the buyable count and disables it at zero (#199)", function()
+            GBL._restock = {
+                state = "READY",
+                activeItems = { { itemID = 111, needed = 5 }, { itemID = 222, needed = 3 } },
+                resultRows = { [1] = { itemKey = { itemID = 111 }, minPrice = 1000 },
+                               [2] = { itemKey = { itemID = 222 }, minPrice = 1000 } },
+                bought = { [1] = true }, skipped = {}, runStartMoney = 1000000,
+            }
+            MockWoW.money = 1000000
             local container = build()
-            local scroll = findChild(container, "ScrollFrame")
-            assert.is_not_nil(findLabelContaining(scroll, "Waiting for the auction house"))
-            assert.is_not_nil(findButton(container, "Cancel"))
             assert.is_nil(findButton(container, "Buy all"))
+            local btn = findButton(container, "Buy next (1 left)")
+            assert.is_not_nil(btn)
+            assert.is_falsy(btn.disabled)
+            btn:Fire("OnClick")
+            assert.equals(1, #MockWoW.commodityPurchases.start)
+            assert.equals(222, MockWoW.commodityPurchases.start[1].itemID)
+
+            GBL._restock.state = "READY"
+            GBL._restock.bought[2] = true
+            container = build()
+            btn = findButton(container, "Buy next (0 left)")
+            assert.is_not_nil(btn)
+            assert.is_true(btn.disabled)
         end)
 
         it("wires each per-row Buy button to that row's item", function()
