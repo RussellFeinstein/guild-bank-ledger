@@ -44,7 +44,7 @@ Health readings from the same window. Kátorri send 1: `46 on 1st, 9 on 2nd, chu
 ## Open questions for the next investigation pass
 
 - Stale ACKs are receiver-liveness evidence and the ladder ignores them. Instrument first: a `staleAcks=N` term on the `Retry causes` line separates late from lost without hand-counting. Only after a capture with that number, a policy: a stale ACK for the previous chunk arriving mid-ladder resets or stretches patience instead of counting toward `MAX_RETRIES`. `ACK_TIMEOUT` and `MAX_RETRIES` move together (#92), and no lever ships in the same capture window as another.
-- The BUSY-abort summary gap (finding 2) is filed as ISSUE_PLACEHOLDER. The fix shape is `OnCombatStart`'s: tag, then `FinishSending`. Whether the bidirectional check that `FinishSending` schedules should run against a peer that just said it is in combat is the one design question.
+- The BUSY-abort summary gap (finding 2) is filed as #202. The fix shape is `OnCombatStart`'s: tag, then `FinishSending`. The bidirectional check that `FinishSending` schedules would run against a peer that just said it is in combat, and that is already covered: `HandleBusy` stamps `peerBusyUntil` before the 0.5 s timer fires and the check's behind branch reads `IsPeerBusy` before it requests. The issue asks for a spec pinning that order.
 - SYNC_RECEIPT is still the instrument that settles finding 3, and it is still unfiled; the build order on #188 puts it at the head of the sync arc.
 - The post-session cooldown directive now has its prerequisite shipped. Finding 4 is its third sighting.
 - Should the superset nudge be suppressed while `sending`? It invites a request the serve gate refuses.
