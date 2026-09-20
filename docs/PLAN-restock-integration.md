@@ -162,7 +162,9 @@ authoritative and its version column as historical.
   - `_RestockBuyNext` (`C_AuctionHouse.StartCommoditiesPurchase`, then the confirm step via
     `C_AuctionHouse.ConfirmCommoditiesPurchase` once `COMMODITY_PRICE_UPDATED` has arrived and the
     throttle has reported ready; as built this was `_RestockBeginPurchase`, and the confirm went out
-    on `AUCTION_HOUSE_THROTTLED_SYSTEM_READY` alone until #199, v0.39.19),
+    on `AUCTION_HOUSE_THROTTLED_SYSTEM_READY` alone until #199, v0.39.19. The start requires a
+    hardware event, so it is only ever called from a click: the per-row Buy and Buy next, one
+    purchase per click. No unattended sweep is possible),
   - `ResetRestockSearch`.
   Register the auction-house events lazily in Start and unregister them in Reset; the handlers
   guard on state (the live set and their guards are in `src/Restock.lua` and the CLAUDE.md bullet).
