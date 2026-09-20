@@ -1,5 +1,10 @@
 # Restock integration plan (GuildBankRestock into GuildBankLedger)
 
+> **The journey design for the Restock rework lives in [PLAN-restock-ux.md](PLAN-restock-ux.md)**
+> (2026-09-20, #56). It supersedes the ordered roadmap table below (Bulk mode is #59, TSM price
+> preview is #196) and corrects risk 4: purchases arrive by mail, not in bags. This document stays as
+> the record of how the tab was scoped and ported.
+
 ## Overview
 
 GuildBankRestock (GBR) is being merged into GuildBankLedger (GBL) as a single gated **Restock** tab,
@@ -215,8 +220,9 @@ on the singleton and must not survive `/reload`.
    Dedup the universe by itemID (an item can be both catalog and layout-pinned).
 3. Reserves are dormant (first consumer). `GetStockReserves()` is empty in the wild; tests must inject
    reserves to prove the `max()` layering.
-4. Stock lags purchases. Bought items land in the buyer's bags, not the bank; `toBuy` only drops after
-   deposit plus rescan. This is inherited GBR behavior.
+4. Stock lags purchases. Bought items arrive in the buyer's mailbox (not bags, as first written), so
+   `toBuy` only drops after the mail is collected, deposited and rescanned; a search inside that
+   window offers the row again (#209). The pending-purchase design in `PLAN-restock-ux.md` closes it.
 5. Commodity-only. `StartCommoditiesPurchase` works for commodities only; surface non-commodity
    catalog items gracefully (found but unbuyable).
 6. The mock `SelectTab` is a no-op, so the render path is not testable in busted. Keep the view a thin
