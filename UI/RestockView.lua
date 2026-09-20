@@ -107,10 +107,12 @@ function GBL:BuildRestockTab(container)
         local line = format("Search complete: %d of %d found.",
             self._restock.foundCount or 0,
             self._restock.activeItems and #self._restock.activeItems or 0)
+        local spent = self:_RestockSpent(self._restock.runStartMoney,
+            (GetMoney and GetMoney()) or 0)
         if budget > 0 then
-            local spent = self:_RestockSpent(self._restock.runStartMoney,
-                (GetMoney and GetMoney()) or 0)
             line = line .. format("  Spent %s of %d g.", self:FormatMoney(spent), budget)
+        elseif spent > 0 then
+            line = line .. format("  Spent %s.", self:FormatMoney(spent))
         end
         line = line .. format("  Gold: %s.", self:FormatMoney((GetMoney and GetMoney()) or 0))
         status:SetText(line)
@@ -165,15 +167,17 @@ function GBL:BuildRestockTab(container)
         focus(cancelBtn)
     elseif state == "READY" then
         local budget = self:GetRestockBudget()
-        local buyAllBtn = AceGUI:Create("Button")
-        buyAllBtn:SetText("Buy all")
-        buyAllBtn:SetWidth(110)
-        buyAllBtn:SetDisabled(self:_RestockNextBuyable(self._restock) == nil)
-        buyAllBtn:SetCallback("OnClick", function()
-            self:StartRestockBuyAll()
+        -- One purchase per click: the start needs the click (#199).
+        local left = self:_RestockBuyableCount(self._restock)
+        local buyNextBtn = AceGUI:Create("Button")
+        buyNextBtn:SetText(format("Buy next (%d left)", left))
+        buyNextBtn:SetWidth(150)
+        buyNextBtn:SetDisabled(left == 0)
+        buyNextBtn:SetCallback("OnClick", function()
+            self:StartRestockBuyNext()
         end)
-        controls:AddChild(buyAllBtn)
-        focus(buyAllBtn)
+        controls:AddChild(buyNextBtn)
+        focus(buyNextBtn)
 
         local budgetBox = AceGUI:Create("EditBox")
         budgetBox:SetLabel("Budget (gold, 0 = none)")
@@ -196,8 +200,8 @@ function GBL:BuildRestockTab(container)
         controls:AddChild(doneBtn)
         focus(doneBtn)
     elseif state == "CONFIRMING" then
-        -- A purchase is in flight. Offer an escape so a stuck confirm (AH closed,
-        -- item no longer a commodity) cannot wedge the tab until /reload.
+        -- A purchase is in flight. Offer an escape so a stuck step cannot
+        -- wedge the tab.
         local cancelBtn = AceGUI:Create("Button")
         cancelBtn:SetText("Cancel")
         cancelBtn:SetWidth(120)

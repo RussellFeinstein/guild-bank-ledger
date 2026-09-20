@@ -5,6 +5,14 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.39.19] - 2026-09-20
+
+### Fixed
+- Buy all stopped on "Confirming purchase..." after its first purchase, for two reasons. The addon was confirming a purchase when the auction house reported its message system ready rather than when it sent back the price; it now confirms each purchase once the auction house has priced it and reported ready, and checks that price against your gold and your budget before spending. And it was starting the next purchase of a sweep from inside the previous one's result, which the game ignores: an auction house purchase can only be started by a mouse or keyboard action, so the sweep is gone (see Changed). A purchase the auction house does not price, or does not answer, is given up on with a chat line after a few seconds instead of waiting forever; under Buy next the row is skipped, and a single Buy leaves it buyable. If a confirmed purchase gets no answer, the run stops, the chat line says to check your mail before buying that item again, a late answer is still credited to the right row, and nothing else can be bought from that search until it arrives or you press Done. Cancel now also tells the auction house to drop a purchase that has not been confirmed yet. Every line the flow writes to the system log carries whether it thinks the auction house throttle is busy and what the game says.
+
+### Changed
+- Buy all is now Buy next: one purchase per click, walking the list from the top and skipping rows over your budget or beyond your gold, with the button showing how many rows are left. The budget caps everything bought from one search, changing it brings back the rows it had skipped, and the Restock banner now shows what the search has spent whether or not a budget is set.
+
 ## [0.39.18] - 2026-09-19
 
 ### Added
