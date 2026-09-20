@@ -102,6 +102,8 @@ function GBL:BuildRestockTab(container)
         status:SetText("|cffffaa55Searching the Auction House...|r")
     elseif state == "CONFIRMING" then
         status:SetText("|cffffaa55Confirming purchase...|r")
+    elseif state == "WAITING" then
+        status:SetText("|cffffaa55Waiting for the auction house before the next purchase...|r")
     elseif state == "READY" then
         local budget = self:GetRestockBudget()
         local line = format("Search complete: %d of %d found.",
@@ -195,9 +197,9 @@ function GBL:BuildRestockTab(container)
         end)
         controls:AddChild(doneBtn)
         focus(doneBtn)
-    elseif state == "CONFIRMING" then
-        -- A purchase is in flight. Offer an escape so a stuck confirm (AH closed,
-        -- item no longer a commodity) cannot wedge the tab until /reload.
+    elseif state == "CONFIRMING" or state == "WAITING" then
+        -- A purchase is in flight, or a sweep is waiting for the throttle before
+        -- its next one. Offer an escape so a stuck step cannot wedge the tab.
         local cancelBtn = AceGUI:Create("Button")
         cancelBtn:SetText("Cancel")
         cancelBtn:SetWidth(120)
@@ -228,6 +230,12 @@ function GBL:BuildRestockTab(container)
         lbl:SetFullWidth(true)
         lbl:SetFont(fontPath, fontSize, "")
         lbl:SetText("|cffffaa55Confirming purchase...|r")
+        content:AddChild(lbl)
+    elseif state == "WAITING" then
+        local lbl = AceGUI:Create("Label")
+        lbl:SetFullWidth(true)
+        lbl:SetFont(fontPath, fontSize, "")
+        lbl:SetText("|cffffaa55Waiting for the auction house before the next purchase...|r")
         content:AddChild(lbl)
     elseif state == "READY" then
         self:_RestockView_RenderResults(content, focus)
