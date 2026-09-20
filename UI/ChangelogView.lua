@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.39.18
+    {"0.39.18", "2026-09-19", {
+        Added = {
+            "The Restock buy flow now writes every auction house event it sees to the system log (/gbl logs) while a purchase is in flight, with its own start, skip, step and reset lines, so a Buy all that stops on Confirming purchase can be read back from the capture. Nothing about when a purchase is confirmed or the next one starts has changed yet; this release is the reading the fix will be planned from. Keep a diagnostic Buy all to two or three items, since the capture holds about twenty-five purchases before its oldest lines drop out.",
+        },
+    }},
     -- v0.39.17
     {"0.39.17", "2026-09-19", {
         Changed = {

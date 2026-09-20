@@ -525,12 +525,57 @@ function GBL:_RestockOnSearchEnd(results)
     self:RefreshRestockTab()
 end
 
+-- Every auction-house event the buy flow registers (#199). Registered on the
+-- first buy and dropped on reset, so idle play at the auction house logs
+-- nothing. Exported so the spec can pin a handler for each name: AceEvent
+-- errors on a registration with no method, the mock does not.
+local AH_EVENTS = {
+    "AUCTION_HOUSE_THROTTLED_SYSTEM_READY",
+    "AUCTION_HOUSE_THROTTLED_MESSAGE_SENT",
+    "AUCTION_HOUSE_THROTTLED_MESSAGE_QUEUED",
+    "AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED",
+    "AUCTION_HOUSE_THROTTLED_MESSAGE_RESPONSE_RECEIVED",
+    "COMMODITY_PRICE_UPDATED",
+    "COMMODITY_PRICE_UNAVAILABLE",
+    "COMMODITY_PURCHASE_SUCCEEDED",
+    "COMMODITY_PURCHASE_FAILED",
+    "UI_ERROR_MESSAGE",
+}
+GBL._restockAHEvents = AH_EVENTS
+
+-- One system-channel line per auction-house event or flow step (#199), written
+-- AFTER the decision it reports so the line says what happened. Restock has no
+-- channel of its own; the system channel is captured, so a Buy all that stops
+-- on Confirming purchase can be read back from the SavedVariables.
+local function ahLog(self, what, detail)
+    local st = self._restock
+    local pending = "none"
+    if st and st.pendingItemID then
+        pending = format("it:%d x%d", st.pendingItemID, st.pendingQty or 0)
+    end
+    local elapsed = 0
+    if st and st.stepStartedAt and GetTime then
+        elapsed = GetTime() - st.stepStartedAt
+    end
+    self:SystemInfo("Restock AH: %s state=%s pending=%s t=+%.2fs%s",
+        what, (st and st.state) or "none", pending, elapsed,
+        detail and (" " .. detail) or "")
+end
+
+-- True while a purchase is in flight: the window the throttle family and
+-- UI_ERROR_MESSAGE are logged in.
+local function purchaseInFlight(self)
+    local st = self._restock
+    return st ~= nil and st.state == "CONFIRMING"
+end
+
 --- Reset the search/buy back to IDLE: unregister listeners and buy events, stop
 -- any in-flight Auctionator search, invalidate stale async callbacks, and clear
 -- results and buy progress.
 function GBL:ResetRestockSearch()
     self._restock = self._restock or { state = "IDLE" }
     local st = self._restock
+    ahLog(self, "reset")
     unregisterSearchListener(self)
     self:_RestockUnregisterBuyEvents()
     if (st.state == "SEARCHING" or st.state == "READY" or st.state == "CONFIRMING")
@@ -594,18 +639,18 @@ end
 function GBL:_RestockRegisterBuyEvents()
     local st = self._restock
     if st and not st.buyEventsRegistered then
-        self:RegisterEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
-        self:RegisterEvent("COMMODITY_PURCHASE_SUCCEEDED")
-        self:RegisterEvent("COMMODITY_PURCHASE_FAILED")
+        for _, ev in ipairs(AH_EVENTS) do
+            self:RegisterEvent(ev)
+        end
         st.buyEventsRegistered = true
     end
 end
 
 function GBL:_RestockUnregisterBuyEvents()
     if self._restock and self._restock.buyEventsRegistered then
-        self:UnregisterEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
-        self:UnregisterEvent("COMMODITY_PURCHASE_SUCCEEDED")
-        self:UnregisterEvent("COMMODITY_PURCHASE_FAILED")
+        for _, ev in ipairs(AH_EVENTS) do
+            self:UnregisterEvent(ev)
+        end
         self._restock.buyEventsRegistered = false
     end
 end
@@ -659,6 +704,7 @@ function GBL:_RestockBeginPurchase(index)
         st.skipped[index] = true
         self:Print(format("Skipped %s: lowest price is over your max of %d g.",
             itemName(self, ref.itemID), maxPrice))
+        ahLog(self, "skip", format("it:%d max price", ref.itemID))
         self:_RestockAfterStep()
         return
     end
@@ -667,6 +713,7 @@ function GBL:_RestockBeginPurchase(index)
     -- Budget cap (already reached): stop the run.
     if self:_RestockBudgetExceeded(spentCopper(self), budget) then
         self:Print(format("Budget of %d g reached; stopping.", budget))
+        ahLog(self, "skip", format("it:%d budget reached", ref.itemID))
         st.buyAll = false
         st.state = "READY"
         self:RefreshRestockTab()
@@ -678,6 +725,7 @@ function GBL:_RestockBeginPurchase(index)
     if budget > 0 and (spentCopper(self) + estCost) > budget * COPPER_PER_GOLD then
         self:Print(format("Skipping %s: it would exceed your budget of %d g.",
             itemName(self, ref.itemID), budget))
+        ahLog(self, "skip", format("it:%d budget on this buy", ref.itemID))
         if st.buyAll then
             st.skipped[index] = true
             self:_RestockAfterStep()
@@ -696,6 +744,7 @@ function GBL:_RestockBeginPurchase(index)
     if estCost > money then
         self:Print(format("Not enough gold for %s: need about %s, have %s.",
             itemName(self, ref.itemID), self:FormatMoney(estCost), self:FormatMoney(money)))
+        ahLog(self, "skip", format("it:%d cannot afford", ref.itemID))
         if st.buyAll then
             st.skipped[index] = true
             self:_RestockAfterStep()
@@ -707,6 +756,7 @@ function GBL:_RestockBeginPurchase(index)
 
     if not (C_AuctionHouse and C_AuctionHouse.StartCommoditiesPurchase) then
         self:Print("Open the Auction House to buy.")
+        ahLog(self, "skip", format("it:%d no auction-house API", ref.itemID))
         return
     end
 
@@ -715,8 +765,10 @@ function GBL:_RestockBeginPurchase(index)
     st.pendingItemID = (row.itemKey and row.itemKey.itemID) or ref.itemID
     st.pendingQty = ref.needed
     st.confirmIssued = false
+    st.stepStartedAt = (GetTime and GetTime()) or nil
     st.state = "CONFIRMING"
     self:RefreshRestockTab()
+    ahLog(self, "start", st.buyAll and "sweep=yes" or "sweep=no")
     C_AuctionHouse.StartCommoditiesPurchase(st.pendingItemID, st.pendingQty)
 end
 
@@ -728,12 +780,14 @@ function GBL:_RestockAfterStep()
     -- its state == "READY" guard.
     st.state = "READY"
     if not st.buyAll then
+        ahLog(self, "step done", "single")
         self:RefreshRestockTab()
         return
     end
     if self:_RestockBudgetExceeded(spentCopper(self), self:GetRestockBudget()) then
         st.buyAll = false
         self:Print("Budget reached; Buy-all stopped.")
+        ahLog(self, "step done", "budget reached")
         self:RefreshRestockTab()
         return
     end
@@ -741,9 +795,11 @@ function GBL:_RestockAfterStep()
     if not nextIndex then
         st.buyAll = false
         self:Print("Buy-all complete.")
+        ahLog(self, "step done", "sweep complete")
         self:RefreshRestockTab()
         return
     end
+    ahLog(self, "step done", format("next=%d", nextIndex))
     self:_RestockBeginPurchase(nextIndex)
 end
 
@@ -772,19 +828,32 @@ end
 --- WoW commodity events (registered lazily; each guards state == CONFIRMING).
 function GBL:AUCTION_HOUSE_THROTTLED_SYSTEM_READY()
     local st = self._restock
-    if not st or st.state ~= "CONFIRMING" then return end
-    if st.confirmIssued then return end  -- throttle-ready can fire repeatedly
+    if not st or st.state ~= "CONFIRMING" then return end  -- silent: fires for every addon's calls
+    if st.confirmIssued then  -- throttle-ready can fire repeatedly
+        ahLog(self, "AUCTION_HOUSE_THROTTLED_SYSTEM_READY", "ignored (already issued)")
+        return
+    end
     if st.pendingItemID and st.pendingQty
             and C_AuctionHouse and C_AuctionHouse.ConfirmCommoditiesPurchase then
         st.confirmIssued = true
+        ahLog(self, "AUCTION_HOUSE_THROTTLED_SYSTEM_READY", "confirm issued")
         C_AuctionHouse.ConfirmCommoditiesPurchase(st.pendingItemID, st.pendingQty)
+    else
+        ahLog(self, "AUCTION_HOUSE_THROTTLED_SYSTEM_READY", "ignored (nothing pending or no API)")
     end
 end
 
 function GBL:COMMODITY_PURCHASE_SUCCEEDED()
     local st = self._restock
-    if not st or st.state ~= "CONFIRMING" then return end
-    if not st.confirmIssued then return end  -- ignore a duplicate or unsolicited success
+    if not st or st.state ~= "CONFIRMING" then
+        ahLog(self, "COMMODITY_PURCHASE_SUCCEEDED", format("ignored (state=%s)", (st and st.state) or "none"))
+        return
+    end
+    if not st.confirmIssued then  -- a duplicate or unsolicited success
+        ahLog(self, "COMMODITY_PURCHASE_SUCCEEDED", "ignored (unsolicited)")
+        return
+    end
+    ahLog(self, "COMMODITY_PURCHASE_SUCCEEDED", "handled")
     st.confirmIssued = false
     local index = st.pendingIndex
     if index then
@@ -803,7 +872,11 @@ end
 
 function GBL:COMMODITY_PURCHASE_FAILED()
     local st = self._restock
-    if not st or st.state ~= "CONFIRMING" then return end
+    if not st or st.state ~= "CONFIRMING" then
+        ahLog(self, "COMMODITY_PURCHASE_FAILED", format("ignored (state=%s)", (st and st.state) or "none"))
+        return
+    end
+    ahLog(self, "COMMODITY_PURCHASE_FAILED", "handled")
     self:Print("Purchase failed; stopping. Check your gold or try again.")
     st.confirmIssued = false
     st.pendingIndex = nil
@@ -812,4 +885,40 @@ function GBL:COMMODITY_PURCHASE_FAILED()
     st.buyAll = false
     st.state = "READY"
     self:RefreshRestockTab()
+end
+
+-- Log-only handlers (#199). The price pair answers our own
+-- StartCommoditiesPurchase (Auctionator and TSM both confirm on it), so it
+-- logs in any state; the throttle family and UI_ERROR_MESSAGE fire for every
+-- addon's auction-house traffic, so they log only while a purchase is in
+-- flight.
+function GBL:COMMODITY_PRICE_UPDATED(_, unitPrice, totalPrice)
+    ahLog(self, "COMMODITY_PRICE_UPDATED", format("unit=%s total=%s",
+        self:FormatMoney(unitPrice or 0), self:FormatMoney(totalPrice or 0)))
+end
+
+function GBL:COMMODITY_PRICE_UNAVAILABLE()
+    ahLog(self, "COMMODITY_PRICE_UNAVAILABLE")
+end
+
+function GBL:AUCTION_HOUSE_THROTTLED_MESSAGE_SENT()
+    if purchaseInFlight(self) then ahLog(self, "AUCTION_HOUSE_THROTTLED_MESSAGE_SENT") end
+end
+
+function GBL:AUCTION_HOUSE_THROTTLED_MESSAGE_QUEUED()
+    if purchaseInFlight(self) then ahLog(self, "AUCTION_HOUSE_THROTTLED_MESSAGE_QUEUED") end
+end
+
+function GBL:AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED()
+    if purchaseInFlight(self) then ahLog(self, "AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED") end
+end
+
+function GBL:AUCTION_HOUSE_THROTTLED_MESSAGE_RESPONSE_RECEIVED()
+    if purchaseInFlight(self) then ahLog(self, "AUCTION_HOUSE_THROTTLED_MESSAGE_RESPONSE_RECEIVED") end
+end
+
+function GBL:UI_ERROR_MESSAGE(_, errorType, message)
+    if purchaseInFlight(self) then
+        ahLog(self, "UI_ERROR_MESSAGE", format("err=%s %s", tostring(errorType), tostring(message)))
+    end
 end

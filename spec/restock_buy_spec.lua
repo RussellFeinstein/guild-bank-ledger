@@ -311,4 +311,200 @@ describe("Restock buy", function()
             assert.is_nil(GBL:_RestockNextBuyable(st))
         end)
     end)
+
+    describe("auction-house event log (#199)", function()
+        -- Every line the buy flow writes to the system channel. GetLog is
+        -- newest-first, so these read by content and count, never by index.
+        local function ahLines()
+            local out = {}
+            for _, e in ipairs(GBL:GetLog("system")) do
+                if e.message:find("Restock AH:", 1, true) == 1 then
+                    out[#out + 1] = e.message
+                end
+            end
+            return out
+        end
+        local function count(needle)
+            local n = 0
+            for _, m in ipairs(ahLines()) do
+                if m:find(needle, 1, true) then n = n + 1 end
+            end
+            return n
+        end
+        local function findLine(needle)
+            for _, m in ipairs(ahLines()) do
+                if m:find(needle, 1, true) then return m end
+            end
+            return nil
+        end
+        local function oneItem()
+            MockWoW.money = 1000000
+            readyState(
+                { { itemID = 100, needed = 5 } },
+                { [1] = { itemKey = { itemID = 100 }, minPrice = 4200 } },
+                { runStartMoney = 1000000 })
+        end
+        local function twoItems()
+            MockWoW.money = 10000000
+            readyState(
+                { { itemID = 100, needed = 5 }, { itemID = 200, needed = 2 } },
+                { [1] = { itemKey = { itemID = 100 }, minPrice = 4200 },
+                  [2] = { itemKey = { itemID = 200 }, minPrice = 900 } },
+                { runStartMoney = 10000000 })
+        end
+
+        it("logs the start of a purchase with the item, the quantity and the sweep flag", function()
+            oneItem()
+            GBL:StartRestockBuy(1)
+            local line = findLine("Restock AH: start ")
+            assert.is_not_nil(line)
+            assert.truthy(line:find("it:100 x5", 1, true))
+            assert.truthy(line:find("sweep=no", 1, true))
+            assert.truthy(line:find("state=CONFIRMING", 1, true))
+            assert.equals(1, count("Restock AH: start "))
+
+            GBL:ResetRestockSearch()
+            oneItem()
+            GBL:StartRestockBuyAll()
+            assert.is_not_nil(findLine("sweep=yes"))
+        end)
+
+        it("logs a price update with its unit and total price and changes nothing", function()
+            oneItem()
+            GBL:StartRestockBuy(1)
+            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 4200, 21000)
+            local line = findLine("Restock AH: COMMODITY_PRICE_UPDATED ")
+            assert.is_not_nil(line)
+            assert.truthy(line:find("unit=" .. GBL:FormatMoney(4200), 1, true))
+            assert.truthy(line:find("total=" .. GBL:FormatMoney(21000), 1, true))
+            assert.equals("CONFIRMING", GBL._restock.state)
+            assert.equals(0, #MockWoW.commodityPurchases.confirm)
+        end)
+
+        it("says whether throttle-ready issued the confirm", function()
+            oneItem()
+            GBL:StartRestockBuy(1)
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            assert.equals(1, count("confirm issued"))
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            assert.equals(1, count("ignored (already issued)"))
+            assert.equals(1, count("confirm issued"))
+            assert.equals(1, #MockWoW.commodityPurchases.confirm)
+        end)
+
+        it("logs a commodity event outside CONFIRMING and keeps the throttle family quiet there", function()
+            oneItem()
+            GBL:StartRestockBuy(1)
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
+            assert.equals("READY", GBL._restock.state)
+
+            local before = #ahLines()
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
+            assert.equals(before + 1, #ahLines())
+            local ignored = findLine("ignored (state=READY)")
+            assert.is_not_nil(ignored)
+            -- The prefix carries the state every line is read by, so pin it
+            -- once on a line outside CONFIRMING (a hardcoded prefix survived).
+            assert.equals(1, ignored:find("Restock AH: COMMODITY_PURCHASE_SUCCEEDED state=READY ", 1, true))
+            assert.is_true(GBL._restock.bought[1])
+            assert.equals(1, #MockWoW.commodityPurchases.confirm)
+
+            before = #ahLines()
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED")
+            MockAce.fireEvent("UI_ERROR_MESSAGE", 123, "You are too far away")
+            assert.equals(before, #ahLines())
+            assert.equals(1, #MockWoW.commodityPurchases.confirm)
+        end)
+
+        it("logs the throttle and price-unavailable events by name while a purchase is in flight", function()
+            oneItem()
+            GBL:StartRestockBuy(1)
+            local names = {
+                "AUCTION_HOUSE_THROTTLED_MESSAGE_SENT",
+                "AUCTION_HOUSE_THROTTLED_MESSAGE_QUEUED",
+                "AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED",
+                "AUCTION_HOUSE_THROTTLED_MESSAGE_RESPONSE_RECEIVED",
+                "COMMODITY_PRICE_UNAVAILABLE",
+            }
+            for _, n in ipairs(names) do MockAce.fireEvent(n) end
+            for _, n in ipairs(names) do
+                assert.equals(1, count("Restock AH: " .. n .. " "), n)
+            end
+            assert.equals("CONFIRMING", GBL._restock.state)
+            assert.equals(1, #MockWoW.commodityPurchases.start)
+            assert.equals(0, #MockWoW.commodityPurchases.confirm)
+        end)
+
+        it("logs a UI error during a purchase with its text", function()
+            oneItem()
+            GBL:StartRestockBuy(1)
+            MockAce.fireEvent("UI_ERROR_MESSAGE", 123, "Not enough money")
+            local line = findLine("Restock AH: UI_ERROR_MESSAGE ")
+            assert.is_not_nil(line)
+            assert.truthy(line:find("err=123", 1, true))
+            assert.truthy(line:find("Not enough money", 1, true))
+            assert.equals("CONFIRMING", GBL._restock.state)
+        end)
+
+        it("logs the step transition and the next purchase of a sweep", function()
+            twoItems()
+            GBL:StartRestockBuyAll()
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
+            local handled = findLine("handled")
+            assert.is_not_nil(handled)
+            assert.truthy(handled:find("it:100 x5", 1, true))
+            local step = findLine("next=2")
+            assert.is_not_nil(step)
+            assert.equals(1, step:find("Restock AH: step done ", 1, true))
+            assert.equals(2, count("Restock AH: start "))
+            assert.is_not_nil(findLine("pending=it:200 x2"))
+            assert.equals("CONFIRMING", GBL._restock.state)
+
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
+            assert.is_not_nil(findLine("sweep complete"))
+            assert.equals("READY", GBL._restock.state)
+        end)
+
+        it("registers the event set on the first buy with a handler for each, and drops it on reset", function()
+            local events = GBL._restockAHEvents
+            assert.is_table(events)
+            assert.equals(10, #events)
+            oneItem()
+            GBL:StartRestockBuy(1)
+            for _, name in ipairs(events) do
+                assert.is_not_nil(MockAce.registeredEvents[name], name)
+                assert.equals("function", type(GBL[name]), name)
+            end
+
+            GBL:ResetRestockSearch()
+            local reset = findLine("Restock AH: reset ")
+            assert.is_not_nil(reset)
+            assert.truthy(reset:find("state=CONFIRMING", 1, true))
+            for _, name in ipairs(events) do
+                assert.is_nil(MockAce.registeredEvents[name], name)
+            end
+        end)
+
+        it("logs a skip with its reason", function()
+            MockWoW.money = 10000000
+            GBL:SetRestockBudget(1)  -- 1 gold
+            readyState(
+                { { itemID = 100, needed = 5 }, { itemID = 200, needed = 2 } },
+                { [1] = { itemKey = { itemID = 100 }, minPrice = 50000 },  -- 5g each, past the budget
+                  [2] = { itemKey = { itemID = 200 }, minPrice = 900 } },
+                { runStartMoney = 10000000 })
+            GBL:StartRestockBuyAll()
+            local skip = findLine("Restock AH: skip ")
+            assert.is_not_nil(skip)
+            assert.truthy(skip:find("it:100", 1, true))
+            assert.truthy(skip:find("budget", 1, true))
+            assert.is_true(GBL._restock.skipped[1])
+            assert.is_not_nil(findLine("pending=it:200 x2"))
+            assert.equals("CONFIRMING", GBL._restock.state)
+        end)
+    end)
 end)
