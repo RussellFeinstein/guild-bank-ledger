@@ -105,6 +105,8 @@ To buy the shortfall from the Auction House, install [Auctionator](https://www.c
 
 Restock spends real gold through WoW's commodity purchase flow. It refuses any purchase you cannot afford, and you can set a gold budget to cap everything bought from one search; Buy next skips a row the budget or your gold cannot cover and moves to the next, and raising the budget brings the skipped rows back. The banner shows what the search has spent so far. Without Auctionator the tab still shows targets and shortfalls; only the search and buy steps need it. A purchase the Auction House does not price, or does not answer, within a few seconds is given up on with a chat line rather than left waiting; if a confirmed purchase gets no answer, the run stops and the line says to check your mail before buying that item again. `/gbl logs` shows every auction house event the addon saw around a purchase.
 
+Bought items arrive by mail, so the bank does not see them until you collect and deposit them. Restock remembers what you bought: the row shows "in the mail N" beside the bank count, the shortfall counts it as stock, and the entry clears once the bank log records you depositing that item. Deposit from another character, or send the items elsewhere, and the row's Clear button drops the entry by hand.
+
 The Restock feature was created by Katorri, based on the Guild Bank Restock addon.
 
 ## Development

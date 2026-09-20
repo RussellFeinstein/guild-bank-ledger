@@ -199,22 +199,26 @@ the buy list uses that shortfall, and the row shows the modifier with its age.
 **Cleared by the ledger, not by the bank scan.** A scan cannot tell the buyer's deposit from another
 member's: a foreign deposit would clear the entry early and re-offer the row, which is the bug, and
 a withdrawal in the window would leave it stuck. The ledger already records every deposit with `type
-= "deposit"`, `player`, `itemID` and `count` (`src/Ledger.lua`, the item record builder), the
-periodic rescan runs while the bank is open, and a synced copy of the buyer's own deposit takes the
-same intake path. The rule: when a record is stored for the first time (`StoreBatchRecords`,
-`src/Dedup.lua`) with `type == "deposit"`, `player == buyer`, that `itemID`, and a timestamp at or
-after the hour of `at` (ledger timestamps are hour-coarse, `ComputeAbsoluteTimestamp(year, month,
-day, hour)`), the entry's `qty` drops by the record's `count`; at zero it is removed; a partial
-deposit leaves the remainder. Dedup stores a record once, so a rescan cannot count it twice.
+= "deposit"`, `player`, `itemID` and `count` (`src/Ledger.lua`, the item record builder), and the
+periodic rescan runs while the bank is open. Two intake paths store a record for the first time, and
+each stores it once: a scan through `StoreBatchRecords` (`src/Dedup.lua`, count-based dedup) and a
+sync receive through `StoreTx` (`src/Ledger.lua`, `IsDuplicate`), so the hook `_RestockOnRecordStored`
+has two call sites (not `UpdatePlayerStats`, which the migration rebuilds call over old records). The
+rule: a stored record with `type == "deposit"`, `player == buyer`, that `itemID`, and a timestamp at
+or after `at` less a one-hour window (`RESTOCK_PENDING_WINDOW`; ledger timestamps are hour-coarse,
+`ComputeAbsoluteTimestamp(year, month, day, hour)`, in a rounding direction nobody has recorded, so
+the window rather than the hour of `at`) drops the entry's `qty` by the record's `count`; at zero it
+is removed; a partial deposit leaves the remainder. Built 2026-09-20 as rebuild step 1; the section
+was corrected then, since the first draft said the sync copy took the scan's path.
 
 **Manual clear.** A Clear button on the row removes the entry: a deposit from an alt (#52 is
 unbuilt, so the ledger cannot match it), items that went somewhere else, or an unconfirmed purchase
 the mail settled. An entry older than a day says so on the row.
 
-**Limits, stated.** A deposit of the same item by the buyer earlier in the same hour, scanned after
-the purchase, matches the rule and clears the entry early; the manual clear and the age are the
-answer, and the failure lands on the side of an early re-offer, which the confirm-at-price pause
-then shows as a quote to decline. Pending is per account, so an officer's alt sees the entry with
+**Limits, stated.** A deposit of the same item by the buyer up to two hours before the purchase,
+stored for the first time after it, matches the rule and clears the entry early; the manual clear and
+the age are the answer, and the failure lands on the side of an early re-offer, which the
+confirm-at-price pause then shows as a quote to decline. Pending is per account, so an officer's alt sees the entry with
 the buyer's name and cannot match its own deposit to it.
 
 Tests (the first rebuild step's plan starts here): a purchase then a scan before the deposit leaves
