@@ -364,6 +364,9 @@ function GBL:SelectTab(tabName)
     elseif tabName == "layout" then
         self:BuildLayoutTab(self.tabGroup)
     elseif tabName == "restock" then
+        -- Tab show is the one place the wallet baseline may move (#60):
+        -- never from RefreshRestockTab, which a purchase result triggers.
+        if self._RestockOnTabShown then self:_RestockOnTabShown() end
         self:BuildRestockTab(self.tabGroup)
     end
 end

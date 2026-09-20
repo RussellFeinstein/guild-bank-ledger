@@ -104,6 +104,14 @@ leaves the pending store alone; Cancel in PRICED cancels the purchase and return
 `activeItems` intact; a new Search with `st.unanswered` set writes the pending entry with
 `unconfirmed = true`.
 
+**Built 2026-09-20 in PR A of #211 (v0.40.0), the flow half.** PRICED exists, and Cancel in
+CONFIRMING and PRICED (`CancelRestockPurchase`) returns to READY with the list intact, parking the
+purchase as unconfirmed when the confirm is already out. Done, Search in READY and the list in
+every state are the view half, #214. One thing the step 1 review added: a purchase result arriving
+in PRICED is another addon's purchase (no confirm of ours is out, and the client holds one
+commodity purchase at a time, so ours was replaced at the server); it ends the pause with a chat
+line and credits nothing.
+
 ## 4. Preconditions as disabled states (#43, #193, #194)
 
 Search is disabled with its reason on the banner, text-carried (no colour-only state), one reason at
@@ -142,6 +150,17 @@ Tests: each precondition failing alone disables Search and puts its text on the 
 shows the first in the table's order; the TSM row is chosen only with `TSM_API` present and its
 predicate true, and today's wording with `TSM_API` nil; a stubbed `GBL_SCAN_COMPLETE` through the
 Core handler rebuilds the tab; rows before the first scan carry no shortfall.
+
+**Built 2026-09-20 in PR A of #211, all but two rows.** The table is `SEARCH_BLOCKERS` in
+`src/Restock.lua`, read by `_RestockSearchBlocker`, and Search disables on the first failing entry
+with its text on the banner. The TSM row is not built: question 1 below decides it, and until then
+the Shopping-tab row keeps today's wording. The `bank ?` rows are the view half (#214). The two
+Core handlers are `OnAuctionHouseToggled` and `OnScanComplete`, and the second refreshes Restock
+only: the step 1 review found the Sort tab already polls `scanInProgress`, so a rebuild from the
+handler would double its refreshes and fire on every executor end-of-pass scan. The review also
+found that Buy, Buy next and Confirm carried no auction-house gate (the only guard on a start was
+the existence of the API); all three disable with the same reason as Search, and a start is
+refused pre-start without the frame.
 
 ## 5. Row vocabulary (#44, #56, #205, #209)
 
@@ -280,6 +299,14 @@ priced total moves both; the baseline moves on tab show with nothing in flight a
 from a purchase result; the budget box renders in IDLE and READY and its committed value is shown
 apart from the typed one; the gold label updates on the money event without a rebuild.
 
+**Built 2026-09-20 in PR A of #211, with one correction from the step 1 review.** Re-baselining
+`runStartMoney` alone double-subtracts: `affordableMoney` was `runStartMoney - spentCopper`, and a
+baseline of the debited wallet against the search's whole spend refuses a 5,000g row with 7,000g
+in hand after a 3,000g purchase. The baseline is a pair, `walletBase` and `spentAtBase`, moved
+together by `_RestockOnTabShown` (from `SelectTab`, never from the rebuild a purchase result
+triggers), and remaining is `walletBase - (spentEstimate - spentAtBase)`. `_RestockSpent`, the
+wallet delta, is gone. The budget box above the list and the gold line are the view half (#214).
+
 ## 8. The buy step (#56, #199)
 
 Each purchase is one click to start and, with the pause on, one click to confirm. The button carries
@@ -313,6 +340,14 @@ once when the throttle is free, on the next READY when busy); Cancel in PRICED c
 to READY; a second price event in PRICED re-checks the budget and updates the total; the step timer
 is off in PRICED and re-armed by Confirm; with the pause off the flow matches the v0.39.19 spec; the
 row in flight renders its marker and every other Buy is disabled.
+
+**Built 2026-09-20 in PR A of #211.** The pause reuses the one step timer (`armStepTimer(self,
+seconds)`, `RESTOCK_PAUSE_TIMEOUT = 60` until question 3 is read), and a Confirm click that finds
+the throttle busy arms it as well, so a READY that never comes ends as `throttle never freed`
+rather than a wait with no timer. A quote the pause gives up on leaves the row buyable under Buy
+next too (`failStep`'s `keepRow`), since the player rather than the auction house ended the step.
+The inline row marker is the view half (#214); until it lands PRICED replaces the list with one
+line, as CONFIRMING does.
 
 ## 9. One-off purchase (#59)
 
@@ -429,6 +464,8 @@ filed as an issue when this doc lands, labelled, naming its section here.
    the Core handlers, `spentEstimate` as the budget read, the pause) then the view (the list in
    every state, the status table, the banner, the budget's home, the keyboard rule). Minor bump: a
    new setting and a new visible control.
+   Split on 2026-09-20 at the re-audit: PR A, `feat/restock-flow-states` (v0.40.0), is the model with
+   #60 and the gate, closing #211; the view half is #214.
 3. **Auctionator's public search** (#194; section 4), then #193's hint as the observation dictates.
    The first in-game question below gates the hint.
 4. **One-off purchase** (#59; section 9).

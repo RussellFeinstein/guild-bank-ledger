@@ -1655,7 +1655,7 @@ describe("Restock buy", function()
         it("does not re-baseline while a purchase is in flight", function()
             oneItem()
             GBL:StartRestockBuy(1)
-            MockWoW.money = 5
+            MockWoW.money = 5000000  -- the wallet moved; the baseline must not
             GBL:_RestockOnTabShown()
             assert.equals(1000000, GBL._restock.walletBase)
             GBL:SetRestockConfirmAtPrice(true)
