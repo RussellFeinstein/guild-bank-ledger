@@ -568,6 +568,29 @@ describe("Restock buy", function()
             assert.is_nil(GBL._restock.skipped[1])
         end)
 
+        it("lets a stale timer from a finished step fire during the next step without touching it", function()
+            -- The state check alone cannot tell item 1's late timers from item 2's
+            -- live one once item 2 is CONFIRMING: only the token can.
+            twoItems()
+            GBL:StartRestockBuyAll()
+            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 4200, 21000)
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
+            local stale = {}
+            for _, t in ipairs(MockWoW.pendingTimers) do
+                if t.delay == GBL.RESTOCK_STEP_TIMEOUT then stale[#stale + 1] = t end
+            end
+            assert.is_true(#stale >= 2)  -- item 1's start and confirm timers, plus the wait
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")  -- item 2 starts
+            assert.equals("CONFIRMING", GBL._restock.state)
+            assert.equals(2, GBL._restock.pendingIndex)
+            for _, t in ipairs(stale) do t.callback() end  -- item 1's timers fire late
+            assert.equals("CONFIRMING", GBL._restock.state)
+            assert.equals(2, GBL._restock.pendingIndex)
+            assert.is_nil(GBL._restock.skipped[2])
+            assert.equals(0, #MockWoW.commodityPurchases.cancel)
+            assert.equals(0, count("step failed"))
+        end)
+
         it("retires the timers on reset", function()
             oneItem()
             GBL:StartRestockBuy(1)
