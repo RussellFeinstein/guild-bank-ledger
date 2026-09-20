@@ -202,8 +202,12 @@ describe("Restock search", function()
             _G.AuctionatorShoppingFrame = nil
         end)
 
-        it("is nil when every precondition holds", function()
-            assert.is_nil(GBL:_RestockSearchBlocker(searchable))
+        it("is nil when every precondition holds, and hands back the buy list it built", function()
+            local blocker, buyList = GBL:_RestockSearchBlocker(searchable)
+            assert.is_nil(blocker)
+            assert.equals(1, #buyList)
+            assert.equals(100, buyList[1].itemID)
+            assert.equals(5, buyList[1].needed)
         end)
 
         it("names each precondition alone, with the text the banner shows", function()

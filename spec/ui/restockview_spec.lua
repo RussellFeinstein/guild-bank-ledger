@@ -581,6 +581,7 @@ describe("RestockView", function()
             GBL._restock.pendingItemID = 111
             GBL._restock.pendingQty = 5
             GBL._restock.pendingTotal = 52250
+            GBL._restock.focusConfirm = true   -- set by the price event that entered PRICED
             local container = build()
             local banner = findChild(container, "Label")
             assert.truthy(banner._text:find("Quoted " .. GBL:FormatMoney(52250), 1, true))
@@ -591,10 +592,32 @@ describe("RestockView", function()
             assert.is_not_nil(findButton(container, "Cancel"))
             assert.is_nil(findButton(container, "Buy next (2 left)"))
             assert.equals(confirm, GBL.A11Y.focusOrder[GBL.A11Y.focusIndex])
+            assert.is_nil(GBL._restock.focusConfirm)  -- consumed by that one build
 
             -- Enter confirms: the activator reaches the focused Confirm.
             assert.is_true(GBL:_RestockView_NavKey("ENTER", false))
             assert.equals(1, #MockWoW.commodityPurchases.confirm)
+        end)
+
+        it("focuses Confirm only on the rebuild that enters PRICED, never on a later one", function()
+            -- A rebuild from a sync or a scan between the player's Tab to
+            -- Cancel and their Enter must not snap focus back onto Confirm.
+            readyTwo()
+            GBL:SetRestockConfirmAtPrice(true)
+            GBL:StartRestockBuy(1)
+            local MockAce = Helpers.MockAce
+            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 1000, 5000)
+            assert.equals("PRICED", GBL._restock.state)
+            local container = build()
+            local confirm = findButton(container, "Confirm")
+            assert.equals(confirm, GBL.A11Y.focusOrder[GBL.A11Y.focusIndex])
+            GBL:_RestockView_NavKey("TAB", false)      -- onto Cancel
+            local cancel = findButton(container, "Cancel")
+            assert.equals(cancel, GBL.A11Y.focusOrder[GBL.A11Y.focusIndex])
+            container = build()                        -- an unrelated rebuild
+            assert.is_nil(GBL.A11Y.focusOrder[GBL.A11Y.focusIndex])  -- the walk starts over, nothing focused
+            assert.equals(0, GBL.A11Y.focusIndex)
+            assert.equals(0, #MockWoW.commodityPurchases.confirm)
         end)
 
         it("wires Cancel in CONFIRMING and PRICED to the purchase cancel, not the reset", function()
@@ -657,14 +680,32 @@ describe("RestockView", function()
             assert.truthy(banner._text:find("Spent " .. GBL:FormatMoney(100000) .. ".", 1, true))
         end)
 
-        it("re-baselines the wallet when the tab is shown", function()
+        it("re-baselines the wallet when the tab comes into view, not on a rebuild while it is showing", function()
             GBL:CreateMainFrame()
+            GBL.mainFrame:Show()
             readyTwo()
             MockWoW.money = 700000
             GBL._restock.spentEstimate = 300000
             GBL:SelectTab("restock")
             assert.equals(700000, GBL._restock.walletBase)
             assert.equals(300000, GBL._restock.spentAtBase)
+
+            -- RefreshUI after a sync receive or a rescan store lands here
+            -- too; with the tab already showing the baseline stays put.
+            MockWoW.money = 100000
+            GBL:SelectTab("restock")
+            assert.equals(700000, GBL._restock.walletBase)
+
+            -- Another tab, then back: the tab came into view again.
+            GBL:SelectTab("sort")
+            GBL:SelectTab("restock")
+            assert.equals(100000, GBL._restock.walletBase)
+
+            -- The window closed and reopened on this tab.
+            MockWoW.money = 50000
+            GBL.mainFrame:Fire("OnClose")
+            GBL:SelectTab("restock")
+            assert.equals(50000, GBL._restock.walletBase)
         end)
     end)
 end)

@@ -1460,36 +1460,119 @@ describe("Restock buy", function()
             assert.equals(1, #GBL._restock.activeItems)
             assert.is_nil(pending(100))
 
-            oneItem()
+            -- Confirm out: nothing to cancel, and the result is still coming,
+            -- so the purchase is kept as unanswered (the timeout's record):
+            -- no new start until it lands, and the late result credits it.
+            twoItems()
             GBL:StartRestockBuy(1)
             MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 4200, 21000)
             MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
             GBL:ConfirmRestockPurchase()
             assert.equals(1, #MockWoW.commodityPurchases.confirm)
-            GBL:CancelRestockPurchase()                             -- confirm out: nothing to cancel
+            GBL:CancelRestockPurchase()
             assert.equals(1, #MockWoW.commodityPurchases.cancel)   -- unchanged
             assert.equals("READY", GBL._restock.state)
-            assert.is_true(pending(100).unconfirmed)
-            assert.equals(5, pending(100).qty)
-            assert.is_not_nil(findLine("confirm already issued, kept as pending"))
+            assert.is_nil(pending(100))                             -- not parked: the result is still due
+            assert.equals(100, GBL._restock.unanswered.itemID)
+            assert.equals(5, GBL._restock.unanswered.qty)
+            assert.is_not_nil(findLine("confirm already issued, kept as unanswered"))
             assert.equals(0, liveStepTimers())
+            GBL:StartRestockBuy(2)                                  -- refused while it is outstanding
+            assert.equals(1, #MockWoW.commodityPurchases.start)
+            assert.is_true(Helpers.printContains("Waiting on the result"))
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")       -- the late result credits it
+            assert.is_nil(GBL._restock.unanswered)
+            assert.equals(5, pending(100).qty)
+            assert.is_nil(pending(100).unconfirmed)
+            assert.is_true(GBL._restock.bought[1])
+            GBL:StartRestockBuy(2)
+            assert.equals(2, #MockWoW.commodityPurchases.start)
         end)
 
-        it("re-checks and re-prices a second price in PRICED", function()
-            GBL:SetRestockBudget(10)  -- 10 gold
-            oneItem()
-            GBL:StartRestockBuy(1)
+        it("ends the pause on a second price or a price-unavailable, without a cancel", function()
+            -- The events carry no item, so a price arriving while our quote
+            -- waits is either a re-quote or another addon's start; either
+            -- way the quote on the banner is no longer ours to confirm. No
+            -- cancel goes out, since it would cancel whatever the server holds.
+            twoItems()
+            GBL:StartRestockBuyNext()
             MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 4200, 21000)
             MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 5000, 25000)
+            assert.equals("READY", GBL._restock.state)
+            assert.equals(0, #MockWoW.commodityPurchases.cancel)
+            assert.equals(0, #MockWoW.commodityPurchases.confirm)
+            assert.is_nil(GBL._restock.skipped[1])
+            assert.is_false(GBL._restock.buyAll)
+            assert.equals(1, count("quote superseded, pause ended"))
+            assert.is_true(Helpers.printContains("click Buy again"))
+            assert.equals(0, livePauseTimers())
+            assert.equals(2, GBL:_RestockBuyableCount(GBL._restock))
+
+            GBL:ClearLog("system")
+            GBL:StartRestockBuyNext()
+            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 4200, 21000)
+            MockAce.fireEvent("COMMODITY_PRICE_UNAVAILABLE")
+            assert.equals("READY", GBL._restock.state)
+            assert.equals(0, #MockWoW.commodityPurchases.cancel)
+            assert.is_nil(GBL._restock.skipped[1])
+            assert.equals(1, count("quote superseded, pause ended"))
+        end)
+
+        it("ignores the price of a start that Cancel dropped before it arrived", function()
+            twoItems()
+            GBL:StartRestockBuyNext()                               -- row 1 starts
+            GBL:CancelRestockPurchase()                             -- before its price
+            assert.equals(1, #MockWoW.commodityPurchases.cancel)
+            GBL:StartRestockBuy(2)                                  -- row 2 starts in the same window
+            assert.equals("CONFIRMING", GBL._restock.state)
+            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 4200, 21000)  -- row 1's price lands first
+            assert.equals("CONFIRMING", GBL._restock.state)
+            assert.is_false(GBL._restock.priceIn)
+            assert.equals(1, count("ignored (price of a cancelled start)"))
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")  -- the cancelled start's cycle ends
+            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 900, 1800)    -- row 2's own price
             assert.equals("PRICED", GBL._restock.state)
-            assert.equals(25000, GBL._restock.pendingTotal)
-            assert.equals(1, count("re-priced"))
-            assert.equals(1, livePauseTimers())
-            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 30000, 150000)  -- 15g, past the budget
+            assert.equals(1800, GBL._restock.pendingTotal)
+
+            -- A cancelled start whose price never comes: the READY clears the
+            -- expectation, so the next start's price is taken as its own.
+            GBL:CancelRestockPurchase()
+            twoItems()
+            GBL:StartRestockBuy(1)
+            GBL:CancelRestockPurchase()
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            GBL:StartRestockBuy(2)
+            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 900, 1800)
+            assert.equals("PRICED", GBL._restock.state)
+        end)
+
+        it("drops a quote or an unpriced start when the auction house closes, and leaves a confirm out alone", function()
+            twoItems()
+            GBL:StartRestockBuyNext()
+            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 4200, 21000)
+            assert.equals("PRICED", GBL._restock.state)
+            GBL:OnAuctionHouseToggled("AUCTION_HOUSE_CLOSED")
             assert.equals("READY", GBL._restock.state)
             assert.equals(1, #MockWoW.commodityPurchases.cancel)
-            assert.equals(1, count("refused (budget at price)"))
+            assert.is_nil(GBL._restock.skipped[1])
             assert.equals(0, livePauseTimers())
+            assert.equals(1, count("cancelled (auction house closed)"))
+
+            _G.AuctionHouseFrame = { IsShown = function() return true end }
+            GBL:StartRestockBuy(1)                                  -- CONFIRMING, no price yet
+            GBL:OnAuctionHouseToggled("AUCTION_HOUSE_CLOSED")
+            assert.equals("READY", GBL._restock.state)
+            assert.equals(2, #MockWoW.commodityPurchases.cancel)
+
+            _G.AuctionHouseFrame = { IsShown = function() return true end }
+            GBL:StartRestockBuy(1)
+            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 4200, 21000)
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            GBL:ConfirmRestockPurchase()
+            GBL:OnAuctionHouseToggled("AUCTION_HOUSE_CLOSED")       -- the result may still come
+            assert.equals("CONFIRMING", GBL._restock.state)
+            assert.equals(2, #MockWoW.commodityPurchases.cancel)
+            assert.equals(1, liveStepTimers())
         end)
 
         it("gives up a quote nobody confirmed and leaves the row buyable", function()
@@ -1642,6 +1725,119 @@ describe("Restock buy", function()
             assert.is_true(GBL:_RestockAuctionHouseOpen())
             GBL:StartRestockBuyNext()
             assert.equals(1, #MockWoW.commodityPurchases.start)
+        end)
+
+        it("reads the auction-house events as well as the frame", function()
+            -- The events are the direct signal; the frame is a proxy an addon
+            -- can hide while the session stays open. Either says open.
+            _G.AuctionHouseFrame = nil
+            assert.is_false(GBL:_RestockAuctionHouseOpen())
+            GBL:OnAuctionHouseToggled("AUCTION_HOUSE_SHOW")
+            assert.is_true(GBL:_RestockAuctionHouseOpen())
+            GBL:OnAuctionHouseToggled("AUCTION_HOUSE_CLOSED")
+            assert.is_false(GBL:_RestockAuctionHouseOpen())
+            _G.AuctionHouseFrame = { IsShown = function() return true end }
+            assert.is_true(GBL:_RestockAuctionHouseOpen())
+        end)
+    end)
+
+    ------------------------------------------------------------------------
+    -- The shipped default is the pause, so the walks the rest of this file
+    -- pins with it off are pinned with it on here too (#211 review).
+    ------------------------------------------------------------------------
+    describe("Buy next with the pause on (#211)", function()
+        before_each(function()
+            GBL:SetRestockConfirmAtPrice(true)
+        end)
+
+        local function pending(itemID)
+            return GBL:GetRestockData().pending[itemID]
+        end
+
+        it("walks two rows with a Confirm click each and settles between them", function()
+            twoItems()
+            GBL:StartRestockBuyNext()
+            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 4200, 21000)
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            assert.equals("PRICED", GBL._restock.state)
+            assert.is_true(GBL._restock.buyAll)
+            GBL:ConfirmRestockPurchase()
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
+            assert.equals("READY", GBL._restock.state)
+            assert.is_true(GBL._restock.bought[1])
+            assert.equals(1, count("next=2 awaiting click"))
+            assert.equals(1, #MockWoW.commodityPurchases.start)
+
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            GBL:StartRestockBuyNext()
+            assert.equals(2, #MockWoW.commodityPurchases.start)
+            assert.equals(200, MockWoW.commodityPurchases.start[2].itemID)
+            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 900, 1800)
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            GBL:ConfirmRestockPurchase()
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
+            assert.is_true(GBL._restock.bought[2])
+            assert.equals(21000 + 1800, GBL._restock.spentEstimate)
+            assert.equals(5, pending(100).qty)
+            assert.equals(2, pending(200).qty)
+            assert.equals(1, count("list done"))
+        end)
+
+        it("reaches the budget through a confirmed quote and refuses the next click", function()
+            GBL:SetRestockBudget(100)
+            twoItems()
+            GBL:StartRestockBuyNext()
+            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 200000, 1000000)  -- exactly 100g
+            assert.equals("PRICED", GBL._restock.state)
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            GBL:ConfirmRestockPurchase()
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
+            assert.equals("READY", GBL._restock.state)
+            assert.equals(1, count("budget reached"))
+            GBL:StartRestockBuyNext()
+            assert.equals(1, #MockWoW.commodityPurchases.start)
+            assert.equals(1, printCount("Budget of 100 g reached"))
+        end)
+
+        it("keeps the walk's skip bookkeeping across an expired quote", function()
+            MockWoW.money = 100000  -- 10g
+            readyState(
+                { { itemID = 100, needed = 5 },   -- 25g: unaffordable, skipped
+                  { itemID = 200, needed = 1 },   -- 1g: quoted, left to expire
+                  { itemID = 300, needed = 1 } },
+                { [1] = { itemKey = { itemID = 100 }, minPrice = 50000 },
+                  [2] = { itemKey = { itemID = 200 }, minPrice = 10000 },
+                  [3] = { itemKey = { itemID = 300 }, minPrice = 10000 } },
+                { walletBase = 100000 })
+            GBL:StartRestockBuyNext()
+            assert.is_truthy(GBL._restock.skipped[1])
+            assert.equals(200, MockWoW.commodityPurchases.start[1].itemID)
+            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 10000, 10000)
+            firePauseTimers()
+            assert.equals("READY", GBL._restock.state)
+            assert.is_truthy(GBL._restock.skipped[1])   -- still skipped
+            assert.is_nil(GBL._restock.skipped[2])      -- the expired row is not
+            assert.equals(2, GBL:_RestockBuyableCount(GBL._restock))
+            GBL:StartRestockBuyNext()                   -- row 2 again, not row 3
+            assert.equals(200, MockWoW.commodityPurchases.start[2].itemID)
+        end)
+
+        it("credits a late result that lands during the next row's pause to the unanswered record", function()
+            twoItems()
+            GBL:StartRestockBuyNext()
+            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 4200, 21000)
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            GBL:ConfirmRestockPurchase()
+            fireStepTimers()                            -- no result: kept as unanswered, run stops
+            assert.is_not_nil(GBL._restock.unanswered)
+            assert.equals("READY", GBL._restock.state)
+            GBL:StartRestockBuyNext()                   -- refused while it is outstanding
+            assert.equals(1, #MockWoW.commodityPurchases.start)
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
+            assert.is_nil(GBL._restock.unanswered)
+            assert.equals(5, pending(100).qty)
+            GBL:StartRestockBuyNext()
+            assert.equals(2, #MockWoW.commodityPurchases.start)
         end)
     end)
 
