@@ -107,7 +107,7 @@ Restock spends real gold through WoW's commodity purchase flow. It refuses any p
 
 Bought items arrive by mail, so the bank does not see them until you collect and deposit them. Restock remembers what you bought: the row shows "in the mail N" beside the bank count, the shortfall counts it as stock, and the entry clears once the bank log records you depositing that item. Deposit from another character, or send the items elsewhere, and the row's Clear button drops the entry by hand.
 
-The Restock feature was created by Katorri, based on the Guild Bank Restock addon.
+The Restock feature was originally created by Katorri (Guild Bank Restock) and is reimplemented here with permission.
 
 ## Development
 
