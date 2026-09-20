@@ -117,6 +117,7 @@
           - 'spec/restock_search_spec.lua'
           - 'spec/ui/restockview_spec.lua'
           - 'docs/PLAN-restock-integration.md'
+          - 'docs/PLAN-restock-ux.md'
 
 "area: layout":
   - changed-files:
