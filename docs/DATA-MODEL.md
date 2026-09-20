@@ -78,7 +78,7 @@ storage module):
 | `teams` | Never written by any code path. Remove or annotate as reserved, issue #71 |
 | `altLinks` | Alt linking is designed but unbuilt, issue #52 |
 | `stockAlerts` | Reserved for the planned low-stock alerts feature. Comment at `src/Core.lua:94-96`. Do not repurpose |
-| `restock` | Guild-local restock settings: `items`, `budget`, and from #209 `pending[itemID] = { qty, buyer, at, unconfirmed }`, purchases not yet seen in the bank. Appears on first use |
+| `restock` | Guild-local restock settings: `items`, `budget`, and from #209 `pending[itemID] = { qty, buyer, buyers, at, unconfirmed }`, purchases not yet seen in the bank. Appears on first use |
 
 `stockAlerts` is the model for the other two: a reserved key with a comment naming what reserves it is
 fine, and a reserved key without one is indistinguishable from an oversight. Its own comment does need

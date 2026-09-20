@@ -458,6 +458,18 @@ describe("Restock", function()
                 local e = GBL:GetRestockData().pending[100]
                 assert.equals(8, e.qty)
                 assert.equals(3600 * 475200, e.at)
+                assert.equals(buyer, e.buyer)
+                assert.is_true(e.buyers[buyer])
+            end)
+
+            it("records a second character on the account as a buyer too", function()
+                GBL:_RestockAddPending(100, 5)
+                MockWoW.player.name = "Altchar"
+                GBL:_RestockAddPending(100, 3)
+                local e = GBL:GetRestockData().pending[100]
+                assert.equals(buyer, e.buyer)  -- the first buyer names the entry
+                assert.is_true(e.buyers[buyer])
+                assert.is_true(e.buyers["Altchar-TestRealm"])
             end)
 
             it("marks an entry unconfirmed and keeps the flag on a later confirmed add", function()
@@ -558,9 +570,22 @@ describe("Restock", function()
             end)
 
             it("clears the entry on a full deposit by the buyer at or after the purchase", function()
-                assert.is_true(GBL:_RestockOnRecordStored(deposit(), guildData))
+                assert.is_true(GBL:_RestockOnRecordStored(deposit({ timestamp = 3600 * 475200 + 1234 }), guildData))
                 assert.is_nil(guildData.restock.pending[100])
-                assert.truthy(pendingLines()[1]:find("it:100 deposit x5 by " .. buyer .. ", cleared", 1, true))
+                assert.truthy(pendingLines()[1]:find("it:100 deposit x5 by " .. buyer
+                    .. ", cleared (recorded +1234s after the purchase)", 1, true))
+            end)
+
+            it("takes a deposit by any character that bought into the entry", function()
+                MockWoW.player.name = "Altchar"
+                GBL:_RestockAddPending(100, 4)
+                MockWoW.player.name = "TestOfficer"
+                assert.is_true(GBL:_RestockOnRecordStored(deposit({ player = "Altchar-TestRealm", count = 4 }), guildData))
+                assert.equals(5, guildData.restock.pending[100].qty)
+                assert.is_false(GBL:_RestockOnRecordStored(deposit({ player = "Jaina-TestRealm" }), guildData))
+                assert.is_true(GBL:_RestockOnRecordStored(deposit({ timestamp = 3600 * 475200 - 600 }), guildData))
+                assert.is_nil(guildData.restock.pending[100])
+                assert.truthy(pendingLines()[1]:find("(recorded -600s after the purchase)", 1, true))
             end)
 
             it("reduces the entry on a partial deposit and clears it on the rest", function()

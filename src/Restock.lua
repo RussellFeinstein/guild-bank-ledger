@@ -158,7 +158,9 @@ end
 
 --- Record a purchase as pending: create the entry or add to it. A second
 -- purchase keeps the earlier `at` so the ledger window covers both, and an
--- unconfirmed flag stays set until the entry clears.
+-- unconfirmed flag stays set until the entry clears. The store is per
+-- account, so a second character buying the same item joins `buyers` and
+-- its deposit settles the entry too; `buyer` stays the first, for the row.
 -- @param itemID number
 -- @param qty number > 0
 -- @param flags table|nil { unconfirmed = true } for a confirm with no result
@@ -170,12 +172,16 @@ function GBL:_RestockAddPending(itemID, qty, flags)
     local data = getStore(self)
     if not data then return false end
     local unconfirmed = flags and flags.unconfirmed or nil
+    local who = buyerName(self)
     local entry = data.pending[itemID]
     if entry then
         entry.qty = (entry.qty or 0) + qty
+        entry.buyers = entry.buyers or { [entry.buyer] = true }
+        entry.buyers[who] = true
         if unconfirmed then entry.unconfirmed = true end
     else
-        entry = { qty = qty, buyer = buyerName(self), at = GetServerTime(), unconfirmed = unconfirmed }
+        entry = { qty = qty, buyer = who, buyers = { [who] = true }, at = GetServerTime(),
+                  unconfirmed = unconfirmed }
         data.pending[itemID] = entry
     end
     self:SystemInfo("Restock pending: it:%d x%d added%s, %d in the mail",
@@ -213,17 +219,23 @@ function GBL:_RestockOnRecordStored(record, guildData)
     local itemID = tonumber(record.itemID)
     local entry = itemID and pending[itemID]
     if not entry then return false end
-    if record.player ~= entry.buyer then return false end
-    if (record.timestamp or 0) < (entry.at or 0) - PENDING_WINDOW then return false end
+    local buyers = entry.buyers
+    if not ((buyers and buyers[record.player]) or record.player == entry.buyer) then return false end
+    local dt = (record.timestamp or 0) - (entry.at or 0)
+    if dt < -PENDING_WINDOW then return false end
     local count = tonumber(record.count) or 0
     if count <= 0 then return false end
+    -- The offset is logged so a capture can say which way the ledger's hour
+    -- rounding goes; a run of positive readings is the case for a zero window.
     local left = (entry.qty or 0) - count
     if left <= 0 then
         pending[itemID] = nil
-        self:SystemInfo("Restock pending: it:%d deposit x%d by %s, cleared", itemID, count, record.player)
+        self:SystemInfo("Restock pending: it:%d deposit x%d by %s, cleared (recorded %+ds after the purchase)",
+            itemID, count, record.player, dt)
     else
         entry.qty = left
-        self:SystemInfo("Restock pending: it:%d deposit x%d by %s, %d left", itemID, count, record.player, left)
+        self:SystemInfo("Restock pending: it:%d deposit x%d by %s, %d left (recorded %+ds after the purchase)",
+            itemID, count, record.player, left, dt)
     end
     return true
 end
