@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.39.19
+    {"0.39.19", "2026-09-20", {
+        Fixed = {
+            "Buy all no longer stops on Confirming purchase after its first purchase. The addon was confirming a purchase when the auction house reported its message system ready rather than when it sent back the price, and starting the next purchase of a sweep in the same instant the previous one succeeded, which the game quietly ignores. It now confirms each purchase once the auction house has priced it and reported ready, checks that price against your gold and your budget before spending, and waits for the auction house to report ready again before starting the next one. A purchase the auction house does not price, or does not answer, is given up on with a chat line after a few seconds; if a confirmed purchase gets no answer, the run stops and the line says to check your mail before buying that item again. Cancel now also tells the auction house to drop a purchase that has not been confirmed yet.",
+        },
+    }},
     -- v0.39.18
     {"0.39.18", "2026-09-19", {
         Added = {
