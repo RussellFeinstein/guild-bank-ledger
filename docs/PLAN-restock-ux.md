@@ -43,7 +43,7 @@ N` where the IDLE list says `Buy N`.
 The buy flow is measured, twice (#199). A commodity purchase is two calls. The start asks the server
 for a quote and needs a hardware event: `StartCommoditiesPurchase` is documented `#hwevent`, and a
 start issued from any handler or timer does nothing and raises nothing (four of four handler starts
-swallowed, nine of nine click starts sent). The quote arrives as `COMMODITY_PRICE_UPDATED`, and the
+swallowed, nineteen of nineteen click starts sent). The quote arrives as `COMMODITY_PRICE_UPDATED`, and the
 confirm goes out on the `AUCTION_HOUSE_THROTTLED_SYSTEM_READY` that follows it (twenty of twenty
 confirms issued that way succeeded). A click while the throttle is busy is queued by the client and
 works (four of four). Everything the flow sees is on the system channel as `Restock AH:` lines and
@@ -66,9 +66,9 @@ deposit, which are the game's steps and not the addon's.
 
 Today (`src/Restock.lua`, "Session state on self._restock"): `IDLE`, `SEARCHING`, `READY`,
 `CONFIRMING`. READY replaces the item list with the result list, CONFIRMING replaces it with one
-line ("Confirming purchase..."), and both Done and Cancel call `ResetRestockSearch`, which "stops
-the live search and discards activeItems, resultRows, bought and skipped" and lands in IDLE. Done is
-the only way out of a search, and Search is not offered in READY.
+line ("Confirming purchase..."), and both Done and Cancel call `ResetRestockSearch`, which will
+"stop any in-flight Auctionator search" and "clear results and buy progress" and lands in IDLE. Done
+is the only way out of a search, and Search is not offered in READY.
 
 **The item list renders in every state.** IDLE shows targets; READY shows the same list with a
 price and a Buy button on each row that has one; CONFIRMING and the new `PRICED` state mark the row
@@ -83,15 +83,20 @@ the reason until the auction house is open again.
 
 **Cancel** keeps its two meanings: in SEARCHING it stops the Auctionator search; in CONFIRMING and
 PRICED it drops the purchase at the auction house (`CancelCommoditiesPurchase`, nothing spent) and
-returns to READY with the list intact rather than to IDLE. The reset to IDLE that
-`ResetRestockSearch` performs stays as the path a failed search takes (Auctionator gone, names did
-not load).
+returns to READY with the list intact rather than to IDLE. CONFIRMING also covers the wait after the
+confirm went out, where a cancel means nothing ("confirm already issued, no cancel"); that branch
+keeps its no-cancel rule and, since step 1, parks the purchase in the pending store flagged
+unconfirmed, because the gold may have moved and the reset unregisters the events its result would
+arrive on. The reset to IDLE that `ResetRestockSearch` performs stays as the path a failed search
+takes (Auctionator gone, names did not load).
 
 **A confirm with no result** (`st.unanswered`, kept when "a cancel means nothing now") blocks new
-starts today and is dropped by `ResetRestockSearch` (`st.unanswered = nil`). With Done gone the
-reset no longer happens between searches; a new Search with an unanswered confirm
-moves it into the pending store flagged unconfirmed (section 6), so the row says "N bought, result
-unknown, check your mail" instead of forgetting the gold.
+starts within its search and was dropped by `ResetRestockSearch` and by `_RestockOnSearchEnd`
+(`st.unanswered = nil` at both) until step 1, which parks it in the pending store flagged
+unconfirmed at both sites (`parkUnanswered`), so the row says "N bought, result unknown, check your
+mail" instead of forgetting the gold. The block stays for the life of the search; parking happens
+where the record used to be dropped, so the window in which a late result can be taken for the
+next purchase (the events carry no id) is the one v0.39.19 already had, not a wider one.
 
 Tests: each state renders the item list (the READY rows carry prices, the CONFIRMING row carries its
 marker); Search is offered in READY and starts a new search that resets `bought` and `skipped` and
@@ -186,12 +191,14 @@ lives for one search, and nothing carries a purchase forward: an auction-house p
 mail and is not in the bank until the officer collects it and deposits it. Any search in that window
 offers the row again.
 
-**Store.** `guild.restock.pending[itemID] = { qty, buyer, at, unconfirmed }`: per guild, persisted
-in the same `restock` table as `budget` (`src/Core.lua`, `restock = { items = {}, budget = 0 }`),
-local to the account and not synced, because the mail is the buyer's. `qty` is added on
-`COMMODITY_PURCHASE_SUCCEEDED` and on the late credit, `buyer` is the buying character as
-`ResolvePlayerName` writes it on ledger records, `at` is `GetServerTime()`, `unconfirmed` is set
-only by the unanswered case in section 3.
+**Store.** `guild.restock.pending[itemID] = { qty, buyer, buyers, at, unconfirmed }`: per guild,
+persisted in the same `restock` table as `budget` (`src/Core.lua`, `restock = { items = {}, budget =
+0, pending = {} }`), local to the account and not synced, because the mail is the buyer's. `qty` is
+added on `COMMODITY_PURCHASE_SUCCEEDED` and on the late credit, `buyer` is the buying character as
+`ResolvePlayerName` writes it on ledger records, `buyers` is the set of characters on the account
+that bought into the entry (the store is per account, so an alt's purchase joins the main's and
+either one's deposit settles it), `at` is `GetServerTime()` of the first purchase, `unconfirmed` is
+set by the two parking sites in section 3 and stays set until the entry clears.
 
 **Read.** The universe row carries `pending`, the shortfall is `max(0, target - stock - pending)`,
 the buy list uses that shortfall, and the row shows the modifier with its age.
@@ -199,22 +206,37 @@ the buy list uses that shortfall, and the row shows the modifier with its age.
 **Cleared by the ledger, not by the bank scan.** A scan cannot tell the buyer's deposit from another
 member's: a foreign deposit would clear the entry early and re-offer the row, which is the bug, and
 a withdrawal in the window would leave it stuck. The ledger already records every deposit with `type
-= "deposit"`, `player`, `itemID` and `count` (`src/Ledger.lua`, the item record builder), the
-periodic rescan runs while the bank is open, and a synced copy of the buyer's own deposit takes the
-same intake path. The rule: when a record is stored for the first time (`StoreBatchRecords`,
-`src/Dedup.lua`) with `type == "deposit"`, `player == buyer`, that `itemID`, and a timestamp at or
-after the hour of `at` (ledger timestamps are hour-coarse, `ComputeAbsoluteTimestamp(year, month,
-day, hour)`), the entry's `qty` drops by the record's `count`; at zero it is removed; a partial
-deposit leaves the remainder. Dedup stores a record once, so a rescan cannot count it twice.
+= "deposit"`, `player`, `itemID` and `count` (`src/Ledger.lua`, the item record builder), and the
+periodic rescan runs while the bank is open. Two intake paths store a record for the first time, and
+each stores it once: a scan through `StoreBatchRecords` (`src/Dedup.lua`, count-based dedup) and a
+sync receive through `StoreTx` (`src/Ledger.lua`, `IsDuplicate`), so the hook `_RestockOnRecordStored`
+has two call sites (not `UpdatePlayerStats`, which the migration rebuilds call over old records). The
+rule: a stored record with `type == "deposit"`, `player == buyer`, that `itemID`, and a timestamp at
+or after `at` less a one-hour window (`RESTOCK_PENDING_WINDOW`; ledger timestamps are hour-coarse,
+`ComputeAbsoluteTimestamp(year, month, day, hour)`, in a rounding direction nobody has recorded, so
+the window rather than the hour of `at`) drops the entry's `qty` by the record's `count`; at zero it
+is removed; a partial deposit leaves the remainder. Built 2026-09-20 as rebuild step 1; the section
+was corrected then, since the first draft said the sync copy took the scan's path.
 
 **Manual clear.** A Clear button on the row removes the entry: a deposit from an alt (#52 is
 unbuilt, so the ledger cannot match it), items that went somewhere else, or an unconfirmed purchase
 the mail settled. An entry older than a day says so on the row.
 
-**Limits, stated.** A deposit of the same item by the buyer earlier in the same hour, scanned after
-the purchase, matches the rule and clears the entry early; the manual clear and the age are the
-answer, and the failure lands on the side of an early re-offer, which the confirm-at-price pause
-then shows as a quote to decline. Pending is per account, so an officer's alt sees the entry with
+**Limits, stated.** A deposit of the same item by the buyer up to two hours before the purchase,
+stored for the first time after it, matches the rule and clears the entry early; the manual clear and
+the age are the answer, and the failure lands on the side of an early re-offer, which the
+confirm-at-price pause then shows as a quote to decline. The window is a reading, not a constant:
+each deposit line logs the record's offset from the purchase (`recorded +Ns after the purchase`), and
+a run of positive readings is the case for tightening it to zero. Store-time dedup is not the whole
+story either: the bank-open chain runs `CleanupWithEventCounts` after the scan because a synced copy
+and the buyer's own scan of one deposit can land under two ids, and the hook fires once per stored
+copy, so that pair would reduce the entry twice. It needs the synced copy to arrive before the
+buyer's own client scans the deposit it just made, with the periodic rescan running every few
+seconds at the bank, which is why it is accepted rather than guarded: a guard keyed on the record's
+prefix would also skip the second of two real deposits of the same count in one hour, which is how
+two stacks are deposited. A late result after the entry was parked is credited to whatever
+purchase is in flight, or ignored; the entry stays unconfirmed until the ledger or the officer clears
+it. Pending is per account, so an officer's alt sees the entry with
 the buyer's name and cannot match its own deposit to it.
 
 Tests (the first rebuild step's plan starts here): a purchase then a scan before the deposit leaves
@@ -295,7 +317,7 @@ row in flight renders its marker and every other Buy is disabled.
 ## 9. One-off purchase (#59)
 
 Restock buys to a target; stocking up before a season means raising Store and remembering to put it
-back. `_RestockBuildBuyList` is the chokepoint ("`needed` comes from `row.toBuy` and nothing else")
+back. `_RestockBuildBuyList` is the chokepoint (`needed = row.toBuy`, its one source)
 and `StartRestockSearch` refuses an empty list ("Nothing to buy").
 
 **One control, not a per-row input.** Above the list: an item Dropdown over the layout's display

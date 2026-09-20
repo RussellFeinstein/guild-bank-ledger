@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.39.19"
+local VERSION = "0.39.20"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -110,7 +110,7 @@ local defaults = {
                     tabs = {},
                 },
                 stockReserves = {},
-                restock = { items = {}, budget = 0 },
+                restock = { items = {}, budget = 0, pending = {} },
                 sortAccess = {
                     rankThreshold = nil,  -- nil = GM-only; N = rank index N and above
                     delegates = {},       -- ["Char-Realm"] = true
