@@ -392,4 +392,257 @@ describe("Restock", function()
             assert.equals(0, #rows)
         end)
     end)
+
+    -- Pending purchases (#209): bought at the auction house and not yet seen
+    -- in the bank. Per guild, persisted beside the budget, cleared by the
+    -- ledger's deposit records for the buyer and never by the bank scan.
+    describe("pending purchases (#209)", function()
+        local buyer
+
+        before_each(function()
+            GBL:OnInitialize()
+            MockWoW.guild.name = "Test Guild"
+            MockWoW.guild.rankIndex = 0
+            GBL:OnEnable()
+            buyer = GBL:ResolvePlayerName(MockWoW.player.name)
+        end)
+
+        -- Every line the store writes to the system channel.
+        local function pendingLines()
+            local out = {}
+            for _, e in ipairs(GBL:GetLog("system")) do
+                if e.message:find("Restock pending:", 1, true) == 1 then
+                    out[#out + 1] = e.message
+                end
+            end
+            return out
+        end
+
+        local function oneItemUniverse(pending, stock)
+            return GBL:_RestockBuildItemUniverse({
+                layout = layout({
+                    [1] = { mode = "display", name = "A",
+                            items = { [100] = { slots = 1, perSlot = 20 } } },
+                    [2] = { mode = "overflow" },
+                }),
+                reserves = {},
+                scanResults = scan({ [1] = { [1] = { itemID = 100, count = stock } } }),
+                data = { items = {}, budget = 0, pending = pending },
+            })
+        end
+
+        describe("store", function()
+            it("backfills an empty pending table on the guild store", function()
+                local data = GBL:GetRestockData()
+                assert.is_table(data.pending)
+                assert.is_nil(next(data.pending))
+            end)
+
+            it("adds an entry with the buyer, the server time and the quantity", function()
+                MockWoW.serverTime = 3600 * 475200
+                assert.is_true(GBL:_RestockAddPending(100, 5))
+                local e = GBL:GetRestockData().pending[100]
+                assert.equals(5, e.qty)
+                assert.equals(buyer, e.buyer)
+                assert.equals(3600 * 475200, e.at)
+                assert.is_nil(e.unconfirmed)
+                assert.equals(1, #pendingLines())
+                assert.truthy(pendingLines()[1]:find("it:100 x5 added, 5 in the mail", 1, true))
+            end)
+
+            it("accumulates a second purchase and keeps the earliest at", function()
+                MockWoW.serverTime = 3600 * 475200
+                GBL:_RestockAddPending(100, 5)
+                MockWoW.serverTime = 3600 * 475200 + 900
+                GBL:_RestockAddPending(100, 3)
+                local e = GBL:GetRestockData().pending[100]
+                assert.equals(8, e.qty)
+                assert.equals(3600 * 475200, e.at)
+            end)
+
+            it("marks an entry unconfirmed and keeps the flag on a later confirmed add", function()
+                GBL:_RestockAddPending(100, 5, { unconfirmed = true })
+                assert.is_true(GBL:GetRestockData().pending[100].unconfirmed)
+                assert.truthy(pendingLines()[1]:find("(result unknown)", 1, true))
+                GBL:_RestockAddPending(100, 2)
+                assert.is_true(GBL:GetRestockData().pending[100].unconfirmed)
+            end)
+
+            it("refuses a non-numeric item or a zero quantity", function()
+                assert.is_false(GBL:_RestockAddPending("nope", 5))
+                assert.is_false(GBL:_RestockAddPending(100, 0))
+                assert.is_nil(next(GBL:GetRestockData().pending))
+                assert.equals(0, #pendingLines())
+            end)
+
+            it("clears an entry by hand", function()
+                GBL:_RestockAddPending(100, 5)
+                assert.is_true(GBL:ClearRestockPending(100))
+                assert.is_nil(GBL:GetRestockData().pending[100])
+                assert.truthy(pendingLines()[1]:find("it:100 cleared by hand (x5)", 1, true))
+                assert.is_false(GBL:ClearRestockPending(100))
+            end)
+        end)
+
+        describe("universe", function()
+            it("subtracts the pending quantity from the shortfall and carries it on the row", function()
+                local rows = oneItemUniverse({ [100] = { qty = 5, buyer = buyer, at = 1 } }, 10)
+                assert.equals(20, rows[1].target)
+                assert.equals(10, rows[1].stock)
+                assert.equals(5, rows[1].pending)
+                assert.equals(1, rows[1].pendingAt)
+                assert.is_nil(rows[1].pendingUnconfirmed)
+                assert.equals(5, rows[1].toBuy)
+            end)
+
+            it("clamps the shortfall at zero when a foreign deposit fills the gap", function()
+                local rows = oneItemUniverse({ [100] = { qty = 5, buyer = buyer, at = 1 } }, 18)
+                assert.equals(5, rows[1].pending)
+                assert.equals(0, rows[1].toBuy)
+            end)
+
+            it("reads a string-keyed pending entry and the unconfirmed flag", function()
+                local rows = oneItemUniverse(
+                    { ["100"] = { qty = 2, buyer = buyer, at = 1, unconfirmed = true } }, 0)
+                assert.equals(2, rows[1].pending)
+                assert.is_true(rows[1].pendingUnconfirmed)
+                assert.equals(18, rows[1].toBuy)
+            end)
+
+            it("carries zero pending on a row with no entry", function()
+                local rows = oneItemUniverse({}, 0)
+                assert.equals(0, rows[1].pending)
+                assert.is_nil(rows[1].pendingAt)
+                assert.equals(20, rows[1].toBuy)
+            end)
+
+            it("drops a covered row from the buy list and reduces the rest", function()
+                local list = GBL:_RestockBuildBuyList({
+                    layout = layout({
+                        [1] = { mode = "display", name = "A",
+                                items = { [100] = { slots = 1, perSlot = 20 },
+                                          [200] = { slots = 1, perSlot = 10 } } },
+                        [2] = { mode = "overflow" },
+                    }),
+                    reserves = {},
+                    scanResults = scan({}),
+                    data = { items = {}, budget = 0,
+                             pending = { [100] = { qty = 20, buyer = buyer, at = 1 },
+                                         [200] = { qty = 4, buyer = buyer, at = 1 } } },
+                })
+                assert.equals(1, #list)
+                assert.equals(200, list[1].itemID)
+                assert.equals(6, list[1].needed)
+            end)
+        end)
+
+        -- The ledger hook. A hand-built record exercises the rule; the two
+        -- intake paths (StoreBatchRecords for a scan, StoreTx for a sync
+        -- receive) prove the call sites.
+        describe("cleared by the ledger", function()
+            local guildData
+
+            local function deposit(over)
+                local rec = {
+                    type = "deposit", player = buyer, itemID = 100, count = 5,
+                    timestamp = 3600 * 475200,
+                }
+                for k, v in pairs(over or {}) do rec[k] = v end
+                return rec
+            end
+
+            before_each(function()
+                guildData = GBL:GetGuildData()
+                MockWoW.serverTime = 3600 * 475200
+                GBL:_RestockAddPending(100, 5)
+            end)
+
+            it("clears the entry on a full deposit by the buyer at or after the purchase", function()
+                assert.is_true(GBL:_RestockOnRecordStored(deposit(), guildData))
+                assert.is_nil(guildData.restock.pending[100])
+                assert.truthy(pendingLines()[1]:find("it:100 deposit x5 by " .. buyer .. ", cleared", 1, true))
+            end)
+
+            it("reduces the entry on a partial deposit and clears it on the rest", function()
+                assert.is_true(GBL:_RestockOnRecordStored(deposit({ count = 2 }), guildData))
+                assert.equals(3, guildData.restock.pending[100].qty)
+                assert.truthy(pendingLines()[1]:find("it:100 deposit x2 by " .. buyer .. ", 3 left", 1, true))
+                assert.is_true(GBL:_RestockOnRecordStored(deposit({ count = 9 }), guildData))
+                assert.is_nil(guildData.restock.pending[100])
+            end)
+
+            it("ignores a deposit by another member", function()
+                assert.is_false(GBL:_RestockOnRecordStored(deposit({ player = "Jaina-TestRealm" }), guildData))
+                assert.equals(5, guildData.restock.pending[100].qty)
+            end)
+
+            it("ignores a withdrawal and a move of the item", function()
+                assert.is_false(GBL:_RestockOnRecordStored(deposit({ type = "withdraw" }), guildData))
+                assert.is_false(GBL:_RestockOnRecordStored(deposit({ type = "move" }), guildData))
+                assert.equals(5, guildData.restock.pending[100].qty)
+            end)
+
+            it("ignores a deposit of another item and a money record", function()
+                assert.is_false(GBL:_RestockOnRecordStored(deposit({ itemID = 200 }), guildData))
+                assert.is_false(GBL:_RestockOnRecordStored(
+                    { type = "deposit", player = buyer, amount = 5000, timestamp = 3600 * 475200 }, guildData))
+                assert.equals(5, guildData.restock.pending[100].qty)
+            end)
+
+            it("ignores a deposit timestamped before the window and takes one inside it", function()
+                local before = 3600 * 475200 - GBL.RESTOCK_PENDING_WINDOW - 1
+                assert.is_false(GBL:_RestockOnRecordStored(deposit({ timestamp = before }), guildData))
+                assert.equals(5, guildData.restock.pending[100].qty)
+                local edge = 3600 * 475200 - GBL.RESTOCK_PENDING_WINDOW
+                assert.is_true(GBL:_RestockOnRecordStored(deposit({ timestamp = edge }), guildData))
+                assert.is_nil(guildData.restock.pending[100])
+            end)
+
+            it("reads the guild the record was stored for, not the active one", function()
+                local other = { restock = { pending = { [100] = { qty = 5, buyer = buyer, at = 3600 * 475200 } } } }
+                assert.is_true(GBL:_RestockOnRecordStored(deposit(), other))
+                assert.is_nil(other.restock.pending[100])
+                assert.equals(5, guildData.restock.pending[100].qty)
+                assert.is_false(GBL:_RestockOnRecordStored(deposit(), { restock = {} }))
+                assert.is_false(GBL:_RestockOnRecordStored(deposit(), {}))
+            end)
+
+            it("fires from StoreBatchRecords once per stored record, not on the rescan of the same batch", function()
+                local link = Helpers.makeItemLink(100, "Flask", 3)
+                local batch = { GBL:CreateTxRecord("deposit", MockWoW.player.name, link, 2, 1, nil, 0, 0, 0, 0) }
+                local stored, counts = GBL:StoreBatchRecords(batch, guildData, "transactions", nil)
+                assert.equals(1, stored)
+                assert.equals(3, guildData.restock.pending[100].qty)
+                local again = { GBL:CreateTxRecord("deposit", MockWoW.player.name, link, 2, 1, nil, 0, 0, 0, 0) }
+                assert.equals(0, (GBL:StoreBatchRecords(again, guildData, "transactions", counts)))
+                assert.equals(3, guildData.restock.pending[100].qty)
+            end)
+
+            it("does not fire for a money record stored through StoreBatchRecords", function()
+                local batch = { GBL:CreateMoneyTxRecord("deposit", MockWoW.player.name, 50000, 0, 0, 0, 0) }
+                assert.equals(1, (GBL:StoreBatchRecords(batch, guildData, "moneyTransactions", nil)))
+                assert.equals(5, guildData.restock.pending[100].qty)
+            end)
+
+            it("fires from StoreTx once, not on the duplicate", function()
+                local link = Helpers.makeItemLink(100, "Flask", 3)
+                local rec = GBL:CreateTxRecord("deposit", MockWoW.player.name, link, 5, 1, nil, 0, 0, 0, 0)
+                assert.is_true(GBL:StoreTx(rec, guildData))
+                assert.is_nil(guildData.restock.pending[100])
+                GBL:_RestockAddPending(100, 5)
+                assert.is_false(GBL:StoreTx(rec, guildData))
+                assert.equals(5, guildData.restock.pending[100].qty)
+            end)
+        end)
+
+        describe("_RestockFormatAge", function()
+            it("renders seconds, minutes, hours and days", function()
+                assert.equals("0s ago", GBL:_RestockFormatAge(-5))
+                assert.equals("45s ago", GBL:_RestockFormatAge(45))
+                assert.equals("2m ago", GBL:_RestockFormatAge(150))
+                assert.equals("3h ago", GBL:_RestockFormatAge(3 * 3600 + 59))
+                assert.equals("2d ago", GBL:_RestockFormatAge(2 * 86400 + 3600))
+            end)
+        end)
+    end)
 end)

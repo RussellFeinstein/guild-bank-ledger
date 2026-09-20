@@ -1201,4 +1201,105 @@ describe("Restock buy", function()
             assert.equals("CONFIRMING", GBL._restock.state)
         end)
     end)
+
+    -- A purchase outlives the search that made it (#209): the mail is not
+    -- the bank, so what was bought is remembered per guild until the ledger
+    -- sees the buyer deposit it.
+    describe("remembers a purchase past the search (#209)", function()
+        local function pending(itemID)
+            return GBL:GetRestockData().pending[itemID]
+        end
+
+        it("records a confirmed purchase with the buyer and the server time", function()
+            MockWoW.serverTime = 3600 * 475200
+            oneItem()
+            GBL:StartRestockBuy(1)
+            priceThenReady(4200, 21000)
+            assert.is_nil(pending(100))  -- nothing until the result
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
+            local e = pending(100)
+            assert.equals(5, e.qty)
+            assert.equals(GBL:ResolvePlayerName(MockWoW.player.name), e.buyer)
+            assert.equals(3600 * 475200, e.at)
+            assert.is_nil(e.unconfirmed)
+        end)
+
+        it("records nothing on a failed purchase", function()
+            oneItem()
+            GBL:StartRestockBuy(1)
+            priceThenReady(4200, 21000)
+            MockAce.fireEvent("COMMODITY_PURCHASE_FAILED")
+            assert.is_nil(pending(100))
+        end)
+
+        it("records a late success and nothing on a late failure", function()
+            twoItems()
+            GBL:StartRestockBuy(1)
+            priceThenReady(4200, 21000)
+            fireStepTimers()
+            assert.is_not_nil(GBL._restock.unanswered)
+            assert.is_nil(pending(100))
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")     -- the late result
+            assert.equals(5, pending(100).qty)
+            assert.is_nil(pending(100).unconfirmed)
+
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            GBL:StartRestockBuy(2)
+            priceThenReady(900, 1800)
+            fireStepTimers()
+            MockAce.fireEvent("COMMODITY_PURCHASE_FAILED")        -- the late answer: nothing bought
+            assert.is_nil(pending(200))
+        end)
+
+        it("parks an unanswered confirm as unconfirmed when the search is reset", function()
+            oneItem()
+            GBL:StartRestockBuy(1)
+            priceThenReady(4200, 21000)
+            fireStepTimers()
+            assert.is_not_nil(GBL._restock.unanswered)
+            GBL:ResetRestockSearch()
+            assert.is_nil(GBL._restock.unanswered)
+            local e = pending(100)
+            assert.equals(5, e.qty)
+            assert.is_true(e.unconfirmed)
+            assert.equals(1, count("Restock AH: reset "))
+        end)
+
+        it("parks a confirmed purchase Cancel abandons, and nothing when the cancel went out", function()
+            oneItem()
+            GBL:StartRestockBuy(1)
+            priceThenReady(4200, 21000)
+            assert.equals(1, #MockWoW.commodityPurchases.confirm)
+            GBL:ResetRestockSearch()                                -- the events are gone with it
+            assert.equals(0, #MockWoW.commodityPurchases.cancel)
+            assert.is_true(pending(100).unconfirmed)
+            assert.equals(5, pending(100).qty)
+
+            oneItem()
+            GBL:StartRestockBuy(1)                                  -- no price yet, no confirm out
+            GBL:ResetRestockSearch()
+            assert.equals(1, #MockWoW.commodityPurchases.cancel)
+            assert.equals(5, pending(100).qty)                      -- unchanged: nothing was spent
+        end)
+
+        it("does not offer a bought row to the next search from the same scan", function()
+            MockWoW.money = 1000000
+            local opts = {
+                layout = { version = 1, updatedAt = 0, tabs = {
+                    [1] = { mode = "display", name = "A", items = { [100] = { slots = 1, perSlot = 5 } } },
+                    [2] = { mode = "overflow" },
+                } },
+                reserves = {},
+                scanResults = {},
+            }
+            assert.equals(1, #GBL:_RestockBuildBuyList(opts))
+            oneItem()
+            GBL:StartRestockBuy(1)
+            priceThenReady(4200, 21000)
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
+            GBL:ResetRestockSearch()                                -- Done, then Search again
+            assert.equals(0, #GBL:_RestockBuildBuyList(opts))
+            assert.equals(5, pending(100).qty)                      -- the entry survives the reset
+        end)
+    end)
 end)

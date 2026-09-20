@@ -110,7 +110,7 @@ local defaults = {
                     tabs = {},
                 },
                 stockReserves = {},
-                restock = { items = {}, budget = 0 },
+                restock = { items = {}, budget = 0, pending = {} },
                 sortAccess = {
                     rankThreshold = nil,  -- nil = GM-only; N = rank index N and above
                     delegates = {},       -- ["Char-Realm"] = true

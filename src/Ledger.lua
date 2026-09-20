@@ -173,6 +173,11 @@ function GBL:StoreTx(record, guildData)
     self:MarkSeen(record.id, record.timestamp, guildData)
     table.insert(guildData.transactions, record)
     self:UpdatePlayerStats(record, guildData)
+    -- A first-time item deposit may settle a pending restock purchase
+    -- (#209). StoreBatchRecords has the same call for the scan path.
+    if self._RestockOnRecordStored then
+        self:_RestockOnRecordStored(record, guildData)
+    end
     return true
 end
 

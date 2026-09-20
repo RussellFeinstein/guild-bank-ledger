@@ -290,6 +290,69 @@ describe("RestockView", function()
             assert.is_true(#GBL.A11Y.focusOrder > 0)
         end)
 
+        -- Pending purchases (#209): the row says what is in the mail, the
+        -- shortfall is reduced by it, and a Clear button sits in the focus
+        -- order for the case the ledger cannot settle.
+        describe("a row with a purchase in the mail (#209)", function()
+            local buyer
+
+            before_each(function()
+                configureLayout()
+                buyer = GBL:ResolvePlayerName(MockWoW.player.name)
+                MockWoW.serverTime = 3600 * 475200
+            end)
+
+            it("renders the modifier with its age, the reduced shortfall, and a Clear button", function()
+                GBL:GetRestockData().pending[55555] = { qty = 8, buyer = buyer, at = 3600 * 475200 - 7200 }
+                local container = build()
+                local scroll = findChild(container, "ScrollFrame")
+                local row = findLabelContaining(scroll, "in the mail 8 (2h ago)")
+                assert.is_not_nil(row)
+                assert.truthy(row._text:find("target 20", 1, true))
+                assert.truthy(row._text:find("Buy 12", 1, true))
+                local clear = findButton(scroll, "Clear")
+                assert.is_not_nil(clear)
+                local inOrder = false
+                for _, w in ipairs(GBL.A11Y.focusOrder) do
+                    if w == clear then inOrder = true end
+                end
+                assert.is_true(inOrder)
+            end)
+
+            it("says the result is unknown for an unconfirmed entry", function()
+                GBL:GetRestockData().pending[55555] =
+                    { qty = 3, buyer = buyer, at = 3600 * 475200 - 90, unconfirmed = true }
+                local container = build()
+                local scroll = findChild(container, "ScrollFrame")
+                assert.is_not_nil(findLabelContaining(scroll,
+                    "3 bought, result unknown (1m ago), check your mail"))
+                assert.is_nil(findLabelContaining(scroll, "in the mail"))
+            end)
+
+            it("removes the entry and rebuilds without the modifier when Clear is pressed", function()
+                GBL:GetRestockData().pending[55555] = { qty = 20, buyer = buyer, at = 3600 * 475200 }
+                GBL.activeTab = "restock"
+                GBL.tabGroup = LibStub("AceGUI-3.0"):Create("TabGroup")
+                GBL:BuildRestockTab(GBL.tabGroup)
+                local before = findChild(GBL.tabGroup, "ScrollFrame")
+                assert.is_not_nil(findLabelContaining(before, "In stock"))
+                findButton(before, "Clear"):Fire("OnClick")
+                assert.is_nil(GBL:GetRestockData().pending[55555])
+                local after = findChild(GBL.tabGroup, "ScrollFrame")
+                assert.is_nil(findLabelContaining(after, "in the mail"))
+                assert.is_nil(findButton(after, "Clear"))
+                assert.is_not_nil(findLabelContaining(after, "Buy 20"))
+            end)
+
+            it("registers no button on a row with nothing in the mail", function()
+                build()
+                local n = #GBL.A11Y.focusOrder
+                GBL:GetRestockData().pending[55555] = { qty = 1, buyer = buyer, at = 3600 * 475200 }
+                build()
+                assert.equals(n + 1, #GBL.A11Y.focusOrder)
+            end)
+        end)
+
         it("shows an Auctionator-required notice when Auctionator is absent", function()
             local container = build()
             local banner = findChild(container, "Label")

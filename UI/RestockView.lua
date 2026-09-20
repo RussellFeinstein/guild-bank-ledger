@@ -236,7 +236,7 @@ function GBL:BuildRestockTab(container)
     elseif state == "READY" then
         self:_RestockView_RenderResults(content, focus)
     else
-        self:_RestockView_RenderItems(content)
+        self:_RestockView_RenderItems(content, focus)
     end
 
     -- Keyboard navigation capture (in-game only; the mock frame has no
@@ -333,8 +333,13 @@ end
 -- Item list rendering
 ------------------------------------------------------------------------
 
-function GBL:_RestockView_RenderItems(content)
+--- Render the item list: one row per universe entry under its tab heading.
+-- A row with a purchase in the mail (#209) carries the modifier and a Clear
+-- button, the one interactive widget in this list, registered in reading
+-- order through `focus`.
+function GBL:_RestockView_RenderItems(content, focus)
     local AceGUI = LibStub("AceGUI-3.0")
+    focus = focus or function() end
     local fontPath, fontSize = self:GetScaledFont()
 
     local universe = self:_RestockBuildItemUniverse()
@@ -366,14 +371,50 @@ function GBL:_RestockView_RenderItems(content)
         local disp = self:GetRestockStatusDisplay(row)
         local iconEsc = disp.icon and ("|T" .. disp.icon .. ":14|t ") or ""
         local statusText = format("|cff%s%s|r", colorToHex(disp.color), disp.text)
-        local rowText = format("%s%s  |cffaaaaaatarget %d || bank %d|r  %s",
-            iconEsc, itemLabel(row.itemID), row.target or 0, row.stock or 0, statusText)
+        local pending = row.pending or 0
+        local mailText = ""
+        if pending > 0 then
+            -- What was bought and not yet seen in the bank (#209). An
+            -- unconfirmed entry is a confirm whose result never arrived.
+            local age = self:_RestockFormatAge(GetServerTime() - (row.pendingAt or 0))
+            if row.pendingUnconfirmed then
+                mailText = format(" || %d bought, result unknown (%s), check your mail", pending, age)
+            else
+                mailText = format(" || in the mail %d (%s)", pending, age)
+            end
+        end
+        local rowText = format("%s%s  |cffaaaaaatarget %d || bank %d%s|r  %s",
+            iconEsc, itemLabel(row.itemID), row.target or 0, row.stock or 0, mailText, statusText)
 
-        local lbl = AceGUI:Create("Label")
-        lbl:SetFullWidth(true)
-        lbl:SetFont(fontPath, fontSize, "")
-        lbl:SetText(rowText)
-        content:AddChild(lbl)
+        if pending > 0 then
+            local grp = AceGUI:Create("SimpleGroup")
+            grp:SetFullWidth(true)
+            grp:SetLayout("Flow")
+            content:AddChild(grp)
+
+            local lbl = AceGUI:Create("Label")
+            lbl:SetRelativeWidth(0.7)
+            lbl:SetFont(fontPath, fontSize, "")
+            lbl:SetText(rowText)
+            grp:AddChild(lbl)
+
+            local itemID = row.itemID
+            local clearBtn = AceGUI:Create("Button")
+            clearBtn:SetText("Clear")
+            clearBtn:SetWidth(80)
+            clearBtn:SetCallback("OnClick", function()
+                self:ClearRestockPending(itemID)
+                self:RefreshRestockTab()
+            end)
+            grp:AddChild(clearBtn)
+            focus(clearBtn)
+        else
+            local lbl = AceGUI:Create("Label")
+            lbl:SetFullWidth(true)
+            lbl:SetFont(fontPath, fontSize, "")
+            lbl:SetText(rowText)
+            content:AddChild(lbl)
+        end
     end
 end
 

@@ -393,6 +393,11 @@ function GBL:StoreBatchRecords(batch, guildData, storageKey, prevCounts)
                     self:MarkSeen(record.id, record.timestamp, guildData)
                     guildData[storageKey][#guildData[storageKey] + 1] = record
                     self:UpdatePlayerStats(record, guildData)
+                    -- A first-time item deposit may settle a pending
+                    -- restock purchase (#209). StoreTx has the same call.
+                    if storageKey == "transactions" and self._RestockOnRecordStored then
+                        self:_RestockOnRecordStored(record, guildData)
+                    end
                     stored = stored + 1
                 end
             end
