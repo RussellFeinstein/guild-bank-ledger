@@ -246,9 +246,16 @@ function GBL:OnScanComplete()
     if self.RefreshRestockTab then self:RefreshRestockTab() end
 end
 
---- The auction house opened or closed: Restock's Search and buy controls are
--- disabled with a reason while it is closed, so the tab redraws on either.
-function GBL:OnAuctionHouseToggled()
+--- The auction house opened or closed (AUCTION_HOUSE_SHOW / _CLOSED). The
+-- flag is what Restock's gate reads first; a close also drops a quote or a
+-- start still waiting for its price, since the server discards its pending
+-- purchase with the session; then the tab redraws with its buy controls
+-- disabled and the reason on the banner.
+function GBL:OnAuctionHouseToggled(event)
+    self._auctionHouseOpen = (event == "AUCTION_HOUSE_SHOW")
+    if event == "AUCTION_HOUSE_CLOSED" and self._RestockOnAuctionHouseClosed then
+        self:_RestockOnAuctionHouseClosed()
+    end
     if self.RefreshRestockTab then self:RefreshRestockTab() end
 end
 

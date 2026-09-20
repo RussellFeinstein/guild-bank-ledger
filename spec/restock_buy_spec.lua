@@ -1478,7 +1478,7 @@ describe("Restock buy", function()
             assert.is_not_nil(findLine("confirm already issued, kept as unanswered"))
             assert.equals(0, liveStepTimers())
             GBL:StartRestockBuy(2)                                  -- refused while it is outstanding
-            assert.equals(1, #MockWoW.commodityPurchases.start)
+            assert.equals(2, #MockWoW.commodityPurchases.start)    -- the two starts above, none here
             assert.is_true(Helpers.printContains("Waiting on the result"))
             MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")       -- the late result credits it
             assert.is_nil(GBL._restock.unanswered)
@@ -1486,7 +1486,7 @@ describe("Restock buy", function()
             assert.is_nil(pending(100).unconfirmed)
             assert.is_true(GBL._restock.bought[1])
             GBL:StartRestockBuy(2)
-            assert.equals(2, #MockWoW.commodityPurchases.start)
+            assert.equals(3, #MockWoW.commodityPurchases.start)
         end)
 
         it("ends the pause on a second price or a price-unavailable, without a cancel", function()
@@ -1645,7 +1645,7 @@ describe("Restock buy", function()
                 MockAce.fireEvent(unpack(ev))
                 assert.equals(1, #MockWoW.commodityPurchases.start, ev[1])
             end
-            -- PRICE_UNAVAILABLE ended the step; a fresh quote for the pause timer.
+            -- The second price ended the pause (quote superseded); a fresh quote for the pause timer.
             assert.equals("READY", GBL._restock.state)
             GBL:StartRestockBuyNext()
             MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 900, 1800)

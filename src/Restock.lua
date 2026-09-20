@@ -506,13 +506,17 @@ function GBL:IsAuctionatorReady()
         and Auctionator.API.v1.ConvertToSearchString ~= nil and Auctionator.EventBus ~= nil
 end
 
---- True while the auction house is open (#211). Read off the default frame,
--- which TradeSkillMaster's UI leaves shown at a tiny scale, so it holds there
--- too. Search, Buy, Buy next and Confirm all disable on it, and a start is
--- refused pre-start without it: nothing used to guard a Buy click at the
--- bank but the existence of the API.
+--- True while the auction house is open (#211): the AUCTION_HOUSE_SHOW and
+-- _CLOSED events are the direct signal (Core's OnAuctionHouseToggled keeps
+-- the flag), and the default frame is the proxy that covers a client whose
+-- events have not fired yet this session. TradeSkillMaster's UI leaves the
+-- frame shown at a tiny scale, so both agree there. Search, Buy, Buy next
+-- and Confirm all disable on it, and a start is refused pre-start without
+-- it: nothing used to guard a Buy click at the bank but the existence of
+-- the API.
 -- @return boolean
 function GBL:_RestockAuctionHouseOpen()
+    if self._auctionHouseOpen then return true end
     return AuctionHouseFrame ~= nil and AuctionHouseFrame.IsShown ~= nil
         and AuctionHouseFrame:IsShown() and true or false
 end
@@ -537,22 +541,28 @@ local SEARCH_BLOCKERS = {
       holds = function(self, opts) return (opts.scanResults or self:GetLastScanResults()) ~= nil end },
     { key = "nothing",
       text = "Nothing to buy: the bank is at target for every layout item.",
-      holds = function(self, opts) return #self:_RestockBuildBuyList(opts) > 0 end },
+      holds = function(self, opts, ctx)
+          ctx.buyList = self:_RestockBuildBuyList(opts)
+          return #ctx.buyList > 0
+      end },
 }
 
 --- The first precondition a search fails, or nil when it can run (#211).
 -- One reader for the button, the banner and StartRestockSearch, in one
--- order, so the reason on screen is the reason the click would print.
+-- order, so the reason on screen is the reason the click would print. When
+-- every precondition holds the buy list the last one built comes back too,
+-- so a click does not build it twice.
 -- @param opts table|nil forwarded to _RestockBuildBuyList (tests inject)
--- @return table|nil { key, text }
+-- @return table|nil { key, text }, table|nil buyList (when nil)
 function GBL:_RestockSearchBlocker(opts)
     opts = opts or {}
+    local ctx = {}
     for _, b in ipairs(SEARCH_BLOCKERS) do
-        if not b.holds(self, opts) then
+        if not b.holds(self, opts, ctx) then
             return { key = b.key, text = b.text }
         end
     end
-    return nil
+    return nil, ctx.buyList
 end
 
 -- Auctionator's SearchEnd event constant, or nil if the API moved.
@@ -628,7 +638,7 @@ function GBL:StartRestockSearch()
     -- The preconditions are one ordered list (#211): the tab disables Search
     -- on the first one that fails and shows its text, and a click that gets
     -- through anyway prints the same text.
-    local blocker = self:_RestockSearchBlocker()
+    local blocker, buyList = self:_RestockSearchBlocker()
     if blocker then
         self:Print(blocker.text)
         return
@@ -638,8 +648,6 @@ function GBL:StartRestockSearch()
         self:Print("Auctionator's search API changed; cannot search.")
         return
     end
-
-    local buyList = self:_RestockBuildBuyList()
 
     self._restock = self._restock or { state = "IDLE" }
     local st = self._restock
@@ -761,6 +769,7 @@ function GBL:_RestockOnSearchEnd(results)
     st.confirmIssued = false
     st.priceIn = false
     st.throttleBusy = false
+    st.cancelledStartDue = nil
     -- The spend model (#60): spentEstimate is what this search has spent
     -- (the priced total of each success), and is what Spent and the budget
     -- read. The wallet baseline pair bounds affordability while the wallet
@@ -876,6 +885,27 @@ local function clearPending(st)
     st.pendingQty = nil
     st.pendingTotal = nil
     st.errorNote = nil
+    st.focusConfirm = nil
+end
+
+-- Drop the purchase in flight before its confirm is out (#211): the cancel
+-- at the auction house, the timer, the pending fields, back to READY with
+-- the list intact. The start's own price may still be on its way (the cancel
+-- is queued behind the start's response), so until that start's READY the
+-- next price event is its answer and not the next purchase's:
+-- cancelledStartDue says so and the READY handler clears it.
+local function dropUnconfirmed(self, st, logWhat, logDetail)
+    if C_AuctionHouse and C_AuctionHouse.CancelCommoditiesPurchase then
+        C_AuctionHouse.CancelCommoditiesPurchase()
+    end
+    if st.state == "CONFIRMING" and not st.priceIn then
+        st.cancelledStartDue = true
+    end
+    ahLog(self, logWhat, logDetail)
+    cancelStepTimer(self)
+    clearPending(st)
+    st.buyAll = false
+    st.state = "READY"
 end
 
 --- Reset the search/buy back to IDLE: drop a purchase that has not been
@@ -916,6 +946,7 @@ function GBL:ResetRestockSearch()
     st.unanswered = nil
     st.buyAll = false
     st.throttleBusy = false
+    st.cancelledStartDue = nil
     st.spentEstimate = 0
     st.spentAtBase = 0
     st.state = "IDLE"
@@ -1340,28 +1371,48 @@ end
 -- a click) and return to READY with the list intact (#211). Before the
 -- confirm is out the purchase is cancelled at the auction house and nothing
 -- was spent; after it, a cancel means nothing (Auctionator never cancels
--- after a confirm) and the purchase is kept in the pending store flagged
--- unconfirmed, since the gold may have moved and the result may still land.
+-- after a confirm) and the purchase becomes the unanswered record the
+-- result timeout keeps: no new start until its result lands, the late
+-- result credits it, and a reset or the next search parks it as pending.
+-- Parking it here instead would leave the row buyable with the buy events
+-- still registered, and the late result would land on the next purchase.
 function GBL:CancelRestockPurchase()
     local st = self._restock
     if not st or not purchaseInFlight(self) then return end
     local wasState = st.state
     if st.confirmIssued and st.pendingItemID then
-        self:_RestockAddPending(st.pendingItemID, st.pendingQty, { unconfirmed = true })
-        ahLog(self, "cancelled", format("state=%s confirm already issued, kept as pending", wasState))
-        self:Print(format("The confirm for %s is already out; it is kept as in the mail until "
-            .. "the result shows.", itemName(self, st.pendingItemID)))
+        st.unanswered = {
+            index = st.pendingIndex, itemID = st.pendingItemID,
+            qty = st.pendingQty, total = st.pendingTotal,
+        }
+        ahLog(self, "cancelled", format("state=%s confirm already issued, kept as unanswered", wasState))
+        self:Print(format("The confirm for %s is already out; waiting for its result. "
+            .. "Check your mail before buying it again.", itemName(self, st.pendingItemID)))
+        cancelStepTimer(self)
+        clearPending(st)
+        st.buyAll = false
+        st.state = "READY"
     else
-        if C_AuctionHouse and C_AuctionHouse.CancelCommoditiesPurchase then
-            C_AuctionHouse.CancelCommoditiesPurchase()
-        end
-        ahLog(self, "cancelled", format("state=%s cancel issued", wasState))
+        dropUnconfirmed(self, st, "cancelled", format("state=%s cancel issued", wasState))
     end
-    cancelStepTimer(self)
-    clearPending(st)
-    st.buyAll = false
-    st.state = "READY"
     self:RefreshRestockTab()
+end
+
+--- The auction house closed with a purchase in flight (#211; called from
+-- Core's OnAuctionHouseToggled). A quote, or a start still waiting for its
+-- price, is dropped: the server discards its pending purchase on close, so a
+-- Confirm after the house reopens would confirm nothing and end as a phantom
+-- unanswered record. A confirm already out is left to its result and the
+-- step timer, as anywhere else.
+function GBL:_RestockOnAuctionHouseClosed()
+    local st = self._restock
+    if not st or not purchaseInFlight(self) or st.confirmIssued then return end
+    local item = itemName(self, st.pendingItemID)
+    dropUnconfirmed(self, st, "cancelled (auction house closed)", format("state=%s", st.state))
+    -- No price follows a closed house, and the flag must not eat the next
+    -- start's price after it reopens.
+    st.cancelledStartDue = nil
+    self:Print(format("The Auction House closed; the purchase of %s was dropped and nothing was spent.", item))
 end
 
 --- WoW commodity events (registered lazily).
@@ -1373,6 +1424,9 @@ function GBL:AUCTION_HOUSE_THROTTLED_SYSTEM_READY()
     local st = self._restock
     if not st then return end
     st.throttleBusy = false
+    -- A cancelled start's response cycle ends here: whatever price it was
+    -- going to send has come or never will.
+    st.cancelledStartDue = nil
     if st.state == "PRICED" then
         ahLog(self, "AUCTION_HOUSE_THROTTLED_SYSTEM_READY", "ignored (quote awaits confirm)")
         return
@@ -1385,6 +1439,40 @@ function GBL:AUCTION_HOUSE_THROTTLED_SYSTEM_READY()
     else
         ahLog(self, "AUCTION_HOUSE_THROTTLED_SYSTEM_READY", "ignored (confirm waits for price)")
     end
+end
+
+-- A price event while our quote waits for the click (#211): the events carry
+-- no item, so it is either the server re-quoting or another addon's start,
+-- and the client holds one commodity purchase at a time, so in the second
+-- case ours is gone. Either way the quote on the banner is not the one to
+-- confirm: drop the pause and let the next click quote again. No cancel goes
+-- out, since it would cancel whatever the server holds now.
+local function supersededQuote(self, event, prefix)
+    local st = self._restock
+    ahLog(self, event, (prefix and (prefix .. " ") or "") .. "ignored (quote superseded, pause ended)")
+    self:Print(format("The quote for %s changed or another purchase started; click Buy again.",
+        itemName(self, st.pendingItemID)))
+    cancelStepTimer(self)
+    clearPending(st)
+    st.buyAll = false
+    st.state = "READY"
+    self:RefreshRestockTab()
+end
+
+-- A purchase result while our quote waits for the click (#211): no confirm of
+-- ours is out in PRICED, so the result is another addon's purchase, and the
+-- client holds one commodity purchase at a time, so ours was replaced at the
+-- server when theirs started. Credit nothing, drop the pause, and say so.
+local function foreignResultInPause(self, event)
+    local st = self._restock
+    ahLog(self, event, "ignored (foreign, pause ended)")
+    self:Print(format("The Auction House completed a different purchase; the quote for %s was dropped.",
+        itemName(self, st.pendingItemID)))
+    cancelStepTimer(self)
+    clearPending(st)
+    st.buyAll = false
+    st.state = "READY"
+    self:RefreshRestockTab()
 end
 
 -- The server's answer to our own StartCommoditiesPurchase, carrying the real
@@ -1405,8 +1493,18 @@ function GBL:COMMODITY_PRICE_UPDATED(_, unitPrice, totalPrice)
         ahLog(self, "COMMODITY_PRICE_UPDATED", prices .. " ignored (already issued)")
         return
     end
-    local rePrice = st.state == "PRICED"
-    if st.priceIn and not rePrice then
+    if st.state == "PRICED" then
+        supersededQuote(self, "COMMODITY_PRICE_UPDATED", prices)
+        return
+    end
+    if st.cancelledStartDue then
+        -- The answer to a start Cancel dropped before it arrived; the next
+        -- purchase's own price follows that start's READY.
+        st.cancelledStartDue = nil
+        ahLog(self, "COMMODITY_PRICE_UPDATED", prices .. " ignored (price of a cancelled start)")
+        return
+    end
+    if st.priceIn then
         ahLog(self, "COMMODITY_PRICE_UPDATED", prices .. " ignored (price already in)")
         return
     end
@@ -1431,19 +1529,13 @@ function GBL:COMMODITY_PRICE_UPDATED(_, unitPrice, totalPrice)
     end
     st.priceIn = true
     st.pendingTotal = totalPrice
-    if rePrice then
-        -- A second quote while ours waits for the click (#211): re-checked
-        -- above, re-priced on the banner, and the pause timer left running.
-        -- The events carry no item, so a capture reads this line to tell a
-        -- server re-quote from another addon's purchase started meanwhile.
-        ahLog(self, "COMMODITY_PRICE_UPDATED", prices .. " re-priced")
-        self:RefreshRestockTab()
-        return
-    end
     if self:IsRestockConfirmAtPrice() then
         -- The pause (#211): the quote goes on the banner and the confirm
         -- waits for a click, with the one timer slot re-armed for the wait.
+        -- focusConfirm is consumed by the one rebuild that enters PRICED,
+        -- so a later rebuild cannot snap focus back onto Confirm.
         st.state = "PRICED"
+        st.focusConfirm = true
         armStepTimer(self, PAUSE_TIMEOUT)
         ahLog(self, "COMMODITY_PRICE_UPDATED", prices .. " price in, awaiting confirm")
         self:RefreshRestockTab()
@@ -1469,24 +1561,17 @@ function GBL:COMMODITY_PRICE_UNAVAILABLE()
         ahLog(self, "COMMODITY_PRICE_UNAVAILABLE", "ignored (already issued)")
         return
     end
+    if st.state == "PRICED" then
+        supersededQuote(self, "COMMODITY_PRICE_UNAVAILABLE")
+        return
+    end
+    if st.cancelledStartDue then
+        st.cancelledStartDue = nil
+        ahLog(self, "COMMODITY_PRICE_UNAVAILABLE", "ignored (answer to a cancelled start)")
+        return
+    end
     ahLog(self, "COMMODITY_PRICE_UNAVAILABLE", "handled")
     failStep(self, "no price available", "the auction house has no price for it right now.")
-end
-
--- A purchase result while our quote waits for the click (#211): no confirm of
--- ours is out in PRICED, so the result is another addon's purchase, and the
--- client holds one commodity purchase at a time, so ours was replaced at the
--- server when theirs started. Credit nothing, drop the pause, and say so.
-local function foreignResultInPause(self, event)
-    local st = self._restock
-    ahLog(self, event, "ignored (foreign, pause ended)")
-    self:Print(format("The Auction House completed a different purchase; the quote for %s was dropped.",
-        itemName(self, st.pendingItemID)))
-    cancelStepTimer(self)
-    clearPending(st)
-    st.buyAll = false
-    st.state = "READY"
-    self:RefreshRestockTab()
 end
 
 function GBL:COMMODITY_PURCHASE_SUCCEEDED()

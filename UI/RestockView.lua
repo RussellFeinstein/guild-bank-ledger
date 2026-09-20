@@ -287,8 +287,12 @@ function GBL:BuildRestockTab(container)
     end
 
     -- The rebuild that enters PRICED lands focus on Confirm (#211), so Enter
-    -- confirms and Escape (PR B) cancels without a Tab walk first.
-    if confirmIndex then
+    -- confirms without a Tab walk first. Only that one: the price handler
+    -- sets focusConfirm and this build consumes it, so a rebuild from a sync
+    -- or a scan while the player has Tabbed onto Cancel cannot snap focus
+    -- back onto Confirm under their Enter.
+    if confirmIndex and self._restock.focusConfirm then
+        self._restock.focusConfirm = nil
         self.A11Y.focusIndex = confirmIndex
         self:RestoreFocus()
     end
@@ -343,31 +347,12 @@ end
 -- deferred accessibility-branch change to SetFocusIndicator).
 ------------------------------------------------------------------------
 
---- Activate the currently focused widget: OnClick for a button, a toggle for
--- a CheckBox (which ignores OnClick, so the confirm-at-price box would read
--- as a dead key otherwise; the same branch the Sort tab has).
+--- Activate the currently focused widget: the shared walk activator in
+-- UI/Accessibility.lua (OnClick for a button, a toggle for a CheckBox, a
+-- disabled widget refused), kept under this tab's name for its key handler.
 -- @return boolean true if a widget was fired
 function GBL:_RestockView_ActivateFocused()
-    local order = self.A11Y and self.A11Y.focusOrder
-    local idx = (self.A11Y and self.A11Y.focusIndex) or 0
-    local widget = order and idx > 0 and order[idx]
-    -- Same disabled check as the Sort tab: firing OnClick bypasses the
-    -- one AceGUI's own handler does, and this tab disables Buy buttons
-    -- when a budget cap is reached. The purchase path re-checks the
-    -- budget itself, so this is defence in depth rather than the only
-    -- gate, but a disabled button that responds to a key is still wrong.
-    if widget and widget.disabled then return false end
-    if widget and widget.type == "CheckBox" and widget.GetValue and widget.SetValue then
-        local newValue = not widget:GetValue()
-        widget:SetValue(newValue)
-        if widget.Fire then widget:Fire("OnValueChanged", newValue) end
-        return true
-    end
-    if widget and widget.Fire then
-        widget:Fire("OnClick")
-        return true
-    end
-    return false
+    return self:ActivateFocused()
 end
 
 --- Map a key press to a focus action. Returns true if handled (the caller then
