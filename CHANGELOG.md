@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.39.18] - 2026-09-19
 
 ### Added
 - The Restock buy flow now writes every auction house event it sees to the system log (`/gbl logs`) while a purchase is in flight, along with its own start, skip, step and reset lines, so a Buy all that stops on "Confirming purchase..." can be read back from the capture instead of guessed at. Nothing about when the addon confirms a purchase or starts the next one has changed yet; this release is the reading the fix will be planned from. Keep a diagnostic Buy all to two or three items, since the system capture holds about twenty-five purchases before its oldest lines drop out.
