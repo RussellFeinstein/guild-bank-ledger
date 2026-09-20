@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.40.0] - 2026-09-20
 
 ### Added
 - Restock pauses on the Auction House's quoted total before spending: after Buy or Buy next the banner shows the real price for that quantity with Confirm and Cancel, Enter confirms, and nothing is spent until you do. A "Confirm at price" checkbox beside the budget turns the pause off, in which case each quote is confirmed automatically once it passes your budget and your gold, as before. A quote left unconfirmed for a minute is dropped and the row stays buyable.
