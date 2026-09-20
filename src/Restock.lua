@@ -301,7 +301,7 @@ end
 
 ------------------------------------------------------------------------
 -- Auctionator search + buy flow (IDLE -> SEARCHING -> READY -> CONFIRMING,
--- with WAITING between the purchases of a sweep)
+-- with WAITING while a call is deferred to the next throttle-ready)
 -- Ported from GuildBankRestock, adapted to the layout-driven buy list and GBL's
 -- singleton session-state conventions. Every Auctionator/Item/C_AuctionHouse
 -- access is existence-guarded and verified in-game; the pure helpers below carry
@@ -311,8 +311,9 @@ end
 --   { state, activeItems = { {itemID, needed} }, resultRows = { [i]=row },
 --     searchGen, listenerRegistered, foundCount,                 -- search
 --     bought, skipped, pendingIndex, pendingItemID, pendingQty,  -- buy
---     pendingTotal, buyAll, sweepNext, buyEventsRegistered, confirmIssued,
---     stepToken, stepStartedAt, runStartMoney, spentEstimate }
+--     pendingTotal, priceIn, confirmIssued, errorNote, stepStartedAt,   -- one step
+--     buyAll, sweepNext, throttleBusy, stepTimer, unanswered,            -- the run
+--     buyEventsRegistered, runStartMoney, spentEstimate }
 -- The EventBus listener table lives on self._restockListener (stable across
 -- searches so Unregister matches Register).
 ------------------------------------------------------------------------
@@ -521,6 +522,9 @@ function GBL:_RestockOnSearchEnd(results)
     st.skipped = {}
     st.buyAll = false
     st.confirmIssued = false
+    st.priceIn = false
+    st.unanswered = nil
+    st.throttleBusy = false
     st.runStartMoney = (GetMoney and GetMoney()) or 0  -- baseline for the budget cap
     st.spentEstimate = 0  -- lag-free lower bound on spend (GetMoney can trail events)
     st.state = "READY"
@@ -547,15 +551,26 @@ GBL._restockAHEvents = AH_EVENTS
 
 -- How long one step may wait on the auction house (#199): for the price after
 -- a start, for the result after a confirm, and for the throttle to report
--- ready between two purchases of a sweep. TSM's API_TIMEOUT is the same
--- figure. Exported so the spec fires the timers by delay, not by count.
+-- ready before a deferred call. TSM's API_TIMEOUT is the same figure.
+-- Exported so the spec fires the timers by delay, not by count.
 local STEP_TIMEOUT = 5
 GBL.RESTOCK_STEP_TIMEOUT = STEP_TIMEOUT
+
+-- The client's own throttle predicate, read for the log only (#199): nothing
+-- is gated on it until a capture has shown what it reads around our calls.
+local function throttleReadyText()
+    if C_AuctionHouse and C_AuctionHouse.IsThrottledMessageSystemReady then
+        local ok, ready = pcall(C_AuctionHouse.IsThrottledMessageSystemReady)
+        if ok then return tostring(ready) end
+    end
+    return "na"
+end
 
 -- One system-channel line per auction-house event or flow step (#199), written
 -- AFTER the decision it reports so the line says what happened. Restock has no
 -- channel of its own; the system channel is captured, so a Buy all that stops
--- on Confirming purchase can be read back from the SavedVariables.
+-- on Confirming purchase can be read back from the SavedVariables. busy= is
+-- this flow's own throttle flag (below); ready= is the client's.
 local function ahLog(self, what, detail)
     local st = self._restock
     local pending = "none"
@@ -566,37 +581,50 @@ local function ahLog(self, what, detail)
     if st and st.stepStartedAt and GetTime then
         elapsed = GetTime() - st.stepStartedAt
     end
-    self:SystemInfo("Restock AH: %s state=%s pending=%s t=+%.2fs%s",
+    self:SystemInfo("Restock AH: %s state=%s pending=%s t=+%.2fs busy=%s ready=%s%s",
         what, (st and st.state) or "none", pending, elapsed,
+        (st and st.throttleBusy) and "yes" or "no", throttleReadyText(),
         detail and (" " .. detail) or "")
 end
 
--- True while a purchase is in flight or a sweep is between two: the window the
+-- True while a purchase is in flight or a call is deferred: the window the
 -- throttle family and UI_ERROR_MESSAGE are logged in.
 local function purchaseInFlight(self)
     local st = self._restock
     return st ~= nil and (st.state == "CONFIRMING" or st.state == "WAITING")
 end
 
--- The step timer (#199). One C_Timer.After per arm, retired by a token rather
--- than a handle, because C_Timer.After hands back nothing to cancel: every
--- arm, every settled step and a reset bump the token, and a timer that fires
--- late finds it stale and returns.
-local function retireStepTimer(self)
+-- The step timer (#199): one cancellable one-shot per arm, the repo's
+-- C_Timer.NewTicker(n, cb, 1) idiom (src/Sync.lua), since C_Timer.After hands
+-- back nothing to cancel. Every arm replaces the last, and every settled step
+-- and a reset cancel it.
+local function cancelStepTimer(self)
     local st = self._restock
-    if st then st.stepToken = (st.stepToken or 0) + 1 end
+    if st and st.stepTimer then
+        if st.stepTimer.Cancel then st.stepTimer:Cancel() end
+        st.stepTimer = nil
+    end
 end
 
 local function armStepTimer(self)
     local st = self._restock
-    if not st or not (C_Timer and C_Timer.After) then return end
-    retireStepTimer(self)
-    local token = st.stepToken
-    C_Timer.After(STEP_TIMEOUT, function()
-        local cur = self._restock
-        if not cur or cur.stepToken ~= token then return end
+    cancelStepTimer(self)
+    if not st or not (C_Timer and C_Timer.NewTicker) then return end
+    st.stepTimer = C_Timer.NewTicker(STEP_TIMEOUT, function()
         self:_RestockOnStepTimeout()
-    end)
+    end, 1)
+end
+
+-- Forget the purchase in flight. The unanswered record (a confirm that got no
+-- result) is deliberately not part of this: it outlives the step.
+local function clearPending(st)
+    st.confirmIssued = false
+    st.priceIn = false
+    st.pendingIndex = nil
+    st.pendingItemID = nil
+    st.pendingQty = nil
+    st.pendingTotal = nil
+    st.errorNote = nil
 end
 
 --- Reset the search/buy back to IDLE: drop a purchase that has not been
@@ -620,7 +648,7 @@ function GBL:ResetRestockSearch()
         end
     end
     ahLog(self, "reset", note)
-    retireStepTimer(self)
+    cancelStepTimer(self)
     unregisterSearchListener(self)
     self:_RestockUnregisterBuyEvents()
     if (st.state == "SEARCHING" or st.state == "READY" or st.state == "CONFIRMING"
@@ -634,25 +662,32 @@ function GBL:ResetRestockSearch()
     st.foundCount = 0
     st.bought = {}
     st.skipped = {}
-    st.pendingIndex = nil
-    st.pendingItemID = nil
-    st.pendingQty = nil
-    st.pendingTotal = nil
+    clearPending(st)
+    st.unanswered = nil
     st.sweepNext = nil
     st.buyAll = false
-    st.confirmIssued = false
+    st.throttleBusy = false
     st.spentEstimate = 0
     st.state = "IDLE"
 end
 
 ------------------------------------------------------------------------
--- Buy / confirm flow (M4c: READY -> CONFIRMING -> READY, with WAITING between
--- the purchases of a sweep since #199)
+-- Buy / confirm flow (M4c: READY -> CONFIRMING -> READY, with WAITING while a
+-- call is deferred to the next throttle-ready since #199)
 -- Per-item buys and a budget-capped Buy-all sweep, ported from GBR. Spends real
 -- gold via C_AuctionHouse commodities; the budget cap, per-item review, the
 -- wallet and budget re-check against the priced total, and in-game
 -- verification are the safeguards. The COMMODITY/THROTTLED handlers are
 -- registered lazily on the first buy and unregistered in ResetRestockSearch.
+--
+-- The throttle rule (#199, the 2026-09-19 capture): a throttled call issued in
+-- the frame of the previous call's response is swallowed by the client with
+-- no event at all. So every start and confirm sets throttleBusy, the
+-- THROTTLED_SYSTEM_READY that follows each response clears it, and a call
+-- that comes due while it is set (the confirm once the price is in, the next
+-- start of a sweep, a Buy click in that window) is deferred to the next READY.
+-- That is the one seam; no caller decides for itself whether the throttle
+-- is free.
 ------------------------------------------------------------------------
 
 local COPPER_PER_GOLD = 10000
@@ -733,38 +768,69 @@ local function itemName(self, itemID)
     return name or ("item " .. tostring(itemID))
 end
 
-local function clearPending(st)
-    st.confirmIssued = false
-    st.pendingIndex = nil
-    st.pendingItemID = nil
-    st.pendingQty = nil
-    st.pendingTotal = nil
+-- Mark a row bought and add what it cost to the lag-free spend estimate: the
+-- priced total when the price event carried one, else the lowest-price lower
+-- bound.
+local function creditPurchase(st, index, total, qty)
+    if not index then return end
+    st.bought = st.bought or {}
+    st.bought[index] = true
+    local row = st.resultRows and st.resultRows[index]
+    local minPrice = (row and row.minPrice) or 0
+    st.spentEstimate = (st.spentEstimate or 0) + (total or (minPrice * (qty or 0)))
+end
+
+-- Settle a sweep, or a deferred single buy, back to READY.
+local function stopRun(self)
+    local st = self._restock
+    st.buyAll = false
+    st.sweepNext = nil
+    st.state = "READY"
+    self:RefreshRestockTab()
 end
 
 -- A step the flow will not confirm (#199): drop the purchase at the auction
--- house (nothing has been spent), skip the row with its reason, and move on.
--- Reached from a price that never came, a price that came back unavailable,
--- and a price the wallet or the budget refuses. fromEvent says whether the
--- caller is inside an auction-house event, which is what decides whether the
--- sweep waits for the throttle before its next start.
-local function failStep(self, reason, chatText, fromEvent)
+-- house (nothing has been spent), say why, and move on. Reached from a price
+-- that never came, a price that came back unavailable or unusable, and a
+-- price the wallet or the budget refuses. Only a sweep marks the row skipped;
+-- a single buy leaves it buyable, as the pre-start refusals do, since every
+-- one of these can be transient.
+local function failStep(self, reason, chatText)
     local st = self._restock
     if not st then return end
     if C_AuctionHouse and C_AuctionHouse.CancelCommoditiesPurchase then
         C_AuctionHouse.CancelCommoditiesPurchase()
     end
-    st.skipped = st.skipped or {}
-    if st.pendingIndex then st.skipped[st.pendingIndex] = true end
-    self:Print(format("Skipped %s: %s", itemName(self, st.pendingItemID), chatText))
+    if st.buyAll and st.pendingIndex then
+        st.skipped = st.skipped or {}
+        st.skipped[st.pendingIndex] = true
+    end
+    self:Print(format("Did not buy %s: %s", itemName(self, st.pendingItemID), chatText))
     ahLog(self, "step failed", reason)
-    retireStepTimer(self)
+    cancelStepTimer(self)
     clearPending(st)
-    self:_RestockAfterStep(fromEvent)
+    self:_RestockAfterStep()
+end
+
+-- The confirm for the purchase in flight. Called only with the price in and
+-- the throttle free, from whichever of the two arrived second.
+local function issueConfirm(self, via, prefix)
+    local st = self._restock
+    if not (C_AuctionHouse and C_AuctionHouse.ConfirmCommoditiesPurchase) then
+        ahLog(self, via, (prefix and (prefix .. " ") or "") .. "ignored (no confirm API)")
+        return
+    end
+    st.confirmIssued = true
+    st.throttleBusy = true
+    ahLog(self, via, (prefix and (prefix .. " ") or "") .. "confirm issued")
+    armStepTimer(self)
+    C_AuctionHouse.ConfirmCommoditiesPurchase(st.pendingItemID, st.pendingQty)
 end
 
 --- Begin a commodity purchase for activeItems[index]. Handles the maxPrice skip
 -- and the budget cap; on a real buy it goes CONFIRMING and waits for the WoW
--- events to confirm and report the result.
+-- events to price, confirm and report the result. With the throttle busy the
+-- start is deferred to the next THROTTLED_SYSTEM_READY instead (WAITING).
 function GBL:_RestockBeginPurchase(index)
     local st = self._restock
     if not st or st.state ~= "READY" then return end
@@ -772,6 +838,17 @@ function GBL:_RestockBeginPurchase(index)
     local row = st.resultRows and st.resultRows[index]
     if not ref or not row or (st.bought and st.bought[index]) or (ref.needed or 0) <= 0 then
         self:_RestockAfterStep()
+        return
+    end
+
+    -- A confirm that got no result is still outstanding: its late result
+    -- would be credited to whatever purchase was in flight, so nothing starts
+    -- until it lands or the run is reset.
+    if st.unanswered then
+        self:Print(format("Waiting on the result of %s; check your mail, then press Done "
+            .. "and search again to buy more.", itemName(self, st.unanswered.itemID)))
+        ahLog(self, "skip", format("it:%d result outstanding for it:%d", ref.itemID, st.unanswered.itemID))
+        stopRun(self)
         return
     end
 
@@ -838,27 +915,35 @@ function GBL:_RestockBeginPurchase(index)
     end
 
     self:_RestockRegisterBuyEvents()
+    if st.throttleBusy then
+        st.sweepNext = index
+        st.state = "WAITING"
+        ahLog(self, "start deferred", format("next=%d waiting for ready", index))
+        armStepTimer(self)
+        self:RefreshRestockTab()
+        return
+    end
+
     st.pendingIndex = index
     st.pendingItemID = (row.itemKey and row.itemKey.itemID) or ref.itemID
     st.pendingQty = ref.needed
     st.pendingTotal = nil
+    st.priceIn = false
     st.confirmIssued = false
+    st.errorNote = nil
     st.stepStartedAt = (GetTime and GetTime()) or nil
     st.state = "CONFIRMING"
-    self:RefreshRestockTab()
+    st.throttleBusy = true
     ahLog(self, "start", st.buyAll and "sweep=yes" or "sweep=no")
     armStepTimer(self)
     C_AuctionHouse.StartCommoditiesPurchase(st.pendingItemID, st.pendingQty)
+    self:RefreshRestockTab()
 end
 
---- After a buy or skip: continue the sweep, or settle back to READY. A
--- continuation that runs inside an auction-house event (fromEvent) waits in
--- WAITING for the throttle to report ready before the next start: a start
--- issued in the frame of the previous purchase's response is swallowed by the
--- client with no event at all (#199, the 2026-09-19 capture). A continuation
--- from a timer or from a skip that made no auction-house call runs straight
--- on, since the throttle has been idle throughout.
-function GBL:_RestockAfterStep(fromEvent)
+--- After a buy or skip: continue the sweep, or settle back to READY. The next
+-- start goes through _RestockBeginPurchase, which defers it while the
+-- throttle is busy.
+function GBL:_RestockAfterStep()
     local st = self._restock
     if not st then return end
     -- Settle out of CONFIRMING first so the next _RestockBeginPurchase passes
@@ -885,50 +970,45 @@ function GBL:_RestockAfterStep(fromEvent)
         self:RefreshRestockTab()
         return
     end
-    if fromEvent then
-        st.sweepNext = nextIndex
-        st.state = "WAITING"
-        ahLog(self, "step done", format("next=%d waiting for ready", nextIndex))
-        armStepTimer(self)
-        self:RefreshRestockTab()
-        return
-    end
     ahLog(self, "step done", format("next=%d", nextIndex))
     self:_RestockBeginPurchase(nextIndex)
 end
 
---- The step timer fired with its token still live (#199): the auction house
--- did not answer within STEP_TIMEOUT. Three cases with three outcomes. No
--- price after a start: nothing was spent, so cancel, skip the row, and carry
--- on. No result after a confirm: the gold may have moved and a cancel means
--- nothing now, so the row is marked, the sweep stops, and the player is told
--- to check the mail before buying it again. No ready during a wait: stop.
+--- The step timer fired (#199): the auction house did not answer within
+-- STEP_TIMEOUT. Three cases with three outcomes. No price after a start:
+-- nothing was spent, so cancel and carry on (the next start is deferred if no
+-- READY came either). No result after a confirm: the gold may have moved and
+-- a cancel means nothing now, so the purchase is kept as unanswered, which
+-- credits its late result and blocks new starts, the run stops, and the
+-- player is told to check the mail. No READY for a deferred call: stop.
 function GBL:_RestockOnStepTimeout()
     local st = self._restock
     if not st then return end
+    st.stepTimer = nil
     if st.state == "CONFIRMING" and not st.confirmIssued then
         failStep(self, format("no price within %ds", STEP_TIMEOUT),
-            format("the auction house did not price it within %d seconds.", STEP_TIMEOUT), false)
+            format("the auction house did not price it within %d seconds.", STEP_TIMEOUT))
     elseif st.state == "CONFIRMING" then
-        st.skipped = st.skipped or {}
-        if st.pendingIndex then st.skipped[st.pendingIndex] = true end
-        self:Print(format("No result for %s within %d seconds; stopping. "
+        st.unanswered = {
+            index = st.pendingIndex, itemID = st.pendingItemID,
+            qty = st.pendingQty, total = st.pendingTotal,
+        }
+        local note = ""
+        if st.errorNote then
+            note = format(" The auction house reported: %s.", st.errorNote)
+        end
+        self:Print(format("No result for %s within %d seconds; stopping.%s "
             .. "Check your mail before buying it again.",
-            itemName(self, st.pendingItemID), STEP_TIMEOUT))
+            itemName(self, st.pendingItemID), STEP_TIMEOUT, note))
         ahLog(self, "step failed", format("no result within %ds", STEP_TIMEOUT))
         clearPending(st)
-        st.buyAll = false
-        st.sweepNext = nil
-        st.state = "READY"
-        self:RefreshRestockTab()
+        stopRun(self)
     elseif st.state == "WAITING" then
         ahLog(self, "wait timed out", format("next=%d", st.sweepNext or 0))
-        self:Print(format("Buy-all stopped: the auction house did not report ready within %d seconds.",
+        self:Print(format("Stopped: the auction house did not report ready within %d seconds.",
             STEP_TIMEOUT))
-        st.sweepNext = nil
-        st.buyAll = false
-        st.state = "READY"
-        self:RefreshRestockTab()
+        st.throttleBusy = false
+        stopRun(self)
     end
 end
 
@@ -956,20 +1036,20 @@ end
 
 --- WoW commodity events (registered lazily).
 
--- The throttle is free again. In WAITING that is the signal the next purchase
--- of a sweep was waiting for. In CONFIRMING it confirms nothing: the confirm
--- goes out on the price (#199). It fires for every addon's calls, so outside
--- those two states it is silent.
+-- The throttle is free again: the flag clears, and whatever was deferred on
+-- it goes out. In WAITING that is a start; in CONFIRMING with the price in it
+-- is the confirm. It fires for every addon's calls, so with nothing deferred
+-- it is silent outside those two states.
 function GBL:AUCTION_HOUSE_THROTTLED_SYSTEM_READY()
     local st = self._restock
     if not st then return end
+    st.throttleBusy = false
     if st.state == "WAITING" then
         local nextIndex = st.sweepNext
-        retireStepTimer(self)
+        cancelStepTimer(self)
         st.sweepNext = nil
         st.state = "READY"
-        ahLog(self, "AUCTION_HOUSE_THROTTLED_SYSTEM_READY",
-            format("next purchase started next=%d", nextIndex or 0))
+        ahLog(self, "AUCTION_HOUSE_THROTTLED_SYSTEM_READY", format("throttle ready next=%d", nextIndex or 0))
         if nextIndex then
             self:_RestockBeginPurchase(nextIndex)
         else
@@ -980,16 +1060,18 @@ function GBL:AUCTION_HOUSE_THROTTLED_SYSTEM_READY()
     if st.state ~= "CONFIRMING" then return end
     if st.confirmIssued then
         ahLog(self, "AUCTION_HOUSE_THROTTLED_SYSTEM_READY", "ignored (already issued)")
+    elseif st.priceIn then
+        issueConfirm(self, "AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
     else
         ahLog(self, "AUCTION_HOUSE_THROTTLED_SYSTEM_READY", "ignored (confirm waits for price)")
     end
 end
 
 -- The server's answer to our own StartCommoditiesPurchase, carrying the real
--- total for the quantity asked. This is where the confirm goes out (#199):
--- Blizzard's dialog, Auctionator and TSM all wait for it. The wallet and the
--- budget are checked again here against the priced total, since the pre-start
--- estimate is a lower bound.
+-- total for the quantity asked (#199). The wallet and the budget are checked
+-- again here against it, since the pre-start estimate is a lower bound. The
+-- confirm itself waits for the READY that follows this response; it goes out
+-- here only when that READY has already come.
 function GBL:COMMODITY_PRICE_UPDATED(_, unitPrice, totalPrice)
     local st = self._restock
     local prices = format("unit=%s total=%s",
@@ -1003,33 +1085,36 @@ function GBL:COMMODITY_PRICE_UPDATED(_, unitPrice, totalPrice)
         ahLog(self, "COMMODITY_PRICE_UPDATED", prices .. " ignored (already issued)")
         return
     end
-    if totalPrice and totalPrice > 0 then
-        if totalPrice > affordableMoney(self) then
-            ahLog(self, "COMMODITY_PRICE_UPDATED", prices .. " refused (cannot afford at price)")
-            failStep(self, "cannot afford at price",
-                format("the auction house quoted %s, more than you have.", self:FormatMoney(totalPrice)),
-                true)
-            return
-        end
-        local budget = self:GetRestockBudget()
-        if budget > 0 and (spentCopper(self) + totalPrice) > budget * COPPER_PER_GOLD then
-            ahLog(self, "COMMODITY_PRICE_UPDATED", prices .. " refused (budget at price)")
-            failStep(self, "budget at price",
-                format("the auction house quoted %s, past your budget of %d g.",
-                    self:FormatMoney(totalPrice), budget),
-                true)
-            return
-        end
-        st.pendingTotal = totalPrice
-    end
-    if not (C_AuctionHouse and C_AuctionHouse.ConfirmCommoditiesPurchase) then
-        ahLog(self, "COMMODITY_PRICE_UPDATED", prices .. " ignored (no confirm API)")
+    if st.priceIn then
+        ahLog(self, "COMMODITY_PRICE_UPDATED", prices .. " ignored (price already in)")
         return
     end
-    st.confirmIssued = true
-    ahLog(self, "COMMODITY_PRICE_UPDATED", prices .. " confirm issued")
-    armStepTimer(self)
-    C_AuctionHouse.ConfirmCommoditiesPurchase(st.pendingItemID, st.pendingQty)
+    if type(totalPrice) ~= "number" or totalPrice <= 0 then
+        ahLog(self, "COMMODITY_PRICE_UPDATED", prices .. " refused (no usable total)")
+        failStep(self, "no usable price", "the auction house sent no usable price for it.")
+        return
+    end
+    if totalPrice > affordableMoney(self) then
+        ahLog(self, "COMMODITY_PRICE_UPDATED", prices .. " refused (cannot afford at price)")
+        failStep(self, "cannot afford at price",
+            format("the auction house quoted %s, more than you have.", self:FormatMoney(totalPrice)))
+        return
+    end
+    local budget = self:GetRestockBudget()
+    if budget > 0 and (spentCopper(self) + totalPrice) > budget * COPPER_PER_GOLD then
+        ahLog(self, "COMMODITY_PRICE_UPDATED", prices .. " refused (budget at price)")
+        failStep(self, "budget at price",
+            format("the auction house quoted %s, past your budget of %d g.",
+                self:FormatMoney(totalPrice), budget))
+        return
+    end
+    st.priceIn = true
+    st.pendingTotal = totalPrice
+    if st.throttleBusy then
+        ahLog(self, "COMMODITY_PRICE_UPDATED", prices .. " price in, confirm waits for ready")
+    else
+        issueConfirm(self, "COMMODITY_PRICE_UPDATED", prices)
+    end
 end
 
 -- The server could not price our start. Auctionator's handling: cancel the
@@ -1046,55 +1131,70 @@ function GBL:COMMODITY_PRICE_UNAVAILABLE()
         return
     end
     ahLog(self, "COMMODITY_PRICE_UNAVAILABLE", "handled")
-    failStep(self, "no price available", "the auction house has no price for it right now.", true)
+    failStep(self, "no price available", "the auction house has no price for it right now.")
 end
 
 function GBL:COMMODITY_PURCHASE_SUCCEEDED()
     local st = self._restock
-    if not st or st.state ~= "CONFIRMING" then
-        ahLog(self, "COMMODITY_PURCHASE_SUCCEEDED", format("ignored (state=%s)", (st and st.state) or "none"))
+    if st and st.state == "CONFIRMING" and st.confirmIssued then
+        ahLog(self, "COMMODITY_PURCHASE_SUCCEEDED", "handled")
+        cancelStepTimer(self)
+        creditPurchase(st, st.pendingIndex, st.pendingTotal, st.pendingQty)
+        self:Print(format("Bought %dx %s.", st.pendingQty or 0, itemName(self, st.pendingItemID)))
+        clearPending(st)
+        self:_RestockAfterStep()
         return
     end
-    if not st.confirmIssued then  -- a duplicate or unsolicited success
+    if st and st.unanswered then
+        -- The result of a confirm the step timer gave up on. The events carry
+        -- no purchase id, which is why nothing else may start while one is
+        -- outstanding.
+        local u = st.unanswered
+        st.unanswered = nil
+        ahLog(self, "COMMODITY_PURCHASE_SUCCEEDED", format("handled (late, it:%d x%d)", u.itemID or 0, u.qty or 0))
+        creditPurchase(st, u.index, u.total, u.qty)
+        self:Print(format("Bought %dx %s (the result arrived late).", u.qty or 0, itemName(self, u.itemID)))
+        self:RefreshRestockTab()
+        return
+    end
+    if st and st.state == "CONFIRMING" then  -- no confirm out: duplicate or foreign
         ahLog(self, "COMMODITY_PURCHASE_SUCCEEDED", "ignored (unsolicited)")
-        return
+    else
+        ahLog(self, "COMMODITY_PURCHASE_SUCCEEDED", format("ignored (state=%s)", (st and st.state) or "none"))
     end
-    ahLog(self, "COMMODITY_PURCHASE_SUCCEEDED", "handled")
-    retireStepTimer(self)
-    local index = st.pendingIndex
-    if index then
-        st.bought[index] = true
-        -- Lag-free lower bound on spend: GetMoney can trail the purchase event.
-        -- The priced total is exact when the price event carried one.
-        local row = st.resultRows and st.resultRows[index]
-        local minPrice = (row and row.minPrice) or 0
-        local spent = st.pendingTotal or (minPrice * (st.pendingQty or 0))
-        st.spentEstimate = (st.spentEstimate or 0) + spent
-    end
-    self:Print(format("Bought %dx %s.", st.pendingQty or 0, itemName(self, st.pendingItemID)))
-    clearPending(st)
-    self:_RestockAfterStep(true)
 end
 
 function GBL:COMMODITY_PURCHASE_FAILED()
     local st = self._restock
-    if not st or st.state ~= "CONFIRMING" then
-        ahLog(self, "COMMODITY_PURCHASE_FAILED", format("ignored (state=%s)", (st and st.state) or "none"))
+    if st and st.state == "CONFIRMING" and st.confirmIssued then
+        ahLog(self, "COMMODITY_PURCHASE_FAILED", "handled")
+        self:Print("Purchase failed; stopping. Check your gold or try again.")
+        cancelStepTimer(self)
+        clearPending(st)
+        stopRun(self)
         return
     end
-    ahLog(self, "COMMODITY_PURCHASE_FAILED", "handled")
-    self:Print("Purchase failed; stopping. Check your gold or try again.")
-    retireStepTimer(self)
-    clearPending(st)
-    st.buyAll = false
-    st.sweepNext = nil
-    st.state = "READY"
-    self:RefreshRestockTab()
+    if st and st.unanswered then
+        local u = st.unanswered
+        st.unanswered = nil
+        ahLog(self, "COMMODITY_PURCHASE_FAILED", format("handled (late, it:%d x%d)", u.itemID or 0, u.qty or 0))
+        self:Print(format("The purchase of %s failed after all; nothing was spent on it.",
+            itemName(self, u.itemID)))
+        self:RefreshRestockTab()
+        return
+    end
+    if st and st.state == "CONFIRMING" then  -- no confirm out: the step timer covers this start
+        ahLog(self, "COMMODITY_PURCHASE_FAILED", "ignored (unsolicited)")
+    else
+        ahLog(self, "COMMODITY_PURCHASE_FAILED", format("ignored (state=%s)", (st and st.state) or "none"))
+    end
 end
 
 -- Log-only handlers (#199). The throttle family and UI_ERROR_MESSAGE fire for
 -- every addon's auction-house traffic, so they log only while a purchase is
--- in flight or a sweep is waiting between two.
+-- in flight or a call is deferred. A drop or an error while a confirm is out
+-- is remembered for the result timeout's chat line and gates nothing: neither
+-- has been observed around one of our calls yet.
 function GBL:AUCTION_HOUSE_THROTTLED_MESSAGE_SENT()
     if purchaseInFlight(self) then ahLog(self, "AUCTION_HOUSE_THROTTLED_MESSAGE_SENT") end
 end
@@ -1104,7 +1204,11 @@ function GBL:AUCTION_HOUSE_THROTTLED_MESSAGE_QUEUED()
 end
 
 function GBL:AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED()
-    if purchaseInFlight(self) then ahLog(self, "AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED") end
+    if purchaseInFlight(self) then
+        ahLog(self, "AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED")
+        local st = self._restock
+        if st.confirmIssued then st.errorNote = "message dropped" end
+    end
 end
 
 function GBL:AUCTION_HOUSE_THROTTLED_MESSAGE_RESPONSE_RECEIVED()
@@ -1114,5 +1218,7 @@ end
 function GBL:UI_ERROR_MESSAGE(_, errorType, message)
     if purchaseInFlight(self) then
         ahLog(self, "UI_ERROR_MESSAGE", format("err=%s %s", tostring(errorType), tostring(message)))
+        local st = self._restock
+        if st.confirmIssued then st.errorNote = tostring(message) end
     end
 end

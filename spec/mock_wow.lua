@@ -233,6 +233,9 @@ function MockWoW.install()
         end,
         -- Takes no arguments in the live API: it drops whatever purchase is
         -- pending between a start and its confirm.
+        -- The client throttle predicate, read by the buy flow for its log line
+        -- only; the mock throttle is always free.
+        IsThrottledMessageSystemReady = function() return true end,
         CancelCommoditiesPurchase = function()
             table.insert(MockWoW.commodityPurchases.cancel, { at = #MockWoW.commodityPurchases.start })
         end,
