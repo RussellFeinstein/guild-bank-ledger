@@ -159,12 +159,13 @@ authoritative and its version column as historical.
   - `_RestockFireAuctionatorSearch` (`Auctionator.API.v1.ConvertToSearchString` then
     `AuctionatorShoppingFrame:DoSearch`),
   - `_RestockSearchEndListener` (Auctionator EventBus SearchEnd, map rows, go READY),
-  - `_RestockBuyNext` (`C_AuctionHouse.StartCommoditiesPurchase`, then the confirm step on
-    `AUCTION_HOUSE_THROTTLED_SYSTEM_READY` via `C_AuctionHouse.ConfirmCommoditiesPurchase`),
+  - `_RestockBuyNext` (`C_AuctionHouse.StartCommoditiesPurchase`, then the confirm step via
+    `C_AuctionHouse.ConfirmCommoditiesPurchase` once `COMMODITY_PRICE_UPDATED` has arrived and the
+    throttle has reported ready; as built this was `_RestockBeginPurchase`, and the confirm went out
+    on `AUCTION_HOUSE_THROTTLED_SYSTEM_READY` alone until #199, v0.39.19),
   - `ResetRestockSearch`.
-  Register `COMMODITY_PURCHASE_SUCCEEDED`, `COMMODITY_PURCHASE_FAILED`, and
-  `AUCTION_HOUSE_THROTTLED_SYSTEM_READY` lazily in Start and unregister them in Reset; each handler
-  guards `state==CONFIRMING`.
+  Register the auction-house events lazily in Start and unregister them in Reset; the handlers
+  guard on state (the live set and their guards are in `src/Restock.lua` and the CLAUDE.md bullet).
 - Tests `spec/restock_search_spec.lua` (pure): reset wipes the right fields; next-item skip logic
   (bought, skipped, missing row); result-row pairing by itemID; a stale `searchGen` callback is
   dropped; budget copper math. The Auctionator and AH calls stay fire-and-forget (guarded, not

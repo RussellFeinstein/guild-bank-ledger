@@ -103,7 +103,7 @@ To buy the shortfall from the Auction House, install [Auctionator](https://www.c
 3. On the Restock tab, click Search to price every item the bank is short on.
 4. Buy items individually with each row's Buy button, or click Buy all to sweep the whole list.
 
-Restock spends real gold through WoW's commodity purchase flow. It refuses any purchase you cannot afford, and you can set a per-run gold budget to cap a Buy all sweep. Without Auctionator the tab still shows targets and shortfalls; only the search and buy steps need it. If a purchase stalls on "Confirming purchase...", `/gbl logs` shows every auction house event the addon saw around it.
+Restock spends real gold through WoW's commodity purchase flow. It refuses any purchase you cannot afford, and you can set a per-run gold budget to cap a Buy all sweep. Without Auctionator the tab still shows targets and shortfalls; only the search and buy steps need it. A purchase the Auction House does not price, or does not answer, within a few seconds is given up on with a chat line rather than left waiting; if a confirmed purchase gets no answer, the run stops and the line says to check your mail before buying that item again. Between the purchases of a Buy all the tab shows "Waiting for the auction house" for a moment. `/gbl logs` shows every auction house event the addon saw around a purchase.
 
 The Restock feature was created by Katorri, based on the Guild Bank Restock addon.
 
