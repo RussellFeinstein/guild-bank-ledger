@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Buy all no longer stops on "Confirming purchase..." after its first purchase. The addon was confirming a purchase when the auction house reported its message system ready rather than when it sent back the price, and it was starting the next purchase of a sweep in the same instant the previous one succeeded, which the game quietly ignores. It now confirms each purchase once the auction house has priced it, checks that price against your gold and your budget before spending, and waits for the auction house to report ready before starting the next one. A purchase the auction house does not price, or does not answer, is skipped or stopped with a chat line after a few seconds instead of waiting forever; if a confirmed purchase gets no answer, the sweep stops and the chat line says to check your mail before buying that item again. Cancel now also tells the auction house to drop a purchase that has not been confirmed yet.
+
 ## [0.39.18] - 2026-09-19
 
 ### Added
