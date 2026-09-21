@@ -1206,7 +1206,7 @@ function GBL:_RestockBeginPurchase(index)
     -- (the tried guard in StartRestockBuyNext) rather than refusing every row.
     if not self:_RestockAuctionHouseOpen() then
         self:Print("Open the Auction House to buy.")
-        ahLog(self, "skip", format("it:%d auction house closed", ref.itemID))
+        ahLog(self, "skip", format("it:%d auction house not open", ref.itemID))
         return false
     end
     if not (C_AuctionHouse and C_AuctionHouse.StartCommoditiesPurchase) then
@@ -1354,7 +1354,7 @@ function GBL:ConfirmRestockPurchase()
     if not st or st.state ~= "PRICED" then return end
     if not self:_RestockAuctionHouseOpen() then
         self:Print("Open the Auction House to buy.")
-        ahLog(self, "confirm click", "ignored (auction house closed)")
+        ahLog(self, "confirm click", "ignored (auction house not open)")
         return
     end
     st.state = "CONFIRMING"
@@ -1408,11 +1408,11 @@ function GBL:_RestockOnAuctionHouseClosed()
     local st = self._restock
     if not st or not purchaseInFlight(self) or st.confirmIssued then return end
     local item = itemName(self, st.pendingItemID)
-    dropUnconfirmed(self, st, "cancelled (auction house closed)", format("state=%s", st.state))
+    dropUnconfirmed(self, st, "cancelled (auction house window closed)", format("state=%s", st.state))
     -- No price follows a closed house, and the flag must not eat the next
     -- start's price after it reopens.
     st.cancelledStartDue = nil
-    self:Print(format("The Auction House closed; the purchase of %s was dropped and nothing was spent.", item))
+    self:Print(format("The Auction House window closed; the purchase of %s was dropped and nothing was spent.", item))
 end
 
 --- WoW commodity events (registered lazily).

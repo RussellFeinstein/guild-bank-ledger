@@ -36,7 +36,7 @@ GBL.CHANGELOG_DATA = {
         },
         Fixed = {
             "The Restock Spent figure and the budget counted gold spent anywhere while the addon window was closed, which could grey out every Buy button with nothing on screen saying why. Both now count only what the search itself bought, and the affordability check re-reads your wallet when the tab is shown.",
-            "Restock's Search button was enabled while its preconditions failed into chat. It is now disabled with the reason on the banner: Auctionator missing, the Auction House closed, Auctionator's Shopping tab not on screen, no bank scan yet, or nothing to buy. Buy, Buy next and Confirm are disabled while the Auction House is closed, instead of starting a purchase the game ignores and giving the row up five seconds later.",
+            "Restock's Search button was enabled while its preconditions failed into chat. It is now disabled with the reason on the banner: Auctionator missing, the Auction House window not open, Auctionator's Shopping tab not on screen, no bank scan yet, or nothing to buy. Buy, Buy next and Confirm are disabled until the Auction House window is open, instead of starting a purchase the game ignores and giving the row up five seconds later.",
             "Cancel during a purchase returns to the search results instead of discarding them. Before the confirm goes out it drops the purchase at the Auction House; after it, the purchase is kept as in the mail until the result shows.",
             "A purchase completed by another addon while a Restock quote was waiting is no longer taken as Restock's own: the quote is dropped with a chat line and nothing is credited.",
         },

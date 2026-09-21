@@ -1556,7 +1556,7 @@ describe("Restock buy", function()
             assert.equals(1, #MockWoW.commodityPurchases.cancel)
             assert.is_nil(GBL._restock.skipped[1])
             assert.equals(0, livePauseTimers())
-            assert.equals(1, count("cancelled (auction house closed)"))
+            assert.equals(1, count("cancelled (auction house window closed)"))
 
             _G.AuctionHouseFrame = { IsShown = function() return true end }
             GBL:StartRestockBuy(1)                                  -- CONFIRMING, no price yet
@@ -1708,7 +1708,7 @@ describe("Restock buy", function()
             assert.equals(0, #MockWoW.commodityPurchases.start)
             assert.equals("READY", GBL._restock.state)
             assert.is_false(GBL._restock.buyAll)
-            assert.equals(1, count("auction house closed"))
+            assert.equals(1, count("auction house not open"))
             assert.is_nil(GBL._restock.skipped[1])
             assert.is_nil(GBL._restock.skipped[2])
             assert.is_true(Helpers.printContains("Open the Auction House"))
