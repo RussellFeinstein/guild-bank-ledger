@@ -496,14 +496,20 @@ function MockAce.install()
         -- which is part of why the Own Transactions mode went four years
         -- without a test (#222). Given to every widget, like the rest of the
         -- mock's methods, rather than only to the two types that carry it.
+        -- Its calls are recorded on the FontString itself, never on the
+        -- widget: widget:SetFont and widget:SetText write _setFont and
+        -- _text, and aliasing them here would let a label:SetFont call
+        -- satisfy an assertion about the widget's own SetFont flags (the
+        -- WoW 12.0.7 nil-third-arg pin in about_spec and restockview_spec).
         widget.label = {
+            _text = "",
             SetWordWrap = function() end,
             SetJustifyH = function() end,
-            SetFont = function(_, font, height, flags)
-                widget._setFont = { font, height, flags }
+            SetFont = function(self, font, height, flags)
+                self._setFont = { font, height, flags }
             end,
-            SetText = function(_, text) widget._text = text end,
-            GetText = function() return widget._text end,
+            SetText = function(self, text) self._text = text end,
+            GetText = function(self) return self._text end,
         }
         return widget
     end

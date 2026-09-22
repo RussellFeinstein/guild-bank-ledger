@@ -30,8 +30,11 @@ written by `RecordOwnCharacter` (`src/Core.lua`) for the logged-in character on 
 account's own characters and nothing else, so the Member view can show a person every character they
 play rather than the one they are on (#222, `docs/PLAN-views-and-access.md` section 7). Account level
 rather than per guild, on the reasoning #52 records: a character's home is the account, the guild is
-where its rows are. It is never transmitted; the absolute HELLO key set in
-`spec/wire_contract_spec.lua` is what keeps it that way.
+where its rows are. It fills as characters log in and is never backfilled, because nothing on disk
+says which of a guild's names belong to this account. It is never transmitted: the HELLO payload is
+built from a literal in `src/Sync.lua` that does not name it, and nothing else reads it. Note that
+HELLO is the one message type `spec/wire_contract_spec.lua` holds to builder parity rather than to an
+absolute key set, so that spec would not catch a field added to both builders.
 
 **`GuildBankLedgerAuditDB`** is a raw global, deliberately not AceDB and deliberately not guild-keyed.
 Its collection unit is the account's SavedVariables file, and each session carries player, realm and

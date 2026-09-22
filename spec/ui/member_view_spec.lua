@@ -252,5 +252,128 @@ describe("Member view (own_transactions)", function()
             assert.equals(1, #kept)
             assert.equals(ME, kept[1].player)
         end)
+
+        -- The resolver falls back to the local realm for a bare name the
+        -- roster marks ambiguous (playerRealms[name] = false, two characters
+        -- of that name on connected realms), so both the viewer's name and a
+        -- stranger's resolve to the same string. Under a promise that the
+        -- addon shows nobody else's rows, that has to fail closed.
+        it("does not claim a bare name the roster marks ambiguous", function()
+            memberFixture()
+            local gd = GBL:GetGuildData()
+            gd.playerRealms = { TestOfficer = false }
+
+            local kept = GBL:FilterToOwnRecords({ { player = "TestOfficer", type = "deposit" } })
+
+            assert.equals(0, #kept)
+        end)
+
+        it("claims nothing while the realm APIs are cold", function()
+            memberFixture()
+            GBL.db.global.characters = {}
+            MockWoW.player.realm = nil
+            MockWoW.player.normalizedRealm = nil
+            local gd = GBL:GetGuildData()
+            gd.playerRealms = {}
+
+            -- ResolvePlayerName would key the player as Name-UnknownRealm,
+            -- which matches no record, so the set must not carry it.
+            local own = GBL:GetOwnCharacterNames()
+            assert.is_nil(own["TestOfficer-UnknownRealm"])
+            assert.equals(0, #GBL:FilterToOwnRecords({ record(ME, 1) }))
+        end)
+    end)
+
+    describe("RecordsForView", function()
+        it("hands a sync_only client nothing", function()
+            local gd = memberFixture()
+            gd.accessControl = { rankThreshold = 3, restrictedMode = "sync_only" }
+
+            local tx, money = GBL:RecordsForView(gd)
+
+            assert.equals(0, #tx)
+            assert.equals(0, #money)
+        end)
+    end)
+
+    -- The filter widgets re-render the tab from an array captured when the
+    -- tab was built. In this mode that array is a snapshot the next refresh
+    -- replaces, so a row that arrived since the build disappeared the moment
+    -- the member touched a filter. For a full-access user the captured array
+    -- is the live guild table, which is why nothing showed it.
+    describe("filter widgets after a refresh", function()
+        local function findWidget(node, wtype, label)
+            for _, c in ipairs(node._children or {}) do
+                if c._type == wtype and (label == nil or c._label == label) then return c end
+                local nested = findWidget(c, wtype, label)
+                if nested then return nested end
+            end
+            return nil
+        end
+
+        it("re-renders the ledger from the rows that arrived since the build", function()
+            local gd = memberFixture()
+            GBL:CreateMainFrame()
+            GBL:SelectTab("transactions")
+            GBL:RefreshUI()
+            assert.equals(2, #GBL._ledgerFiltered)
+
+            gd.transactions[#gd.transactions + 1] = record(ALT, 6)
+            GBL:RefreshUI()
+            assert.equals(3, #GBL._ledgerFiltered)
+
+            local search = findWidget(GBL.tabGroup, "EditBox", "Search")
+            assert.is_not_nil(search)
+            search:Fire("OnEnterPressed", "")
+
+            assert.equals(3, #GBL._ledgerFiltered)
+        end)
+
+        it("re-renders the gold log from the rows that arrived since the build", function()
+            local gd = memberFixture()
+            GBL:CreateMainFrame()
+            GBL:SelectTab("goldlog")
+            GBL:RefreshUI()
+
+            gd.moneyTransactions[#gd.moneyTransactions + 1] = moneyRecord(ALT, 6)
+            GBL:RefreshUI()
+
+            local handed
+            local orig = GBL.RenderGoldLog
+            GBL.RenderGoldLog = function(self, c, records, filters)
+                handed = records
+                return orig(self, c, records, filters)
+            end
+            local search = findWidget(GBL.tabGroup, "EditBox", "Search")
+            assert.is_not_nil(search)
+            search:Fire("OnEnterPressed", "")
+            GBL.RenderGoldLog = orig
+
+            assert.equals(2, #handed)
+        end)
+
+        it("re-renders consumption from the rows that arrived since the build", function()
+            local gd = memberFixture()
+            GBL:CreateMainFrame()
+            GBL:SelectTab("consumption")
+            GBL:RefreshUI()
+
+            gd.transactions[#gd.transactions + 1] = record(ALT, 6)
+            GBL:RefreshUI()
+
+            local handed
+            local orig = GBL.RenderConsumptionDashboard
+            GBL.RenderConsumptionDashboard = function(self, c, records, filters)
+                handed = records
+                return orig(self, c, records, filters)
+            end
+            local cat = findWidget(GBL.tabGroup, "Dropdown", "Category")
+            assert.is_not_nil(cat)
+            cat:Fire("OnValueChanged", "ALL")
+            GBL.RenderConsumptionDashboard = orig
+
+            -- Three item rows plus the one money row the member owns.
+            assert.equals(4, #handed)
+        end)
     end)
 end)

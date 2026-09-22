@@ -254,8 +254,10 @@ function GBL:BuildAccessControlRow(container)
             configuredAt = GetServerTime(),
         }
 
+        -- Say it back in the words the dropdown used, not the wire value.
         self:Print("Access control updated: "
-            .. (threshold and ("rank " .. threshold .. ", " .. mode) or "unrestricted"))
+            .. (threshold and ("rank " .. threshold .. ", " .. (modeList[mode] or mode))
+                or "unrestricted"))
         self:BroadcastHello(true)
         self:SendMessage("GBL_ACCESS_CONTROL_CHANGED")
     end)

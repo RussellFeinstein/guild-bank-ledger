@@ -127,14 +127,48 @@ describe("Access Control", function()
         -- handed a member the whole ledger until the first roster tick ran
         -- RefreshAccessTabsIfChanged. The GM is caught by it too and gets the
         -- restricted view for those seconds, which is the cheaper mistake.
-        it("returns the restricted mode when the rank is not loaded yet", function()
+        it("returns the restricted mode when no rank has ever been read", function()
             MockWoW.guild.name = "Test Guild"
             MockWoW.guild.rankIndex = nil
+            GBL._lastKnownRank = nil
             local guildData = GBL:GetGuildData()
             guildData.accessControl = {
                 rankThreshold = 3,
                 restrictedMode = "own_transactions",
             }
+            assert.equals("own_transactions", GBL:GetAccessLevel())
+        end)
+
+        -- GetGuildInfo answers nothing at all for a few frames after a
+        -- loading screen, and reading that as a change would flip the
+        -- access-derived tab signature: RebuildTabs would collapse the tab
+        -- list for a sync_only guild and park the player on the Sync tab
+        -- with their filters gone, for a transient that told us nothing.
+        it("keeps the level it last read through a momentary loss of rank", function()
+            MockWoW.guild.name = "Test Guild"
+            MockWoW.guild.rankIndex = 2
+            local guildData = GBL:GetGuildData()
+            guildData.accessControl = {
+                rankThreshold = 3,
+                restrictedMode = "sync_only",
+            }
+            assert.equals("full", GBL:GetAccessLevel())
+
+            MockWoW.guild.rankIndex = nil
+            assert.equals("full", GBL:GetAccessLevel())
+        end)
+
+        it("still follows a demotion, which arrives as a rank", function()
+            MockWoW.guild.name = "Test Guild"
+            MockWoW.guild.rankIndex = 2
+            local guildData = GBL:GetGuildData()
+            guildData.accessControl = {
+                rankThreshold = 3,
+                restrictedMode = "own_transactions",
+            }
+            assert.equals("full", GBL:GetAccessLevel())
+
+            MockWoW.guild.rankIndex = 5
             assert.equals("own_transactions", GBL:GetAccessLevel())
         end)
 

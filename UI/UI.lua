@@ -277,22 +277,24 @@ function GBL:RefreshUI()
 
     local guildData = self:GetGuildData()
     local tab = self.activeTab or "transactions"
-    -- The same arrays the build used, through the one filter (#222). This
-    -- function used to read guildData directly in all three branches, so a
-    -- member in Own Transactions mode got the whole guild's rows back the
-    -- moment anything refreshed: the call ToggleMainFrame makes right after
-    -- the build, every bank open, every scan that stored something, and
-    -- every completed sync receive.
-    local transactions, moneyTransactions = self:RecordsForView(guildData)
+    -- Each branch takes the arrays through the one filter (#222). This
+    -- function used to read guildData directly, so a member in Own
+    -- Transactions mode got the whole guild's rows back the moment anything
+    -- refreshed: the call ToggleMainFrame makes right after the build,
+    -- every bank open, every scan that stored something, and every
+    -- completed sync receive. Inside the branches rather than above them
+    -- because the last one hands off to SelectTab, which filters again.
 
     if tab == "goldlog" and self._goldLogContainer then
         -- Update stored data reference, re-render with existing filters
+        local _, moneyTransactions = self:RecordsForView(guildData)
         self._goldLogTransactions = moneyTransactions
         self:RefreshGoldLog()
     elseif tab == "transactions" and self._ledgerContainer then
-        self._ledgerTransactions = transactions
+        self._ledgerTransactions = self:RecordsForView(guildData)
         self:RefreshLedgerView()
     elseif tab == "consumption" and self._consumptionContainer then
+        local transactions, moneyTransactions = self:RecordsForView(guildData)
         local allTx = {}
         for i = 1, #transactions do allTx[#allTx + 1] = transactions[i] end
         for i = 1, #moneyTransactions do allTx[#allTx + 1] = moneyTransactions[i] end
@@ -395,15 +397,18 @@ end
 
 --- The characters this account has played, in the qualified Name-Realm
 -- form records carry (#222, docs/PLAN-views-and-access.md section 7).
--- The logged-in character is always in the set, whether or not the first
--- roster tick has recorded it yet, so a member's own rows are never
--- hidden from them while the roster is cold.
+-- The logged-in character is added the way RecordOwnCharacter writes it,
+-- so a member's own rows show before the first roster tick has recorded
+-- the character. Both skip the "UnknownRealm" sentinel: a key built from
+-- it matches no record, so while the realm APIs are cold the set can come
+-- back empty and the member sees nothing rather than someone else's rows.
 -- @return table [Name-Realm] = true
 function GBL:GetOwnCharacterNames()
     local names = {}
     local me = UnitName("player")
-    if me and me ~= "" then
-        names[self:ResolvePlayerName(me)] = true
+    local realm = self:GetLocalRealm()
+    if me and me ~= "" and realm and realm ~= "" and realm ~= "UnknownRealm" then
+        names[me .. "-" .. realm] = true
     end
     local chars = self.db and self.db.global and self.db.global.characters
     if type(chars) == "table" then
@@ -417,16 +422,31 @@ end
 -- a bare-name compare: a same-named character on another realm is
 -- someone else, and the member's own alts are not. A bare-name record
 -- (everything before 2026-04-13) resolves through the guild's
--- playerRealms cache the way every migration reads those rows, with the
--- resolver's own limit: a name playerRealms marks ambiguous falls back to
--- the local realm.
+-- playerRealms cache the way every migration reads those rows.
+--
+-- One case is refused rather than resolved: a bare name the roster marks
+-- ambiguous (`playerRealms[name] == false`, two characters of that name
+-- on connected realms). The resolver falls back to the local realm there,
+-- so the viewer's name and a stranger's resolve to the same string and
+-- the stranger's rows would render as the member's own. Under a promise
+-- that the addon shows nobody else's rows, that has to fail closed, at
+-- the cost of hiding the member's own bare-name rows in that case.
+--
+-- The limit that stays: a bare name the roster has no entry for at all
+-- resolves to the local realm for both sides, so a same-named stranger
+-- from another realm still matches. Nothing here can tell those apart.
 -- @param records table Array of transaction records
 -- @return table Filtered array
 function GBL:FilterToOwnRecords(records)
     local own = self:GetOwnCharacterNames()
+    local guildData = self:GetGuildData()
+    local playerRealms = guildData and guildData.playerRealms
     local filtered = {}
     for _, record in ipairs(records or {}) do
-        if record.player and own[self:ResolvePlayerName(record.player)] then
+        local name = record.player
+        local ambiguous = name and playerRealms and not name:find("%-")
+            and playerRealms[name] == false
+        if name and not ambiguous and own[self:ResolvePlayerName(name)] then
             filtered[#filtered + 1] = record
         end
     end
@@ -437,12 +457,20 @@ end
 -- level. One place, read by both SelectTab (the build) and RefreshUI
 -- (every re-render). Keeping the filter in the build alone is what made
 -- Own Transactions mode paper for four years (#222).
+--
+-- `sync_only` gets two empty tables. Nothing should render a history tab
+-- at that level, but the only things stopping it are RebuildTabs not
+-- offering the tabs and RefreshUI's container guards, and a demotion that
+-- arrives over HELLO while the window is open on Transactions leaves both
+-- true until the rebuild lands.
 -- @param guildData table|nil The current guild's data
 -- @return table transactions, table moneyTransactions
 function GBL:RecordsForView(guildData)
+    local level = self:GetAccessLevel()
+    if level == "sync_only" then return {}, {} end
     local transactions = guildData and guildData.transactions or {}
     local moneyTransactions = guildData and guildData.moneyTransactions or {}
-    if self:GetAccessLevel() ~= "own_transactions" then
+    if level ~= "own_transactions" then
         return transactions, moneyTransactions
     end
     return self:FilterToOwnRecords(transactions),
@@ -578,10 +606,13 @@ function GBL:BuildTransactionsTab(container, transactions)
         self._pendingSearchText = nil
     end
 
-    -- Create filter widgets (references ledgerGroup via closure)
+    -- Create filter widgets (references ledgerGroup via closure). They read
+    -- the stored array rather than the one this build was handed: under the
+    -- Member filter that one is a snapshot, and every refresh replaces it,
+    -- so a captured copy loses every row that has arrived since (#222).
     self:CreateFilterWidgets(filterGroup, filters, function()
         self._ledgerCurrentPage = 1  -- reset pagination on filter change
-        self:CreateLedgerView(ledgerGroup, transactions, filters)
+        self:CreateLedgerView(ledgerGroup, self._ledgerTransactions, filters)
     end)
 
     self:AddFillChild(container, ledgerGroup)
@@ -657,7 +688,7 @@ function GBL:BuildGoldLogTab(container, moneyTransactions)
     searchBox:SetCallback("OnEnterPressed", function(_widget, _event, text)
         filters.searchText = text
         self._goldLogCurrentPage = 1
-        self:RenderGoldLog(contentGroup, moneyTransactions, filters)
+        self:RenderGoldLog(contentGroup, self._goldLogTransactions, filters)
     end)
     filterGroup:AddChild(searchBox)
 
@@ -677,7 +708,7 @@ function GBL:BuildGoldLogTab(container, moneyTransactions)
     dateDropdown:SetCallback("OnValueChanged", function(_widget, _event, value)
         filters.dateRange = value
         self._goldLogCurrentPage = 1
-        self:RenderGoldLog(contentGroup, moneyTransactions, filters)
+        self:RenderGoldLog(contentGroup, self._goldLogTransactions, filters)
     end)
     filterGroup:AddChild(dateDropdown)
 
@@ -695,7 +726,7 @@ function GBL:BuildGoldLogTab(container, moneyTransactions)
     typeDropdown:SetCallback("OnValueChanged", function(_widget, _event, value)
         filters.txType = value
         self._goldLogCurrentPage = 1
-        self:RenderGoldLog(contentGroup, moneyTransactions, filters)
+        self:RenderGoldLog(contentGroup, self._goldLogTransactions, filters)
     end)
     filterGroup:AddChild(typeDropdown)
 
@@ -712,7 +743,7 @@ function GBL:BuildGoldLogTab(container, moneyTransactions)
         dateDropdown:SetValue("30d")
         typeDropdown:SetValue("ALL")
         self._goldLogCurrentPage = 1
-        self:RenderGoldLog(contentGroup, moneyTransactions, filters)
+        self:RenderGoldLog(contentGroup, self._goldLogTransactions, filters)
     end)
     filterGroup:AddChild(resetBtn)
 
@@ -1082,7 +1113,7 @@ function GBL:BuildConsumptionTab(container, transactions)
     dateDropdown:SetValue("30d")
     dateDropdown:SetCallback("OnValueChanged", function(_widget, _event, value)
         filters.dateRange = value
-        self:RenderConsumptionDashboard(contentGroup, transactions, filters)
+        self:RenderConsumptionDashboard(contentGroup, self._consumptionTransactions, filters)
     end)
     filterGroup:AddChild(dateDropdown)
 
@@ -1101,7 +1132,7 @@ function GBL:BuildConsumptionTab(container, transactions)
     catDropdown:SetValue("ALL")
     catDropdown:SetCallback("OnValueChanged", function(_widget, _event, value)
         filters.category = value
-        self:RenderConsumptionDashboard(contentGroup, transactions, filters)
+        self:RenderConsumptionDashboard(contentGroup, self._consumptionTransactions, filters)
     end)
     filterGroup:AddChild(catDropdown)
 
@@ -1116,7 +1147,7 @@ function GBL:BuildConsumptionTab(container, transactions)
         end
         dateDropdown:SetValue("30d")
         catDropdown:SetValue("ALL")
-        self:RenderConsumptionDashboard(contentGroup, transactions, filters)
+        self:RenderConsumptionDashboard(contentGroup, self._consumptionTransactions, filters)
     end)
     filterGroup:AddChild(resetBtn)
 
