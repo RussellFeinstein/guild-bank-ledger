@@ -330,11 +330,19 @@ frames GBL creates and owns. While a tab still runs on AceGUI inside the bridge 
 the fix for that window; once a tab has moved, its frames are not pooled and the leak has no
 producer.
 
-**Skins.** Under the default UI the addon is native by construction. It is skinnable, not skinned:
-EllesmereUI takes a registration (`EllesmereUI.RegisterSkin("GuildBankLedger", function(S) ... end)`,
-`EllesmereUIBlizzardSkin_SkinAPI.lua:5`) and ElvUI has its own, and Baganator ships one file per
-skin. Those files are written when someone asks, after the chassis lands, and each one recolours
-chrome only: `heading`, `ink`, `muted`, `disabled` and the status keys stay GBL's under every skin.
+**Skins.** The guild runs a mix, "all sorts of different UIs", and the addon has to hold up under
+every one of them (Russell, 2026-09-22). That is met in two layers. First, nothing that carries
+meaning is left to a skin: the content area sits on GBL's own `ground`, the text roles and the
+status keys are GBL's tokens, so a skin that recolours the frame's chrome recolours chrome and
+nothing else, and every contrast ratio in section 4 holds whatever the frame around it looks like.
+Second, the chrome itself: under the default UI the addon is native by construction, and a skin
+that restyles Blizzard frames by name either restyles this one the same way or leaves it native,
+neither of which breaks it. EllesmereUI takes a registration
+(`EllesmereUI.RegisterSkin("GuildBankLedger", function(S) ... end)`,
+`EllesmereUIBlizzardSkin_SkinAPI.lua:5`) and ElvUI has its own, the way Baganator ships one file
+per skin; the two registrations follow the shell (section 9, step 1) rather than waiting for a
+request, and the step 1 probe renders the templates under both. Any other UI gets the native frame
+and can register later. No skin ever touches `heading`, `ink`, `muted`, `disabled` or a status key.
 
 ## 6. The views on the chassis
 
@@ -466,14 +474,17 @@ in-game check it promised.
   8. No visual change beyond consistency, so it ships alone and first, and every later step reads
   tokens instead of adding literals. Absorbs #44.
 - **Step 1, shell, tab strip, footer, Settings (M).** Opens with a 40-line in-game probe frame: the
-  templates in section 5 exist on 12.1 and render under EllesmereUI's Blizzard skin, the tab strip
-  at font sizes 8 and 24, a re-sized font object propagating to a template's FontStrings, and
-  whether `WowStyle1FilterDropdownTemplate` and `Settings.RegisterVerticalLayoutCategory` are
-  registered. Then the shell, with each un-migrated tab body hosted inside the inset the way
+  templates in section 5 exist on 12.1 and render under EllesmereUI's Blizzard skin and under ElvUI
+  (installed for the probe if it is not on the machine), the tab strip at font sizes 8 and 24, a
+  re-sized font object propagating to a template's FontStrings, and whether
+  `WowStyle1FilterDropdownTemplate` and `Settings.RegisterVerticalLayoutCategory` are registered.
+  Then the shell, with each un-migrated tab body hosted inside the inset the way
   AceGUI's own `BlizOptionsGroup` container hosts AceGUI content in a native panel
   (`Libs/AceGUI-3.0/widgets/AceGUIContainer-BlizOptionsGroup.lua:59-128`: a `SimpleGroup`-shaped
   container sized from `OnWidthSet` and `OnHeightSet`). The `AddFillChild` registry
   (`UI/UI.lua:129-150`) goes with the AceGUI Frame. Absorbs #65 and the minimap tooltip promise.
+  The ElvUI and EllesmereUI registration files (section 5, Skins) ride this step or the next,
+  each checked on screen under its skin.
 - **Step 2, `UI/Table.lua` and Transactions (L).** The Table component, #86, and the reference view
   in section 6, with the filter row. The render spec for Transactions rides this PR. Absorbs #43;
   #63's date entry lands here and its guild-wide definition is the views doc's item 5.
@@ -486,7 +497,9 @@ in-game check it promised.
 - **Step 4, Sync and Help (S).** The peer Table, the checkboxes, the access-control group; About and
   Changelog under one tab.
 - **Step 5, Restock (M).** #214 on the chassis. The rows, banner and controls per
-  `docs/PLAN-restock-ux.md`; nothing in that design changes.
+  `docs/PLAN-restock-ux.md`; nothing in that design changes. If the reorder spike (section 10)
+  keeps #214 ahead of steps 0 to 2, the tab is built on AceGUI there and this step rebuilds it on
+  the Table; the cost is that one rebuild and nothing else here moves.
 - **Step 6, Sort (M, after #55).** The plan Table and the status cell, once #55 has decided the
   flow.
 - **Step 7, Layout (L).** #206's sweep on the chassis; the nested TabGroup goes.
@@ -504,12 +517,14 @@ views rework (#204, #86, #63, #43) and taking #65, #164 and #44 from Accessibili
 each is a consequence of the chassis. Accessibility to v1.0 keeps its verification pass as step 8
 and runs after the milestone, which is the placement #188 already gives History views rework.
 
-The one order change this asks of #188: steps 0 to 2 before #214, so the Restock tab half is built
-once, on the chassis, instead of on AceGUI and then again. #214 was next in the order; under this
-proposal it becomes step 5. If Russell would rather see the Restock tab finished first, the cost is
-one more rebuild of that tab and nothing else in this doc changes. The hotfix in
-`docs/PLAN-views-and-access.md` section 18 goes ahead of all of it, #214 included, because it is
-live; that is not a proposal.
+This doc asks for no change to the order on #188 (Russell, 2026-09-22): the milestone and its
+issues are filed once the doc has been read, and a separate spike then reorders the tracker and
+the work order with everything filed in front of it. The one fact that spike inherits rather than
+decides is the section 9 dependency chain (tokens, shell, Table, then the views), and the one
+placement the tracker's own rule already makes is the hotfix in `docs/PLAN-views-and-access.md`
+section 18, which is live and so takes position 1 wherever it is put. Where #214 sits relative to
+steps 0 to 2 is that spike's call; the cost of either order is stated in section 9 (built once on
+the chassis, or built on AceGUI now and rebuilt at its step).
 
 Issues to file when the doc is accepted, one clause each, in the tracker's table shape:
 
@@ -532,13 +547,18 @@ and are not repeated here.
 
 ## 11. Open questions
 
-- Decided 2026-09-21 (`docs/PLAN-views-and-access.md` section 19): a Member opens on My record,
-  full access opens on Transactions, and Help is a bottom tab as section 5 draws it.
-- **No pages**, section 6's answer to #204's pagination model, to confirm.
-- **The guild's split between the default UI and skins**, which decides how soon a skin file is
-  worth writing.
+Decided by Russell on the doc, 2026-09-21 and 2026-09-22: a Member opens on My record, full
+access opens on Transactions, and Help is a bottom tab (`docs/PLAN-views-and-access.md` section
+19); **no pages** (section 6's answer to #204's pagination model stands: one virtualised list, the
+count in the footer); the guild runs **a mix of UIs and the addon handles every one** (section 5,
+Skins, rewritten to say how); and this doc asks for **no order change** on #188, since a separate
+spike reorders the tracker once everything is filed (section 10).
+
+Still open, and not Russell's to answer:
+
 - **The probe's five readings** (section 9, step 1), which decide the filter dropdown and the
-  Settings layout and confirm the font-object propagation the type section rests on.
+  Settings layout, confirm the font-object propagation the type section rests on, and now include
+  rendering under ElvUI as well as EllesmereUI.
 
 ## 12. Sources
 

@@ -429,9 +429,10 @@ In build order. `live` means broken in production now and goes first. The `Flag`
 | 8 | The visual doc's section 10 rows | | as that doc orders them | | carried forward unchanged except that My record is a step of its own and the tab list per role comes from here |
 | 9 | The export button on the History group | | in milestone 9, after the shell | kat (the format, #186) | `/gbl export` first; the button when the shell exists |
 
-Nothing above changes the order on #188 except item 1, which goes ahead of #214 because it is
-live, and the visual doc's own proposal that its steps 0 to 2 precede #214, which stands as a
-proposal.
+Nothing above asks for a change to the order on #188 (Russell, 2026-09-22): these items and the
+visual doc's are filed once both docs have been read, and a separate spike then reorders the
+tracker and the work order with everything in front of it. Item 1 is the one placement that spike
+inherits, because a live item takes position 1 wherever it sits, by the tracker's own rule.
 
 ## 19. Decisions taken on this doc (Russell, 2026-09-21)
 
