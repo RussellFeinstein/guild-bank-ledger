@@ -238,6 +238,10 @@ function GBL:BuildRestockTab(container)
     -- first that fails disables Search and is the reason on the banner, in
     -- IDLE and in READY, where Search is offered again (#214).
     local blocker = self:_RestockStateReadsBlocker(state) and self:_RestockSearchBlocker() or nil
+    -- What this build drew, for the Shopping-tab hook's log line only (#217).
+    -- Nothing gates on it: the first cut did, and a stale compare is one of
+    -- the two ways that cut could refuse the redraw it exists for.
+    self._restockRenderedBlocker = blocker and blocker.key or "none"
 
     -- Status banner: the state line.
     local fontPath, fontSize = self:GetScaledFont()

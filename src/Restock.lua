@@ -656,12 +656,18 @@ function GBL:_RestockShoppingTabChanged()
         local state = st and st.state or "IDLE"
         local visible = AuctionatorShoppingFrame ~= nil and AuctionatorShoppingFrame.IsVisible ~= nil
             and AuctionatorShoppingFrame:IsVisible() and true or false
-        local drawing = self:_RestockStateReadsBlocker(state)
-        self:SystemInfo("Restock tab: shopping tab %s, state=%s tab=%s inview=%s %s",
-            visible and "shown" or "hidden", state, tostring(self.activeTab),
-            tostring(self._restockInView), drawing and "redraw" or "skipped (in flight)")
-        if not drawing then return end
+        if not self:_RestockStateReadsBlocker(state) then
+            self:SystemInfo("Restock tab: shopping tab %s, state=%s tab=%s skipped (in flight)",
+                visible and "shown" or "hidden", state, tostring(self.activeTab))
+            return
+        end
         if self.RefreshRestockTab then self:RefreshRestockTab() end
+        -- After the redraw, so the line carries what the tab now shows: the
+        -- precondition the build rendered, or "not built" when
+        -- RefreshRestockTab declined (another tab, or no window).
+        self:SystemInfo("Restock tab: shopping tab %s, state=%s tab=%s redrew blocker=%s",
+            visible and "shown" or "hidden", state, tostring(self.activeTab),
+            tostring(self._restockRenderedBlocker or "not built"))
     end)
 end
 
