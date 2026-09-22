@@ -179,9 +179,12 @@ A member's record is every character they play in this guild, not the one they a
 The addon can know that without asking anyone: SavedVariables are account-wide, so each character
 that loads the addon can write itself into one table on this machine.
 
-- **The roster:** `db.global.characters[Name-Realm] = lastSeen`, written in `OnEnable`
-  (`src/Core.lua:181`) for the character logging in, using the qualified form
-  `ResolvePlayerName` produces. Account level rather than per guild, on the reasoning #52 already
+- **The roster:** `db.global.characters[Name-Realm] = lastSeen`, written for the character
+  logging in, using the qualified form `ResolvePlayerName` produces. Not in `OnEnable`
+  (`src/Core.lua:181`): the realm APIs can still be cold there and `GetLocalRealm` answers with
+  the `"UnknownRealm"` sentinel (`src/Core.lua:427-430`), so the write sits in the
+  `GUILD_ROSTER_UPDATE` handler beside `BuildRosterCache` (`src/Core.lua:1747-1749`), guarded on a
+  resolved realm, and a `-UnknownRealm` key is never written. Account level rather than per guild, on the reasoning #52 already
   recorded (a character's home is the account; the guild is where its rows are). AceDB writes the
   same set to `profileKeys` on disk today, which is cited as precedent that recording it is nothing
   new, and not as a dependency (`Libs/` is absent in CI).
@@ -192,7 +195,11 @@ that loads the addon can write itself into one table on this machine.
   (`src/Core.lua:372-386`: a qualified name as is, a bare name through `playerRealms`, then the
   local realm) against the roster's qualified names. The 961 pre-2026-04-13 bare-name records
   resolve through `playerRealms` the way every migration does, and a same-named character on
-  another realm does not match.
+  another realm does not match. One limit, the resolver's own: a bare-name record whose name
+  `playerRealms` marks ambiguous (`false`) falls back to the local realm, so a pre-2026-04-13 row
+  by a same-named character on another realm is attributed to the member. That is how every
+  migration already reads those 961 rows, it affects no record written since the qualified form
+  landed, and the doc records it rather than adding a second resolver.
 - **A character that left the guild still matches.** Its rows are still that person's history in
   this guild, and it produces no new rows. A renamed or transferred character keeps its old rows
   under the old name; that is documented behaviour, not repaired.
@@ -233,8 +240,10 @@ since the addon is where a member sees the guild's scale at all.
 
 **The rows.** The member's own item and gold rows in one Table (the visual doc's component),
 newest first, the status cell telling repair from withdraw from deposit from move by icon, text
-and colour, with the item, count and tab where they apply. The three sortable headers of the
-leadership Transactions view, minus Player, since every row is theirs.
+and colour, with the item, count and tab where they apply. Five sortable columns (Time, Action,
+Item, Amount, Tab): the leadership Transactions view's columns with Player and Category folded
+out, since every row is theirs and the category is what the strip already totals; Amount holds an
+item count or a gold figure by row.
 
 **The empty state.** One sentence: "The guild has not covered any repairs or withdrawals for you
 yet." The guild line still shows when its window passes the floor.
@@ -383,12 +392,16 @@ realm, and the member's alt (in the roster). Because the mock AceGUI `SelectTab`
 array handed to the renderer (`_ledgerTransactions`) and on the built rows: the own row and the alt
 row present, the foreign and the cross-realm rows absent. Before the fix the assertion after the
 first `RefreshUI` is what goes red, and the spec names that line. Three more cases: the
-`goldlog` and `consumption` tabs the same way; a nil rank with a threshold configured answers the
-restricted mode (fail closed); and the three bare-name `FilterByPlayer` tests in
+`goldlog` and `consumption` tabs the same way (Consumption under a filtered set still reads
+"1 active player" over the member's own totals until My record replaces it; the hotfix changes
+the rows, not that label); a nil rank with a threshold configured answers the restricted mode
+(fail closed, the GM included, until the first roster tick rebuilds the tabs through
+`RefreshAccessTabsIfChanged`); and the three bare-name `FilterByPlayer` tests in
 `spec/access_control_spec.lua:162-188` updated as a visible step to the qualified comparison. The
-roster gets its own small spec: `OnEnable` writes the qualified name, a second character adds a
-second key, nothing is on any HELLO or SYNC_DATA builder's output (the wire-contract parity test
-covers the second half by construction).
+roster gets its own small spec: nothing is written while the realm is unresolved, the first warm
+`GUILD_ROSTER_UPDATE` writes the qualified name, a second character adds a second key, and nothing
+is on any HELLO or SYNC_DATA builder's output (the wire-contract parity test covers the second
+half by construction).
 
 **My record (section 18, item 4), on the chassis.** The strip through `ComputeGoldLogSums` and
 `BuildConsumptionSummary` against a hand-built fixture whose expected figures are written from
@@ -419,7 +432,7 @@ In build order. `live` means broken in production now and goes first. The `Flag`
 
 | # | Item | Flag | Runs | Needs | What |
 |---|---|---|---|---|---|
-| 1 | Members see the whole ledger under the Own Transactions banner | live | first, on `hotfix/` off `main`, ahead of everything on #188 | | one own-rows helper shared by `SelectTab` and `RefreshUI`, qualified matching through `ResolvePlayerName`, the account roster at `OnEnable`, a nil rank fails closed, the red spec of section 16, the three `FilterByPlayer` tests updated, README and CurseForge reworded per section 10, a patch stamp and CHANGELOG entry (it touches `UI/UI.lua`, so it is a release) |
+| 1 | Members see the whole ledger under the Own Transactions banner | live | first, on `hotfix/` off `main`, ahead of everything on #188 | | one own-rows helper shared by `SelectTab` and `RefreshUI`, qualified matching through `ResolvePlayerName`, the account roster written on the first warm roster tick, a nil rank fails closed, the red spec of section 16, the three `FilterByPlayer` tests updated, README and CurseForge reworded per section 10, a patch stamp and CHANGELOG entry (it touches `UI/UI.lua`, so it is a release) |
 | 2 | `/gbl sortpreview` and `/gbl deviations` gated on `HasSortAccess` | | beside | | parity with `sortexec` (`src/Core.lua:2464`); not live (section 14) |
 | 3 | Open with Guild Bank moves to the personal row | | with 1, or with the shell | Russell | a member can have the frame at the bank; default stays off |
 | 4 | My record on the chassis | | after the visual doc's step 2 (the Table) | | section 8 and 15; the Member set's tab list; #204's member half |
