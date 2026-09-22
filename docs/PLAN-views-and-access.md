@@ -118,6 +118,17 @@ sample early and the button late. It gets no view of its own here.
 
 ## 5. The live defect: members have never seen a filtered list
 
+**Built (#222, 2026-09-22).** `GBL:RecordsForView(guildData)` in `UI/UI.lua` is the one place an
+access level decides which rows a tab renders, read by both `SelectTab` and `RefreshUI`.
+`FilterToOwnRecords` matches `ResolvePlayerName(record.player)` against `GetOwnCharacterNames()`,
+the account roster plus the logged-in character, which is always in the set so a cold roster
+cannot hide someone's own rows from them. `FilterByPlayer` and its bare-name compare are gone
+with their three tests, and `spec/ui/member_view_spec.lua` renders the three history tabs in the
+mode. `GetAccessLevel` fails closed on a cold rank and reads a configured threshold with no mode
+as `own_transactions`. The Sync tab's dropdown reads Member and Sync only over the same wire
+values. Section 16's roster cases are in `spec/core_spec.lua`. What follows is the reading that
+produced the fix, kept as the record of how the defect looked.
+
 Verified by reading the call chain on `eda34ea`; the red spec in section 16 is the run.
 
 `GBL:ToggleMainFrame` (`UI/UI.lua:258-267`) calls `CreateMainFrame`, whose last act is

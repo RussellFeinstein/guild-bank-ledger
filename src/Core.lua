@@ -70,6 +70,10 @@ end
 -- AceDB defaults
 local defaults = {
     global = {
+        -- The account's own characters, [Name-Realm] = lastSeen (#222).
+        -- Account level, not per guild, and never on the wire; see
+        -- RecordOwnCharacter.
+        characters = {},
         guilds = {
             ["*"] = {
                 transactions = {},
@@ -537,6 +541,34 @@ end
 -- possible in connected-realm guilds) is marked with the `false` sentinel
 -- so CanonicalPeerKey skips re-realming and keeps the bare arrival bare —
 -- guessing the wrong realm would silently misroute peer state.
+--- Record the logged-in character in the account roster (#222,
+-- docs/PLAN-views-and-access.md section 7).
+--
+-- `db.global.characters[Name-Realm] = lastSeen`. SavedVariables are
+-- account-wide, so each character that logs in writes itself into one
+-- table and the Member view can show a person every character they play
+-- in this guild instead of only the one they are on. Account level rather
+-- than per guild, on the reasoning #52 already recorded: a character's
+-- home is the account, the guild is where its rows are.
+--
+-- Never transmitted. Recording locally is not a privacy event by this
+-- project's own rule, and the wire-contract spec's absolute HELLO key set
+-- is what keeps it off the wire.
+--
+-- Called from GUILD_ROSTER_UPDATE rather than OnEnable, and guarded on a
+-- resolved realm: the realm APIs can still be cold at enable time, and
+-- GetLocalRealm answers the "UnknownRealm" sentinel there. A key built
+-- from that sentinel would match no record and would never expire.
+function GBL:RecordOwnCharacter()
+    if not self.db or not self.db.global then return end
+    local name = UnitName("player")
+    if not name or name == "" then return end
+    local realm = self:GetLocalRealm()
+    if not realm or realm == "" or realm == "UnknownRealm" then return end
+    self.db.global.characters = self.db.global.characters or {}
+    self.db.global.characters[name .. "-" .. realm] = GetServerTime()
+end
+
 function GBL:BuildRosterCache()
     if not self.db then return end
     local numMembers = GetNumGuildMembers()
@@ -1751,6 +1783,9 @@ function GBL:GUILD_ROSTER_UPDATE()
     -- Update the persistent player→realm mapping
     self:BuildRosterCache()
 
+    -- Record this character in the account roster (#222).
+    self:RecordOwnCharacter()
+
     -- One-time retrigger of the migration ladder once roster is warm. Closes
     -- the cold-roster gap for migrations like MigrateRecoverPeerRealms that
     -- short-circuit on cold APIs at OnEnable time. Strict-gated migrations
@@ -2003,13 +2038,24 @@ function GBL:GetAccessLevel()
     if not ac or not ac.rankThreshold then return "full" end
 
     local _, _, rankIndex = GetGuildInfo("player")
-    if not rankIndex then return "full" end
+    -- Fail closed while the rank is cold (#222). GetGuildInfo answers no
+    -- rank for the first seconds after login, and answering "full" there
+    -- handed a member the whole guild's ledger until the first roster tick
+    -- ran RefreshAccessTabsIfChanged. A threshold is configured here, so
+    -- someone meant this guild to be restricted; the GM is caught by it for
+    -- those seconds too, which is the cheaper of the two mistakes.
+    if not rankIndex then return ac.restrictedMode or "own_transactions" end
 
     if rankIndex <= ac.rankThreshold then
         return "full"
     end
 
-    return ac.restrictedMode or "sync_only"
+    -- A threshold with no mode chosen reads as Member rather than Sync only
+    -- (#222, views doc section 6): the mode a GM gets by not choosing should
+    -- still show a member their own record. Display-side only; the stored
+    -- and advertised values do not change, so an older client reads this
+    -- guild exactly as it did before.
+    return ac.restrictedMode or "own_transactions"
 end
 
 --- Convenience check for full addon access.

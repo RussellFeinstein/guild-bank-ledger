@@ -24,6 +24,15 @@ Both live in one file, `WTF/Account/<id>/SavedVariables/GuildBankLedger.lua`.
 **`GuildBankLedgerDB`** is the AceDB store. Everything the addon records about a guild hangs off
 `global.guilds["<Guild Name>"]`. It is account-wide, so a player's alts share one copy.
 
+One key sits beside `guilds` rather than inside it: **`global.characters`**, `[Name-Realm] = lastSeen`,
+written by `RecordOwnCharacter` (`src/Core.lua`) for the logged-in character on every
+`GUILD_ROSTER_UPDATE` once the realm resolves, and never for the `"UnknownRealm"` sentinel. It is the
+account's own characters and nothing else, so the Member view can show a person every character they
+play rather than the one they are on (#222, `docs/PLAN-views-and-access.md` section 7). Account level
+rather than per guild, on the reasoning #52 records: a character's home is the account, the guild is
+where its rows are. It is never transmitted; the absolute HELLO key set in
+`spec/wire_contract_spec.lua` is what keeps it that way.
+
 **`GuildBankLedgerAuditDB`** is a raw global, deliberately not AceDB and deliberately not guild-keyed.
 Its collection unit is the account's SavedVariables file, and each session carries player, realm and
 guild in its own header. See the Conventions section of `CLAUDE.md` for why it must not be migrated

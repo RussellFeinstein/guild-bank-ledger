@@ -277,17 +277,22 @@ function GBL:RefreshUI()
 
     local guildData = self:GetGuildData()
     local tab = self.activeTab or "transactions"
+    -- The same arrays the build used, through the one filter (#222). This
+    -- function used to read guildData directly in all three branches, so a
+    -- member in Own Transactions mode got the whole guild's rows back the
+    -- moment anything refreshed: the call ToggleMainFrame makes right after
+    -- the build, every bank open, every scan that stored something, and
+    -- every completed sync receive.
+    local transactions, moneyTransactions = self:RecordsForView(guildData)
 
     if tab == "goldlog" and self._goldLogContainer then
         -- Update stored data reference, re-render with existing filters
-        self._goldLogTransactions = guildData and guildData.moneyTransactions or {}
+        self._goldLogTransactions = moneyTransactions
         self:RefreshGoldLog()
     elseif tab == "transactions" and self._ledgerContainer then
-        self._ledgerTransactions = guildData and guildData.transactions or {}
+        self._ledgerTransactions = transactions
         self:RefreshLedgerView()
     elseif tab == "consumption" and self._consumptionContainer then
-        local transactions = guildData and guildData.transactions or {}
-        local moneyTransactions = guildData and guildData.moneyTransactions or {}
         local allTx = {}
         for i = 1, #transactions do allTx[#allTx + 1] = transactions[i] end
         for i = 1, #moneyTransactions do allTx[#allTx + 1] = moneyTransactions[i] end
@@ -337,16 +342,9 @@ function GBL:SelectTab(tabName)
         self:AddRestrictedBanner(self.tabGroup, "Restricted view - limited tabs available.")
     end
 
-    local guildData = self:GetGuildData()
-    local transactions = guildData and guildData.transactions or {}
-    local moneyTransactions = guildData and guildData.moneyTransactions or {}
-
-    -- Pre-filter to own transactions in restricted mode
-    if accessLevel == "own_transactions" then
-        local myName = UnitName("player") or ""
-        transactions = self:FilterByPlayer(transactions, myName)
-        moneyTransactions = self:FilterByPlayer(moneyTransactions, myName)
-    end
+    -- The rows this access level may see (#222). RefreshUI reads the same
+    -- helper, so the build and every later re-render cannot disagree.
+    local transactions, moneyTransactions = self:RecordsForView(self:GetGuildData())
 
     if tabName == "transactions" then
         self:BuildTransactionsTab(self.tabGroup, transactions)
@@ -395,18 +393,60 @@ function GBL:OnMainFrameHidden()
     self._restockInView = false
 end
 
---- Filter a records array to only records from the given player.
+--- The characters this account has played, in the qualified Name-Realm
+-- form records carry (#222, docs/PLAN-views-and-access.md section 7).
+-- The logged-in character is always in the set, whether or not the first
+-- roster tick has recorded it yet, so a member's own rows are never
+-- hidden from them while the roster is cold.
+-- @return table [Name-Realm] = true
+function GBL:GetOwnCharacterNames()
+    local names = {}
+    local me = UnitName("player")
+    if me and me ~= "" then
+        names[self:ResolvePlayerName(me)] = true
+    end
+    local chars = self.db and self.db.global and self.db.global.characters
+    if type(chars) == "table" then
+        for name in pairs(chars) do names[name] = true end
+    end
+    return names
+end
+
+--- Filter a records array to this account's own rows.
+-- Matched through ResolvePlayerName against the account roster, never on
+-- a bare-name compare: a same-named character on another realm is
+-- someone else, and the member's own alts are not. A bare-name record
+-- (everything before 2026-04-13) resolves through the guild's
+-- playerRealms cache the way every migration reads those rows, with the
+-- resolver's own limit: a name playerRealms marks ambiguous falls back to
+-- the local realm.
 -- @param records table Array of transaction records
--- @param playerName string Player name (without realm)
 -- @return table Filtered array
-function GBL:FilterByPlayer(records, playerName)
+function GBL:FilterToOwnRecords(records)
+    local own = self:GetOwnCharacterNames()
     local filtered = {}
-    for _, record in ipairs(records) do
-        if record.player and self:StripRealm(record.player) == playerName then
+    for _, record in ipairs(records or {}) do
+        if record.player and own[self:ResolvePlayerName(record.player)] then
             filtered[#filtered + 1] = record
         end
     end
     return filtered
+end
+
+--- The two record arrays a tab renders from, filtered for the access
+-- level. One place, read by both SelectTab (the build) and RefreshUI
+-- (every re-render). Keeping the filter in the build alone is what made
+-- Own Transactions mode paper for four years (#222).
+-- @param guildData table|nil The current guild's data
+-- @return table transactions, table moneyTransactions
+function GBL:RecordsForView(guildData)
+    local transactions = guildData and guildData.transactions or {}
+    local moneyTransactions = guildData and guildData.moneyTransactions or {}
+    if self:GetAccessLevel() ~= "own_transactions" then
+        return transactions, moneyTransactions
+    end
+    return self:FilterToOwnRecords(transactions),
+        self:FilterToOwnRecords(moneyTransactions)
 end
 
 --- Show a yellow banner indicating restricted access mode.

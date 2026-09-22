@@ -211,17 +211,22 @@ function GBL:BuildAccessControlRow(container)
     rankDropdown:SetValue(currentDropdownValue)
     row:AddChild(rankDropdown)
 
-    -- Restricted mode dropdown
+    -- Restricted mode dropdown. The labels are display text over unchanged
+    -- wire values (#222, views doc section 6): "Member" reads as what the
+    -- mode gives someone rather than as what it takes away, and the stored
+    -- own_transactions is what every client still advertises and reads.
     local modeList = {
-        sync_only = "Sync Only",
-        own_transactions = "Own Transactions Only",
+        sync_only = "Sync only",
+        own_transactions = "Member",
     }
-    local modeOrder = { "sync_only", "own_transactions" }
+    local modeOrder = { "own_transactions", "sync_only" }
     local modeDropdown = AceGUI:Create("Dropdown")
     modeDropdown:SetLabel("Restricted mode")
     modeDropdown:SetWidth(190)
     modeDropdown:SetList(modeList, modeOrder)
-    modeDropdown:SetValue(ac.restrictedMode or "sync_only")
+    -- Member is the mode a threshold with no choice lands on, here and in
+    -- GetAccessLevel, so the dropdown shows what the level computation does.
+    modeDropdown:SetValue(ac.restrictedMode or "own_transactions")
     modeDropdown:SetDisabled(currentThreshold == nil)
     row:AddChild(modeDropdown)
 
