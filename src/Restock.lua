@@ -585,25 +585,146 @@ function GBL:_RestockAuctionHouseOpen()
         and AuctionHouseFrame:IsShown() and true or false
 end
 
+--- The states that read the search blocker: IDLE and READY. The button,
+-- the banner, StartRestockSearch and the Shopping-tab hook all ask this
+-- one place, so a state added later joins all four at once or none.
+-- @param state string
+-- @return boolean
+function GBL:_RestockStateReadsBlocker(state)
+    return state == "IDLE" or state == "READY"
+end
+
+-- Seconds between looks for Auctionator's Shopping frame after the Auction
+-- House window shows and the frame is not there yet (#217).
+local SHOPPING_TAB_POLL = 0.5
+GBL.RESTOCK_SHOPPING_TAB_POLL = SHOPPING_TAB_POLL
+
+--- Watch Auctionator's Shopping tab (#217). The shopping-tab precondition
+-- below is read on a rebuild and nowhere else, so selecting the tab with
+-- the Restock tab showing left Search greyed until the tab was left and
+-- re-entered. Auctionator creates AuctionatorShoppingFrame on the first
+-- Auction House show of the session (its tab container's OnLoad, inside
+-- AuctionatorAHFrameMixin:OnShow, and under TradeSkillMaster's scaled-down
+-- frame not until the scale reaches 0.5), so the hooks install lazily:
+-- from every rebuild, and from _RestockOnAuctionHouseShown's poll while
+-- the frame is not there. LibAHTab hides every Auctionator tab frame and
+-- shows the selected one on each selection, Auctionator shows its default
+-- tab twice on open (once synchronously, once a tick later), and the frame
+-- hides with the window, so the hooks fire in bursts; the redraw behind
+-- them is coalesced and compared before it draws. Goes with the
+-- precondition when #194 deletes it.
+-- @return boolean true once the hooks are installed
+function GBL:_RestockWatchShoppingTab()
+    if self._restockShoppingTabHooked then return true end
+    local frame = AuctionatorShoppingFrame
+    if not (frame and frame.HookScript) then return false end
+    local function changed() self:_RestockShoppingTabChanged() end
+    frame:HookScript("OnShow", changed)
+    frame:HookScript("OnHide", changed)
+    self._restockShoppingTabHooked = true
+    self:SystemInfo("Restock tab: hooked Auctionator's shopping frame")
+    return true
+end
+
+--- The Shopping tab came on or went off screen. One redraw is scheduled
+-- for the next tick however many firings land in this one: LibAHTab hides
+-- every Auctionator tab frame and shows the selected one on each
+-- selection, Auctionator shows its default tab twice on open, and the
+-- frame hides with the window, so the hooks arrive in bursts. The redraw
+-- is skipped only while a search or a purchase is in flight, where a
+-- rebuild would move the focus from under the player (#214) or redraw a
+-- running search; RefreshRestockTab decides the rest, as every other
+-- caller lets it (it no-ops unless the Restock tab is the built one).
+--
+-- Two further gates shipped in the first cut of this fix and were
+-- withdrawn after the in-game run, where Search never came back: an
+-- in-view check on the cached `_restockInView` flag, and a compare of the
+-- blocker against the one the last build rendered. Both could suppress the
+-- redraw the fix exists for, and neither had ever been observed true on a
+-- real client (`_restockInView`'s only other reader is the wallet
+-- baseline, where a wrong value is invisible). That is the 2026-09-17 rule
+-- (never gate an action on a predicate whose real behaviour has not been
+-- observed) and it cost this fix its whole point. What replaces them is
+-- the line below: the next run says which of them was false.
+function GBL:_RestockShoppingTabChanged()
+    if self._restockShoppingTabRedraw then return end
+    if not (C_Timer and C_Timer.After) then return end
+    self._restockShoppingTabRedraw = true
+    C_Timer.After(0, function()
+        self._restockShoppingTabRedraw = nil
+        -- Another tab, or no window: RefreshRestockTab declines, and a line
+        -- per Auction House tab click while the player is reading their
+        -- transactions is noise that pushes a run out of the 300-entry
+        -- capture (the #199 rule about idle auction-house traffic).
+        if self.activeTab ~= "restock" then return end
+        local st = self._restock
+        local state = st and st.state or "IDLE"
+        local visible = AuctionatorShoppingFrame ~= nil and AuctionatorShoppingFrame.IsVisible ~= nil
+            and AuctionatorShoppingFrame:IsVisible() and true or false
+        if not self:_RestockStateReadsBlocker(state) then
+            self:SystemInfo("Restock tab: shopping tab %s, state=%s skipped (in flight)",
+                visible and "shown" or "hidden", state)
+            return
+        end
+        if self.RefreshRestockTab then self:RefreshRestockTab() end
+        -- After the redraw, so the line carries the precondition the build
+        -- just rendered, which is what a greyed Search has to be read
+        -- against: shopping-tab, ah-closed, no-scan, nothing, or none.
+        self:SystemInfo("Restock tab: shopping tab %s, state=%s redrew blocker=%s",
+            visible and "shown" or "hidden", state,
+            tostring(self._restockRenderedBlocker or "not built"))
+    end)
+end
+
+--- The Auction House window showed (Core's OnAuctionHouseToggled, ahead of
+-- its redraw). Installs the watch when the frame is there; otherwise, with
+-- Auctionator loaded, polls for it until it is or the window closes, since
+-- Auctionator's own OnShow can run after ours in the same event burst and
+-- under TradeSkillMaster not until the player switches to the default
+-- frame. A tick that installs redraws through the same coalesced path.
+function GBL:_RestockOnAuctionHouseShown()
+    if self:_RestockWatchShoppingTab() then return end
+    if not self:IsAuctionatorReady() then return end
+    if self._restockShoppingTabPoll then return end
+    if not (C_Timer and C_Timer.NewTicker) then return end
+    self:SystemInfo("Restock tab: watching for Auctionator's shopping frame every %ss", tostring(SHOPPING_TAB_POLL))
+    self._restockShoppingTabPoll = C_Timer.NewTicker(SHOPPING_TAB_POLL, function()
+        if not self:_RestockAuctionHouseOpen() then
+            self:_RestockStopShoppingTabPoll()
+        elseif self:_RestockWatchShoppingTab() then
+            self:_RestockStopShoppingTabPoll()
+            self:_RestockShoppingTabChanged()
+        end
+    end)
+end
+
+--- Stop the Shopping-frame poll, if one is running.
+function GBL:_RestockStopShoppingTabPoll()
+    local poll = self._restockShoppingTabPoll
+    if not poll then return end
+    self._restockShoppingTabPoll = nil
+    if poll.Cancel then poll:Cancel() end
+end
+
 local SEARCH_BLOCKERS = {
-    { key = "auctionator",
+    { key = "auctionator", short = "needs Auctionator",
       text = "Restock needs the Auctionator addon to search and buy. Targets still display below.",
       holds = function(self) return self:IsAuctionatorReady() end },
-    { key = "ah-closed",
+    { key = "ah-closed", short = "open the Auction House",
       text = "Open the Auction House to search.",
       holds = function(self) return self:_RestockAuctionHouseOpen() end },
     -- Until #194 moves the search to Auctionator's public entry, which
     -- selects the tab itself, the Shopping tab has to be on screen.
-    { key = "shopping-tab",
+    { key = "shopping-tab", short = "open the Shopping tab",
       text = "Open the Auctionator Shopping tab first, then search.",
       holds = function()
           return AuctionatorShoppingFrame ~= nil and AuctionatorShoppingFrame.IsVisible ~= nil
               and AuctionatorShoppingFrame:IsVisible() and true or false
       end },
-    { key = "no-scan",
+    { key = "no-scan", short = "scan the bank first",
       text = "Waiting on the bank scan. Open the guild bank, or click Scan bank, so in-bank counts are right.",
       holds = function(self, opts) return (opts.scanResults or self:GetLastScanResults()) ~= nil end },
-    { key = "nothing",
+    { key = "nothing", short = "nothing to buy",
       text = "Nothing to buy: the bank and the mail cover every layout item.",
       holds = function(self, opts, ctx)
           ctx.buyList = self:_RestockBuildBuyList(opts)
@@ -617,13 +738,13 @@ local SEARCH_BLOCKERS = {
 -- every precondition holds the buy list the last one built comes back too,
 -- so a click does not build it twice.
 -- @param opts table|nil forwarded to _RestockBuildBuyList (tests inject)
--- @return table|nil { key, text }, table|nil buyList (when nil)
+-- @return table|nil { key, text, short }, table|nil buyList (when nil)
 function GBL:_RestockSearchBlocker(opts)
     opts = opts or {}
     local ctx = {}
     for _, b in ipairs(SEARCH_BLOCKERS) do
         if not b.holds(self, opts, ctx) then
-            return { key = b.key, text = b.text }
+            return { key = b.key, text = b.text, short = b.short }
         end
     end
     return nil, ctx.buyList
@@ -715,7 +836,7 @@ end
 -- not part of the run and stays.
 function GBL:StartRestockSearch()
     local state = self._restock and self._restock.state or "IDLE"
-    if state ~= "IDLE" and state ~= "READY" then return end
+    if not self:_RestockStateReadsBlocker(state) then return end
     -- From READY the old run goes first, and the park it performs feeds the
     -- buy list built next: a parked quantity is in the mail, so the row is
     -- reduced or dropped rather than offered again (the review of PR B).
@@ -1549,6 +1670,7 @@ end
 -- unanswered record. A confirm already out is left to its result and the
 -- step timer, as anywhere else.
 function GBL:_RestockOnAuctionHouseClosed()
+    self:_RestockStopShoppingTabPoll()
     local st = self._restock
     if not st then return end
     if purchaseInFlight(self) and not st.confirmIssued then
