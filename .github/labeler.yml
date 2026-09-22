@@ -148,6 +148,7 @@
           - 'spec/ui/ledgerview_columns_spec.lua'
           - 'spec/ui/persistence_spec.lua'
           - 'spec/ui/tab_visibility_spec.lua'
+          - 'docs/PLAN-visual-overhaul.md'
 
 "area: accessibility":
   - changed-files:
