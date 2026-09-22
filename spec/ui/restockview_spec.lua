@@ -233,6 +233,7 @@ describe("RestockView", function()
                 },
             })
             assert.is_true(ok)
+            GBL.lastScanResults = {}   -- a scan that saw nothing: the rows read a shortfall, not bank ?
         end
 
         it("renders the layout items grouped by tab name", function()
@@ -845,7 +846,7 @@ describe("RestockView", function()
             assert.is_true(findButton(container, "Buy next (2 left)").disabled)
             assert.is_true(findButton(container, "Buy 5 (~" .. GBL:FormatMoney(5000) .. ")").disabled)
             assert.is_true(findButton(container, "Buy 3 (~" .. GBL:FormatMoney(3000) .. ")").disabled)
-            assert.truthy(findChild(container, "Label")._text:find("Open the Auction House to buy.", 1, true))
+            assert.truthy(findChild(container, "Label")._text:find("Open the Auction House to search or buy.", 1, true))
 
             _G.AuctionHouseFrame = { IsShown = function() return true end }
             container = build()
@@ -962,12 +963,18 @@ describe("RestockView", function()
             _G.AuctionatorShoppingFrame = { IsVisible = function() return true end,
                                             DoSearch = function() end, StopSearch = function() end }
             GBL.lastScanResults = {}   -- a scan that saw nothing: every layout item is short
+            -- Names resolve at once (the mock Item has no CreateFromItemID).
+            _G.Item.CreateFromItemID = function(_self, id)
+                return { ContinueOnItemLoad = function(_i, cb) cb() end,
+                         GetItemName = function() return "Item " .. id end }
+            end
         end)
 
         after_each(function()
             _G.Auctionator = nil
             _G.AuctionHouseFrame = nil
             _G.AuctionatorShoppingFrame = nil
+            _G.Item.CreateFromItemID = nil
         end)
 
         it("offers Search in READY and never Done, disabling it on a blocker with the reason on the banner", function()
@@ -983,7 +990,7 @@ describe("RestockView", function()
             container = build()
             search = findButton(container, "Search auctions")
             assert.is_true(search.disabled)
-            assert.truthy(findChild(container, "Label")._text:find("Open the Auction House to search.", 1, true))
+            assert.truthy(findChild(container, "Label")._text:find("Open the Auction House to search or buy.", 1, true))
         end)
 
         it("starts a new search from READY: progress reset, the pending store kept, the list still there", function()

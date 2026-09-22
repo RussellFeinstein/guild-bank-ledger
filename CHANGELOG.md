@@ -5,6 +5,19 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- The Restock tab keeps its item list on screen through a search and a purchase. Every row shows its target, what the bank holds, what is in the mail, the shortfall and a status; after a search each row adds its lowest price and a Buy button carrying the estimated cost, the row being bought says so, and a bought row shows what it cost. Before the first bank scan of the session the rows read "bank ?" and "bank unknown" instead of a shortfall.
+- Search is offered from the results, so a new search no longer needs Done first: it clears the search's own progress and keeps what is in the mail. Done is gone.
+- The budget box and the "Confirm at price" checkbox sit above the list in every state, with the committed budget shown beside the box, so both can be set before the first search. The gold line shows in every state and updates as your wallet changes, without redrawing the tab.
+- The Layout tab's Keep field is now Store, with a hint saying what it does: how many the guild bank should hold, with Restock buying up to the larger of the layout's slots x per slot and Store. A row whose Store is above its layout total shows the target it raises the row to.
+
+### Fixed
+- On the Restock tab an arrow key pressed with nothing focused no longer lands on Scan bank, where Space then ran a scan: with nothing focused only Tab enters the keyboard walk, and Escape now clears the focus (a second Escape closes the window as before).
+- The Restock tab's grey row annotations read the accessible palette instead of a low-contrast grey (#44).
+- A skipped row on the Restock tab says why in plain words (over your budget, not enough gold, over your max price, no price from the auction house) instead of the log's code.
+
 ## [0.40.0] - 2026-09-20
 
 ### Added

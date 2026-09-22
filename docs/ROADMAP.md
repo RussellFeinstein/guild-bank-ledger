@@ -43,9 +43,10 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 - Sort tab preview + rank-gated execute
 - Bags as an optional sort source (#139): an "Include bags" toggle deposits any bag item the layout names as part of the sort, layout slots first and surplus to overflow, so a farming run does not have to be deposited by hand first. Source only, never a destination; bound, locked, and unnamed items are left alone. Off by default
 
-**Restock** (v0.34.0):
-- Restock tab: layout-driven item list grouped by bank tab, showing each item's target, current stock, and shortfall; gated by sort access
-- Auction House buying via the optional Auctionator addon (per-item and Buy-all), spending real gold through the commodity flow with an affordability check and an optional per-run gold budget
+**Restock** (v0.34.0, rebuilt through the Restock rework milestone from v0.39.18):
+- Restock tab: layout-driven item list grouped by bank tab, on screen in every state of the flow, showing each item's target, current stock, what is in the mail, shortfall and status, with the price, the estimated cost and the outcome on each searched row; gated by sort access
+- Auction House buying via the optional Auctionator addon (per-item and Buy next, one purchase per click since the game starts a purchase only from a click), each purchase pausing on its quoted total for Confirm unless the pause is turned off, spending real gold through the commodity flow with an affordability check and an optional per-search gold budget above the list
+- Purchases stay counted as in the mail until the bank log records the deposit, so a second search does not offer them again; the search's preconditions are disabled states with the reason on the banner
 
 **Logging** (v0.32.0):
 - Per-channel session logs (sync cap 2000, sort cap 3000, system cap 500)

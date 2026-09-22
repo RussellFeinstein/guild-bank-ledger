@@ -292,6 +292,19 @@ function GBL:AdvanceFocus(delta)
     end
 end
 
+--- Drop the focus without touching the order (#214): the ring on the
+-- focused widget is hidden and the walk starts over at the next Tab. Escape's
+-- action on the key-capturing tabs. Not ClearFocus, which is WoW's protected
+-- unit-focus global and the EditBox method.
+function GBL:ResetFocus()
+    local order = self.A11Y.focusOrder
+    local idx = self.A11Y.focusIndex
+    if idx > 0 and order[idx] then
+        self:SetFocusIndicator(order[idx], false)
+    end
+    self.A11Y.focusIndex = 0
+end
+
 --- Thickness of the focus ring, in pixels, per WCAG 2.4.7 focus-visible.
 local FOCUS_RING_THICKNESS = 2
 

@@ -296,19 +296,25 @@ describe("Restock search", function()
                 walletBase = 1000000, spentAtBase = 0, spentEstimate = 21000,
             }
             GBL:_RestockRegisterBuyEvents()
+            -- Names resolve at once (the mock Item has no CreateFromItemID).
+            _G.Item.CreateFromItemID = function(_self, id)
+                return { ContinueOnItemLoad = function(_i, cb) cb() end,
+                         GetItemName = function() return "Item " .. id end }
+            end
         end)
 
         after_each(function()
             _G.Auctionator = nil
             _G.AuctionHouseFrame = nil
             _G.AuctionatorShoppingFrame = nil
+            _G.Item.CreateFromItemID = nil
         end)
 
         it("tears the run down and starts: progress cleared, the buy events dropped, a new generation", function()
             GBL:StartRestockSearch()
             local st = GBL._restock
             assert.equals("SEARCHING", st.state)
-            assert.equals(4, st.searchGen)
+            assert.is_true(st.searchGen > 3)   -- the old run's callbacks are dead
             assert.equals(2, #st.activeItems)
             assert.is_nil(next(st.bought))
             assert.is_nil(next(st.boughtTotal))

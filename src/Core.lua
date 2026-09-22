@@ -214,6 +214,7 @@ function GBL:OnEnable()
     self:RegisterEvent("AUCTION_HOUSE_SHOW", "OnAuctionHouseToggled")
     self:RegisterEvent("AUCTION_HOUSE_CLOSED", "OnAuctionHouseToggled")
     self:RegisterMessage("GBL_SCAN_COMPLETE", "OnScanComplete")
+    self:RegisterEvent("PLAYER_MONEY", "OnPlayerMoney")
 
     -- Initialize sync system (M5)
     self:InitSync()
@@ -244,6 +245,13 @@ end
 -- of its refreshes and fire on each executor end-of-pass scan mid-run.
 function GBL:OnScanComplete()
     if self.RefreshRestockTab then self:RefreshRestockTab() end
+end
+
+--- The wallet changed (PLAYER_MONEY). The Restock tab's gold line is
+-- rewritten in place (#214), never rebuilt: a purchase fires this inside
+-- the flow, and a rebuild there would take the focus from under the player.
+function GBL:OnPlayerMoney()
+    if self._RestockOnMoneyChanged then self:_RestockOnMoneyChanged() end
 end
 
 --- The auction house opened or closed (AUCTION_HOUSE_SHOW / _CLOSED). The
