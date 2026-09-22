@@ -1334,17 +1334,28 @@ describe("RestockView", function()
             local f = shoppingFrame(true)
             _G.AuctionatorShoppingFrame = f
             buildLive()
+            -- The burst is coalesced ahead of the compare: the blocker is
+            -- computed once per burst, plus once more inside a redraw.
+            local reads = 0
+            local origBlocker = GBL._RestockSearchBlocker
+            GBL._RestockSearchBlocker = function(...) reads = reads + 1; return origBlocker(...) end
+
             -- Auctionator re-selecting the tab: Hide then Show, still visible.
             assert.equals(0, countBuilds(function()
                 f._visible = false; fire(f, "OnHide")
                 f._visible = true;  fire(f, "OnShow")
             end))
+            assert.equals(1, reads)
+
             -- Three firings that end hidden: one redraw.
+            reads = 0
             assert.equals(1, countBuilds(function()
                 f._visible = false; fire(f, "OnHide")
                 f._visible = true;  fire(f, "OnShow")
                 f._visible = false; fire(f, "OnHide")
             end))
+            assert.equals(2, reads)
+            GBL._RestockSearchBlocker = origBlocker
             assert.is_true(searchButton().disabled)
         end)
 

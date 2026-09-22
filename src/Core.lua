@@ -258,22 +258,16 @@ end
 -- flag is what Restock's gate reads first; a close also drops a quote or a
 -- start still waiting for its price, since the server discards its pending
 -- purchase with the session; then the tab redraws with its buy controls
--- disabled and the reason on the banner. On a show, Auctionator creates its
--- Shopping tab's frame in the same event burst, possibly after this
--- handler, so when the redraw found no frame the watch is retried one tick
--- later and the tab redrawn if it lands (#217).
+-- disabled and the reason on the banner. A show hands Restock the watch on
+-- Auctionator's Shopping tab (#217) ahead of the redraw.
 function GBL:OnAuctionHouseToggled(event)
     self._auctionHouseOpen = (event == "AUCTION_HOUSE_SHOW")
     if event == "AUCTION_HOUSE_CLOSED" and self._RestockOnAuctionHouseClosed then
         self:_RestockOnAuctionHouseClosed()
+    elseif event == "AUCTION_HOUSE_SHOW" and self._RestockOnAuctionHouseShown then
+        self:_RestockOnAuctionHouseShown()
     end
     if self.RefreshRestockTab then self:RefreshRestockTab() end
-    if event == "AUCTION_HOUSE_SHOW" and self._RestockWatchShoppingTab
-       and not self:_RestockWatchShoppingTab() and C_Timer and C_Timer.After then
-        C_Timer.After(0, function()
-            if self:_RestockWatchShoppingTab() then self:_RestockShoppingTabChanged() end
-        end)
-    end
 end
 
 ------------------------------------------------------------------------
