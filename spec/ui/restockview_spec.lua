@@ -1226,7 +1226,9 @@ describe("RestockView", function()
     -- tab with the Restock tab showing left Search greyed until the tab was
     -- left and re-entered. Auctionator creates AuctionatorShoppingFrame on
     -- the first Auction House show of the session, so the hook installs
-    -- lazily, from every rebuild and one tick after AUCTION_HOUSE_SHOW.
+    -- lazily: from every rebuild, and from a poll after AUCTION_HOUSE_SHOW
+    -- while the frame is not there. A change redraws once, on the next tick,
+    -- and only when the blocker it would render differs from the one drawn.
     ------------------------------------------------------------------------
     describe("shopping tab refresh (#217)", function()
         local function shoppingFrame(visible)
@@ -1253,6 +1255,7 @@ describe("RestockView", function()
         end
         local function buildLive()
             GBL.activeTab = "restock"
+            GBL._restockInView = true
             GBL.tabGroup = LibStub("AceGUI-3.0"):Create("TabGroup")
             GBL:BuildRestockTab(GBL.tabGroup)
         end
@@ -1261,8 +1264,16 @@ describe("RestockView", function()
             local orig = GBL.BuildRestockTab
             GBL.BuildRestockTab = function(...) builds = builds + 1; return orig(...) end
             fn()
+            Helpers.drainZeroDelayTimers()
             GBL.BuildRestockTab = orig
             return builds
+        end
+        local function polls()
+            local out = {}
+            for _, t in ipairs(MockWoW.pendingTimers) do
+                if not t.cancelled and t.delay == GBL.RESTOCK_SHOPPING_TAB_POLL then out[#out + 1] = t end
+            end
+            return out
         end
 
         before_each(function()
@@ -1273,11 +1284,13 @@ describe("RestockView", function()
             }
             layoutTwo()
             GBL.lastScanResults = {}
+            MockWoW.cancelTimers()
         end)
 
         after_each(function()
             _G.Auctionator = nil
             _G.AuctionatorShoppingFrame = nil
+            GBL._restockInView = nil
         end)
 
         it("installs the OnShow and OnHide hooks once across two rebuilds", function()
@@ -1289,7 +1302,7 @@ describe("RestockView", function()
             assert.equals(1, hookCount(f, "OnHide"))
         end)
 
-        it("OnShow with the Restock tab active rebuilds it and Search reads enabled", function()
+        it("OnShow with the Restock tab active redraws it and Search reads enabled", function()
             local f = shoppingFrame(false)
             _G.AuctionatorShoppingFrame = f
             buildLive()
@@ -1298,7 +1311,7 @@ describe("RestockView", function()
             assert.is_not_nil(findLabelContaining(GBL.tabGroup, "Open the Auctionator Shopping tab first"))
 
             f._visible = true
-            fire(f, "OnShow")
+            assert.equals(1, countBuilds(function() fire(f, "OnShow") end))
             btn = searchButton()
             assert.is_not_nil(btn)
             assert.is_falsy(btn.disabled)
@@ -1312,9 +1325,27 @@ describe("RestockView", function()
             assert.is_falsy(searchButton().disabled)
 
             f._visible = false
-            fire(f, "OnHide")
+            assert.equals(1, countBuilds(function() fire(f, "OnHide") end))
             assert.is_true(searchButton().disabled)
             assert.is_not_nil(findLabelContaining(GBL.tabGroup, "Open the Auctionator Shopping tab first"))
+        end)
+
+        it("redraws once for a hide and show in one frame, and not at all when the reading is unchanged", function()
+            local f = shoppingFrame(true)
+            _G.AuctionatorShoppingFrame = f
+            buildLive()
+            -- Auctionator re-selecting the tab: Hide then Show, still visible.
+            assert.equals(0, countBuilds(function()
+                f._visible = false; fire(f, "OnHide")
+                f._visible = true;  fire(f, "OnShow")
+            end))
+            -- Three firings that end hidden: one redraw.
+            assert.equals(1, countBuilds(function()
+                f._visible = false; fire(f, "OnHide")
+                f._visible = true;  fire(f, "OnShow")
+                f._visible = false; fire(f, "OnHide")
+            end))
+            assert.is_true(searchButton().disabled)
         end)
 
         it("OnShow with another tab active changes nothing", function()
@@ -1326,12 +1357,21 @@ describe("RestockView", function()
             assert.equals(0, countBuilds(function() fire(f, "OnShow") end))
         end)
 
-        it("does not rebuild while a purchase is in flight", function()
+        it("changes nothing while the window is hidden, even with the Restock tab still active", function()
+            local f = shoppingFrame(false)
+            _G.AuctionatorShoppingFrame = f
+            buildLive()
+            GBL._restockInView = nil       -- OnMainFrameHidden's write
+            f._visible = true
+            assert.equals(0, countBuilds(function() fire(f, "OnShow") end))
+        end)
+
+        it("does not redraw while a search or a purchase is in flight", function()
             local f = shoppingFrame(true)
             _G.AuctionatorShoppingFrame = f
             readyTwo()
             buildLive()
-            for _, state in ipairs({ "PRICED", "CONFIRMING" }) do
+            for _, state in ipairs({ "SEARCHING", "PRICED", "CONFIRMING" }) do
                 GBL._restock.state = state
                 f._visible = false
                 assert.equals(0, countBuilds(function() fire(f, "OnHide") end), state)
@@ -1350,29 +1390,56 @@ describe("RestockView", function()
             assert.equals(1, hookCount(f, "OnHide"))
         end)
 
-        it("retries the install one tick after AUCTION_HOUSE_SHOW when the frame is not there yet", function()
+        it("installs at AUCTION_HOUSE_SHOW without a poll when the frame is already there", function()
+            local f = shoppingFrame(true)
+            _G.AuctionatorShoppingFrame = f
+            GBL.activeTab = "sort"
+            GBL:OnAuctionHouseToggled("AUCTION_HOUSE_SHOW")
+            assert.equals(1, hookCount(f, "OnShow"))
+            assert.equals(0, #polls())
+        end)
+
+        it("polls after AUCTION_HOUSE_SHOW while the frame is not there, and a tick that finds it installs and redraws", function()
             _G.AuctionatorShoppingFrame = nil
             buildLive()
             GBL:OnAuctionHouseToggled("AUCTION_HOUSE_SHOW")
             assert.is_true(searchButton().disabled)
+            local poll = polls()
+            assert.equals(1, #poll)
 
-            -- Auctionator's own OnShow creates the frame and shows the tab in
-            -- the same event burst; our retry runs on the next tick.
+            -- Ticks that find nothing keep polling and raise nothing.
+            assert.has_no.errors(function() poll[1].callback(); poll[1].callback() end)
+            assert.is_false(poll[1].cancelled)
+
+            -- Auctionator built its tabs and showed Shopping: the next tick lands.
             local f = shoppingFrame(true)
             _G.AuctionatorShoppingFrame = f
-            Helpers.drainZeroDelayTimers()
+            assert.equals(1, countBuilds(function() poll[1].callback() end))
             assert.equals(1, hookCount(f, "OnShow"))
+            assert.is_true(poll[1].cancelled)
             assert.is_falsy(searchButton().disabled)
         end)
 
-        it("does not retry after AUCTION_HOUSE_CLOSED", function()
+        it("starts one poll, and AUCTION_HOUSE_CLOSED cancels it", function()
             _G.AuctionatorShoppingFrame = nil
             buildLive()
+            GBL:OnAuctionHouseToggled("AUCTION_HOUSE_SHOW")
+            GBL:OnAuctionHouseToggled("AUCTION_HOUSE_SHOW")
+            assert.equals(1, #polls())
             GBL:OnAuctionHouseToggled("AUCTION_HOUSE_CLOSED")
+            assert.equals(0, #polls())
             local f = shoppingFrame(true)
             _G.AuctionatorShoppingFrame = f
-            Helpers.drainZeroDelayTimers()
+            MockWoW.fireTimers()
             assert.equals(0, hookCount(f, "OnShow"))
+        end)
+
+        it("does not poll without Auctionator", function()
+            _G.Auctionator = nil
+            _G.AuctionatorShoppingFrame = nil
+            buildLive()
+            GBL:OnAuctionHouseToggled("AUCTION_HOUSE_SHOW")
+            assert.equals(0, #polls())
         end)
     end)
 end)
