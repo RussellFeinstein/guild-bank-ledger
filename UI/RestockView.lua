@@ -209,6 +209,11 @@ function GBL:BuildRestockTab(container)
     local st = self._restock
     local state = st.state or "IDLE"
 
+    -- The Shopping-tab precondition watches its frame (#217); installed
+    -- from here because the frame does not exist until the Auction House
+    -- window has shown once this session.
+    if self._RestockWatchShoppingTab then self:_RestockWatchShoppingTab() end
+
     -- Focus order is rebuilt every build, in reading order: the controls,
     -- the budget row, then the list's own buttons. Only interactive widgets
     -- are registered (a per-row tab stop over read-only rows would make
@@ -232,7 +237,11 @@ function GBL:BuildRestockTab(container)
     -- The search's preconditions, in the design's order (section 4): the
     -- first that fails disables Search and is the reason on the banner, in
     -- IDLE and in READY, where Search is offered again (#214).
-    local blocker = (state == "IDLE" or state == "READY") and self:_RestockSearchBlocker() or nil
+    local blocker = self:_RestockStateReadsBlocker(state) and self:_RestockSearchBlocker() or nil
+    -- What this build drew, for the Shopping-tab hook's log line only (#217).
+    -- Nothing gates on it: the first cut did, and a stale compare is one of
+    -- the two ways that cut could refuse the redraw it exists for.
+    self._restockRenderedBlocker = blocker and blocker.key or "none"
 
     -- Status banner: the state line.
     local fontPath, fontSize = self:GetScaledFont()
@@ -307,8 +316,27 @@ function GBL:BuildRestockTab(container)
     local confirmIndex
     if state == "IDLE" or state == "READY" then
         local searchBtn = AceGUI:Create("Button")
-        searchBtn:SetText("Search auctions")
-        searchBtn:SetWidth(140)
+        -- A disabled control that does not say why reads as broken
+        -- (Russell, the 2026-09-22 run, on the bank-scan precondition).
+        -- The tag is on the button, so it needs no pointer and no colour;
+        -- the banner keeps the sentence and the tooltip repeats it for a
+        -- player whose eye is on the control rather than the top of the tab.
+        if blocker then
+            searchBtn:SetText(format("Search auctions (%s)", blocker.short or "unavailable"))
+            if searchBtn.SetAutoWidth then searchBtn:SetAutoWidth(true) end
+            searchBtn:SetCallback("OnEnter", function(w)
+                if not (GameTooltip and GameTooltip.SetOwner and GameTooltip.SetText) then return end
+                GameTooltip:SetOwner(w.frame, "ANCHOR_RIGHT")
+                GameTooltip:SetText(blocker.text, 1, 1, 1, 1, true)
+                GameTooltip:Show()
+            end)
+            searchBtn:SetCallback("OnLeave", function()
+                if GameTooltip and GameTooltip.Hide then GameTooltip:Hide() end
+            end)
+        else
+            searchBtn:SetText("Search auctions")
+            searchBtn:SetWidth(140)
+        end
         searchBtn:SetDisabled(blocker ~= nil)
         searchBtn:SetCallback("OnClick", function()
             self:StartRestockSearch()

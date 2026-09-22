@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.41.0"
+local VERSION = "0.41.1"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -258,11 +258,14 @@ end
 -- flag is what Restock's gate reads first; a close also drops a quote or a
 -- start still waiting for its price, since the server discards its pending
 -- purchase with the session; then the tab redraws with its buy controls
--- disabled and the reason on the banner.
+-- disabled and the reason on the banner. A show hands Restock the watch on
+-- Auctionator's Shopping tab (#217) ahead of the redraw.
 function GBL:OnAuctionHouseToggled(event)
     self._auctionHouseOpen = (event == "AUCTION_HOUSE_SHOW")
     if event == "AUCTION_HOUSE_CLOSED" and self._RestockOnAuctionHouseClosed then
         self:_RestockOnAuctionHouseClosed()
+    elseif event == "AUCTION_HOUSE_SHOW" and self._RestockOnAuctionHouseShown then
+        self:_RestockOnAuctionHouseShown()
     end
     if self.RefreshRestockTab then self:RefreshRestockTab() end
 end
