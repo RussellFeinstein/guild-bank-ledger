@@ -42,6 +42,18 @@ local function findLabelContaining(container, substr)
     return nil
 end
 
+-- Recursive: first Button whose text starts with prefix. The Search
+-- button carries the blocking precondition in its own label (#217), so a
+-- test that only cares which control it is matches the prefix.
+local function findButtonStarting(container, prefix)
+    for _, c in ipairs(container._children or {}) do
+        if c._type == "Button" and c._text and c._text:sub(1, #prefix) == prefix then return c end
+        local nested = findButtonStarting(c, prefix)
+        if nested then return nested end
+    end
+    return nil
+end
+
 -- Recursive: first Button whose text matches.
 local function findButton(container, text)
     for _, c in ipairs(container._children or {}) do
@@ -332,7 +344,7 @@ describe("RestockView", function()
             assert.truthy(row._text:find("short 20", 1, true))
             assert.is_nil(findLabelContaining(scroll, "not found"))
             assert.is_not_nil(findButton(container, "Cancel"))
-            assert.is_nil(findButton(container, "Search auctions"))
+            assert.is_nil(findButtonStarting(container, "Search auctions"))
         end)
 
         it("decorates the list in READY with each searched row's price and Buy, formatting price with FormatMoney", function()
@@ -769,7 +781,7 @@ describe("RestockView", function()
             local container = build()
             local banner = findChild(container, "Label")
             assert.truthy(banner._text:find("Open the Auction House to search.", 1, true))
-            local btn = findButton(container, "Search auctions")
+            local btn = findButton(container, "Search auctions (open the Auction House)")
             assert.is_not_nil(btn)
             assert.is_true(btn.disabled)
         end)
@@ -977,7 +989,8 @@ describe("RestockView", function()
 
             _G.AuctionHouseFrame = { IsShown = function() return false end }
             container = build()
-            search = findButton(container, "Search auctions")
+            search = findButton(container, "Search auctions (open the Auction House)")
+            assert.is_not_nil(search)
             assert.is_true(search.disabled)
             assert.truthy(findChild(container, "Label")._text:find("Open the Auction House to search or buy.", 1, true))
         end)
@@ -1253,7 +1266,7 @@ describe("RestockView", function()
             return #(f.hooks[script] or {})
         end
         local function searchButton()
-            return findButton(GBL.tabGroup, "Search auctions")
+            return findButtonStarting(GBL.tabGroup, "Search auctions")
         end
         -- What the live path leaves behind: RefreshRestockTab reads
         -- activeTab and tabGroup, and nothing else gates the redraw.
@@ -1348,6 +1361,73 @@ describe("RestockView", function()
                 f._visible = true; fire(f, "OnShow")
             end))
             assert.is_falsy(searchButton().disabled)
+        end)
+
+        it("says on the button itself why Search is unavailable, and offers the full reason as a tooltip", function()
+            local f = shoppingFrame(true)
+            _G.AuctionatorShoppingFrame = f
+            GBL.lastScanResults = nil          -- no bank scan this session
+            buildLive()
+
+            local btn = findButton(GBL.tabGroup, "Search auctions (scan the bank first)")
+            assert.is_not_nil(btn)
+            assert.is_true(btn.disabled)
+            assert.is_true(btn._autoWidth)
+            -- The plain label belongs to the state where the click works.
+            assert.is_nil(findButton(GBL.tabGroup, "Search auctions"))
+
+            -- The full sentence is the tooltip, so the short tag on the
+            -- button does not have to carry the whole instruction.
+            local shown
+            _G.GameTooltip = {
+                SetOwner = function() end,
+                SetText = function(_s, text) shown = text end,
+                Show = function() end,
+                Hide = function() end,
+            }
+            btn:Fire("OnEnter", btn)
+            assert.is_not_nil(shown)
+            assert.truthy(shown:find("Waiting on the bank scan", 1, true))
+            _G.GameTooltip = nil
+        end)
+
+        it("names each precondition on the button", function()
+            local f = shoppingFrame(false)
+            _G.AuctionatorShoppingFrame = f
+            GBL.lastScanResults = nil
+            buildLive()
+            assert.is_not_nil(findButton(GBL.tabGroup, "Search auctions (open the Shopping tab)"))
+
+            _G.AuctionHouseFrame = nil
+            GBL._auctionHouseOpen = nil
+            buildLive()
+            assert.is_not_nil(findButton(GBL.tabGroup, "Search auctions (open the Auction House)"))
+            _G.AuctionHouseFrame = { IsShown = function() return true end }
+
+            _G.Auctionator = nil
+            buildLive()
+            assert.is_not_nil(findButton(GBL.tabGroup, "Search auctions (needs Auctionator)"))
+        end)
+
+        it("drops the tag and the tooltip once nothing blocks the search", function()
+            local f = shoppingFrame(true)
+            _G.AuctionatorShoppingFrame = f
+            GBL.lastScanResults = {}
+            buildLive()
+            local btn = findButton(GBL.tabGroup, "Search auctions")
+            assert.is_not_nil(btn)
+            assert.is_falsy(btn.disabled)
+
+            local shown
+            _G.GameTooltip = {
+                SetOwner = function() end,
+                SetText = function(_s, text) shown = text end,
+                Show = function() end,
+                Hide = function() end,
+            }
+            btn:Fire("OnEnter", btn)
+            assert.is_nil(shown)
+            _G.GameTooltip = nil
         end)
 
         it("OnShow with another tab active changes nothing", function()

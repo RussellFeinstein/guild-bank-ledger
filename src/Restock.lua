@@ -652,21 +652,26 @@ function GBL:_RestockShoppingTabChanged()
     self._restockShoppingTabRedraw = true
     C_Timer.After(0, function()
         self._restockShoppingTabRedraw = nil
+        -- Another tab, or no window: RefreshRestockTab declines, and a line
+        -- per Auction House tab click while the player is reading their
+        -- transactions is noise that pushes a run out of the 300-entry
+        -- capture (the #199 rule about idle auction-house traffic).
+        if self.activeTab ~= "restock" then return end
         local st = self._restock
         local state = st and st.state or "IDLE"
         local visible = AuctionatorShoppingFrame ~= nil and AuctionatorShoppingFrame.IsVisible ~= nil
             and AuctionatorShoppingFrame:IsVisible() and true or false
         if not self:_RestockStateReadsBlocker(state) then
-            self:SystemInfo("Restock tab: shopping tab %s, state=%s tab=%s skipped (in flight)",
-                visible and "shown" or "hidden", state, tostring(self.activeTab))
+            self:SystemInfo("Restock tab: shopping tab %s, state=%s skipped (in flight)",
+                visible and "shown" or "hidden", state)
             return
         end
         if self.RefreshRestockTab then self:RefreshRestockTab() end
-        -- After the redraw, so the line carries what the tab now shows: the
-        -- precondition the build rendered, or "not built" when
-        -- RefreshRestockTab declined (another tab, or no window).
-        self:SystemInfo("Restock tab: shopping tab %s, state=%s tab=%s redrew blocker=%s",
-            visible and "shown" or "hidden", state, tostring(self.activeTab),
+        -- After the redraw, so the line carries the precondition the build
+        -- just rendered, which is what a greyed Search has to be read
+        -- against: shopping-tab, ah-closed, no-scan, nothing, or none.
+        self:SystemInfo("Restock tab: shopping tab %s, state=%s redrew blocker=%s",
+            visible and "shown" or "hidden", state,
             tostring(self._restockRenderedBlocker or "not built"))
     end)
 end
@@ -702,24 +707,24 @@ function GBL:_RestockStopShoppingTabPoll()
 end
 
 local SEARCH_BLOCKERS = {
-    { key = "auctionator",
+    { key = "auctionator", short = "needs Auctionator",
       text = "Restock needs the Auctionator addon to search and buy. Targets still display below.",
       holds = function(self) return self:IsAuctionatorReady() end },
-    { key = "ah-closed",
+    { key = "ah-closed", short = "open the Auction House",
       text = "Open the Auction House to search.",
       holds = function(self) return self:_RestockAuctionHouseOpen() end },
     -- Until #194 moves the search to Auctionator's public entry, which
     -- selects the tab itself, the Shopping tab has to be on screen.
-    { key = "shopping-tab",
+    { key = "shopping-tab", short = "open the Shopping tab",
       text = "Open the Auctionator Shopping tab first, then search.",
       holds = function()
           return AuctionatorShoppingFrame ~= nil and AuctionatorShoppingFrame.IsVisible ~= nil
               and AuctionatorShoppingFrame:IsVisible() and true or false
       end },
-    { key = "no-scan",
+    { key = "no-scan", short = "scan the bank first",
       text = "Waiting on the bank scan. Open the guild bank, or click Scan bank, so in-bank counts are right.",
       holds = function(self, opts) return (opts.scanResults or self:GetLastScanResults()) ~= nil end },
-    { key = "nothing",
+    { key = "nothing", short = "nothing to buy",
       text = "Nothing to buy: the bank and the mail cover every layout item.",
       holds = function(self, opts, ctx)
           ctx.buyList = self:_RestockBuildBuyList(opts)
@@ -733,13 +738,13 @@ local SEARCH_BLOCKERS = {
 -- every precondition holds the buy list the last one built comes back too,
 -- so a click does not build it twice.
 -- @param opts table|nil forwarded to _RestockBuildBuyList (tests inject)
--- @return table|nil { key, text }, table|nil buyList (when nil)
+-- @return table|nil { key, text, short }, table|nil buyList (when nil)
 function GBL:_RestockSearchBlocker(opts)
     opts = opts or {}
     local ctx = {}
     for _, b in ipairs(SEARCH_BLOCKERS) do
         if not b.holds(self, opts, ctx) then
-            return { key = b.key, text = b.text }
+            return { key = b.key, text = b.text, short = b.short }
         end
     end
     return nil, ctx.buyList

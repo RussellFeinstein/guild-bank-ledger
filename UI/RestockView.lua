@@ -316,8 +316,27 @@ function GBL:BuildRestockTab(container)
     local confirmIndex
     if state == "IDLE" or state == "READY" then
         local searchBtn = AceGUI:Create("Button")
-        searchBtn:SetText("Search auctions")
-        searchBtn:SetWidth(140)
+        -- A disabled control that does not say why reads as broken
+        -- (Russell, the 2026-09-22 run, on the bank-scan precondition).
+        -- The tag is on the button, so it needs no pointer and no colour;
+        -- the banner keeps the sentence and the tooltip repeats it for a
+        -- player whose eye is on the control rather than the top of the tab.
+        if blocker then
+            searchBtn:SetText(format("Search auctions (%s)", blocker.short or "unavailable"))
+            if searchBtn.SetAutoWidth then searchBtn:SetAutoWidth(true) end
+            searchBtn:SetCallback("OnEnter", function(w)
+                if not (GameTooltip and GameTooltip.SetOwner and GameTooltip.SetText) then return end
+                GameTooltip:SetOwner(w.frame, "ANCHOR_RIGHT")
+                GameTooltip:SetText(blocker.text, 1, 1, 1, 1, true)
+                GameTooltip:Show()
+            end)
+            searchBtn:SetCallback("OnLeave", function()
+                if GameTooltip and GameTooltip.Hide then GameTooltip:Hide() end
+            end)
+        else
+            searchBtn:SetText("Search auctions")
+            searchBtn:SetWidth(140)
+        end
         searchBtn:SetDisabled(blocker ~= nil)
         searchBtn:SetCallback("OnClick", function()
             self:StartRestockSearch()

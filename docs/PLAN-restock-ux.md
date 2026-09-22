@@ -183,8 +183,9 @@ the row reads `bank ?` and `bank unknown` with no shortfall until a scan has com
 (Search stayed disabled after the Shopping tab was selected, nothing re-read the blocker on that
 change) shipped 2026-09-22 as v0.41.1: the frame's OnShow and OnHide redraw the tab once per burst, in IDLE
 and READY, only when the reading changed, installed lazily because Auctionator creates the frame on
-the first Auction House show; the hook goes with the precondition at #194. #218 (a countdown on
-the PRICED banner) follows.
+the first Auction House show; the hook goes with the precondition at #194. Each precondition also gained a short tag that a
+disabled Search carries in its own label, with the sentence on hover (Russell: a greyed control
+that gives no reason reads as a bug). #218 (a countdown on the PRICED banner) follows.
 
 ## 5. Row vocabulary (#44, #56, #205, #209)
 
