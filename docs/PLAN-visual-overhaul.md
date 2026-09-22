@@ -12,6 +12,11 @@ doc: the chassis is Blizzard's current frame templates, migrated tab by tab, wit
 each tab moves; the nine flat tabs become four groups; and nothing is filed on the tracker until
 this doc has been read, so section 10 is a proposal rather than a record.
 
+Revised the same day after `docs/PLAN-views-and-access.md`, which sits above this doc: the roles,
+the view set each access mode shows, the member view (My record) and the order of the first steps
+are decided there, and sections 5, 6, 9, 10 and 11 below were rewritten to say what it says. Where
+the two disagree, that doc wins.
+
 Every number below was measured on that commit with the command beside it or with the file and
 line quoted. The URLs in section 12 were read by the research pass on 2026-09-21 and not by the
 author of this doc directly, which is why each finding names the page it came from.
@@ -264,9 +269,10 @@ text.
 
 **Tab strip.** Four `PanelTabButtonTemplate` tabs hung below the frame's bottom edge, the way the
 Character and Collections frames hang theirs: History, Bank, Sync, Help. Access gating stays a
-property of the list: a `sync_only` member gets Sync and Help; a member without sort access gets
-History, Sync and Help; Bank appears when `HasSortAccess()` holds and its Layout view when
-`HasLayoutWrite()` holds. The selection fallback is the one `RebuildTabs` has today and
+property of the list, per `docs/PLAN-views-and-access.md` sections 6 and 14: a Sync-only member
+gets Sync and Help; a Member gets My record (the one History view of that set), Sync and Help;
+full access gets History, Sync and Help, with Bank when `HasSortAccess()` holds and its Layout
+view when `HasLayoutWrite()` holds. The selection fallback is the one `RebuildTabs` has today and
 `spec/ui/tab_visibility_spec.lua` pins. Tab widths come from the font object, not a constant;
 the probe measures the strip at font size 8 and 24.
 
@@ -348,10 +354,21 @@ it in review. Absorbs #204's Transactions half, #86, #63 (the season entry in th
 column in `muted` labels and `ink` values, repairs and withdrawals told apart by the status cell's
 text (#204's "a member cannot tell a manual gold withdrawal from a repair").
 
-**History > Players.** The Consumption view under #204's member-facing framing: the guild totals as
-a row of label-and-value pairs (label in `muted`, value in `ink`, the label folded into the value
-where it reads better: "47 flasks" rather than "Flasks: 47"), then the per-player Table. Whether the
-tab is called Players is #204's call; the view keeps every column it has.
+**History > Players.** The Consumption view under the roadmap's own rename, a leadership view:
+the guild totals as a row of label-and-value pairs (label in `muted`, value in `ink`, the label
+folded into the value where it reads better: "47 flasks" rather than "Flasks: 47"), then the
+per-player Table, with #204's exclusion list (the GM's administrative moves) as an officer setting
+on the guild. The view keeps every column it has. The member framing #204 records as homeless does
+not live here; it lives in My record.
+
+**History > My record.** The Member set's one History view, `docs/PLAN-views-and-access.md`
+section 8: a strip of two sentences in `ink` under the in-tab switch ("Since 2026-08-22 the guild
+covered 7,529g of your repairs." and the counts taken and deposited by category), a window list
+of three entries (last 30 days, this season, all time) and nothing shorter, one unnamed guild line
+in `muted` for the same window with a five-name floor, then the member's own item and gold rows in
+the Table across every character on the account, the status cell first, no Player column. The
+empty state is one sentence. It opens first for a Member, and it is where the triple encoding the
+README claims is first true on the view most members see.
 
 **Bank > Sort.** The preview and progress list as a Table whose rows are ops, the status cell in
 the first column, the op text as `formatOpRow` writes it today (`UI/SortView.lua:42-51`), the amber
@@ -439,6 +456,11 @@ Cost is a band, not a figure: S is a session, M a few sessions, L a milestone-si
 is one PR with its own stamp, closes its issue, and ends with a screenshot in the PR body and the
 in-game check it promised.
 
+- **Ahead of everything, the hotfix (S).** `docs/PLAN-views-and-access.md` section 18, item 1:
+  members have never seen a filtered list under the Own Transactions banner (that doc's section
+  5). On AceGUI, on `hotfix/` off `main`, before #214 and before step 0, because it is live. It
+  changes what the AceGUI ledger is handed, not how it is drawn, so nothing here depends on it and
+  it depends on nothing here.
 - **Step 0, `UI/Theme.lua` and the literal sweep (M).** The token table, the three font objects,
   `colorHex` written once, the 130 literals routed through the palette, the two specs from section
   8. No visual change beyond consistency, so it ships alone and first, and every later step reads
@@ -453,10 +475,14 @@ in-game check it promised.
   container sized from `OnWidthSet` and `OnHeightSet`). The `AddFillChild` registry
   (`UI/UI.lua:129-150`) goes with the AceGUI Frame. Absorbs #65 and the minimap tooltip promise.
 - **Step 2, `UI/Table.lua` and Transactions (L).** The Table component, #86, and the reference view
-  in section 6, with the filter row. The render spec for Transactions rides this PR. Absorbs #63
-  and #43.
+  in section 6, with the filter row. The render spec for Transactions rides this PR. Absorbs #43;
+  #63's date entry lands here and its guild-wide definition is the views doc's item 5.
+- **Step 2b, My record (M).** The Member set's view on the same Table: the strip through the two
+  existing computers, the three-entry window list, the guild line and its floor, the own rows
+  (`docs/PLAN-views-and-access.md` sections 8, 15 and 16). Before Gold and Players because it is
+  the view the majority of the guild sees, and after the Table because it is one.
 - **Step 3, Gold and Players (M).** Two more column lists on the same Table; the summary column;
-  #204 closes here with its own verification.
+  #204 closes once this and step 2b have both landed, with its own verification.
 - **Step 4, Sync and Help (S).** The peer Table, the checkboxes, the access-control group; About and
   Changelog under one tab.
 - **Step 5, Restock (M).** #214 on the chassis. The rows, banner and controls per
@@ -481,32 +507,34 @@ and runs after the milestone, which is the placement #188 already gives History 
 The one order change this asks of #188: steps 0 to 2 before #214, so the Restock tab half is built
 once, on the chassis, instead of on AceGUI and then again. #214 was next in the order; under this
 proposal it becomes step 5. If Russell would rather see the Restock tab finished first, the cost is
-one more rebuild of that tab and nothing else in this doc changes.
+one more rebuild of that tab and nothing else in this doc changes. The hotfix in
+`docs/PLAN-views-and-access.md` section 18 goes ahead of all of it, #214 included, because it is
+live; that is not a proposal.
 
 Issues to file when the doc is accepted, one clause each, in the tracker's table shape:
 
 | # | Issue | Runs | What |
 |---|---|---|---|
 | 1 | Theme tokens and the literal sweep | beside | `UI/Theme.lua`, three font objects, 130 literals routed, the two token specs (absorbs #44) |
-| 2 | Native shell, tab strip, footer, Settings | after 1 | `ButtonFrameTemplate` shell hosting AceGUI bodies, four tabs, footer line, Settings category (closes #65) |
-| 3 | Table component and Transactions | after 2 | `UI/Table.lua` on `WowScrollBoxList` and TableBuilder, #86, the reference view (closes #63, #43) |
-| 4 | Gold and Players on the Table | after 3 | two column lists, the summary column (closes #204) |
-| 5 | Sync and Help on the chassis | after 3 | peer Table, checkboxes, access-control group, About and Changelog under one tab |
-| 6 | Restock tab on the chassis | after 3 | #214's content, built once |
-| 7 | Sort tab on the chassis | after 3 and #55 | plan Table, status cell |
-| 8 | Layout tab on the chassis | after 3 | #206's sweep |
-| 9 | High-contrast palette values that reach 7:1 | beside | the four section 4 replacements validated on screen; the AAA claim corrected in three docs |
+| 2 | Native shell, tab strip, footer, Settings | after 1 | `ButtonFrameTemplate` shell hosting AceGUI bodies, the tab list per role from the views doc, footer line, Settings category (closes #65) |
+| 3 | Table component and Transactions | after 2 | `UI/Table.lua` on `WowScrollBoxList` and TableBuilder, #86, the reference view (closes #43; #63's date entry) |
+| 4 | My record on the Table | after 3 | the Member set's view: strip, three-entry window, guild line, own rows (the views doc's sections 8, 15, 16) |
+| 5 | Gold and Players on the Table | after 3 | two column lists, the summary column, the exclusion setting (closes #204 with 4) |
+| 6 | Sync and Help on the chassis | after 3 | peer Table, checkboxes, access-control group with the season, About and Changelog under one tab |
+| 7 | Restock tab on the chassis | after 3 | #214's content, built once |
+| 8 | Sort tab on the chassis | after 3 and #55 | plan Table, status cell |
+| 9 | Layout tab on the chassis | after 3 | #206's sweep |
+| 10 | High-contrast palette values that reach 7:1 | beside | the four section 4 replacements validated on screen; the AAA claim corrected in three docs |
 
-Item 9 is filed regardless of the rest: the claim is on the CurseForge page today.
+Item 10 is filed regardless of the rest: the claim is on the CurseForge page today. The hotfix,
+the slash-command parity item, the season field and the #88 close are the views doc's section 18
+and are not repeated here.
 
 ## 11. Open questions
 
-- **Which view does each role open first, and how often.** The four groups and the Help tab are a
-  plausible default, not observed usage (the 2026-09-01 lesson: a genre-plausible structure is an
-  assumed field). Before step 1, Russell answers from the guild for the GM, an officer with sort
-  access and a plain member; the answer decides the default tab per role and whether Help is a tab
-  or a button in the title bar.
-- **Players or Consumption**, #204's call.
+- **Which view leadership opens first, and whether Help is a tab or a title-bar button.** For a
+  Member the answer is My record (`docs/PLAN-views-and-access.md` section 8, from Russell's
+  answers of 2026-09-21); for ranks 0 to 3 it stays Transactions until Russell says otherwise.
 - **No pages**, section 6's answer to #204's pagination model, to confirm.
 - **The guild's split between the default UI and skins**, which decides how soon a skin file is
   worth writing.
