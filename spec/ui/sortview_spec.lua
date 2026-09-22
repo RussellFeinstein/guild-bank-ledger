@@ -355,8 +355,33 @@ describe("SortView", function()
         it("leaves an unrelated key unhandled so it keeps propagating", function()
             buildTab()
             GBL.A11Y.focusIndex = 1
-            assert.is_false(GBL:_SortView_NavKey("ESCAPE", false))
+            assert.is_false(GBL:_SortView_NavKey("X", false))
             assert.equals(1, GBL.A11Y.focusIndex)
+        end)
+
+        -- The rule (#219, shared with the Restock tab through GBL:FocusNavKey):
+        -- with nothing focused only Tab enters the walk, so an arrow pressed
+        -- to turn the character cannot land on Preview or Execute; Escape
+        -- clears focus and consumes only itself.
+        it("consumes nothing but TAB while nothing is focused (#219)", function()
+            buildTab()
+            GBL.A11Y.focusIndex = 0
+            for _, key in ipairs({ "UP", "DOWN", "ENTER", "NUMPADENTER", "SPACE" }) do
+                assert.is_false(GBL:_SortView_NavKey(key, false), key)
+                assert.equals(0, GBL.A11Y.focusIndex, key)
+            end
+            assert.is_true(GBL:_SortView_NavKey("TAB", false))
+            assert.equals(1, GBL.A11Y.focusIndex)
+        end)
+
+        it("ESCAPE clears focus when a widget has it, and propagates when none does (#219)", function()
+            buildTab()
+            GBL.A11Y.focusIndex = 0
+            assert.is_false(GBL:_SortView_NavKey("ESCAPE", false))
+            GBL:_SortView_NavKey("TAB", false)
+            assert.equals(1, GBL.A11Y.focusIndex)
+            assert.is_true(GBL:_SortView_NavKey("ESCAPE", false))
+            assert.equals(0, GBL.A11Y.focusIndex)
         end)
     end)
 

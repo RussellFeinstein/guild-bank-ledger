@@ -616,6 +616,41 @@ describe("LayoutEditor Store field", function()
         assert.is_not_nil(hint, "the Store hint under the bulk row")
         assert.truthy(hint._text:find("larger of slots x per slot and Store", 1, true))
     end)
+
+    it("colours the hints under the bulk row from the palette, not a grey literal", function()
+        local AceGUI = LibStub("AceGUI-3.0")
+        local parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderDisplayDetails(parent, 1, true)
+        local hex = string.format("%02x%02x%02x", 204, 204, 204)   -- NEUTRAL in the normal palette
+        local found = 0
+        local function walk(w)
+            for _, c in ipairs(w._children or {}) do
+                if c._type == "Label" and c._text and (c._text:find("Store: how many", 1, true)
+                    or c._text:find("Leave a field blank", 1, true)) then
+                    found = found + 1
+                    assert.truthy(c._text:find("|cff" .. hex, 1, true), c._text:sub(1, 40))
+                    assert.is_nil(c._text:find("|cff888888", 1, true), c._text:sub(1, 40))
+                end
+                walk(c)
+            end
+        end
+        walk(parent)
+        assert.equals(2, found)
+    end)
+
+    it("shows the Store hint as a tooltip over the field and hides it on leave", function()
+        local AceGUI = LibStub("AceGUI-3.0")
+        local parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, true)
+        local box = findStore(parent)
+        GameTooltip._shown = false
+        box:Fire("OnEnter")
+        assert.equals(box.frame, GameTooltip._owner)
+        assert.truthy(GameTooltip._text:find("Store: how many the guild bank should hold", 1, true))
+        assert.is_true(GameTooltip._shown)
+        box:Fire("OnLeave")
+        assert.is_false(GameTooltip._shown)
+    end)
 end)
 
 describe("LayoutEditor._LayoutGrantSummary", function()

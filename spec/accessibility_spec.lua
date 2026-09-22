@@ -267,6 +267,19 @@ describe("Accessibility", function()
             assert.equals(3, #GBL.A11Y.focusOrder)   -- the order survives; only the focus goes
         end)
 
+        it("ActivateFocused gives an EditBox keyboard focus rather than firing a click it has no handler for (#214)", function()
+            local AceGUI = LibStub("AceGUI-3.0")
+            local box = AceGUI:Create("EditBox")
+            local clicked = false
+            box:SetCallback("OnClick", function() clicked = true end)
+            GBL:ClearFocusOrder()
+            GBL:RegisterFocusable(box, 1)
+            GBL.A11Y.focusIndex = 1
+            assert.is_true(GBL:ActivateFocused())
+            assert.is_true(box._hasFocus)
+            assert.is_false(clicked)
+        end)
+
         it("restores focus to last focused element", function()
             GBL:AdvanceFocus(1)
             GBL:AdvanceFocus(1)

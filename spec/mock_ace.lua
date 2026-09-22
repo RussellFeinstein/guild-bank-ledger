@@ -333,8 +333,27 @@ function MockAce.install()
             table.insert(self._children, child)
             child._parent = self
         end
-        widget.ReleaseChildren = function(self) self._children = {} end
-        widget.Release = function() end
+        -- Real AceGUI:Release fires the widget's OnRelease callback and then
+        -- releases its children, so a reference production code keeps to a
+        -- widget can be dropped from that callback; the mock does the same
+        -- (#214, the Restock gold line), or a guard written against it can
+        -- go neither red nor green here.
+        widget.ReleaseChildren = function(self)
+            local children = self._children
+            self._children = {}
+            for _, child in ipairs(children) do
+                child:Fire("OnRelease")
+                child:ReleaseChildren()
+            end
+        end
+        widget.Release = function(self)
+            self:Fire("OnRelease")
+            self:ReleaseChildren()
+        end
+        -- Real AceGUI EditBox has SetFocus (keyboard focus into the box) and
+        -- Button has SetAutoWidth; both are what the Restock tab calls (#214).
+        widget.SetFocus = function(self) self._hasFocus = true end
+        widget.SetAutoWidth = function(self, on) self._autoWidth = on end
         widget.Show = function(self) self._shown = true end
         widget.Hide = function(self) self._shown = false end
         -- Mock underlying WoW frame (for IsShown checks)
