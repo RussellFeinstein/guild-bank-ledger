@@ -102,8 +102,7 @@ count and tab); where the gold went, with a manual withdrawal told from a repair
 administrative moves excluded so the list means something (Players; #204's second note); the bank
 kept in shape (Sort), stocked (Restock) and described (Layout), each gated by the bank family; the
 sync state and, for the GM, the two policies (Sync); the export for the hub (section 13). Their
-first view stays Transactions, as today, until Russell says otherwise (the visual doc's section 11
-still asks which view leadership opens first; for members this doc answers it).
+first view is Transactions, as today (decided, section 19); for members it is My record.
 
 **The member.** One question in two forms: what did the guild give me, and what is my record. In
 the numbers of section 2 that is a real statement: a member active this tier has had thousands of
@@ -166,8 +165,8 @@ one thing and the label is another:
 | `own_transactions` | Member | My record (section 8), Sync, Help |
 | `sync_only` | Sync only | Sync, Help |
 
-Proposed, for Russell to decide on this doc: when a threshold is set and no mode is chosen, the
-default becomes Member rather than Sync only. `restrictedMode or "sync_only"`
+Decided (section 19): when a threshold is set and no mode is chosen, the default becomes Member
+rather than Sync only, from the hotfix on. `restrictedMode or "sync_only"`
 (`src/Core.lua:2001`) makes the mode with no member value the one a GM gets by not choosing. The
 change is one line in the level computation and one in the dropdown's default
 (`UI/SyncStatus.lua:224`), display-side, no wire change. Until every client updates, a guild in
@@ -212,7 +211,7 @@ the record shape supports and that is three figures, not a page.
 Gold is exact on repairs (`type == "repair"`, `amount`) and on gold withdrawals, and the strip
 says both. Items are counts per category and never gold: the addon holds no prices, so no line
 here values a flask. Taken and deposited are two gross figures, not a net (a net needs a sentence
-of arithmetic under it; Russell confirms gross on this doc). The figures come through
+of arithmetic under it; decided, section 19). The figures come through
 `ComputeGoldLogSums` (`UI/ConsumptionView.lua:172`) and `BuildConsumptionSummary`
 (`UI/ConsumptionView.lua:55`), the two computers that already carry a "keep in sync" comment,
 and not through a third copy. Records whose `category` is `unknown` (195 synced records that lost
@@ -291,8 +290,9 @@ What reaches which client, for the record:
 #88 asks whether a member should see synced history for bank tabs their rank cannot view. Under a
 threshold, the Member set answers it by construction: a member sees only their own rows, and
 nobody has a row on a tab they cannot open. For ranks 0 to 3 it is documented behaviour: a rank-3
-bank hand may read the history of a tab the guild restricts to officers, and whether that matters
-is a fact about the guild's tab permissions, which Russell answers on this doc. For a guild with
+bank hand could read the history of a tab a guild restricts to officers. In We Go Again rank 3 can
+open every tab (decided, section 19), so the case does not arise here and the note is for other
+guilds, whose tab permissions are their own. For a guild with
 no threshold at all, everyone is `full` (`src/Core.lua:1992`) and #88 is wholly open; that guild
 has chosen to draw no line, and the doc says so rather than filtering on its behalf. #88 closes
 as documented behaviour with this wording once the hotfix has shipped.
@@ -317,7 +317,8 @@ from one.
 
 Set by the GM from the Sync tab's access-control group, beside the threshold and the mode, because
 it is guild state and not a preference (the visual doc keeps guild state off the Settings panel
-for that reason); whether layout-write holders may set it is Russell's call. The per-user date presets
+for that reason), and by the GM alone, the same gate as the two policies beside it (decided,
+section 19). The per-user date presets
 (`db.profile.filters`, declared and unread) stay per user and are where the three-entry list of
 section 8 and the leadership views' longer list keep their defaults.
 
@@ -422,8 +423,8 @@ In build order. `live` means broken in production now and goes first. The `Flag`
 | 2 | `/gbl sortpreview` and `/gbl deviations` gated on `HasSortAccess` | | beside | | parity with `sortexec` (`src/Core.lua:2464`); not live (section 14) |
 | 3 | Open with Guild Bank moves to the personal row | | with 1, or with the shell | Russell | a member can have the frame at the bank; default stays off |
 | 4 | My record on the chassis | | after the visual doc's step 2 (the Table) | | section 8 and 15; the Member set's tab list; #204's member half |
-| 5 | The season as a guild fact | | after the shell (the visual doc's step 1) | Russell (who may set it) | a top-level HELLO field per section 12, set from the Sync tab's access-control group; the three-entry and the long date lists reading it; #63 |
-| 6 | #88 closed as documented behaviour | | after 1 | Russell (rank-3 tab permissions) | section 11's wording |
+| 5 | The season as a guild fact | | after the shell (the visual doc's step 1) | | a top-level HELLO field per section 12, GM-set from the Sync tab's access-control group; the three-entry and the long date lists reading it; #63 |
+| 6 | #88 closed as documented behaviour | | after 1 | | section 11's wording |
 | 7 | #204 re-scoped | | after 4 and the visual doc's step 3 | | the member journey is My record; closes when both have landed |
 | 8 | The visual doc's section 10 rows | | as that doc orders them | | carried forward unchanged except that My record is a step of its own and the tab list per role comes from here |
 | 9 | The export button on the History group | | in milestone 9, after the shell | kat (the format, #186) | `/gbl export` first; the button when the shell exists |
@@ -432,16 +433,23 @@ Nothing above changes the order on #188 except item 1, which goes ahead of #214 
 live, and the visual doc's own proposal that its steps 0 to 2 precede #214, which stands as a
 proposal.
 
-## 19. Open questions
+## 19. Decisions taken on this doc (Russell, 2026-09-21)
 
-- **The nil default** (section 6): does a threshold with no mode mean Member from the hotfix on?
-- **Gross or net** on the strip (section 8): two figures, or one with the arithmetic explained.
-- **The guild line** (section 8): keep it with the five-name floor, or leave it out of the member
-  view entirely.
-- **Who sets the season** (section 12): the GM only, or layout-write holders too.
-- **Rank-3 tab permissions** (section 11): does a rank-3 bank hand see the history of a tab that
-  rank cannot open in the bank itself, and does the guild mind.
-- **Leadership's first view** and **Help as a tab or a button**, carried over from the visual doc.
+Seven questions were open when the doc was written; all seven were put to Russell the same night
+and are recorded here, each folded into the section it belongs to.
+
+- **The nil default** (section 6): a threshold with no mode means Member from the hotfix on.
+- **Gross, two figures** on the strip (section 8): taken and deposited stated separately.
+- **The guild line stays** (section 8), with the five-name floor and the 30-day minimum window.
+- **The GM alone sets the season** (section 12), the same gate as access control and sort access.
+- **Rank 3 can open every bank tab** in We Go Again (section 11), so the rank-3 residual does not
+  arise here, and #88 closes as documented behaviour with that note.
+- **Leadership opens on Transactions**, as today (section 4).
+- **Help is a bottom tab**, as the canvas draws it (the visual doc's section 5).
+
+The one item still marked for Russell in section 18 is whether "Open with Guild Bank" moves to the
+personal row (item 3); it was not put as a question and rides the hotfix or the shell as he
+prefers.
 
 ## 20. Sources
 

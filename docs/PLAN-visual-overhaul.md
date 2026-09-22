@@ -532,9 +532,8 @@ and are not repeated here.
 
 ## 11. Open questions
 
-- **Which view leadership opens first, and whether Help is a tab or a title-bar button.** For a
-  Member the answer is My record (`docs/PLAN-views-and-access.md` section 8, from Russell's
-  answers of 2026-09-21); for ranks 0 to 3 it stays Transactions until Russell says otherwise.
+- Decided 2026-09-21 (`docs/PLAN-views-and-access.md` section 19): a Member opens on My record,
+  full access opens on Transactions, and Help is a bottom tab as section 5 draws it.
 - **No pages**, section 6's answer to #204's pagination model, to confirm.
 - **The guild's split between the default UI and skins**, which decides how soon a skin file is
   worth writing.
