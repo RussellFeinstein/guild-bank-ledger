@@ -32,7 +32,7 @@ GBL.CHANGELOG_DATA = {
     -- v0.41.1
     {"0.41.1", "2026-09-22", {
         Fixed = {
-            "Restock's Search no longer stays greyed after Auctionator's Shopping tab is selected while the Restock tab is showing. The tab now redraws when that Shopping tab comes on or goes off screen, so Search and the banner read the precondition as it is, instead of waiting for the Restock tab to be left and re-entered. The redraw waits for a search or a purchase in flight to finish, and skips when nothing on screen would change.",
+            "Restock's Search no longer stays greyed after Auctionator's Shopping tab is selected while the Restock tab is showing. The tab now redraws when that Shopping tab comes on or goes off screen, so Search and the banner read the precondition as it is, instead of waiting for the Restock tab to be left and re-entered. The redraw waits for a search or a purchase in flight to finish.",
         },
     }},
     -- v0.41.0

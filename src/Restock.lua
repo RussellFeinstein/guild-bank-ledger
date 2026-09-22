@@ -622,31 +622,45 @@ function GBL:_RestockWatchShoppingTab()
     frame:HookScript("OnShow", changed)
     frame:HookScript("OnHide", changed)
     self._restockShoppingTabHooked = true
+    self:SystemInfo("Restock tab: hooked Auctionator's shopping frame")
     return true
 end
 
 --- The Shopping tab came on or went off screen. One redraw is scheduled
--- for the next tick however many firings land in this one, and it draws
--- only when the Restock tab is in view, in a state that reads the blocker
--- (a rebuild in CONFIRMING or PRICED moves the focus from under the
--- player, the #214 rule, and a search in flight is ended by Auctionator's
--- own OnHide, whose SearchEnd lands the tab in READY and redraws it), and
--- when the blocker it would render differs from the one on screen: a
--- hide-and-show pair, the OnHide that rides the window closing (Core's
--- CLOSED redraw has drawn "ah-closed" by then) and a SearchEnd that
--- already redrew all compare equal and draw nothing.
+-- for the next tick however many firings land in this one: LibAHTab hides
+-- every Auctionator tab frame and shows the selected one on each
+-- selection, Auctionator shows its default tab twice on open, and the
+-- frame hides with the window, so the hooks arrive in bursts. The redraw
+-- is skipped only while a search or a purchase is in flight, where a
+-- rebuild would move the focus from under the player (#214) or redraw a
+-- running search; RefreshRestockTab decides the rest, as every other
+-- caller lets it (it no-ops unless the Restock tab is the built one).
+--
+-- Two further gates shipped in the first cut of this fix and were
+-- withdrawn after the in-game run, where Search never came back: an
+-- in-view check on the cached `_restockInView` flag, and a compare of the
+-- blocker against the one the last build rendered. Both could suppress the
+-- redraw the fix exists for, and neither had ever been observed true on a
+-- real client (`_restockInView`'s only other reader is the wallet
+-- baseline, where a wrong value is invisible). That is the 2026-09-17 rule
+-- (never gate an action on a predicate whose real behaviour has not been
+-- observed) and it cost this fix its whole point. What replaces them is
+-- the line below: the next run says which of them was false.
 function GBL:_RestockShoppingTabChanged()
     if self._restockShoppingTabRedraw then return end
     if not (C_Timer and C_Timer.After) then return end
     self._restockShoppingTabRedraw = true
     C_Timer.After(0, function()
         self._restockShoppingTabRedraw = nil
-        if not self._restockInView then return end
         local st = self._restock
-        if not self:_RestockStateReadsBlocker(st and st.state or "IDLE") then return end
-        local blocker = self:_RestockSearchBlocker()
-        local key = blocker and blocker.key or "none"
-        if key == self._restockRenderedBlocker then return end
+        local state = st and st.state or "IDLE"
+        local visible = AuctionatorShoppingFrame ~= nil and AuctionatorShoppingFrame.IsVisible ~= nil
+            and AuctionatorShoppingFrame:IsVisible() and true or false
+        local drawing = self:_RestockStateReadsBlocker(state)
+        self:SystemInfo("Restock tab: shopping tab %s, state=%s tab=%s inview=%s %s",
+            visible and "shown" or "hidden", state, tostring(self.activeTab),
+            tostring(self._restockInView), drawing and "redraw" or "skipped (in flight)")
+        if not drawing then return end
         if self.RefreshRestockTab then self:RefreshRestockTab() end
     end)
 end
@@ -662,6 +676,7 @@ function GBL:_RestockOnAuctionHouseShown()
     if not self:IsAuctionatorReady() then return end
     if self._restockShoppingTabPoll then return end
     if not (C_Timer and C_Timer.NewTicker) then return end
+    self:SystemInfo("Restock tab: watching for Auctionator's shopping frame every %ss", tostring(SHOPPING_TAB_POLL))
     self._restockShoppingTabPoll = C_Timer.NewTicker(SHOPPING_TAB_POLL, function()
         if not self:_RestockAuctionHouseOpen() then
             self:_RestockStopShoppingTabPoll()

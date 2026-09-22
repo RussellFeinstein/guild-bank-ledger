@@ -1227,8 +1227,10 @@ describe("RestockView", function()
     -- left and re-entered. Auctionator creates AuctionatorShoppingFrame on
     -- the first Auction House show of the session, so the hook installs
     -- lazily: from every rebuild, and from a poll after AUCTION_HOUSE_SHOW
-    -- while the frame is not there. A change redraws once, on the next tick,
-    -- and only when the blocker it would render differs from the one drawn.
+    -- while the frame is not there. A burst of firings redraws once, on the
+    -- next tick, and only a search or a purchase in flight holds it back:
+    -- the in-view flag and the blocker compare the first cut also gated on
+    -- were withdrawn after the in-game run, where Search never came back.
     ------------------------------------------------------------------------
     describe("shopping tab refresh (#217)", function()
         local function shoppingFrame(visible)
@@ -1253,9 +1255,10 @@ describe("RestockView", function()
         local function searchButton()
             return findButton(GBL.tabGroup, "Search auctions")
         end
+        -- What the live path leaves behind: RefreshRestockTab reads
+        -- activeTab and tabGroup, and nothing else gates the redraw.
         local function buildLive()
             GBL.activeTab = "restock"
-            GBL._restockInView = true
             GBL.tabGroup = LibStub("AceGUI-3.0"):Create("TabGroup")
             GBL:BuildRestockTab(GBL.tabGroup)
         end
@@ -1290,7 +1293,6 @@ describe("RestockView", function()
         after_each(function()
             _G.Auctionator = nil
             _G.AuctionatorShoppingFrame = nil
-            GBL._restockInView = nil
         end)
 
         it("installs the OnShow and OnHide hooks once across two rebuilds", function()
@@ -1330,33 +1332,22 @@ describe("RestockView", function()
             assert.is_not_nil(findLabelContaining(GBL.tabGroup, "Open the Auctionator Shopping tab first"))
         end)
 
-        it("redraws once for a hide and show in one frame, and not at all when the reading is unchanged", function()
+        it("redraws once for a burst of firings in one frame", function()
             local f = shoppingFrame(true)
             _G.AuctionatorShoppingFrame = f
             buildLive()
-            -- The burst is coalesced ahead of the compare: the blocker is
-            -- computed once per burst, plus once more inside a redraw.
-            local reads = 0
-            local origBlocker = GBL._RestockSearchBlocker
-            GBL._RestockSearchBlocker = function(...) reads = reads + 1; return origBlocker(...) end
-
-            -- Auctionator re-selecting the tab: Hide then Show, still visible.
-            assert.equals(0, countBuilds(function()
-                f._visible = false; fire(f, "OnHide")
-                f._visible = true;  fire(f, "OnShow")
-            end))
-            assert.equals(1, reads)
-
-            -- Three firings that end hidden: one redraw.
-            reads = 0
             assert.equals(1, countBuilds(function()
                 f._visible = false; fire(f, "OnHide")
                 f._visible = true;  fire(f, "OnShow")
                 f._visible = false; fire(f, "OnHide")
             end))
-            assert.equals(2, reads)
-            GBL._RestockSearchBlocker = origBlocker
             assert.is_true(searchButton().disabled)
+            -- The next burst is its own redraw: the flag is cleared by the
+            -- tick, not left set for the session.
+            assert.equals(1, countBuilds(function()
+                f._visible = true; fire(f, "OnShow")
+            end))
+            assert.is_falsy(searchButton().disabled)
         end)
 
         it("OnShow with another tab active changes nothing", function()
@@ -1364,15 +1355,6 @@ describe("RestockView", function()
             _G.AuctionatorShoppingFrame = f
             buildLive()
             GBL.activeTab = "sort"
-            f._visible = true
-            assert.equals(0, countBuilds(function() fire(f, "OnShow") end))
-        end)
-
-        it("changes nothing while the window is hidden, even with the Restock tab still active", function()
-            local f = shoppingFrame(false)
-            _G.AuctionatorShoppingFrame = f
-            buildLive()
-            GBL._restockInView = nil       -- OnMainFrameHidden's write
             f._visible = true
             assert.equals(0, countBuilds(function() fire(f, "OnShow") end))
         end)
