@@ -273,6 +273,63 @@ function GBL:SetRestockItemOverride(itemID, override)
     return true, nil
 end
 
+-- How long one step may wait on the auction house (#199): for the price after
+-- a start, for the result after a confirm, and for the throttle to report
+-- ready before a deferred call. TSM's API_TIMEOUT is the same figure.
+-- Exported so the spec fires the timers by delay, not by count.
+local STEP_TIMEOUT = 5
+GBL.RESTOCK_STEP_TIMEOUT = STEP_TIMEOUT
+
+-- How long a quote waits for the Confirm click (#211) before the purchase is
+-- dropped. A placeholder until a run has read what the server does with a
+-- quote left unconfirmed for minutes (section 14 of the design, question 3);
+-- the same one timer slot, armed at this delay in PRICED.
+local PAUSE_TIMEOUT = 60
+GBL.RESTOCK_PAUSE_TIMEOUT = PAUSE_TIMEOUT
+
+-- Every reason a row is skipped under Buy next (st.skipped[i]), the code's
+-- own list (#214): the row renders the prose below, the log keeps the code
+-- (a capture is searched by it), and the chat lines keep their own wording
+-- with the figures. Exported so the spec walks this list, not a copy of it.
+local SKIP = {
+    MAX_PRICE = "max price",
+    BUDGET_THIS_BUY = "budget on this buy",
+    CANNOT_AFFORD = "cannot afford",
+    NO_PRICE_IN_TIME = format("no price within %ds", STEP_TIMEOUT),
+    NO_USABLE_PRICE = "no usable price",
+    CANNOT_AFFORD_AT_PRICE = "cannot afford at price",
+    BUDGET_AT_PRICE = "budget at price",
+    NO_PRICE_AVAILABLE = "no price available",
+}
+GBL._restockSkipReasons = SKIP
+
+-- The two budget reasons: a budget change clears them (SetRestockBudget) and
+-- they share the budget hint on the row. One set for both readers.
+local SKIP_BUDGET = { [SKIP.BUDGET_THIS_BUY] = true, [SKIP.BUDGET_AT_PRICE] = true }
+
+local BUDGET_TEXT = "over your budget (raise the budget to bring it back)"
+local AFFORD_TEXT = "not enough gold"
+local PRICE_TEXT = "no price from the auction house"
+local RESTOCK_SKIP_TEXT = {
+    [SKIP.MAX_PRICE] = "over your max price",
+    [SKIP.CANNOT_AFFORD] = AFFORD_TEXT,
+    [SKIP.NO_PRICE_IN_TIME] = PRICE_TEXT,
+    [SKIP.NO_USABLE_PRICE] = PRICE_TEXT,
+    [SKIP.CANNOT_AFFORD_AT_PRICE] = AFFORD_TEXT,
+    [SKIP.NO_PRICE_AVAILABLE] = PRICE_TEXT,
+}
+for reason in pairs(SKIP_BUDGET) do RESTOCK_SKIP_TEXT[reason] = BUDGET_TEXT end
+
+--- The prose for a skip reason, the one place a code becomes words (#214).
+-- An unknown code comes back as itself, so a reason added ahead of its text
+-- still shows something searchable on the row (the SortReasonText rule).
+-- @param reason string|nil
+-- @return string
+function GBL:RestockSkipText(reason)
+    if reason == nil then return "reason not recorded" end
+    return RESTOCK_SKIP_TEXT[reason] or tostring(reason)
+end
+
 --- Per-run gold budget cap (0 = no cap).
 -- @return number budget (>= 0)
 function GBL:GetRestockBudget()
@@ -297,7 +354,7 @@ function GBL:SetRestockBudget(n)
     local st = self._restock
     if changed and st and type(st.skipped) == "table" then
         for i, reason in pairs(st.skipped) do
-            if type(reason) == "string" and reason:find("budget", 1, true) == 1 then
+            if SKIP_BUDGET[reason] then
                 st.skipped[i] = nil
             end
         end
@@ -547,7 +604,7 @@ local SEARCH_BLOCKERS = {
       text = "Waiting on the bank scan. Open the guild bank, or click Scan bank, so in-bank counts are right.",
       holds = function(self, opts) return (opts.scanResults or self:GetLastScanResults()) ~= nil end },
     { key = "nothing",
-      text = "Nothing to buy: the bank is at target for every layout item.",
+      text = "Nothing to buy: the bank and the mail cover every layout item.",
       holds = function(self, opts, ctx)
           ctx.buyList = self:_RestockBuildBuyList(opts)
           return #ctx.buyList > 0
@@ -591,7 +648,11 @@ function GBL:_RestockBuildBuyList(opts)
     return list
 end
 
---- Pure: pair Auctionator result rows back to the active items by itemID.
+--- Pair Auctionator result rows back to the active items by itemID, and
+-- stamp each with whether it is a commodity when the client can say
+-- (C_AuctionHouse.GetItemKeyInfo, guarded): a BoE or a pet in a display
+-- tab comes back with a price like anything else, and the commodity start
+-- fails on it. Without the API the row is left as the search sent it.
 -- @param activeItems table array of { itemID, needed }
 -- @param results table|nil Auctionator results, each { itemKey = {itemID}, minPrice }
 -- @return table resultRows ([i] = row for activeItems[i]), number foundCount
@@ -601,9 +662,16 @@ function GBL:_RestockMapResults(activeItems, results)
     if type(activeItems) ~= "table" or type(results) ~= "table" then
         return resultRows, found
     end
+    local keyInfo = C_AuctionHouse and C_AuctionHouse.GetItemKeyInfo
     for i, ref in ipairs(activeItems) do
         for _, row in ipairs(results) do
             if row.itemKey and row.itemKey.itemID == ref.itemID then
+                if keyInfo then
+                    local ok, info = pcall(keyInfo, row.itemKey)
+                    if ok and type(info) == "table" and info.isCommodity ~= nil then
+                        row.isCommodity = info.isCommodity and true or false
+                    end
+                end
                 resultRows[i] = row
                 found = found + 1
                 break
@@ -648,12 +716,23 @@ end
 function GBL:StartRestockSearch()
     local state = self._restock and self._restock.state or "IDLE"
     if state ~= "IDLE" and state ~= "READY" then return end
+    -- From READY the old run goes first, and the park it performs feeds the
+    -- buy list built next: a parked quantity is in the mail, so the row is
+    -- reduced or dropped rather than offered again (the review of PR B).
+    if state == "READY" then
+        self:_RestockSearchTeardown("new search")
+    end
     -- The preconditions are one ordered list (#211): the tab disables Search
     -- on the first one that fails and shows its text, and a click that gets
-    -- through anyway prints the same text.
+    -- through anyway prints the same text. After a teardown there is no run
+    -- to stay in, so a refused search settles to IDLE with the list intact.
     local blocker, buyList = self:_RestockSearchBlocker()
     if blocker then
         self:Print(blocker.text)
+        if state == "READY" then
+            self._restock.state = "IDLE"
+            self:RefreshRestockTab()
+        end
         return
     end
     local ev = searchEndEvent()
@@ -664,9 +743,6 @@ function GBL:StartRestockSearch()
 
     self._restock = self._restock or { state = "IDLE" }
     local st = self._restock
-    if st.state == "READY" then
-        self:_RestockSearchTeardown()
-    end
     st.activeItems = buyList
     st.resultRows = {}
     st.foundCount = 0
@@ -771,14 +847,12 @@ local function parkUnanswered(self, st)
     end
 end
 
---- Auctionator finished a search: map results to the active items, go READY.
-function GBL:_RestockOnSearchEnd(results)
-    local st = self._restock
-    if not st or st.state ~= "SEARCHING" then return end
-    unregisterSearchListener(self)
-    local resultRows, found = self:_RestockMapResults(st.activeItems, results)
-    st.resultRows = resultRows
-    st.foundCount = found
+-- The per-run progress, cleared when a search ends and when a run is torn
+-- down: what was bought and skipped, the step flags, the spend (#60:
+-- spentEstimate is what this search has spent, the priced total of each
+-- success, and is what Spent and the budget read; the wallet baseline pair
+-- bounds affordability while the wallet trails the purchase events).
+local function clearRunProgress(st)
     st.bought = {}
     st.boughtTotal = {}
     st.skipped = {}
@@ -787,13 +861,21 @@ function GBL:_RestockOnSearchEnd(results)
     st.priceIn = false
     st.throttleBusy = false
     st.cancelledStartDue = nil
-    -- The spend model (#60): spentEstimate is what this search has spent
-    -- (the priced total of each success), and is what Spent and the budget
-    -- read. The wallet baseline pair bounds affordability while the wallet
-    -- trails the purchase events; it moves again only on tab show.
     st.spentEstimate = 0
-    st.walletBase = (GetMoney and GetMoney()) or 0
     st.spentAtBase = 0
+end
+
+--- Auctionator finished a search: map results to the active items, go READY.
+function GBL:_RestockOnSearchEnd(results)
+    local st = self._restock
+    if not st or st.state ~= "SEARCHING" then return end
+    unregisterSearchListener(self)
+    local resultRows, found = self:_RestockMapResults(st.activeItems, results)
+    st.resultRows = resultRows
+    st.foundCount = found
+    clearRunProgress(st)
+    -- The baseline moves again only on tab show.
+    st.walletBase = (GetMoney and GetMoney()) or 0
     st.state = "READY"
     self:RefreshRestockTab()
 end
@@ -815,20 +897,6 @@ local AH_EVENTS = {
     "UI_ERROR_MESSAGE",
 }
 GBL._restockAHEvents = AH_EVENTS
-
--- How long one step may wait on the auction house (#199): for the price after
--- a start, for the result after a confirm, and for the throttle to report
--- ready before a deferred call. TSM's API_TIMEOUT is the same figure.
--- Exported so the spec fires the timers by delay, not by count.
-local STEP_TIMEOUT = 5
-GBL.RESTOCK_STEP_TIMEOUT = STEP_TIMEOUT
-
--- How long a quote waits for the Confirm click (#211) before the purchase is
--- dropped. A placeholder until a run has read what the server does with a
--- quote left unconfirmed for minutes (section 14 of the design, question 3);
--- the same one timer slot, armed at this delay in PRICED.
-local PAUSE_TIMEOUT = 60
-GBL.RESTOCK_PAUSE_TIMEOUT = PAUSE_TIMEOUT
 
 -- The client's own throttle predicate, read for the log only (#199): nothing
 -- is gated on it until a capture has shown what it reads around our calls.
@@ -929,8 +997,9 @@ end
 -- has not been confirmed, unregister listeners and buy events, stop any
 -- in-flight Auctionator search, invalidate stale async callbacks, and clear
 -- results and buy progress. Leaves the state where it was: a reset then
--- goes to IDLE, a Search from READY goes on to SEARCHING.
-function GBL:_RestockSearchTeardown()
+-- goes to IDLE, a Search from READY goes on to SEARCHING. logWhat is the
+-- log line's word: "reset" (Cancel, a failed search) or "new search".
+function GBL:_RestockSearchTeardown(logWhat)
     self._restock = self._restock or { state = "IDLE" }
     local st = self._restock
     parkUnanswered(self, st)
@@ -947,7 +1016,7 @@ function GBL:_RestockSearchTeardown()
             note = "no cancel API"
         end
     end
-    ahLog(self, "reset", note)
+    ahLog(self, logWhat or "reset", note)
     cancelStepTimer(self)
     unregisterSearchListener(self)
     self:_RestockUnregisterBuyEvents()
@@ -958,16 +1027,9 @@ function GBL:_RestockSearchTeardown()
     st.activeItems = {}
     st.resultRows = {}
     st.foundCount = 0
-    st.bought = {}
-    st.boughtTotal = {}
-    st.skipped = {}
     clearPending(st)
     st.unanswered = nil
-    st.buyAll = false
-    st.throttleBusy = false
-    st.cancelledStartDue = nil
-    st.spentEstimate = 0
-    st.spentAtBase = 0
+    clearRunProgress(st)
 end
 
 --- Reset the search/buy back to IDLE: the teardown, then IDLE. The path a
@@ -1000,46 +1062,6 @@ end
 
 local COPPER_PER_GOLD = 10000
 
--- Every reason a row is skipped under Buy next (st.skipped[i]), the code's
--- own list (#214): the row renders the prose below, the log keeps the code
--- (a capture is searched by it), and the chat lines keep their own wording
--- with the figures. Exported so the spec walks this list, not a copy of it.
-local SKIP = {
-    MAX_PRICE = "max price",
-    BUDGET_THIS_BUY = "budget on this buy",
-    CANNOT_AFFORD = "cannot afford",
-    NO_PRICE_IN_TIME = format("no price within %ds", STEP_TIMEOUT),
-    NO_USABLE_PRICE = "no usable price",
-    CANNOT_AFFORD_AT_PRICE = "cannot afford at price",
-    BUDGET_AT_PRICE = "budget at price",
-    NO_PRICE_AVAILABLE = "no price available",
-}
-GBL._restockSkipReasons = SKIP
-
-local BUDGET_TEXT = "over your budget (raise the budget to bring it back)"
-local AFFORD_TEXT = "not enough gold"
-local PRICE_TEXT = "no price from the auction house"
-local RESTOCK_SKIP_TEXT = {
-    [SKIP.MAX_PRICE] = "over your max price",
-    [SKIP.BUDGET_THIS_BUY] = BUDGET_TEXT,
-    [SKIP.CANNOT_AFFORD] = AFFORD_TEXT,
-    [SKIP.NO_PRICE_IN_TIME] = PRICE_TEXT,
-    [SKIP.NO_USABLE_PRICE] = PRICE_TEXT,
-    [SKIP.CANNOT_AFFORD_AT_PRICE] = AFFORD_TEXT,
-    [SKIP.BUDGET_AT_PRICE] = BUDGET_TEXT,
-    [SKIP.NO_PRICE_AVAILABLE] = PRICE_TEXT,
-}
-
---- The prose for a skip reason, the one place a code becomes words (#214).
--- An unknown code comes back as itself, so a reason added ahead of its text
--- still shows something searchable on the row (the SortReasonText rule).
--- @param reason string|nil
--- @return string
-function GBL:RestockSkipText(reason)
-    if reason == nil then return "reason not recorded" end
-    return RESTOCK_SKIP_TEXT[reason] or tostring(reason)
-end
-
 --- True when a positive budget (gold) has been reached by the spent copper.
 function GBL:_RestockBudgetExceeded(spentCopper, budgetGold)
     budgetGold = budgetGold or 0
@@ -1047,16 +1069,33 @@ function GBL:_RestockBudgetExceeded(spentCopper, budgetGold)
     return (spentCopper or 0) >= budgetGold * COPPER_PER_GOLD
 end
 
-local function buyable(st, i, ref)
-    return (st.resultRows or {})[i] ~= nil and not (st.bought or {})[i]
-        and not (st.skipped or {})[i] and (ref.needed or 0) > 0
+--- Whether row i of the search can be bought (#214, one predicate for Buy
+-- next, its count, and the tab's Buy buttons): a result with a usable price
+-- on a commodity (a BoE or a pet comes back priced too, and the commodity
+-- start fails on it), not bought, not skipped, a quantity to buy, and no
+-- confirm of this search still waiting for its result (nothing starts
+-- until that lands, so nothing is offered either).
+-- @param st table the session state
+-- @param i number index into activeItems
+-- @return boolean
+function GBL:_RestockRowBuyable(st, i)
+    if not st or type(st.activeItems) ~= "table" then return false end
+    local ref = st.activeItems[i]
+    local row = st.resultRows and st.resultRows[i]
+    if not ref or not row then return false end
+    if type(row.minPrice) ~= "number" or row.minPrice <= 0 then return false end
+    if row.isCommodity == false then return false end
+    if (st.bought or {})[i] or (st.skipped or {})[i] then return false end
+    if (ref.needed or 0) <= 0 then return false end
+    if st.unanswered then return false end
+    return true
 end
 
---- First index eligible to buy: has a result, not bought, not skipped, needed > 0.
+--- First index eligible to buy.
 function GBL:_RestockNextBuyable(st)
     if not st or type(st.activeItems) ~= "table" then return nil end
-    for i, ref in ipairs(st.activeItems) do
-        if buyable(st, i, ref) then return i end
+    for i in ipairs(st.activeItems) do
+        if self:_RestockRowBuyable(st, i) then return i end
     end
     return nil
 end
@@ -1065,8 +1104,8 @@ end
 function GBL:_RestockBuyableCount(st)
     if not st or type(st.activeItems) ~= "table" then return 0 end
     local n = 0
-    for i, ref in ipairs(st.activeItems) do
-        if buyable(st, i, ref) then n = n + 1 end
+    for i in ipairs(st.activeItems) do
+        if self:_RestockRowBuyable(st, i) then n = n + 1 end
     end
     return n
 end
@@ -1225,6 +1264,16 @@ function GBL:_RestockBeginPurchase(index)
         return false
     end
 
+    -- Not a commodity (the item key said so at SearchEnd): the commodity
+    -- start would fail on it. Marks nothing, like the gate below; the row
+    -- reads "buy it by hand" and Buy next walks past it.
+    if row.isCommodity == false then
+        self:Print(format("%s is not a commodity; buy it by hand at the Auction House.",
+            itemName(self, ref.itemID)))
+        ahLog(self, "skip", format("it:%d not a commodity", ref.itemID))
+        return false
+    end
+
     -- Per-item maxPrice cap (override; no input UI yet, so usually unset).
     local override = self:GetRestockItemOverride(ref.itemID)
     local maxPrice = override and override.maxPrice
@@ -1232,7 +1281,7 @@ function GBL:_RestockBeginPurchase(index)
         st.skipped[index] = SKIP.MAX_PRICE
         self:Print(format("Skipped %s: lowest price is over your max of %d g.",
             itemName(self, ref.itemID), maxPrice))
-        ahLog(self, "skip", format("it:%d max price", ref.itemID))
+        ahLog(self, "skip", format("it:%d %s", ref.itemID, SKIP.MAX_PRICE))
         return false
     end
 
@@ -1250,7 +1299,7 @@ function GBL:_RestockBeginPurchase(index)
     if budget > 0 and (spentCopper(self) + estCost) > budget * COPPER_PER_GOLD then
         self:Print(format("Skipping %s: it would exceed your budget of %d g.",
             itemName(self, ref.itemID), budget))
-        ahLog(self, "skip", format("it:%d budget on this buy", ref.itemID))
+        ahLog(self, "skip", format("it:%d %s", ref.itemID, SKIP.BUDGET_THIS_BUY))
         if st.buyAll then st.skipped[index] = SKIP.BUDGET_THIS_BUY end
         return false
     end
@@ -1263,7 +1312,7 @@ function GBL:_RestockBeginPurchase(index)
     if estCost > money then
         self:Print(format("Not enough gold for %s: need about %s, have %s.",
             itemName(self, ref.itemID), self:FormatMoney(estCost), self:FormatMoney(money)))
-        ahLog(self, "skip", format("it:%d cannot afford", ref.itemID))
+        ahLog(self, "skip", format("it:%d %s", ref.itemID, SKIP.CANNOT_AFFORD))
         if st.buyAll then st.skipped[index] = SKIP.CANNOT_AFFORD end
         return false
     end
@@ -1392,6 +1441,16 @@ function GBL:StartRestockBuyNext()
     local st = self._restock
     if not st or st.state ~= "READY" then return end
     st.buyAll = true
+    -- No row is buyable while a confirm of this search awaits its result
+    -- (the tab greys every Buy and counts none), so a click that lands
+    -- anyway says why once rather than walking an empty list in silence.
+    if st.unanswered then
+        self:Print(format("Waiting on the result of %s; check your mail, then search "
+            .. "again to buy more.", itemName(self, st.unanswered.itemID)))
+        ahLog(self, "skip", format("result outstanding for it:%d", st.unanswered.itemID))
+        stopRun(self)
+        return
+    end
     local tried = {}
     local started = false
     while true do
@@ -1423,6 +1482,23 @@ function GBL:ConfirmRestockPurchase()
     if not self:_RestockAuctionHouseOpen() then
         self:Print("Open the Auction House to buy.")
         ahLog(self, "confirm click", "ignored (auction house not open)")
+        return
+    end
+    -- The quote passed the budget and the wallet when it arrived; both can
+    -- have moved during the pause (a budget change, gold spent elsewhere), so
+    -- the click reads them again (the review of PR B).
+    local total = st.pendingTotal or 0
+    local budget = self:GetRestockBudget()
+    if budget > 0 and (spentCopper(self) + total) > budget * COPPER_PER_GOLD then
+        ahLog(self, "confirm click", "refused (budget at price)")
+        failStep(self, SKIP.BUDGET_AT_PRICE,
+            format("the quote of %s is past your budget of %d g.", self:FormatMoney(total), budget))
+        return
+    end
+    if total > affordableMoney(self) then
+        ahLog(self, "confirm click", "refused (cannot afford at price)")
+        failStep(self, SKIP.CANNOT_AFFORD_AT_PRICE,
+            format("the quote of %s is more than you have.", self:FormatMoney(total)))
         return
     end
     st.state = "CONFIRMING"
@@ -1474,13 +1550,23 @@ end
 -- step timer, as anywhere else.
 function GBL:_RestockOnAuctionHouseClosed()
     local st = self._restock
-    if not st or not purchaseInFlight(self) or st.confirmIssued then return end
-    local item = itemName(self, st.pendingItemID)
-    dropUnconfirmed(self, st, "cancelled (auction house window closed)", format("state=%s", st.state))
-    -- No price follows a closed house, and the flag must not eat the next
-    -- start's price after it reopens.
-    st.cancelledStartDue = nil
-    self:Print(format("The Auction House window closed; the purchase of %s was dropped and nothing was spent.", item))
+    if not st then return end
+    if purchaseInFlight(self) and not st.confirmIssued then
+        local item = itemName(self, st.pendingItemID)
+        dropUnconfirmed(self, st, "cancelled (auction house window closed)", format("state=%s", st.state))
+        -- No price follows a closed house, and the flag must not eat the next
+        -- start's price after it reopens.
+        st.cancelledStartDue = nil
+        self:Print(format("The Auction House window closed; the purchase of %s was dropped "
+            .. "and nothing was spent.", item))
+    end
+    -- With nothing in flight no result can arrive on a closed session, so
+    -- the buy events go rather than logging every purchase the player makes
+    -- by hand until the next reset; the next start registers them again. A
+    -- confirm still out keeps them for its result and the step timer.
+    if not purchaseInFlight(self) then
+        self:_RestockUnregisterBuyEvents()
+    end
 end
 
 --- WoW commodity events (registered lazily).

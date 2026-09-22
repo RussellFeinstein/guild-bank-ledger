@@ -9,13 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - The Restock tab keeps its item list on screen through a search and a purchase. Every row shows its target, what the bank holds, what is in the mail, the shortfall and a status; after a search each row adds its lowest price and a Buy button carrying the estimated cost, the row being bought says so, and a bought row shows what it cost. Before the first bank scan of the session the rows read "bank ?" and "bank unknown" instead of a shortfall.
-- Search is offered from the results, so a new search no longer needs Done first: it clears the search's own progress and keeps what is in the mail. Done is gone.
+- Search is offered from the results, so a new search no longer needs Done first: it clears the search's own progress and keeps what is in the mail. Done is gone. A purchase whose result never arrived is counted as in the mail before the new list is built, so its quantity is not offered again; until then its row reads "awaiting result" and every Buy is greyed with the reason on the banner.
 - The budget box and the "Confirm at price" checkbox sit above the list in every state, with the committed budget shown beside the box, so both can be set before the first search. The gold line shows in every state and updates as your wallet changes, without redrawing the tab.
 - The Layout tab's Keep field is now Store, with a hint saying what it does: how many the guild bank should hold, with Restock buying up to the larger of the layout's slots x per slot and Store. A row whose Store is above its layout total shows the target it raises the row to.
 
 ### Fixed
-- On the Restock tab an arrow key pressed with nothing focused no longer lands on Scan bank, where Space then ran a scan: with nothing focused only Tab enters the keyboard walk, and Escape now clears the focus (a second Escape closes the window as before).
-- The Restock tab's grey row annotations read the accessible palette instead of a low-contrast grey (#44).
+- On the Restock and Sort tabs an arrow key pressed with nothing focused no longer lands on the first button, where Space then ran a scan or a sort: with nothing focused only Tab enters the keyboard walk, Escape clears the focus (a second Escape closes the window as before), a greyed button is not a Tab stop, and Enter on the budget box puts the cursor in it (#219).
+- A Restock row the Auction House lists as something other than a commodity (a piece of gear, a pet) no longer gets a Buy button that fails five seconds later: the row says to buy it by hand, and Buy next walks past it.
+- Confirm on a waiting quote re-checks your budget and your gold as they are at the click, and the budget box and the "Confirm at price" checkbox are held while a purchase is in flight, so a budget lowered under a quote cannot be spent past and the pause cannot be switched off under one.
+- Leaving the Auction House with no purchase in flight stops Restock listening to auction events, so a run followed by manual buying no longer fills the log with purchases that were not Restock's.
+- The Restock tab's grey row annotations and the Layout tab's hints under the bulk row read the accessible palette instead of a low-contrast grey (#44).
 - A skipped row on the Restock tab says why in plain words (over your budget, not enough gold, over your max price, no price from the auction house) instead of the log's code.
 
 ## [0.40.0] - 2026-09-20

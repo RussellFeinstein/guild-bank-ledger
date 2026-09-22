@@ -141,14 +141,6 @@ end
 -- Expose the pure helper for the spec suite.
 GBL._layoutEditorApplyBulkToItems = applyBulkToItems
 
---- Set the reserve draft entry for every item on a tab to `storeValue` in place.
---
--- Pure over `tabItems` + `reserveDraft` (writes the draft). itemID keys are
--- coerced to numbers, since a synced layout can be string-keyed while the
--- reserve store (and SetStockReserve) is number-keyed. A storeValue of 0 marks
--- each item's reserve for removal on Save (draft-only apply clears it).
---
--- Returns the number of items written.
 -- What Store means, on the bulk row's hint and every Store field's tooltip
 -- (#61, #214). One string so the two cannot drift.
 local STORE_HINT = "Store: how many the guild bank should hold. "
@@ -158,7 +150,7 @@ local STORE_HINT = "Store: how many the guild bank should hold. "
 -- GameTooltip is guarded: the spec's stub has it, a stripped client may not.
 local function attachStoreTooltip(widget)
     widget:SetCallback("OnEnter", function(w)
-        if not (GameTooltip and GameTooltip.SetOwner) then return end
+        if not (GameTooltip and GameTooltip.SetOwner and GameTooltip.SetText) then return end
         GameTooltip:SetOwner(w.frame, "ANCHOR_RIGHT")
         GameTooltip:SetText(STORE_HINT, 1, 1, 1, 1, true)
         GameTooltip:Show()
@@ -168,6 +160,24 @@ local function attachStoreTooltip(widget)
     end)
 end
 
+-- The hint colour under the bulk row reads the palette (#44's rule), so a
+-- high-contrast palette lifts it.
+local function neutralHex(self)
+    local c = self:GetAccessibleColor("NEUTRAL")
+    return format("%02x%02x%02x",
+        math.floor((c.r or 1) * 255 + 0.5),
+        math.floor((c.g or 1) * 255 + 0.5),
+        math.floor((c.b or 1) * 255 + 0.5))
+end
+
+--- Set the reserve draft entry for every item on a tab to `storeValue` in place.
+--
+-- Pure over `tabItems` + `reserveDraft` (writes the draft). itemID keys are
+-- coerced to numbers, since a synced layout can be string-keyed while the
+-- reserve store (and SetStockReserve) is number-keyed. A storeValue of 0 marks
+-- each item's reserve for removal on Save (draft-only apply clears it).
+--
+-- Returns the number of items written.
 local function applyBulkReserve(tabItems, reserveDraft, storeValue)
     if type(tabItems) ~= "table" or type(reserveDraft) ~= "table" then return 0 end
     local n = 0
@@ -942,7 +952,8 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
         local hint = AceGUI:Create("Label")
         hint:SetFullWidth(true)
         hint:SetFontObject(GameFontNormalSmall)
-        hint:SetText("|cff888888Leave a field blank to keep its current " ..
+        local hex = neutralHex(self)
+        hint:SetText("|cff" .. hex .. "Leave a field blank to keep its current " ..
             "value for each item. Set Store to 0 to clear the reserves on this " ..
             "tab. Shrinking slots trims that item's pinned positions from the " ..
             "highest slot down.|r")
@@ -953,7 +964,7 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
         local storeHint = AceGUI:Create("Label")
         storeHint:SetFullWidth(true)
         storeHint:SetFontObject(GameFontNormalSmall)
-        storeHint:SetText("|cff888888" .. STORE_HINT .. "|r")
+        storeHint:SetText("|cff" .. hex .. STORE_HINT .. "|r")
         parent:AddChild(storeHint)
     end
 

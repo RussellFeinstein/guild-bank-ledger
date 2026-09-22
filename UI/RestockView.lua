@@ -69,16 +69,19 @@ local RESTOCK_STATUS_TEXT = {
     quoted       = { text = "quoted %s, confirm?", icon = ICON.gold, color = "ALERT" },
     bought       = { text = "bought %d for %s", icon = ICON.ready, color = "DEPOSIT" },
     skipped      = { text = "skipped: %s", icon = ICON.notready, color = "ALERT" },
+    awaiting     = { text = "awaiting result", icon = ICON.waiting, color = "ALERT" },
 }
 GBL._restockStatusText = RESTOCK_STATUS_TEXT
 
 --- Classify a universe row against the session. Pure. The precedence: the
--- session first (the row in flight, then bought, then skipped), then the
--- search (priced, not a commodity, not found), then the universe (bank
--- unknown, in the mail, in stock, short). A search implies a scan, so the
--- search readings sit ahead of the unscanned one. During SEARCHING the
--- results are not in, so the search readings are skipped rather than every
--- searched row reading "not found".
+-- session first (the row in flight, then the confirm still awaiting its
+-- result, then bought, then skipped), then the search (not a commodity,
+-- priced, not found), then the universe (bank unknown, in the mail, in
+-- stock, short). A search implies a scan, so the search readings sit ahead
+-- of the unscanned one. During SEARCHING the results are not in, so the
+-- search readings are skipped rather than every searched row reading "not
+-- found". Priced needs a usable price: Auctionator's placeholder for a miss
+-- carries minPrice 0, which Lua reads as true.
 -- @param row table|nil universe row { itemID, target, stock, toBuy, pending, scanned }
 -- @param st table|nil the session state (self._restock)
 -- @return table { status, index?, needed?, minPrice?, total?, reason? }
@@ -103,16 +106,18 @@ function GBL:_RestockRowStatus(row, st)
         if st.pendingIndex == index and (st.state == "CONFIRMING" or st.state == "PRICED") then
             out.status = (st.state == "PRICED") and "quoted" or "buying"
             out.total = st.pendingTotal
+        elseif st.unanswered and st.unanswered.itemID == row.itemID then
+            out.status = "awaiting"
         elseif st.bought and st.bought[index] then
             out.status = "bought"
             out.total = st.boughtTotal and st.boughtTotal[index] or nil
         elseif st.skipped and st.skipped[index] then
             out.status = "skipped"
             out.reason = st.skipped[index]
-        elseif result and result.minPrice then
-            out.status = "priced"
-        elseif result then
+        elseif result and result.isCommodity == false then
             out.status = "notcommodity"
+        elseif result and type(result.minPrice) == "number" and result.minPrice > 0 then
+            out.status = "priced"
         else
             out.status = "notfound"
         end
@@ -150,6 +155,19 @@ function GBL:GetRestockStatusDisplay(row, st)
     return r
 end
 
+--- The estimate on a Buy button: whole gold above one gold (the quote
+-- carries the exact total, and a full gold/silver/copper string overran the
+-- button), the exact figure below it.
+-- @param copper number
+-- @return string
+function GBL:_RestockEstimateText(copper)
+    copper = copper or 0
+    if copper >= 10000 then
+        return format("%dg", math.floor(copper / 10000))
+    end
+    return self:FormatMoney(copper)
+end
+
 ------------------------------------------------------------------------
 -- Tab builder
 ------------------------------------------------------------------------
@@ -172,12 +190,13 @@ local function goldText(self)
 end
 
 --- The wallet changed (Core's OnPlayerMoney): rewrite the gold line in
--- place while this tab is on screen. Never a rebuild, which would take the
--- focus from under the player mid-purchase.
+-- place while this tab is the active one. Never a rebuild, which would take
+-- the focus from under the player mid-purchase. A hidden window keeps its
+-- label (it reads fresh when the window reopens); a released one drops the
+-- reference through its own OnRelease below, since AceGUI pools frames.
 function GBL:_RestockOnMoneyChanged()
     local label = self._restockGoldLabel
     if not label or self.activeTab ~= "restock" then return end
-    if not self:IsMainFrameShown() then return end
     label:SetText(goldText(self))
 end
 
@@ -192,11 +211,15 @@ function GBL:BuildRestockTab(container)
 
     -- Focus order is rebuilt every build, in reading order: the controls,
     -- the budget row, then the list's own buttons. Only interactive widgets
-    -- are registered: a per-row tab stop over read-only rows would make
-    -- keyboard navigation unusable.
+    -- are registered (a per-row tab stop over read-only rows would make
+    -- keyboard navigation unusable), and only enabled ones: a stop the
+    -- activator would refuse is a dead press, and thirty greyed Buys inside
+    -- the pause put Confirm thirty presses away (the review of PR B). Every
+    -- caller sets the widget's disabled state before registering it.
     self:ClearFocusOrder()
     local focusN = 0
     local function focus(widget)
+        if widget.disabled then return end
         focusN = focusN + 1
         self:RegisterFocusable(widget, focusN)
     end
@@ -230,6 +253,12 @@ function GBL:BuildRestockTab(container)
     elseif state == "READY" then
         local line = format("Search complete: %d of %d found.",
             st.foundCount or 0, st.activeItems and #st.activeItems or 0)
+        if st.unanswered then
+            -- Nothing starts until that result lands (or a new search parks
+            -- it), and every Buy below is greyed for it: say so here.
+            line = line .. format("  |cffffcc00Waiting on the result of %s; check your mail, then search again.|r",
+                itemLabel(st.unanswered.itemID))
+        end
         if blocker and blocker.key == "ah-closed" then
             -- Search and every Buy are shut for the same reason: one sentence.
             line = line .. "  |cffffcc00Open the Auction House to search or buy.|r"
@@ -250,6 +279,9 @@ function GBL:BuildRestockTab(container)
     gold:SetFullWidth(true)
     gold:SetFont(fontPath, fontSize, "")
     gold:SetText(goldText(self))
+    gold:SetCallback("OnRelease", function()
+        if self._restockGoldLabel == gold then self._restockGoldLabel = nil end
+    end)
     container:AddChild(gold)
     self._restockGoldLabel = gold
 
@@ -342,11 +374,16 @@ function GBL:BuildRestockTab(container)
     budgetRow:SetLayout("Flow")
     container:AddChild(budgetRow)
 
+    -- Both hold while a purchase is in flight: the flow read them at the
+    -- price, and a budget lowered or the pause switched off under a waiting
+    -- quote would spend past the one or confirm without the click.
+    local inFlight = (state == "CONFIRMING" or state == "PRICED")
     local budget = self:GetRestockBudget()
     local budgetBox = AceGUI:Create("EditBox")
     budgetBox:SetLabel("Budget (gold, 0 = none)")
     budgetBox:SetWidth(160)
     budgetBox:SetText(tostring(budget))
+    budgetBox:SetDisabled(inFlight)
     budgetBox:SetCallback("OnEnterPressed", function(_w, _e, value)
         self:SetRestockBudget(tonumber(value) or 0)
         self:RefreshRestockTab()
@@ -366,6 +403,7 @@ function GBL:BuildRestockTab(container)
     pauseCB:SetLabel("Confirm at price")
     pauseCB:SetWidth(150)
     pauseCB:SetValue(self:IsRestockConfirmAtPrice())
+    pauseCB:SetDisabled(inFlight)
     pauseCB:SetCallback("OnValueChanged", function(_w, _e, value)
         self:SetRestockConfirmAtPrice(value)
     end)
@@ -447,36 +485,15 @@ function GBL:_RestockView_ActivateFocused()
     return self:ActivateFocused()
 end
 
---- Map a key press to a focus action. Returns true if handled (the caller then
--- consumes the key). The rule (#214, section 12): with nothing focused only
--- Tab is consumed, so an arrow pressed to turn the character cannot land on
--- Scan bank; with a widget focused, Tab and the arrows move, Enter and Space
--- activate, and Escape clears focus and consumes only itself, so the next
--- Escape closes the window as before.
+--- Map a key press to a focus action: the shared rule in
+-- UI/Accessibility.lua (GBL:FocusNavKey, #214 section 12), kept under this
+-- tab's name for its key handler. Returns true if handled (the caller then
+-- consumes the key).
 -- @param key string OnKeyDown key name
 -- @param shiftDown boolean whether Shift is held (Tab direction)
 -- @return boolean handled
 function GBL:_RestockView_NavKey(key, shiftDown)
-    if key == "TAB" then
-        self:AdvanceFocus(shiftDown and -1 or 1)
-        return true
-    end
-    if (self.A11Y.focusIndex or 0) == 0 then
-        return false
-    end
-    if key == "DOWN" then
-        self:AdvanceFocus(1)
-        return true
-    elseif key == "UP" then
-        self:AdvanceFocus(-1)
-        return true
-    elseif key == "ENTER" or key == "NUMPADENTER" or key == "SPACE" then
-        return self:_RestockView_ActivateFocused()
-    elseif key == "ESCAPE" then
-        self:ResetFocus()
-        return true
-    end
-    return false
+    return self:FocusNavKey(key, shiftDown)
 end
 
 ------------------------------------------------------------------------
@@ -503,13 +520,14 @@ function GBL:_RestockView_RenderItems(content, focus)
     local buyBlocked = state ~= "READY"
         or self:_RestockBudgetExceeded(st.spentEstimate or 0, self:GetRestockBudget())
         or not self:_RestockAuctionHouseOpen()
+        or st.unanswered ~= nil
     -- The annotations read the palette (#44), not a grey literal.
     local neutral = colorToHex(self:GetAccessibleColor("NEUTRAL"))
 
     local seen = {}
     for _, row in ipairs(universe) do seen[row.itemID] = true end
     local orphans = {}
-    if state ~= "IDLE" and type(st.activeItems) == "table" then
+    if state ~= "IDLE" and state ~= "SEARCHING" and type(st.activeItems) == "table" then
         for _, ref in ipairs(st.activeItems) do
             if not seen[ref.itemID] then
                 orphans[#orphans + 1] = {
@@ -561,7 +579,11 @@ function GBL:_RestockView_RenderItems(content, focus)
         local rowText = format("%s%s  |cff%s%s|r  %s",
             iconEsc, itemLabel(row.itemID), neutral, figures, statusText)
 
-        local buyable = disp.status == "priced" and (disp.needed or 0) > 0
+        -- A priced row carries a Buy; whether it can be pressed is the
+        -- flow's own predicate (the one Buy next reads), plus the state and
+        -- the gate. A button that cannot be pressed stays out of the walk.
+        local buyable = disp.status == "priced"
+        local buyDisabled = buyBlocked or not self:_RestockRowBuyable(st, disp.index)
         if not buyable and pending == 0 then
             local lbl = AceGUI:Create("Label")
             lbl:SetFullWidth(true)
@@ -589,9 +611,10 @@ function GBL:_RestockView_RenderItems(content, focus)
             -- bound (the price climbs as listings are bought up), hence the
             -- tilde. The quote carries the real total.
             buyBtn:SetText(format("Buy %d (~%s)", disp.needed,
-                self:FormatMoney((disp.minPrice or 0) * disp.needed)))
+                self:_RestockEstimateText((disp.minPrice or 0) * disp.needed)))
             buyBtn:SetWidth(140)
-            buyBtn:SetDisabled(buyBlocked)
+            if buyBtn.SetAutoWidth then buyBtn:SetAutoWidth(true) end
+            buyBtn:SetDisabled(buyDisabled)
             buyBtn:SetCallback("OnClick", function()
                 self:StartRestockBuy(idx)
             end)

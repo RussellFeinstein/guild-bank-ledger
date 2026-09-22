@@ -248,24 +248,14 @@ function GBL:_SortView_ActivateFocused()
     return self:ActivateFocused()
 end
 
---- Map a key press to a focus action. Returns true if handled (the caller
---- then consumes the key). The frame handler passes the live Shift state.
+--- Map a key press to a focus action: the shared rule in
+--- UI/Accessibility.lua (GBL:FocusNavKey, #219), kept under this tab's name
+--- for its key handler. Returns true if handled (the caller then consumes
+--- the key). The frame handler passes the live Shift state.
 --- @param key string OnKeyDown key name
 --- @param shiftDown boolean whether Shift is held (Tab direction)
 function GBL:_SortView_NavKey(key, shiftDown)
-    if key == "TAB" then
-        self:AdvanceFocus(shiftDown and -1 or 1)
-        return true
-    elseif key == "DOWN" then
-        self:AdvanceFocus(1)
-        return true
-    elseif key == "UP" then
-        self:AdvanceFocus(-1)
-        return true
-    elseif key == "ENTER" or key == "NUMPADENTER" or key == "SPACE" then
-        return self:_SortView_ActivateFocused()
-    end
-    return false
+    return self:FocusNavKey(key, shiftDown)
 end
 
 --- Refresh the Sort tab — called after state transitions.

@@ -405,8 +405,47 @@ function GBL:ActivateFocused()
         if widget.Fire then widget:Fire("OnValueChanged", newValue) end
         return true
     end
+    -- An EditBox takes keyboard focus (Enter then commits through its own
+    -- OnEnterPressed); a click is a handler it does not have (#214).
+    if widget.type == "EditBox" and widget.SetFocus then
+        widget:SetFocus()
+        return true
+    end
     if widget.Fire then
         widget:Fire("OnClick")
+        return true
+    end
+    return false
+end
+
+--- Map a key press to a focus action, the one rule for every tab that
+-- captures keys (#214 section 12, #219). With nothing focused only Tab is
+-- consumed, so an arrow pressed to turn the character cannot land on a
+-- button; with a widget focused, Tab, Shift-Tab and the arrows move, Enter
+-- and Space activate through ActivateFocused, and Escape resets the focus
+-- and consumes only itself, so the next Escape closes the window as before.
+-- Returns true when the key was handled (the caller then consumes it).
+-- @param key string OnKeyDown key name
+-- @param shiftDown boolean whether Shift is held (Tab direction)
+-- @return boolean handled
+function GBL:FocusNavKey(key, shiftDown)
+    if key == "TAB" then
+        self:AdvanceFocus(shiftDown and -1 or 1)
+        return true
+    end
+    if ((self.A11Y and self.A11Y.focusIndex) or 0) == 0 then
+        return false
+    end
+    if key == "DOWN" then
+        self:AdvanceFocus(1)
+        return true
+    elseif key == "UP" then
+        self:AdvanceFocus(-1)
+        return true
+    elseif key == "ENTER" or key == "NUMPADENTER" or key == "SPACE" then
+        return self:ActivateFocused()
+    elseif key == "ESCAPE" then
+        self:ResetFocus()
         return true
     end
     return false

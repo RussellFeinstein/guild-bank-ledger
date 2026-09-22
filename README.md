@@ -101,7 +101,7 @@ To buy the shortfall from the Auction House, install [Auctionator](https://www.c
 1. Open the Auction House and Auctionator's Shopping tab.
 2. Open the guild bank at least once in the session so Restock knows the current stock.
 3. On the Restock tab, click Search to price every item the bank is short on. Until every step above is done the button is disabled and the banner says which one is missing. The list stays on screen: each row that was searched adds its lowest price and a Buy button with the estimated cost, and a row the Auction House has no listing for says so.
-4. Buy items individually with each row's Buy button, or click Buy next to buy the first row still short; each click buys one row, because the game only starts an Auction House purchase from a click. The button shows how many rows are left, the row being bought says so, and a bought row shows what it cost.
+4. Buy items individually with each row's Buy button, or click Buy next to buy the first row still short; each click buys one row, because the game only starts an Auction House purchase from a click. The button shows how many rows are left, the row being bought says so, and a bought row shows what it cost. A row the Auction House lists as something other than a commodity (gear, a pet) says to buy it by hand.
 5. The Auction House quotes the real total for that quantity, and the banner shows it: click Confirm to buy (Enter works too) or Cancel to drop it with nothing spent. Untick "Confirm at price" above the list to skip that pause and confirm each quote automatically, as long as it passes your budget and your gold.
 6. Click Search again whenever you want fresh prices; what is in the mail from earlier purchases is kept and still counts as stock.
 

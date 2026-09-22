@@ -393,9 +393,6 @@ end
 -- cascade): whatever tab was showing is not in view any more.
 function GBL:OnMainFrameHidden()
     self._restockInView = false
-    -- The gold line's label is released with the frame (#214); AceGUI pools
-    -- widget frames, so a write to it later would land on whatever recycled it.
-    self._restockGoldLabel = nil
 end
 
 --- Filter a records array to only records from the given player.
