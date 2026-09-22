@@ -181,7 +181,7 @@ purchase with the session.
 **Built 2026-09-21 in PR B (#214).** `_RestockBuildItemUniverse` puts `scanned` on every row and
 the row reads `bank ?` and `bank unknown` with no shortfall until a scan has completed. #217
 (Search stayed disabled after the Shopping tab was selected, nothing re-read the blocker on that
-change) shipped 2026-09-22: the frame's OnShow and OnHide redraw the tab once per burst, in IDLE
+change) shipped 2026-09-22 as v0.41.1: the frame's OnShow and OnHide redraw the tab once per burst, in IDLE
 and READY, only when the reading changed, installed lazily because Auctionator creates the frame on
 the first Auction House show; the hook goes with the precondition at #194. #218 (a countdown on
 the PRICED banner) follows.
@@ -535,7 +535,7 @@ filed as an issue when this doc lands, labelled, naming its section here.
    new setting and a new visible control.
    Split on 2026-09-20 at the re-audit: PR A, `feat/restock-flow-states` (v0.40.0), is the model with
    #60 and the gate, closing #211; the view half is #214, `feat/restock-tab-rebuild` (v0.41.0). The
-   v0.40.0 run filed #217 (shipped 2026-09-22) and #218, which follow #214 in the order.
+   v0.40.0 run filed #217 (shipped v0.41.1, 2026-09-22) and #218, which follow #214 in the order.
 3. **Auctionator's public search** (#194; section 4), then #193's hint as the observation dictates.
    The first in-game question below gates the hint.
 4. **One-off purchase** (#59; section 9).
