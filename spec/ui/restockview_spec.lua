@@ -1238,8 +1238,12 @@ describe("RestockView", function()
             end
             return f
         end
+        -- Fires the hooks registered before the call: a hook body that
+        -- rebuilds the tab must not extend the list it is being walked from.
         local function fire(f, script)
-            for _, fn in ipairs(f.hooks[script] or {}) do fn(f) end
+            local hooks = {}
+            for i, fn in ipairs(f.hooks[script] or {}) do hooks[i] = fn end
+            for _, fn in ipairs(hooks) do fn(f) end
         end
         local function hookCount(f, script)
             return #(f.hooks[script] or {})

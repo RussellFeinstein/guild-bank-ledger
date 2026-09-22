@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Restock's Search no longer stays greyed after Auctionator's Shopping tab is selected while the Restock tab is showing. The tab now redraws when that Shopping tab comes on or goes off screen, so Search and the banner read the precondition as it is, instead of waiting for the Restock tab to be left and re-entered.
+
 ## [0.41.0] - 2026-09-21
 
 ### Added

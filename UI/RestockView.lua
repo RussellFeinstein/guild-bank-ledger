@@ -209,6 +209,11 @@ function GBL:BuildRestockTab(container)
     local st = self._restock
     local state = st.state or "IDLE"
 
+    -- The Shopping-tab precondition watches its frame (#217); installed
+    -- from here because the frame does not exist until the Auction House
+    -- window has shown once this session.
+    if self._RestockWatchShoppingTab then self:_RestockWatchShoppingTab() end
+
     -- Focus order is rebuilt every build, in reading order: the controls,
     -- the budget row, then the list's own buttons. Only interactive widgets
     -- are registered (a per-row tab stop over read-only rows would make

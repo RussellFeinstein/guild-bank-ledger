@@ -585,6 +585,41 @@ function GBL:_RestockAuctionHouseOpen()
         and AuctionHouseFrame:IsShown() and true or false
 end
 
+--- Watch Auctionator's Shopping tab (#217). The shopping-tab precondition
+-- below is read on a rebuild and nowhere else, so selecting the tab with
+-- the Restock tab showing left Search greyed until the tab was left and
+-- re-entered. Auctionator creates AuctionatorShoppingFrame on the first
+-- Auction House show of the session (its tab container's OnLoad, inside
+-- AuctionatorAHFrameMixin:OnShow), so the hooks install lazily: from every
+-- rebuild, and one tick after AUCTION_HOUSE_SHOW when that rebuild ran
+-- ahead of Auctionator's OnShow in the same event burst (Core). LibAHTab
+-- shows a selected tab's frame and hides the rest, and the frame hides with
+-- the window, so OnShow and OnHide fire once per selection either way.
+-- Goes with the precondition when #194 deletes it.
+-- @return boolean true once the hooks are installed
+function GBL:_RestockWatchShoppingTab()
+    if self._restockShoppingTabHooked then return true end
+    local frame = AuctionatorShoppingFrame
+    if not (frame and frame.HookScript) then return false end
+    local function changed() self:_RestockShoppingTabChanged() end
+    frame:HookScript("OnShow", changed)
+    frame:HookScript("OnHide", changed)
+    self._restockShoppingTabHooked = true
+    return true
+end
+
+--- The Shopping tab came on or went off screen: redraw the Restock tab so
+-- Search and the banner read the precondition as it is now. Only in IDLE
+-- and READY, the two states that read it: in CONFIRMING and PRICED the
+-- controls are held and a rebuild would move the focus from under the
+-- player (#214), and a search in flight reads nothing until SearchEnd.
+function GBL:_RestockShoppingTabChanged()
+    local st = self._restock
+    local state = st and st.state or "IDLE"
+    if state ~= "IDLE" and state ~= "READY" then return end
+    if self.RefreshRestockTab then self:RefreshRestockTab() end
+end
+
 local SEARCH_BLOCKERS = {
     { key = "auctionator",
       text = "Restock needs the Auctionator addon to search and buy. Targets still display below.",
