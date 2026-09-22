@@ -336,7 +336,7 @@ describe("LayoutEditor._LayoutEditor_ApplyBulk", function()
         GBL._reserveDraft = {}
     end)
 
-    it("applies a bulk Keep to every item on the tab", function()
+    it("applies a bulk Store to every item on the tab", function()
         local ok, res = GBL:_LayoutEditor_ApplyBulk(1, nil, nil, 300)
         assert.is_true(ok)
         assert.equals(300, GBL._reserveDraft[100])
@@ -344,7 +344,7 @@ describe("LayoutEditor._LayoutEditor_ApplyBulk", function()
         assert.equals(2, res.applied)
     end)
 
-    it("applies slots, perSlot and Keep together", function()
+    it("applies slots, perSlot and Store together", function()
         local ok = GBL:_LayoutEditor_ApplyBulk(1, 4, 12, 50)
         assert.is_true(ok)
         assert.equals(4, GBL._layoutDraft.tabs[1].items[100].slots)
@@ -353,7 +353,7 @@ describe("LayoutEditor._LayoutEditor_ApplyBulk", function()
         assert.equals(50, GBL._reserveDraft[200])
     end)
 
-    it("a Keep of 0 marks every reserve for removal", function()
+    it("a Store of 0 marks every reserve for removal", function()
         GBL._reserveDraft = { [100] = 250, [200] = 99 }
         local ok = GBL:_LayoutEditor_ApplyBulk(1, nil, nil, 0)
         assert.is_true(ok)
@@ -375,17 +375,17 @@ describe("LayoutEditor._LayoutEditor_ApplyBulk", function()
         assert.matches("at least one", err)
     end)
 
-    it("rejects a negative Keep", function()
+    it("rejects a negative Store", function()
         local ok, err = GBL:_LayoutEditor_ApplyBulk(1, nil, nil, -5)
         assert.is_false(ok)
-        assert.matches("Keep", err)
+        assert.matches("Store", err)
     end)
 
     it("leaves reserves untouched on a slots/perSlot-only apply", function()
         local ok, res = GBL:_LayoutEditor_ApplyBulk(1, 3, nil, nil)
         assert.is_true(ok)
         assert.is_nil(next(GBL._reserveDraft), "no reserve should be written")
-        assert.is_nil(table.concat(res.parts, ","):find("keep"), "no keep= in summary")
+        assert.is_nil(table.concat(res.parts, ","):find("store"), "no store= in summary")
     end)
 
     it("rejects slots below 1", function()
@@ -463,7 +463,7 @@ describe("LayoutEditor._LayoutEditor_ApplyReserveDraft", function()
     end)
 end)
 
-describe("LayoutEditor Keep field", function()
+describe("LayoutEditor Store field", function()
     local MockWoW = Helpers.MockWoW
     local GBL
 
@@ -488,27 +488,27 @@ describe("LayoutEditor Keep field", function()
         GBL._layoutDirty = false
     end)
 
-    local function findKeep(parent)
+    local function findStore(parent)
         local rowGroup = parent._children[1]
         for _, child in ipairs(rowGroup._children) do
-            if child._type == "EditBox" and child._label == "Keep" then
+            if child._type == "EditBox" and child._label == "Store" then
                 return child
             end
         end
     end
 
-    it("renders a Keep EditBox on the item row", function()
+    it("renders a Store EditBox on the item row", function()
         local AceGUI = LibStub("AceGUI-3.0")
         local parent = AceGUI:Create("SimpleGroup")
         GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, true)
-        assert.is_not_nil(findKeep(parent), "expected a 'Keep' EditBox on the item row")
+        assert.is_not_nil(findStore(parent), "expected a 'Store' EditBox on the item row")
     end)
 
     it("writes the entered value into the reserve draft and marks dirty", function()
         local AceGUI = LibStub("AceGUI-3.0")
         local parent = AceGUI:Create("SimpleGroup")
         GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, true)
-        findKeep(parent):Fire("OnEnterPressed", "150")
+        findStore(parent):Fire("OnEnterPressed", "150")
         assert.equals(150, GBL._reserveDraft[100])
         assert.is_true(GBL._layoutDirty)
     end)
@@ -518,14 +518,14 @@ describe("LayoutEditor Keep field", function()
         local AceGUI = LibStub("AceGUI-3.0")
         local parent = AceGUI:Create("SimpleGroup")
         GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, true)
-        assert.equals("75", findKeep(parent):GetText())
+        assert.equals("75", findStore(parent):GetText())
     end)
 
-    it("disables the Keep field for non-writable viewers", function()
+    it("disables the Store field for non-writable viewers", function()
         local AceGUI = LibStub("AceGUI-3.0")
         local parent = AceGUI:Create("SimpleGroup")
         GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, false)
-        assert.is_true(findKeep(parent).disabled)
+        assert.is_true(findStore(parent).disabled)
     end)
 
     it("coerces a string itemID (synced layout) to the number-keyed reserve", function()
@@ -534,9 +534,9 @@ describe("LayoutEditor Keep field", function()
         local AceGUI = LibStub("AceGUI-3.0")
         local parent = AceGUI:Create("SimpleGroup")
         GBL:_LayoutEditor_RenderItemRow(parent, 1, "100", true)
-        local keep = findKeep(parent)
-        assert.equals("75", keep:GetText())        -- read the number-keyed reserve
-        keep:Fire("OnEnterPressed", "150")
+        local store = findStore(parent)
+        assert.equals("75", store:GetText())        -- read the number-keyed reserve
+        store:Fire("OnEnterPressed", "150")
         assert.equals(150, GBL._reserveDraft[100]) -- wrote a number key
         assert.is_nil(GBL._reserveDraft["100"])    -- not a string key
     end)
@@ -558,6 +558,98 @@ describe("LayoutEditor Keep field", function()
         assert.equals(0, GBL._reserveDraft[100])     -- explicit removal marker
         GBL:_LayoutEditor_ApplyReserveDraft()
         assert.is_nil(GBL:GetStockReserves()[100])   -- Save clears the live reserve
+    end)
+
+    -- The effective target (#214, section 11): the row's total reads "= N"
+    -- while Store is at or below slots x per slot, and "= N, target M" when
+    -- Store is above, since Restock buys to the larger of the two.
+    local function findTotal(parent)
+        local rowGroup = parent._children[1]
+        for _, child in ipairs(rowGroup._children) do
+            if child._type == "Label" and child._text and child._text:find("^= ") then
+                return child
+            end
+        end
+    end
+
+    it("reads the effective target on the row: the total, or the total and the Store above it", function()
+        local AceGUI = LibStub("AceGUI-3.0")
+        GBL._reserveDraft = { [100] = 30 }
+        local parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, true)
+        assert.equals("= 40", findTotal(parent)._text)
+
+        GBL._reserveDraft = { [100] = 75 }
+        parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, true)
+        assert.equals("= 40, target 75", findTotal(parent)._text)
+
+        GBL._reserveDraft = {}
+        parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, true)
+        assert.equals("= 40", findTotal(parent)._text)
+
+        -- The boundary: a Store equal to the total raises nothing.
+        GBL._reserveDraft = { [100] = 40 }
+        parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, true)
+        assert.equals("= 40", findTotal(parent)._text)
+    end)
+
+    it("renders the Store hint under the bulk row and a Store field on it", function()
+        local AceGUI = LibStub("AceGUI-3.0")
+        local parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderDisplayDetails(parent, 1, true)
+        local storeBox, hint
+        local function walk(w)
+            for _, c in ipairs(w._children or {}) do
+                if c._type == "EditBox" and c._label == "Store" then storeBox = storeBox or c end
+                if c._type == "Label" and c._text
+                    and c._text:find("Store: how many the guild bank should hold", 1, true) then
+                    hint = c
+                end
+                walk(c)
+            end
+        end
+        walk(parent)
+        assert.is_not_nil(storeBox, "a Store EditBox on the bulk row")
+        assert.is_not_nil(hint, "the Store hint under the bulk row")
+        assert.truthy(hint._text:find("larger of slots x per slot and Store", 1, true))
+    end)
+
+    it("colours the hints under the bulk row from the palette, not a grey literal", function()
+        local AceGUI = LibStub("AceGUI-3.0")
+        local parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderDisplayDetails(parent, 1, true)
+        local hex = string.format("%02x%02x%02x", 204, 204, 204)   -- NEUTRAL in the normal palette
+        local found = 0
+        local function walk(w)
+            for _, c in ipairs(w._children or {}) do
+                if c._type == "Label" and c._text and (c._text:find("Store: how many", 1, true)
+                    or c._text:find("Leave a field blank", 1, true)) then
+                    found = found + 1
+                    assert.truthy(c._text:find("|cff" .. hex, 1, true), c._text:sub(1, 40))
+                    assert.is_nil(c._text:find("|cff888888", 1, true), c._text:sub(1, 40))
+                end
+                walk(c)
+            end
+        end
+        walk(parent)
+        assert.equals(2, found)
+    end)
+
+    it("shows the Store hint as a tooltip over the field and hides it on leave", function()
+        local AceGUI = LibStub("AceGUI-3.0")
+        local parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, true)
+        local box = findStore(parent)
+        GameTooltip._shown = false
+        box:Fire("OnEnter")
+        assert.equals(box.frame, GameTooltip._owner)
+        assert.truthy(GameTooltip._text:find("Store: how many the guild bank should hold", 1, true))
+        assert.is_true(GameTooltip._shown)
+        box:Fire("OnLeave")
+        assert.is_false(GameTooltip._shown)
     end)
 end)
 

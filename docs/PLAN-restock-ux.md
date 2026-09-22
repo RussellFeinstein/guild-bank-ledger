@@ -114,6 +114,17 @@ One thing the step 1 review added: a purchase result arriving in PRICED is anoth
 purchase (no confirm of ours is out, and the client holds one commodity purchase at a time, so
 ours was replaced at the server); it ends the pause with a chat line and credits nothing.
 
+**Built 2026-09-21 in PR B of #214 (v0.41.0), the view half.** The list renders in every state,
+decorated per row from the session; Done is gone; Search is offered in READY and runs the reset's
+teardown first (`_RestockSearchTeardown`, shared with `ResetRestockSearch`), so the unanswered
+confirm is parked before the buy events drop and the pending store is left alone. A searched row
+that has since left the layout is kept under its own heading, and a searched row whose live
+shortfall dropped to 0 keeps its Buy: Buy next walks the search's snapshot, and a list that hid a
+row it would still buy would lie; a re-search is one click away. The code review of PR B moved the
+teardown ahead of the buy list (the parked quantity is subtracted before the new list is built),
+gave the confirm still awaiting its result its own row status with every Buy greyed and the reason
+on the banner, and dropped the buy events when the house closes with nothing in flight.
+
 ## 4. Preconditions as disabled states (#43, #193, #194)
 
 Search is disabled with its reason on the banner, text-carried (no colour-only state), one reason at
@@ -167,6 +178,11 @@ and the frame second (the review: an addon can hide the frame with the session o
 drops a quote or a start still waiting for its price, since the server discards its pending
 purchase with the session.
 
+**Built 2026-09-21 in PR B (#214).** `_RestockBuildItemUniverse` puts `scanned` on every row and
+the row reads `bank ?` and `bank unknown` with no shortfall until a scan has completed. #217
+(Search stays disabled after the Shopping tab is selected, nothing re-reads the blocker on that
+change) and #218 (a countdown on the PRICED banner) follow.
+
 ## 5. Row vocabulary (#44, #56, #205, #209)
 
 One table of status texts, `RESTOCK_STATUS_TEXT`, read by `GetRestockStatusDisplay` (the row), the
@@ -207,6 +223,20 @@ the row carries `in the mail N (2h ago)` with a Clear button beside it (section 
 Tests: every status in the table has text, an icon and a colour, and no two share a text; every
 reason `failStep` and the pre-start refusals write has a row text; the row for a pending item
 renders the modifier and the reduced shortfall; the grey sites are gone.
+
+**Built 2026-09-21 in PR B of #214 (v0.41.0), with three decisions.** `RESTOCK_STATUS_TEXT` in
+`UI/RestockView.lua` holds eleven statuses, the ten above less "sourced elsewhere" (#205, not yet
+built) plus `in the mail` as a status of its own for a row whose shortfall the mail covers (the
+#215 reading), each with text, an icon and a palette role; `_RestockRowStatus` is the pure
+classifier, session over search over universe. The skip reasons are eight, not seven (`cannot
+afford at price` was missing here), constants in `src/Restock.lua` with `RestockSkipText` beside
+them; `quote expired` and `throttle never freed` never reach `st.skipped`. The table serves the
+row: the log keeps the raw code, which a capture is searched by, and the chat lines keep their own
+wording, which carries the figures, so this section's "the chat lines and the log" read the row
+only. The button says `Buy N (~X)`, the estimate rounded to whole gold above one gold. After the
+review: twelve statuses (`awaiting result` for the confirm with no result yet), "not a commodity"
+keyed on the item key's `isCommodity` (Auctionator prices gear and pets like anything else),
+"priced" needing a usable price, and one buyable predicate shared by Buy next and the tab.
 
 ## 6. Pending purchases (#209)
 
@@ -314,6 +344,12 @@ rescan while the tab is already showing, which the review found could land insid
 after a purchase), and remaining is `walletBase - (spentEstimate - spentAtBase)`. `_RestockSpent`,
 the wallet delta, is gone. The budget box above the list and the gold line are the view half
 (#214).
+
+**Built 2026-09-21 in PR B (#214).** The budget row (the box, `Budget: N g` or `Budget: none`, the
+confirm-at-price toggle) sits above the list in every state, both held while a purchase is in
+flight, and Confirm re-checks the quote against the budget and the wallet at the click; the gold
+line is a second banner label rewritten in place by Core's `OnPlayerMoney` while the tab is
+active, never a rebuild, its reference dropped by the label's own `OnRelease`.
 
 ## 8. The buy step (#56, #199)
 
@@ -438,6 +474,11 @@ Tests: the six strings read Store and the Keep assertions in `spec/ui/layoutedit
 with them; the effective-target label reads both forms; the Reserves group no longer renders and a
 stray reserve is pruned on Save.
 
+**Built 2026-09-21 in PR B (#214), the Store half.** The six strings read Store, the hint sits
+under the bulk row and on every Store field's tooltip, and the row's total reads `= N` or `= N,
+target M`. The item row did not split into two lines (that rides #205's row control), and the
+Reserves group stays until the prune on Save lands (#206).
+
 ## 12. Keyboard
 
 Today `_RestockView_NavKey` consumes TAB, UP, DOWN, ENTER, NUMPADENTER and SPACE whenever the tab is
@@ -451,17 +492,29 @@ Space activate, and Escape clears focus and consumes only itself. A Buy click fo
 the pause. The Sort tab shares the walk and the defect; its copy of the rule is filed for the
 accessibility milestone rather than built here.
 
+**Built 2026-09-21 in PR B (#214) for both tabs.** The rule is `GBL:FocusNavKey` in
+`UI/Accessibility.lua`, which both tabs' key handlers delegate to (the code review of PR B: the
+two handlers were character-identical and already shared the walk), and Escape calls the new
+`GBL:ResetFocus`; the capture block is invisible to the suite (#166), so the wiring is read in
+game. The Sort tab's copy was filed as #219 that day and closed by the same PR. A greyed widget is
+not a Tab stop, and Enter on the budget box gives it keyboard focus.
+
 **Every new element, per the project's accessibility rule:**
 
 | Element | Keyboard path | Focus ring | Colour fallback | Font scaling | Screen reader |
 |---|---|---|---|---|---|
 | Search disabled with reason | none (disabled) | none | text on the banner | `GetScaledFont` | the banner text |
-| Budget box and committed label | Tab; Enter commits | `SetFocusIndicator` | text | yes | the label and box text |
+| Budget box and committed label | Tab; Enter focuses the box, Enter again commits; held while a purchase is in flight | `SetFocusIndicator` | text | yes | the label and box text |
 | Confirm-at-price toggle | Tab; Space toggles | yes | CheckBox state plus label | yes | label |
-| Confirm and Cancel (PRICED) | focused on Buy; Enter / Escape | yes | text | yes | button text carries the quote |
+| Confirm and Cancel (PRICED) | Confirm focused on Buy; Enter confirms; Tab then Enter cancels; Escape clears focus | yes | text | yes | the banner carries the quote |
 | Clear (pending) | Tab, only on rows with an entry | yes | text | yes | "Clear N in the mail" |
 | One-off control | Tab through Dropdown, box, Add | yes | text | yes | labels |
 | Row status | none (read-only) | none | icon plus text | yes | the status text |
+| Per-row Buy | Tab, only when it can be pressed; Enter / Space | yes | text (the estimate) | yes | `Buy N (~X)` |
+| Gold line | none (read-only) | none | text | yes | the line |
+| Store field, hint and tooltip | Tab; Enter focuses, Enter commits; the tooltip on hover | `SetFocusIndicator` | text | yes | the hint text |
+| Effective-target label | none (read-only) | none | text | yes | `= N` or `= N, target M` |
+| Orphan heading | none (read-only) | none | text | yes | the heading |
 
 ## 13. Rebuild order
 
@@ -478,7 +531,8 @@ filed as an issue when this doc lands, labelled, naming its section here.
    every state, the status table, the banner, the budget's home, the keyboard rule). Minor bump: a
    new setting and a new visible control.
    Split on 2026-09-20 at the re-audit: PR A, `feat/restock-flow-states` (v0.40.0), is the model with
-   #60 and the gate, closing #211; the view half is #214.
+   #60 and the gate, closing #211; the view half is #214, `feat/restock-tab-rebuild` (v0.41.0). The
+   v0.40.0 run filed #217 and #218, which follow #214 in the order.
 3. **Auctionator's public search** (#194; section 4), then #193's hint as the observation dictates.
    The first in-game question below gates the hint.
 4. **One-off purchase** (#59; section 9).

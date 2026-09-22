@@ -55,6 +55,51 @@ end
 describe("RestockView", function()
     local GBL
 
+    -- One builder and one two-item READY fixture for every describe below.
+    -- readyTwo saves the layout its two items come from: the view renders
+    -- from the universe, so a fixture without a layout would exercise the
+    -- orphan path ("Searched, no longer in the layout") and read as a test
+    -- of something else.
+    local function build()
+        local AceGUI = LibStub("AceGUI-3.0")
+        local container = AceGUI:Create("SimpleGroup")
+        GBL:BuildRestockTab(container)
+        return container
+    end
+
+    local function findCheckBox(container, label)
+        for _, c in ipairs(container._children or {}) do
+            if c._type == "CheckBox" and c._label == label then return c end
+            local nested = findCheckBox(c, label)
+            if nested then return nested end
+        end
+        return nil
+    end
+
+    local function layoutTwo()
+        local ok = GBL:SaveBankLayout({
+            tabs = {
+                [1] = { mode = "display", name = "Mats",
+                        items = { [111] = { slots = 1, perSlot = 5 }, [222] = { slots = 1, perSlot = 3 } } },
+                [2] = { mode = "overflow" },
+            },
+        })
+        assert.is_true(ok)
+    end
+
+    local function readyTwo()
+        layoutTwo()
+        GBL.lastScanResults = GBL.lastScanResults or {}
+        GBL._restock = {
+            state = "READY",
+            activeItems = { { itemID = 111, needed = 5 }, { itemID = 222, needed = 3 } },
+            resultRows = { [1] = { itemKey = { itemID = 111 }, minPrice = 1000 },
+                           [2] = { itemKey = { itemID = 222 }, minPrice = 1000 } },
+            bought = {}, skipped = {}, walletBase = 1000000, spentAtBase = 0, spentEstimate = 0,
+        }
+        MockWoW.money = 1000000
+    end
+
     before_each(function()
         Helpers.setupMocks()
         GBL = Helpers.loadAddon()
@@ -72,16 +117,16 @@ describe("RestockView", function()
     end)
 
     describe("GetRestockStatusDisplay", function()
-        it("distinguishes buy / in stock by color, icon and text", function()
-            local buy = GBL:GetRestockStatusDisplay({ target = 60, stock = 20, toBuy = 40 })
-            local atMax = GBL:GetRestockStatusDisplay({ target = 60, stock = 60, toBuy = 0 })
-            local overMax = GBL:GetRestockStatusDisplay({ target = 60, stock = 80, toBuy = 0 })
+        it("distinguishes short / in stock by colour, icon and text", function()
+            local short = GBL:GetRestockStatusDisplay({ target = 60, stock = 20, toBuy = 40, scanned = true })
+            local atMax = GBL:GetRestockStatusDisplay({ target = 60, stock = 60, toBuy = 0, scanned = true })
+            local overMax = GBL:GetRestockStatusDisplay({ target = 60, stock = 80, toBuy = 0, scanned = true })
 
-            assert.equals("buy", buy.status)
+            assert.equals("short", short.status)
             assert.equals("instock", atMax.status)
 
-            assert.equals("Buy 40", buy.text)
-            assert.equals("In stock", atMax.text)
+            assert.equals("short", short.text)
+            assert.equals("in stock", atMax.text)
 
             -- At or above the max is one state: over the max reads identically
             -- to exactly at it (no separate "over" callout).
@@ -90,14 +135,136 @@ describe("RestockView", function()
 
             -- Triple-encoded: the two states differ on all three channels (icon,
             -- color, text), so status is never conveyed by color alone.
-            assert.is_true(buy.icon ~= atMax.icon)
-            assert.is_true(buy.color ~= atMax.color)
-            assert.is_true(buy.text ~= atMax.text)
+            assert.is_true(short.icon ~= atMax.icon)
+            assert.is_true(short.color ~= atMax.color)
+            assert.is_true(short.text ~= atMax.text)
         end)
 
         it("treats a nil or empty row as in stock", function()
             assert.equals("instock", GBL:GetRestockStatusDisplay(nil).status)
             assert.equals("instock", GBL:GetRestockStatusDisplay({}).status)
+        end)
+    end)
+
+    ------------------------------------------------------------------------
+    -- The row vocabulary (#214, section 5): one table of statuses, each
+    -- triple-encoded, read through one pure classifier with a fixed
+    -- precedence, and the skip reasons rendered from the code's own list.
+    ------------------------------------------------------------------------
+    describe("row vocabulary (#214)", function()
+        local function session(fields)
+            local s = {
+                state = "READY",
+                activeItems = { { itemID = 100, needed = 5 } },
+                resultRows = { [1] = { itemKey = { itemID = 100 }, minPrice = 4200 } },
+                bought = {}, boughtTotal = {}, skipped = {},
+            }
+            for k, v in pairs(fields or {}) do s[k] = v end
+            return s
+        end
+        local function row(fields)
+            local r = { itemID = 100, target = 20, stock = 15, toBuy = 5, pending = 0, scanned = true }
+            for k, v in pairs(fields or {}) do r[k] = v end
+            return r
+        end
+
+        it("gives every status text, an icon and a palette colour, with no two texts alike", function()
+            local _, palette = next(GBL.A11Y.PALETTES)
+            local seen, n = {}, 0
+            for status, entry in pairs(GBL._restockStatusText) do
+                n = n + 1
+                assert.is_string(entry.text, status)
+                assert.is_true(#entry.text > 0, status)
+                assert.is_string(entry.icon, status)
+                assert.is_table(palette[entry.color], status .. " names no palette role")
+                assert.is_nil(seen[entry.text], "two statuses share '" .. entry.text .. "'")
+                seen[entry.text] = status
+            end
+            assert.equals(12, n)
+        end)
+
+        it("reads bank unknown before a scan, with no shortfall on the row", function()
+            local d = GBL:GetRestockStatusDisplay(row({ scanned = false, stock = 0, toBuy = 20 }), nil)
+            assert.equals("unknown", d.status)
+            assert.equals("bank unknown", d.text)
+        end)
+
+        it("reads in the mail when the pending covers the shortfall, in stock when the bank does", function()
+            local mail = GBL:GetRestockStatusDisplay(row({ stock = 0, pending = 20, toBuy = 0 }), nil)
+            assert.equals("inmail", mail.status)
+            assert.equals("in the mail", mail.text)
+            local bank = GBL:GetRestockStatusDisplay(row({ stock = 25, pending = 20, toBuy = 0 }), nil)
+            assert.equals("instock", bank.status)
+        end)
+
+        it("decorates a searched row from the session: priced, not a commodity, not found", function()
+            local priced = GBL:GetRestockStatusDisplay(row(), session())
+            assert.equals("priced", priced.status)
+            assert.equals(1, priced.index)
+            assert.equals(4200, priced.minPrice)
+            assert.equals(5, priced.needed)
+            local other = GBL:GetRestockStatusDisplay(row(),
+                session({ resultRows = { [1] = { itemKey = { itemID = 100 }, minPrice = 4200, isCommodity = false } } }))
+            assert.equals("notcommodity", other.status)
+            local missing = GBL:GetRestockStatusDisplay(row(), session({ resultRows = {} }))
+            assert.equals("notfound", missing.status)
+            -- A result with no usable price is not found either: Auctionator's
+            -- placeholder for a miss carries minPrice 0, which Lua reads as true.
+            local zero = GBL:GetRestockStatusDisplay(row(),
+                session({ resultRows = { [1] = { itemKey = { itemID = 100 }, minPrice = 0 } } }))
+            assert.equals("notfound", zero.status)
+            -- A row the search never covered keeps the universe reading.
+            assert.equals("short", GBL:GetRestockStatusDisplay(row({ itemID = 200 }), session()).status)
+            -- So does every searched row while the search is out: the results
+            -- are not in, and "not found" would be a lie for the duration.
+            assert.equals("short", GBL:GetRestockStatusDisplay(row(),
+                session({ state = "SEARCHING", resultRows = {} })).status)
+        end)
+
+        it("reads bought with its total, and skipped with the reason's prose", function()
+            local bought = GBL:GetRestockStatusDisplay(row(),
+                session({ bought = { [1] = true }, boughtTotal = { [1] = 21000 } }))
+            assert.equals("bought", bought.status)
+            assert.equals("bought 5 for " .. GBL:FormatMoney(21000), bought.text)
+            local skipped = GBL:GetRestockStatusDisplay(row(), session({ skipped = { [1] = "budget at price" } }))
+            assert.equals("skipped", skipped.status)
+            assert.equals("skipped: " .. GBL:RestockSkipText("budget at price"), skipped.text)
+        end)
+
+        it("marks the row in flight as buying or quoted ahead of every other reading", function()
+            local buying = GBL:GetRestockStatusDisplay(row({ stock = 0, pending = 20, toBuy = 0 }),
+                session({ state = "CONFIRMING", pendingIndex = 1 }))
+            assert.equals("buying", buying.status)
+            local quoted = GBL:GetRestockStatusDisplay(row(),
+                session({ state = "PRICED", pendingIndex = 1, pendingTotal = 52250 }))
+            assert.equals("quoted", quoted.status)
+            assert.equals("quoted " .. GBL:FormatMoney(52250) .. ", confirm?", quoted.text)
+            -- Session over search over universe: a bought row that is also
+            -- priced and covered by the mail reads bought.
+            local d = GBL:GetRestockStatusDisplay(row({ stock = 0, pending = 5, toBuy = 0 }),
+                session({ bought = { [1] = true }, boughtTotal = { [1] = 100 } }))
+            assert.equals("bought", d.status)
+        end)
+
+        it("renders every skip reason the code writes, and an unknown code as itself", function()
+            local reasons = GBL._restockSkipReasons
+            assert.is_table(reasons)
+            local n, seen = 0, {}
+            for _, code in pairs(reasons) do
+                n = n + 1
+                local text = GBL:RestockSkipText(code)
+                assert.is_string(text, code)
+                assert.is_true(text ~= code, "no prose for '" .. code .. "'")
+                seen[text] = (seen[text] or 0) + 1
+            end
+            assert.equals(8, n)
+            -- The two budget reasons share the budget hint, the two afford
+            -- reasons share theirs, and the three price reasons share theirs.
+            assert.equals(2, seen[GBL:RestockSkipText(reasons.BUDGET_THIS_BUY)])
+            assert.truthy(GBL:RestockSkipText(reasons.BUDGET_THIS_BUY):find("budget", 1, true))
+            assert.equals(2, seen[GBL:RestockSkipText(reasons.CANNOT_AFFORD)])
+            assert.equals(3, seen[GBL:RestockSkipText(reasons.NO_PRICE_AVAILABLE)])
+            assert.equals("mystery", GBL:RestockSkipText("mystery"))
         end)
     end)
 
@@ -120,6 +287,7 @@ describe("RestockView", function()
                 },
             })
             assert.is_true(ok)
+            GBL.lastScanResults = {}   -- a scan that saw nothing: the rows read a shortfall, not bank ?
         end
 
         it("renders the layout items grouped by tab name", function()
@@ -130,7 +298,7 @@ describe("RestockView", function()
             assert.is_not_nil(findHeading(scroll, "Consumables"))
             assert.is_not_nil(findLabelContaining(scroll, "target 20"))
             -- triple-encoded status is wired into the row (text + icon channels)
-            assert.is_not_nil(findLabelContaining(scroll, "Buy 20"))
+            assert.is_not_nil(findLabelContaining(scroll, "short 20"))
             assert.is_not_nil(findLabelContaining(scroll, "|T"))
         end)
 
@@ -151,27 +319,50 @@ describe("RestockView", function()
             assert.is_not_nil(findHeading(scroll, "Gems"))
         end)
 
-        it("renders a searching message in the SEARCHING state", function()
-            GBL._restock = { state = "SEARCHING", activeItems = { { itemID = 1, needed = 1 } } }
+        it("renders the item list under the banner in SEARCHING, with Cancel", function()
+            configureLayout()
+            GBL._restock = { state = "SEARCHING", activeItems = { { itemID = 55555, needed = 20 } } }
             local container = build()
+            local banner = findChild(container, "Label")
+            assert.truthy(banner._text:find("Searching the Auction House", 1, true))
             local scroll = findChild(container, "ScrollFrame")
-            assert.is_not_nil(findLabelContaining(scroll, "Searching the Auction House"))
+            assert.is_not_nil(findHeading(scroll, "Consumables"))
+            local row = findLabelContaining(scroll, "target 20")
+            assert.is_not_nil(row)
+            assert.truthy(row._text:find("short 20", 1, true))
+            assert.is_nil(findLabelContaining(scroll, "not found"))
+            assert.is_not_nil(findButton(container, "Cancel"))
+            assert.is_nil(findButton(container, "Search auctions"))
         end)
 
-        it("renders search results in READY, formatting price with FormatMoney", function()
+        it("decorates the list in READY with each searched row's price and Buy, formatting price with FormatMoney", function()
+            local ok = GBL:SaveBankLayout({
+                tabs = {
+                    [1] = { mode = "display", name = "Consumables",
+                            items = { [55555] = { slots = 1, perSlot = 5 }, [66666] = { slots = 1, perSlot = 3 } } },
+                    [2] = { mode = "overflow" },
+                },
+            })
+            assert.is_true(ok)
             GBL._restock = {
                 state = "READY",
                 activeItems = { { itemID = 55555, needed = 5 }, { itemID = 66666, needed = 3 } },
-                resultRows = { [1] = { minPrice = 4200 } },  -- 55555 found (42s); 66666 missing
-                foundCount = 1,
+                resultRows = { [1] = { itemKey = { itemID = 55555 }, minPrice = 4200 } },  -- 66666 missing
+                foundCount = 1, bought = {}, skipped = {},
+                walletBase = 1000000, spentAtBase = 0, spentEstimate = 0,
             }
+            MockWoW.money = 1000000
             local container = build()
             local scroll = findChild(container, "ScrollFrame")
-            assert.is_not_nil(scroll)
-            assert.is_not_nil(findLabelContaining(scroll, "need 5"))
-            assert.is_not_nil(findLabelContaining(scroll, GBL:FormatMoney(4200)))  -- not "0 g"
+            assert.is_not_nil(findHeading(scroll, "Consumables"))
+            local priced = findLabelContaining(scroll, "lowest " .. GBL:FormatMoney(4200))
+            assert.is_not_nil(priced)
+            assert.truthy(priced._text:find("target 5", 1, true))
+            assert.truthy(priced._text:find("priced", 1, true))
+            assert.is_not_nil(findButton(scroll, "Buy 5 (~" .. GBL:_RestockEstimateText(21000) .. ")"))
             assert.is_not_nil(findLabelContaining(scroll, "not found"))
-            -- the new result labels must keep explicit SetFont flags (12.0.7 guard)
+            assert.is_nil(findButton(scroll, "Buy 3 (~" .. GBL:_RestockEstimateText(0) .. ")"))
+            -- the result labels must keep explicit SetFont flags (12.0.7 guard)
             local function walk(w)
                 for _, c in ipairs(w._children or {}) do
                     if c._type == "Label" and c._setFont then
@@ -183,12 +374,50 @@ describe("RestockView", function()
             walk(container)
         end)
 
-        it("renders a confirming message and a Cancel button in CONFIRMING", function()
-            GBL._restock = { state = "CONFIRMING", activeItems = {}, resultRows = {} }
+        it("keeps the list in CONFIRMING, marks the row in flight, disables the other Buys, and offers Cancel", function()
+            local ok = GBL:SaveBankLayout({
+                tabs = {
+                    [1] = { mode = "display", name = "Consumables",
+                            items = { [55555] = { slots = 1, perSlot = 5 }, [66666] = { slots = 1, perSlot = 3 } } },
+                    [2] = { mode = "overflow" },
+                },
+            })
+            assert.is_true(ok)
+            GBL._restock = {
+                state = "CONFIRMING",
+                activeItems = { { itemID = 55555, needed = 5 }, { itemID = 66666, needed = 3 } },
+                resultRows = { [1] = { itemKey = { itemID = 55555 }, minPrice = 4200 },
+                               [2] = { itemKey = { itemID = 66666 }, minPrice = 1000 } },
+                bought = {}, skipped = {}, pendingIndex = 1, pendingItemID = 55555, pendingQty = 5,
+                walletBase = 1000000, spentAtBase = 0, spentEstimate = 0,
+            }
+            MockWoW.money = 1000000
             local container = build()
+            local banner = findChild(container, "Label")
+            assert.truthy(banner._text:find("Confirming purchase", 1, true))
             local scroll = findChild(container, "ScrollFrame")
-            assert.is_not_nil(findLabelContaining(scroll, "Confirming purchase"))
+            assert.is_not_nil(findHeading(scroll, "Consumables"))
+            assert.is_not_nil(findLabelContaining(scroll, "buying"))
+            local other = findButton(scroll, "Buy 3 (~" .. GBL:_RestockEstimateText(3000) .. ")")
+            assert.is_not_nil(other)
+            assert.is_true(other.disabled)
             assert.is_not_nil(findButton(container, "Cancel"))
+            assert.is_nil(findButton(container, "Done"))
+        end)
+
+        it("renders a searched row that left the layout under its own heading rather than dropping it", function()
+            configureLayout()   -- 55555 only; 77777 was searched and then removed from the layout
+            GBL._restock = {
+                state = "READY",
+                activeItems = { { itemID = 77777, needed = 2 } },
+                resultRows = { [1] = { itemKey = { itemID = 77777 }, minPrice = 500 } },
+                bought = {}, skipped = {}, walletBase = 1000000, spentAtBase = 0, spentEstimate = 0,
+            }
+            MockWoW.money = 1000000
+            local scroll = findChild(build(), "ScrollFrame")
+            assert.is_not_nil(findHeading(scroll, "Consumables"))
+            assert.is_not_nil(findHeading(scroll, "Searched, no longer in the layout"))
+            assert.is_not_nil(findButton(scroll, "Buy 2 (~" .. GBL:_RestockEstimateText(1000) .. ")"))
         end)
 
         it("renders Buy next with the buyable count and disables it at zero (#199)", function()
@@ -227,7 +456,7 @@ describe("RestockView", function()
             }
             MockWoW.money = 1000000
             local container = build()
-            local btn = findButton(container, "Buy 3")  -- item 222 (needs 3)
+            local btn = findButton(container, "Buy 3 (~" .. GBL:_RestockEstimateText(3000) .. ")")  -- item 222 (needs 3)
             assert.is_not_nil(btn)
             btn:Fire("OnClick")
             assert.equals(1, #MockWoW.commodityPurchases.start)
@@ -259,7 +488,7 @@ describe("RestockView", function()
             }
             MockWoW.money = 1000000  -- spent 0
             local container = build()
-            local banner = findChild(container, "Label")
+            local banner = findLabelContaining(container, "Gold:")
             assert.truthy(banner._text:find("Spent", 1, true))
             assert.truthy(banner._text:find("Gold", 1, true))  -- current wallet shown
         end)
@@ -272,16 +501,16 @@ describe("RestockView", function()
                 bought = {}, skipped = {}, walletBase = 1000000, spentAtBase = 0, spentEstimate = 0,
             }
             MockWoW.money = 1000000  -- spent 0, no budget
-            local banner = findChild(build(), "Label")
+            local banner = findLabelContaining(build(), "Gold:")
             assert.is_nil(banner._text:find("Spent", 1, true))
 
             GBL._restock.spentEstimate = 100000  -- spent 10g, no budget
-            banner = findChild(build(), "Label")
+            banner = findLabelContaining(build(), "Gold:")
             assert.truthy(banner._text:find("Spent " .. GBL:FormatMoney(100000) .. ".", 1, true))
             assert.is_nil(banner._text:find(GBL:FormatMoney(100000) .. " of ", 1, true))  -- "1 of 1 found" is the count
 
             GBL:SetRestockBudget(100)
-            banner = findChild(build(), "Label")
+            banner = findLabelContaining(build(), "Gold:")
             assert.truthy(banner._text:find("Spent " .. GBL:FormatMoney(100000) .. " of 100 g.", 1, true))
         end)
 
@@ -316,7 +545,7 @@ describe("RestockView", function()
                 local row = findLabelContaining(scroll, "in the mail 8 (2h ago)")
                 assert.is_not_nil(row)
                 assert.truthy(row._text:find("target 20", 1, true))
-                assert.truthy(row._text:find("Buy 12", 1, true))
+                assert.truthy(row._text:find("short 12", 1, true))
                 local clear = findButton(scroll, "Clear")
                 assert.is_not_nil(clear)
                 local inOrder = false
@@ -342,13 +571,13 @@ describe("RestockView", function()
                 GBL.tabGroup = LibStub("AceGUI-3.0"):Create("TabGroup")
                 GBL:BuildRestockTab(GBL.tabGroup)
                 local before = findChild(GBL.tabGroup, "ScrollFrame")
-                assert.is_not_nil(findLabelContaining(before, "In stock"))
+                assert.is_not_nil(findLabelContaining(before, "in the mail"))
                 findButton(before, "Clear"):Fire("OnClick")
                 assert.is_nil(GBL:GetRestockData().pending[55555])
                 local after = findChild(GBL.tabGroup, "ScrollFrame")
                 assert.is_nil(findLabelContaining(after, "in the mail"))
                 assert.is_nil(findButton(after, "Clear"))
-                assert.is_not_nil(findLabelContaining(after, "Buy 20"))
+                assert.is_not_nil(findLabelContaining(after, "short 20"))
             end)
 
             it("registers no button on a row with nothing in the mail", function()
@@ -429,8 +658,8 @@ describe("RestockView", function()
             assert.equals(2, GBL.A11Y.focusIndex)
         end)
 
-        it("DOWN and UP move focus", function()
-            GBL:_RestockView_NavKey("DOWN", false)
+        it("DOWN and UP move focus once a widget has it", function()
+            GBL:_RestockView_NavKey("TAB", false)
             assert.equals(1, GBL.A11Y.focusIndex)
             GBL:_RestockView_NavKey("DOWN", false)
             assert.equals(2, GBL.A11Y.focusIndex)
@@ -473,6 +702,31 @@ describe("RestockView", function()
         it("returns false for an unhandled key", function()
             assert.is_false(GBL:_RestockView_NavKey("X", false))
         end)
+
+        -- The rule (#214, section 12): with nothing focused only Tab enters
+        -- the walk, so an arrow pressed to turn the character cannot land on
+        -- Scan bank; Escape clears focus and consumes only itself, so the next
+        -- Escape closes the window as before.
+        it("consumes nothing but TAB while nothing is focused (#214)", function()
+            for _, key in ipairs({ "UP", "DOWN", "ENTER", "NUMPADENTER", "SPACE" }) do
+                assert.is_false(GBL:_RestockView_NavKey(key, false), key)
+                assert.equals(0, GBL.A11Y.focusIndex, key)
+            end
+            assert.is_true(GBL:_RestockView_NavKey("TAB", false))
+            assert.equals(1, GBL.A11Y.focusIndex)
+            assert.is_true(GBL:_RestockView_NavKey("DOWN", false))
+            assert.equals(2, GBL.A11Y.focusIndex)
+        end)
+
+        it("ESCAPE clears focus when a widget has it, and propagates when none does (#214)", function()
+            assert.is_false(GBL:_RestockView_NavKey("ESCAPE", false))
+            GBL:_RestockView_NavKey("TAB", false)
+            assert.equals(1, GBL.A11Y.focusIndex)
+            assert.is_true(GBL:_RestockView_NavKey("ESCAPE", false))
+            assert.equals(0, GBL.A11Y.focusIndex)
+            assert.is_false(b1._focused)
+            assert.is_false(GBL:_RestockView_NavKey("ESCAPE", false))
+        end)
     end)
 
     describe("OpenRestockTab", function()
@@ -494,33 +748,6 @@ describe("RestockView", function()
     -- the focus order, and the auction-house gate on every buy control.
     ------------------------------------------------------------------------
     describe("flow states (#211)", function()
-        local function build()
-            local AceGUI = LibStub("AceGUI-3.0")
-            local container = AceGUI:Create("SimpleGroup")
-            GBL:BuildRestockTab(container)
-            return container
-        end
-
-        local function findCheckBox(container, label)
-            for _, c in ipairs(container._children or {}) do
-                if c._type == "CheckBox" and c._label == label then return c end
-                local nested = findCheckBox(c, label)
-                if nested then return nested end
-            end
-            return nil
-        end
-
-        local function readyTwo()
-            GBL._restock = {
-                state = "READY",
-                activeItems = { { itemID = 111, needed = 5 }, { itemID = 222, needed = 3 } },
-                resultRows = { [1] = { itemKey = { itemID = 111 }, minPrice = 1000 },
-                               [2] = { itemKey = { itemID = 222 }, minPrice = 1000 } },
-                bought = {}, skipped = {}, walletBase = 1000000, spentAtBase = 0, spentEstimate = 0,
-            }
-            MockWoW.money = 1000000
-        end
-
         before_each(function()
             _G.Auctionator = {
                 API = { v1 = { ConvertToSearchString = function() return "x" end } },
@@ -647,14 +874,14 @@ describe("RestockView", function()
             _G.AuctionHouseFrame = { IsShown = function() return false end }
             local container = build()
             assert.is_true(findButton(container, "Buy next (2 left)").disabled)
-            assert.is_true(findButton(container, "Buy 5").disabled)
-            assert.is_true(findButton(container, "Buy 3").disabled)
-            assert.truthy(findChild(container, "Label")._text:find("Open the Auction House to buy.", 1, true))
+            assert.is_true(findButton(container, "Buy 5 (~" .. GBL:_RestockEstimateText(5000) .. ")").disabled)
+            assert.is_true(findButton(container, "Buy 3 (~" .. GBL:_RestockEstimateText(3000) .. ")").disabled)
+            assert.truthy(findChild(container, "Label")._text:find("Open the Auction House to search or buy.", 1, true))
 
             _G.AuctionHouseFrame = { IsShown = function() return true end }
             container = build()
             assert.is_falsy(findButton(container, "Buy next (2 left)").disabled)
-            assert.is_falsy(findButton(container, "Buy 5").disabled)
+            assert.is_falsy(findButton(container, "Buy 5 (~" .. GBL:_RestockEstimateText(5000) .. ")").disabled)
         end)
 
         it("disables Confirm with the auction house closed", function()
@@ -673,10 +900,10 @@ describe("RestockView", function()
         it("shows Spent from what the search spent, not from the wallet (#60)", function()
             readyTwo()
             MockWoW.money = 900000  -- 10g left the wallet elsewhere
-            local banner = findChild(build(), "Label")
+            local banner = findLabelContaining(build(), "Gold:")
             assert.is_nil(banner._text:find("Spent", 1, true))
             GBL._restock.spentEstimate = 100000
-            banner = findChild(build(), "Label")
+            banner = findLabelContaining(build(), "Gold:")
             assert.truthy(banner._text:find("Spent " .. GBL:FormatMoney(100000) .. ".", 1, true))
         end)
 
@@ -706,6 +933,291 @@ describe("RestockView", function()
             GBL.mainFrame:Fire("OnClose")
             GBL:SelectTab("restock")
             assert.equals(50000, GBL._restock.walletBase)
+        end)
+    end)
+    ------------------------------------------------------------------------
+    -- The tab over the flow (#214): Done retired, Search offered from the
+    -- list in READY, the budget row above the list in every state, the gold
+    -- line updated in place, and the list rendered in every state.
+    ------------------------------------------------------------------------
+    describe("the tab in every state (#214)", function()
+        before_each(function()
+            _G.Auctionator = {
+                API = { v1 = { ConvertToSearchString = function() return "x" end } },
+                EventBus = { RegisterSource = function() end, Register = function() end,
+                             Unregister = function() end },
+                Shopping = { Tab = { Events = { SearchEnd = "SearchEnd" } } },
+            }
+            _G.AuctionHouseFrame = { IsShown = function() return true end }
+            _G.AuctionatorShoppingFrame = { IsVisible = function() return true end,
+                                            DoSearch = function() end, StopSearch = function() end }
+            GBL.lastScanResults = {}   -- a scan that saw nothing: every layout item is short
+            -- Names resolve at once (the mock Item has no CreateFromItemID).
+            _G.Item.CreateFromItemID = function(_self, id)
+                return { ContinueOnItemLoad = function(_i, cb) cb() end,
+                         GetItemName = function() return "Item " .. id end }
+            end
+        end)
+
+        after_each(function()
+            _G.Auctionator = nil
+            _G.AuctionHouseFrame = nil
+            _G.AuctionatorShoppingFrame = nil
+            _G.Item.CreateFromItemID = nil
+        end)
+
+        it("offers Search in READY and never Done, disabling it on a blocker with the reason on the banner", function()
+            readyTwo()
+            local container = build()
+            assert.is_nil(findButton(container, "Done"))
+            local search = findButton(container, "Search auctions")
+            assert.is_not_nil(search)
+            assert.is_falsy(search.disabled)
+            assert.is_not_nil(findButton(container, "Buy next (2 left)"))
+
+            _G.AuctionHouseFrame = { IsShown = function() return false end }
+            container = build()
+            search = findButton(container, "Search auctions")
+            assert.is_true(search.disabled)
+            assert.truthy(findChild(container, "Label")._text:find("Open the Auction House to search or buy.", 1, true))
+        end)
+
+        it("starts a new search from READY: progress reset, the pending store kept, the list still there", function()
+            readyTwo()
+            GBL:GetRestockData().pending[111] = { qty = 1, buyer = "Someone", at = 1 }
+            GBL._restock.bought = { [2] = true }
+            GBL._restock.boughtTotal = { [2] = 3000 }
+            GBL._restock.skipped = { [1] = "max price" }
+            findButton(build(), "Search auctions"):Fire("OnClick")
+            assert.equals("SEARCHING", GBL._restock.state)
+            assert.is_nil(next(GBL._restock.bought))
+            assert.is_nil(next(GBL._restock.boughtTotal))
+            assert.is_nil(next(GBL._restock.skipped))
+            assert.is_not_nil(GBL:GetRestockData().pending[111])
+            local scroll = findChild(build(), "ScrollFrame")
+            assert.is_not_nil(findHeading(scroll, "Mats"))
+        end)
+
+        it("renders the budget row above the list in every state, with the committed value and the toggle", function()
+            layoutTwo()
+            GBL:SetRestockConfirmAtPrice(true)
+            for _, state in ipairs({ "IDLE", "SEARCHING", "READY", "CONFIRMING", "PRICED" }) do
+                GBL._restock = { state = state, activeItems = {}, resultRows = {}, bought = {}, skipped = {},
+                                 pendingIndex = 1, pendingItemID = 111, pendingQty = 5, pendingTotal = 5000 }
+                local container = build()
+                local box = findChild(container, "EditBox")
+                assert.is_not_nil(box, state)
+                assert.is_not_nil(findLabelContaining(container, "Budget: none"), state)
+                local cb = findCheckBox(container, "Confirm at price")
+                assert.is_not_nil(cb, state)
+                assert.is_true(cb:GetValue(), state)
+            end
+
+            GBL._restock = { state = "IDLE" }
+            local container = build()
+            findChild(container, "EditBox"):Fire("OnEnterPressed", "500")
+            assert.equals(500, GBL:GetRestockBudget())
+            container = build()
+            assert.is_not_nil(findLabelContaining(container, "Budget: 500 g"))
+            assert.is_nil(findLabelContaining(container, "Budget: none"))
+
+            -- The toggle writes back and is in the focus order before the list.
+            local cb = findCheckBox(container, "Confirm at price")
+            cb:SetValue(false)
+            cb:Fire("OnValueChanged", false)
+            assert.is_false(GBL:IsRestockConfirmAtPrice())
+            local idx
+            for i, w in ipairs(GBL.A11Y.focusOrder) do
+                if w == cb then idx = i end
+            end
+            assert.is_not_nil(idx)
+        end)
+
+        it("shows the gold line in every state and rewrites it in place on PLAYER_MONEY", function()
+            layoutTwo()
+            MockWoW.money = 1234500
+            for _, state in ipairs({ "IDLE", "SEARCHING", "READY", "CONFIRMING", "PRICED" }) do
+                GBL._restock = { state = state, activeItems = {}, resultRows = {}, bought = {}, skipped = {},
+                                 pendingIndex = 1, pendingItemID = 111, pendingQty = 5, pendingTotal = 5000,
+                                 spentEstimate = 0 }
+                assert.is_not_nil(findLabelContaining(build(), "Gold: " .. GBL:FormatMoney(1234500)), state)
+            end
+
+            GBL.activeTab = "restock"
+            GBL:CreateMainFrame()
+            GBL.mainFrame:Show()
+            GBL.tabGroup = LibStub("AceGUI-3.0"):Create("TabGroup")
+            GBL:BuildRestockTab(GBL.tabGroup)
+            local gold = findLabelContaining(GBL.tabGroup, "Gold:")
+            local builds = 0
+            local orig = GBL.BuildRestockTab
+            GBL.BuildRestockTab = function(...) builds = builds + 1; return orig(...) end
+            MockWoW.money = 999
+            GBL:OnPlayerMoney()
+            GBL.BuildRestockTab = orig
+            assert.equals(0, builds)
+            assert.truthy(gold._text:find("Gold: " .. GBL:FormatMoney(999), 1, true))
+
+            -- Another tab active: nothing is written.
+            GBL.activeTab = "sort"
+            MockWoW.money = 5
+            GBL:OnPlayerMoney()
+            assert.truthy(gold._text:find("Gold: " .. GBL:FormatMoney(999), 1, true))
+        end)
+
+        it("reads bank ? on every row before a scan, with the banner waiting on it", function()
+            layoutTwo()
+            GBL.lastScanResults = nil
+            GBL._restock = { state = "IDLE" }
+            local container = build()
+            local scroll = findChild(container, "ScrollFrame")
+            local row = findLabelContaining(scroll, "bank ?")
+            assert.is_not_nil(row)
+            assert.is_nil(row._text:find("short", 1, true))
+            assert.truthy(row._text:find("bank unknown", 1, true))
+            assert.truthy(findChild(container, "Label")._text:find("Waiting on the bank scan", 1, true))
+        end)
+
+        it("colours the row annotations from the palette, not a grey literal", function()
+            readyTwo()
+            local scroll = findChild(build(), "ScrollFrame")
+            local hex = string.format("%02x%02x%02x", 204, 204, 204)   -- NEUTRAL in the normal palette
+            local row = findLabelContaining(scroll, "target 5")
+            assert.is_nil(row._text:find("|cffaaaaaa", 1, true))
+            assert.truthy(row._text:find("|cff" .. hex, 1, true))
+        end)
+    end)
+    ------------------------------------------------------------------------
+    -- The code review of PR B (#214): the unanswered row, one buyable
+    -- predicate, the controls held while a purchase is in flight, the walk
+    -- skipping refused stops, the gold label's lifetime, orphans during a
+    -- search, the estimate on the button.
+    ------------------------------------------------------------------------
+    describe("review of the tab (#214)", function()
+        before_each(function()
+            _G.Auctionator = {
+                API = { v1 = { ConvertToSearchString = function() return "x" end } },
+                EventBus = { RegisterSource = function() end, Register = function() end,
+                             Unregister = function() end },
+                Shopping = { Tab = { Events = { SearchEnd = "SearchEnd" } } },
+            }
+            _G.AuctionatorShoppingFrame = { IsVisible = function() return true end,
+                                            DoSearch = function() end, StopSearch = function() end }
+            GBL.lastScanResults = {}
+        end)
+
+        after_each(function()
+            _G.Auctionator = nil
+            _G.AuctionatorShoppingFrame = nil
+        end)
+
+        it("marks the unanswered row awaiting its result, disables every Buy, and says so on the banner", function()
+            readyTwo()
+            GBL._restock.unanswered = { index = 1, itemID = 111, qty = 5, total = 5000 }
+            local container = build()
+            local scroll = findChild(container, "ScrollFrame")
+            local row = findLabelContaining(scroll, "awaiting result")
+            assert.is_not_nil(row)
+            assert.truthy(row._text:find("item 111", 1, true))
+            -- The awaiting row carries no Buy of its own; every other Buy is greyed.
+            assert.is_nil(findButton(scroll, "Buy 5 (~" .. GBL:_RestockEstimateText(5000) .. ")"))
+            assert.is_true(findButton(scroll, "Buy 3 (~" .. GBL:_RestockEstimateText(3000) .. ")").disabled)
+            local next_ = findButton(container, "Buy next (0 left)")
+            assert.is_not_nil(next_)
+            assert.is_true(next_.disabled)
+            assert.truthy(findChild(container, "Label")._text:find("Waiting on the result of item 111", 1, true))
+        end)
+
+        it("offers a Buy exactly where the flow would start one: not for a non-commodity, not without a price", function()
+            readyTwo()
+            GBL._restock.resultRows[1].isCommodity = false
+            GBL._restock.resultRows[2].minPrice = 0
+            local container = build()
+            local scroll = findChild(container, "ScrollFrame")
+            assert.is_not_nil(findLabelContaining(scroll, "not a commodity, buy it by hand"))
+            assert.is_not_nil(findLabelContaining(scroll, "not found"))
+            assert.is_nil(findButton(scroll, "Buy 5 (~" .. GBL:_RestockEstimateText(5000) .. ")"))
+            assert.is_nil(findButton(scroll, "Buy 3 (~" .. GBL:_RestockEstimateText(0) .. ")"))
+            assert.is_not_nil(findButton(container, "Buy next (0 left)"))
+        end)
+
+        it("holds the budget box and the pause toggle while a purchase is in flight", function()
+            readyTwo()
+            for _, state in ipairs({ "CONFIRMING", "PRICED" }) do
+                GBL._restock.state = state
+                GBL._restock.pendingIndex = 1
+                GBL._restock.pendingItemID = 111
+                GBL._restock.pendingQty = 5
+                GBL._restock.pendingTotal = 5000
+                local container = build()
+                assert.is_true(findChild(container, "EditBox").disabled, state)
+                assert.is_true(findCheckBox(container, "Confirm at price").disabled, state)
+            end
+            GBL._restock.state = "READY"
+            local container = build()
+            assert.is_falsy(findChild(container, "EditBox").disabled)
+            assert.is_falsy(findCheckBox(container, "Confirm at price").disabled)
+        end)
+
+        it("registers no refused Buy in the focus walk, so Tab from Confirm reaches Cancel and back", function()
+            readyTwo()
+            GBL._restock.state = "PRICED"
+            GBL._restock.pendingIndex = 1
+            GBL._restock.pendingItemID = 111
+            GBL._restock.pendingQty = 5
+            GBL._restock.pendingTotal = 5000
+            build()
+            for _, w in ipairs(GBL.A11Y.focusOrder) do
+                assert.is_falsy(w._type == "Button" and w.disabled, "a disabled button in the walk")
+            end
+        end)
+
+        it("stops writing the gold line once its label is released, and keeps writing while the frame is only hidden", function()
+            layoutTwo()
+            GBL._restock = { state = "IDLE" }
+            GBL.activeTab = "restock"
+            GBL:CreateMainFrame()
+            GBL.mainFrame:Show()
+            GBL.tabGroup = LibStub("AceGUI-3.0"):Create("TabGroup")
+            GBL:BuildRestockTab(GBL.tabGroup)
+            local gold = findLabelContaining(GBL.tabGroup, "Gold:")
+
+            -- Hidden, not released (the window closed on this tab): the line
+            -- is still the live label and reads fresh when the window reopens.
+            GBL.mainFrame:Fire("OnClose")
+            MockWoW.money = 777
+            GBL:OnPlayerMoney()
+            assert.truthy(gold._text:find("Gold: " .. GBL:FormatMoney(777), 1, true))
+
+            -- Released (another tab built over it): the reference is gone with it.
+            GBL.tabGroup:ReleaseChildren()
+            MockWoW.money = 888
+            GBL:OnPlayerMoney()
+            assert.is_nil(gold._text:find("Gold: " .. GBL:FormatMoney(888), 1, true))
+            assert.is_nil(GBL._restockGoldLabel)
+        end)
+
+        it("builds no orphan row while a search is out", function()
+            layoutTwo()
+            GBL._restock = { state = "SEARCHING", activeItems = { { itemID = 999, needed = 2 } } }
+            local scroll = findChild(build(), "ScrollFrame")
+            assert.is_nil(findHeading(scroll, "Searched, no longer in the layout"))
+            GBL._restock.state = "READY"
+            GBL._restock.resultRows = { [1] = { itemKey = { itemID = 999 }, minPrice = 500 } }
+            GBL._restock.bought, GBL._restock.skipped = {}, {}
+            scroll = findChild(build(), "ScrollFrame")
+            assert.is_not_nil(findHeading(scroll, "Searched, no longer in the layout"))
+        end)
+
+        it("rounds the estimate on the button to whole gold above one gold, and asks for the width it needs", function()
+            assert.equals("2g", GBL:_RestockEstimateText(21000))
+            assert.equals("740g", GBL:_RestockEstimateText(7407360))
+            assert.equals("10s", GBL:_RestockEstimateText(1000))
+            assert.equals("0c", GBL:_RestockEstimateText(0))
+            readyTwo()
+            local btn = findButton(findChild(build(), "ScrollFrame"), "Buy 5 (~50s)")
+            assert.is_not_nil(btn)
+            assert.is_true(btn._autoWidth)
         end)
     end)
 end)

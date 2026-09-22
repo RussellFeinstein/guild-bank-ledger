@@ -1071,11 +1071,13 @@ function MockWoW.install()
     -- GameTooltip stub
     _G.GameTooltip = _G.GameTooltip or {
         _lines = {},
-        SetOwner = function() end,
+        _shown = false,
+        SetOwner = function(self, owner, anchor) self._owner = owner; self._anchor = anchor end,
         ClearLines = function(self) self._lines = {} end,
         AddLine = function(self, text) table.insert(self._lines, text) end,
-        Show = function() end,
-        Hide = function() end,
+        SetText = function(self, text) self._text = text end,
+        Show = function(self) self._shown = true end,
+        Hide = function(self) self._shown = false end,
         SetHyperlink = function() end,
     }
 

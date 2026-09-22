@@ -141,21 +141,50 @@ end
 -- Expose the pure helper for the spec suite.
 GBL._layoutEditorApplyBulkToItems = applyBulkToItems
 
---- Set the reserve draft entry for every item on a tab to `keepValue` in place.
+-- What Store means, on the bulk row's hint and every Store field's tooltip
+-- (#61, #214). One string so the two cannot drift.
+local STORE_HINT = "Store: how many the guild bank should hold. "
+    .. "Restock buys up to the larger of slots x per slot and Store."
+
+-- Show the Store hint as a tooltip while the pointer is over the field.
+-- GameTooltip is guarded: the spec's stub has it, a stripped client may not.
+local function attachStoreTooltip(widget)
+    widget:SetCallback("OnEnter", function(w)
+        if not (GameTooltip and GameTooltip.SetOwner and GameTooltip.SetText) then return end
+        GameTooltip:SetOwner(w.frame, "ANCHOR_RIGHT")
+        GameTooltip:SetText(STORE_HINT, 1, 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    widget:SetCallback("OnLeave", function()
+        if GameTooltip and GameTooltip.Hide then GameTooltip:Hide() end
+    end)
+end
+
+-- The hint colour under the bulk row reads the palette (#44's rule), so a
+-- high-contrast palette lifts it.
+local function neutralHex(self)
+    local c = self:GetAccessibleColor("NEUTRAL")
+    return format("%02x%02x%02x",
+        math.floor((c.r or 1) * 255 + 0.5),
+        math.floor((c.g or 1) * 255 + 0.5),
+        math.floor((c.b or 1) * 255 + 0.5))
+end
+
+--- Set the reserve draft entry for every item on a tab to `storeValue` in place.
 --
 -- Pure over `tabItems` + `reserveDraft` (writes the draft). itemID keys are
 -- coerced to numbers, since a synced layout can be string-keyed while the
--- reserve store (and SetStockReserve) is number-keyed. A keepValue of 0 marks
+-- reserve store (and SetStockReserve) is number-keyed. A storeValue of 0 marks
 -- each item's reserve for removal on Save (draft-only apply clears it).
 --
 -- Returns the number of items written.
-local function applyBulkReserve(tabItems, reserveDraft, keepValue)
+local function applyBulkReserve(tabItems, reserveDraft, storeValue)
     if type(tabItems) ~= "table" or type(reserveDraft) ~= "table" then return 0 end
     local n = 0
     for itemID in pairs(tabItems) do
         local key = tonumber(itemID)
         if key then
-            reserveDraft[key] = keepValue
+            reserveDraft[key] = storeValue
             n = n + 1
         end
     end
@@ -213,32 +242,32 @@ end
 -- Expose the pure helper for the spec suite.
 GBL._layoutEditorOverflowOrderSummary = overflowOrderSummary
 
---- Validate and apply a bulk edit (slots / perSlot / keep) to every item on a
+--- Validate and apply a bulk edit (slots / perSlot / store) to every item on a
 -- display tab. Orchestrates the working drafts: applyBulkToItems mutates the
 -- layout draft, applyBulkReserve writes the reserve draft. Does no rendering and
 -- no Print, so the button handler stays thin and this stays unit-testable.
--- newSlots / newPerSlot / newKeep are numbers or nil (nil = leave unchanged);
--- newKeep may be 0 (clear reserves on Save).
+-- newSlots / newPerSlot / newStore are numbers or nil (nil = leave unchanged);
+-- newStore may be 0 (clear reserves on Save).
 -- @return ok, (result { applied, parts } on success | errorMessage string)
-function GBL:_LayoutEditor_ApplyBulk(tabIndex, newSlots, newPerSlot, newKeep)
+function GBL:_LayoutEditor_ApplyBulk(tabIndex, newSlots, newPerSlot, newStore)
     local draft = self._layoutDraft
     local tab = draft and draft.tabs and draft.tabs[tabIndex]
     if type(tab) ~= "table" then return false, "no layout draft for this tab" end
-    if not newSlots and not newPerSlot and newKeep == nil then
-        return false, "Enter at least one of Slots / Per slot / Keep to apply."
+    if not newSlots and not newPerSlot and newStore == nil then
+        return false, "Enter at least one of Slots / Per slot / Store to apply."
     end
     if newSlots and newSlots < 1 then return false, "Slots must be >= 1." end
     if newPerSlot and newPerSlot < 1 then return false, "Per slot must be >= 1." end
-    if newKeep ~= nil and newKeep < 0 then return false, "Keep must be >= 0." end
+    if newStore ~= nil and newStore < 0 then return false, "Store must be >= 0." end
 
     local applied = applyBulkToItems(tab, newSlots, newPerSlot, MAX_SLOTS)
     local parts = {}
     if newSlots then parts[#parts + 1] = format("slots=%d", newSlots) end
     if newPerSlot then parts[#parts + 1] = format("perSlot=%d", newPerSlot) end
-    if newKeep ~= nil then
+    if newStore ~= nil then
         self._reserveDraft = self._reserveDraft or {}
-        applyBulkReserve(tab.items, self._reserveDraft, math.floor(newKeep))
-        parts[#parts + 1] = format("keep=%d", math.floor(newKeep))
+        applyBulkReserve(tab.items, self._reserveDraft, math.floor(newStore))
+        parts[#parts + 1] = format("store=%d", math.floor(newStore))
     end
     return true, { applied = applied, parts = parts }
 end
@@ -622,7 +651,7 @@ end
 
 --- Render the overflow-tab details: routing priority + current fill order.
 --
--- Keyboard path matches the sibling Slots/Keep EditBoxes: focus the
+-- Keyboard path matches the sibling Slots/Store EditBoxes: focus the
 -- field, type, Enter commits, Escape drops focus. A rejected value is
 -- reported as plain chat text and the field reverts; the fill order is
 -- a plain-text label, so nothing here is carried by color or position.
@@ -891,11 +920,12 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
         perSlotInput:DisableButton(true)
         bulkRow:AddChild(perSlotInput)
 
-        local keepInput = AceGUI:Create("EditBox")
-        keepInput:SetLabel("Keep")
-        keepInput:SetWidth(80)
-        keepInput:DisableButton(true)
-        bulkRow:AddChild(keepInput)
+        local storeInput = AceGUI:Create("EditBox")
+        storeInput:SetLabel("Store")
+        storeInput:SetWidth(80)
+        storeInput:DisableButton(true)
+        attachStoreTooltip(storeInput)
+        bulkRow:AddChild(storeInput)
 
         local applyBtn = AceGUI:Create("Button")
         applyBtn:SetText("Apply to all")
@@ -903,9 +933,9 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
         applyBtn:SetCallback("OnClick", function()
             local newSlots = tonumber(slotsInput:GetText())
             local newPerSlot = tonumber(perSlotInput:GetText())
-            local keepText = keepInput:GetText()
-            local newKeep = (keepText and keepText ~= "") and tonumber(keepText) or nil
-            local ok, res = self:_LayoutEditor_ApplyBulk(tabIndex, newSlots, newPerSlot, newKeep)
+            local storeText = storeInput:GetText()
+            local newStore = (storeText and storeText ~= "") and tonumber(storeText) or nil
+            local ok, res = self:_LayoutEditor_ApplyBulk(tabIndex, newSlots, newPerSlot, newStore)
             if not ok then
                 self:Print(res)
                 return
@@ -922,11 +952,20 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
         local hint = AceGUI:Create("Label")
         hint:SetFullWidth(true)
         hint:SetFontObject(GameFontNormalSmall)
-        hint:SetText("|cff888888Leave a field blank to keep its current " ..
-            "value for each item. Set Keep to 0 to clear the reserves on this " ..
+        local hex = neutralHex(self)
+        hint:SetText("|cff" .. hex .. "Leave a field blank to keep its current " ..
+            "value for each item. Set Store to 0 to clear the reserves on this " ..
             "tab. Shrinking slots trims that item's pinned positions from the " ..
             "highest slot down.|r")
         parent:AddChild(hint)
+
+        -- The hint the field never had (#61, #214): what Store means and how
+        -- Restock reads it, under the bulk row and as each field's tooltip.
+        local storeHint = AceGUI:Create("Label")
+        storeHint:SetFullWidth(true)
+        storeHint:SetFontObject(GameFontNormalSmall)
+        storeHint:SetText("|cff" .. hex .. STORE_HINT .. "|r")
+        parent:AddChild(storeHint)
     end
 
     if #itemIDs == 0 then
@@ -1040,26 +1079,31 @@ function GBL:_LayoutEditor_RenderItemRow(parent, tabIndex, itemID, writable)
     end)
     rowGroup:AddChild(perSlotInput)
 
-    local totalLabel = AceGUI:Create("Label")
-    totalLabel:SetWidth(80)
-    totalLabel:SetText(format("= %d", row.slots * row.perSlot))
-    totalLabel:SetFontObject(GameFontNormalSmall)
-    rowGroup:AddChild(totalLabel)
-
-    -- "Keep" = the total to keep in stock for this item (the reserve floor).
-    -- Restock targets max(layout demand, reserve), so a Keep above the layout
-    -- total raises the buy-to target. Reserves ride the draft (applied on Save).
+    -- "Store" = the total the guild bank should hold of this item (the
+    -- reserve floor). Restock targets max(layout demand, reserve), so a Store
+    -- above the layout total raises the buy-to target, and the total label
+    -- says so (#214): "= N" while Store is at or below it, "= N, target M"
+    -- when Store is above. Reserves ride the draft (applied on Save).
     -- Reserves are number-keyed (SetStockReserve rejects non-number ids), but a
     -- synced layout can arrive string-keyed, so coerce the row's itemID before
     -- using it as a reserve key (the same hazard _RestockBuildItemUniverse guards).
     local reserveKey = tonumber(itemID)
-    local keepInput = AceGUI:Create("EditBox")
-    keepInput:SetLabel("Keep")
-    keepInput:SetWidth(80)
-    keepInput:SetText(tostring((reserveKey and self._reserveDraft and self._reserveDraft[reserveKey]) or 0))
-    keepInput:SetDisabled(not writable)
-    keepInput:DisableButton(true)
-    keepInput:SetCallback("OnEnterPressed", function(_w, _e, value)
+    local total = row.slots * row.perSlot
+    local store = (reserveKey and self._reserveDraft and self._reserveDraft[reserveKey]) or 0
+    local totalLabel = AceGUI:Create("Label")
+    totalLabel:SetWidth(store > total and 140 or 80)
+    totalLabel:SetText(store > total and format("= %d, target %d", total, store) or format("= %d", total))
+    totalLabel:SetFontObject(GameFontNormalSmall)
+    rowGroup:AddChild(totalLabel)
+
+    local storeInput = AceGUI:Create("EditBox")
+    storeInput:SetLabel("Store")
+    storeInput:SetWidth(80)
+    storeInput:SetText(tostring(store))
+    storeInput:SetDisabled(not writable)
+    storeInput:DisableButton(true)
+    attachStoreTooltip(storeInput)
+    storeInput:SetCallback("OnEnterPressed", function(_w, _e, value)
         local n = tonumber(value)
         if n and n >= 0 and reserveKey then
             self._reserveDraft = self._reserveDraft or {}
@@ -1068,7 +1112,7 @@ function GBL:_LayoutEditor_RenderItemRow(parent, tabIndex, itemID, writable)
             self:RefreshLayoutTab()
         end
     end)
-    rowGroup:AddChild(keepInput)
+    rowGroup:AddChild(storeInput)
 
     -- Count how many slotOrder entries pin this specific item, so the
     -- per-item Unpin button can show the count and be disabled when
@@ -1115,7 +1159,7 @@ function GBL:_LayoutEditor_RenderItemRow(parent, tabIndex, itemID, writable)
             end
             -- Drop the item's reserve too, as an explicit 0 so Save clears it
             -- (draft-only apply skips absent keys). Otherwise removing an item
-            -- would strand a reserve the Keep field can no longer reach (Keep
+            -- would strand a reserve the Store field can no longer reach (Store
             -- renders only for items still in a display tab).
             local rk = tonumber(itemID)
             if rk then

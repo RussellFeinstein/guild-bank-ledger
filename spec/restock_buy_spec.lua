@@ -177,6 +177,17 @@ describe("Restock buy", function()
             assert.equals("READY", GBL._restock.state)  -- per-item stops after one
         end)
 
+        it("records the priced total beside the bought flag, for the row (#214)", function()
+            oneItem()
+            GBL:StartRestockBuy(1)
+            priceThenReady(4200, 21000)
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
+            assert.is_true(GBL._restock.bought[1])
+            assert.equals(21000, GBL._restock.boughtTotal[1])
+            GBL:ResetRestockSearch()
+            assert.is_nil(next(GBL._restock.boughtTotal))
+        end)
+
         it("returns to READY and clears pending on a failed purchase", function()
             oneItem()
             GBL:StartRestockBuy(1)
@@ -1913,6 +1924,97 @@ describe("Restock buy", function()
             GBL:StartRestockBuy(2)         -- 4.5g + 1g > 5g
             assert.equals(1, #MockWoW.commodityPurchases.start)
             assert.is_true(Helpers.printContains("exceed your budget"))
+        end)
+    end)
+    ------------------------------------------------------------------------
+    -- The code review of PR B (#214): one buyable predicate the tab and Buy
+    -- next share, Confirm re-checking the quote, the buy events dropped
+    -- when the house closes with nothing in flight, the budget set.
+    ------------------------------------------------------------------------
+    describe("review of the flow (#214)", function()
+        it("counts a row buyable only with a usable price on a commodity, and never while a result is outstanding", function()
+            twoItems()
+            assert.equals(2, GBL:_RestockBuyableCount(GBL._restock))
+            GBL._restock.resultRows[1].isCommodity = false
+            assert.equals(1, GBL:_RestockBuyableCount(GBL._restock))
+            assert.is_false(GBL:_RestockRowBuyable(GBL._restock, 1))
+            GBL._restock.resultRows[2].minPrice = 0
+            assert.equals(0, GBL:_RestockBuyableCount(GBL._restock))
+            GBL._restock.resultRows[1].isCommodity = nil
+            GBL._restock.resultRows[2].minPrice = 900
+            GBL._restock.unanswered = { index = 1, itemID = 100, qty = 5 }
+            assert.equals(0, GBL:_RestockBuyableCount(GBL._restock))
+            assert.is_nil(GBL:_RestockNextBuyable(GBL._restock))
+        end)
+
+        it("refuses to start a non-commodity pre-start, with the reason in the log and no skip mark", function()
+            twoItems()
+            GBL._restock.resultRows[1].isCommodity = false
+            GBL:StartRestockBuy(1)
+            assert.equals(0, #MockWoW.commodityPurchases.start)
+            assert.equals("READY", GBL._restock.state)
+            assert.equals(1, count("it:100 not a commodity"))
+            GBL:StartRestockBuyNext()
+            assert.equals(1, #MockWoW.commodityPurchases.start)
+            assert.equals(200, MockWoW.commodityPurchases.start[1].itemID)
+        end)
+
+        it("Confirm re-checks the quote against the budget and the wallet as they are now", function()
+            GBL.db.profile.restock.confirmAtPrice = true
+            oneItem()
+            GBL:SetRestockBudget(10)
+            GBL:StartRestockBuy(1)
+            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 4200, 90000)   -- 9g, inside the budget
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            assert.equals("PRICED", GBL._restock.state)
+            GBL:SetRestockBudget(5)                                      -- lowered during the pause
+            GBL:ConfirmRestockPurchase()
+            assert.equals(0, #MockWoW.commodityPurchases.confirm)
+            assert.equals(1, #MockWoW.commodityPurchases.cancel)
+            assert.equals("READY", GBL._restock.state)
+            assert.equals(1, count("refused (budget at price)"))
+            assert.equals(1, count("step failed"))
+
+            GBL:SetRestockBudget(0)
+            GBL:StartRestockBuy(1)
+            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 4200, 90000)
+            MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+            assert.equals("PRICED", GBL._restock.state)
+            MockWoW.money = 1000                                          -- the wallet emptied elsewhere
+            GBL:ConfirmRestockPurchase()
+            assert.equals(0, #MockWoW.commodityPurchases.confirm)
+            assert.equals(2, #MockWoW.commodityPurchases.cancel)
+            assert.equals("READY", GBL._restock.state)
+            assert.equals(1, count("refused (cannot afford at price)"))
+            assert.equals(2, count("step failed"))
+        end)
+
+        it("drops the buy events when the house closes with nothing in flight, and keeps them with a confirm out", function()
+            oneItem()
+            GBL:StartRestockBuy(1)
+            priceThenReady(4200, 21000)                                   -- the confirm is out
+            GBL:_RestockOnAuctionHouseClosed()
+            assert.is_true(GBL._restock.buyEventsRegistered)
+            assert.is_not_nil(MockAce.registeredEvents["COMMODITY_PURCHASE_SUCCEEDED"])
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
+            assert.equals("READY", GBL._restock.state)
+            GBL:_RestockOnAuctionHouseClosed()
+            assert.is_false(GBL._restock.buyEventsRegistered)
+            assert.is_nil(MockAce.registeredEvents["COMMODITY_PURCHASE_SUCCEEDED"])
+            assert.equals(1, #GBL._restock.activeItems)                   -- the list stays
+            -- The next start registers them again.
+            GBL._restock.bought = {}
+            GBL._restock.boughtTotal = {}
+            GBL:StartRestockBuy(1)
+            assert.is_true(GBL._restock.buyEventsRegistered)
+        end)
+
+        it("clears the budget skips by membership in the reason set, not by prefix", function()
+            twoItems()
+            GBL._restock.skipped = { [1] = GBL._restockSkipReasons.BUDGET_AT_PRICE, [2] = "budgetary" }
+            GBL:SetRestockBudget(50)
+            assert.is_nil(GBL._restock.skipped[1])
+            assert.equals("budgetary", GBL._restock.skipped[2])
         end)
     end)
 end)

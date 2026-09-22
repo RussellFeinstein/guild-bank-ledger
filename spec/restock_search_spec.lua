@@ -112,6 +112,27 @@ describe("Restock search", function()
             assert.is_nil(rows[2])
         end)
 
+        it("stamps whether each result is a commodity from the item key, when the client can say (#214)", function()
+            _G.C_AuctionHouse = _G.C_AuctionHouse or {}
+            local asked = {}
+            _G.C_AuctionHouse.GetItemKeyInfo = function(key)
+                asked[#asked + 1] = key.itemID
+                return { isCommodity = (key.itemID ~= 200) }
+            end
+            local rows = GBL:_RestockMapResults(
+                { { itemID = 100, needed = 5 }, { itemID = 200, needed = 2 } },
+                { { itemKey = { itemID = 100 }, minPrice = 4200 }, { itemKey = { itemID = 200 }, minPrice = 900 } })
+            _G.C_AuctionHouse.GetItemKeyInfo = nil
+            assert.is_true(rows[1].isCommodity)
+            assert.is_false(rows[2].isCommodity)
+            assert.same({ 100, 200 }, asked)
+
+            -- Without the API the row is left as the search sent it.
+            rows = GBL:_RestockMapResults({ { itemID = 100, needed = 5 } },
+                { { itemKey = { itemID = 100 }, minPrice = 4200 } })
+            assert.is_nil(rows[1].isCommodity)
+        end)
+
         it("returns empty for nil results", function()
             local rows, found = GBL:_RestockMapResults({ { itemID = 1, needed = 1 } }, nil)
             assert.same({}, rows)
@@ -153,6 +174,7 @@ describe("Restock search", function()
             assert.equals(0, #GBL._restock.activeItems)
             assert.same({}, GBL._restock.resultRows)
             assert.equals(4, GBL._restock.searchGen)  -- bumped 3 -> 4
+            assert.is_nil(next(GBL._restock.boughtTotal))
         end)
     end)
 
@@ -240,7 +262,7 @@ describe("Restock search", function()
                 scanResults = scan({ [1] = { [1] = { itemID = 100, count = 5 } } }),  -- at target
             })
             assert.equals("nothing", b.key)
-            assert.truthy(b.text:find("Nothing to buy", 1, true))
+            assert.equals("Nothing to buy: the bank and the mail cover every layout item.", b.text)
         end)
 
         it("reports the first failing precondition in the table's order", function()
@@ -257,6 +279,122 @@ describe("Restock search", function()
             GBL:StartRestockSearch()
             assert.equals("IDLE", GBL._restock.state)
             assert.is_true(Helpers.printContains("Open the Auction House to search."))
+        end)
+    end)
+    ------------------------------------------------------------------------
+    -- Search from READY (#214, section 3): a new search tears the old run
+    -- down first (the reset's teardown, shared), so bought, skipped and the
+    -- buy events go, an unanswered confirm is parked as unconfirmed before
+    -- the events it would have been credited on are dropped, and the pending
+    -- store is left alone. CONFIRMING and PRICED refuse.
+    ------------------------------------------------------------------------
+    describe("Search from READY (#214)", function()
+        local MockAce = Helpers.MockAce
+
+        before_each(function()
+            _G.Auctionator = {
+                API = { v1 = { ConvertToSearchString = function() return "x" end } },
+                EventBus = { RegisterSource = function() end, Register = function() end,
+                             Unregister = function() end },
+                Shopping = { Tab = { Events = { SearchEnd = "SearchEnd" } } },
+            }
+            _G.AuctionHouseFrame = { IsShown = function() return true end }
+            _G.AuctionatorShoppingFrame = { IsVisible = function() return true end,
+                                            DoSearch = function() end, StopSearch = function() end }
+            assert.is_true(GBL:SaveBankLayout({
+                tabs = {
+                    [1] = { mode = "display", name = "A",
+                            items = { [100] = { slots = 1, perSlot = 5 }, [200] = { slots = 1, perSlot = 2 } } },
+                    [2] = { mode = "overflow" },
+                },
+            }))
+            GBL.lastScanResults = {}   -- a scan that saw nothing: both items short
+            GBL._restock = {
+                state = "READY", searchGen = 3,
+                activeItems = { { itemID = 100, needed = 5 }, { itemID = 200, needed = 2 } },
+                resultRows = { [1] = { itemKey = { itemID = 100 }, minPrice = 4200 } },
+                bought = { [1] = true }, boughtTotal = { [1] = 21000 }, skipped = { [2] = "max price" },
+                walletBase = 1000000, spentAtBase = 0, spentEstimate = 21000,
+            }
+            GBL:_RestockRegisterBuyEvents()
+            -- Names resolve at once (the mock Item has no CreateFromItemID).
+            _G.Item.CreateFromItemID = function(_self, id)
+                return { ContinueOnItemLoad = function(_i, cb) cb() end,
+                         GetItemName = function() return "Item " .. id end }
+            end
+        end)
+
+        after_each(function()
+            _G.Auctionator = nil
+            _G.AuctionHouseFrame = nil
+            _G.AuctionatorShoppingFrame = nil
+            _G.Item.CreateFromItemID = nil
+        end)
+
+        it("tears the run down and starts: progress cleared, the buy events dropped, a new generation", function()
+            GBL:StartRestockSearch()
+            local st = GBL._restock
+            assert.equals("SEARCHING", st.state)
+            assert.is_true(st.searchGen > 3)   -- the old run's callbacks are dead
+            assert.equals(2, #st.activeItems)
+            assert.is_nil(next(st.bought))
+            assert.is_nil(next(st.boughtTotal))
+            assert.is_nil(next(st.skipped))
+            assert.is_false(st.buyEventsRegistered)
+            assert.is_nil(MockAce.registeredEvents["COMMODITY_PRICE_UPDATED"])
+        end)
+
+        it("parks an unanswered confirm as unconfirmed before the events drop, and keeps the store", function()
+            GBL:GetRestockData().pending[200] = { qty = 1, buyer = "Someone", at = 1 }
+            GBL._restock.unanswered = { index = 1, itemID = 100, qty = 5, total = 21000 }
+            GBL:StartRestockSearch()
+            assert.is_nil(GBL._restock.unanswered)
+            local entry = GBL:GetRestockData().pending[100]
+            assert.is_not_nil(entry)
+            assert.equals(5, entry.qty)
+            assert.is_true(entry.unconfirmed)
+            assert.is_not_nil(GBL:GetRestockData().pending[200])
+        end)
+
+        it("parks before it builds the new list, so a parked quantity is not offered again", function()
+            GBL._restock.unanswered = { index = 1, itemID = 100, qty = 5, total = 21000 }
+            GBL:StartRestockSearch()
+            assert.equals("SEARCHING", GBL._restock.state)
+            -- Item 100's whole target is now in the mail as unconfirmed, so
+            -- the new list holds only item 200.
+            assert.equals(1, #GBL._restock.activeItems)
+            assert.equals(200, GBL._restock.activeItems[1].itemID)
+            local words = 0
+            for _, e in ipairs(GBL:GetLog("system")) do
+                if e.message:find("Restock AH: new search", 1, true) then words = words + 1 end
+                assert.is_nil(e.message:find("Restock AH: reset", 1, true), "a Search is not a reset")
+            end
+            assert.equals(1, words)
+        end)
+
+        it("goes IDLE with the reason when the park leaves nothing to buy", function()
+            assert.is_true(GBL:SaveBankLayout({
+                tabs = {
+                    [1] = { mode = "display", name = "A", items = { [100] = { slots = 1, perSlot = 5 } } },
+                    [2] = { mode = "overflow" },
+                },
+            }))
+            GBL._restock.activeItems = { { itemID = 100, needed = 5 } }
+            GBL._restock.unanswered = { index = 1, itemID = 100, qty = 5, total = 21000 }
+            GBL:StartRestockSearch()
+            assert.equals("IDLE", GBL._restock.state)
+            assert.is_true(Helpers.printContains("Nothing to buy"))
+            assert.is_true(GBL:GetRestockData().pending[100].unconfirmed)
+        end)
+
+        it("refuses from CONFIRMING and PRICED", function()
+            for _, state in ipairs({ "CONFIRMING", "PRICED" }) do
+                GBL._restock.state = state
+                GBL._restock.searchGen = 3
+                GBL:StartRestockSearch()
+                assert.equals(state, GBL._restock.state)
+                assert.equals(3, GBL._restock.searchGen)
+            end
         end)
     end)
 end)
