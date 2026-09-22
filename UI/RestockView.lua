@@ -93,6 +93,15 @@ function GBL:BuildRestockTab(container)
 
     local state = self._restock.state or "IDLE"
 
+    -- The auction-house gate (#211): every buy control disables on it, with
+    -- the reason on the banner. One read per build so the banner and the
+    -- buttons cannot disagree.
+    local ahOpen = self:_RestockAuctionHouseOpen()
+    local AH_CLOSED_TEXT = "|cffffcc00Open the Auction House to buy.|r"
+    -- The search's preconditions, in the design's order (section 4): the
+    -- first that fails disables Search and is the banner text in IDLE.
+    local blocker = (state == "IDLE") and self:_RestockSearchBlocker() or nil
+
     -- Status banner.
     local fontPath, fontSize = self:GetScaledFont()
     local status = AceGUI:Create("Label")
@@ -102,26 +111,31 @@ function GBL:BuildRestockTab(container)
         status:SetText("|cffffaa55Searching the Auction House...|r")
     elseif state == "CONFIRMING" then
         status:SetText("|cffffaa55Confirming purchase...|r")
+    elseif state == "PRICED" then
+        -- The quote (#211): the real total for the quantity, waiting for the
+        -- Confirm click. Text carries the state; the colour is a second channel.
+        local line = format("|cffffaa55Quoted %s for %d x %s. Confirm?|r",
+            self:FormatMoney(self._restock.pendingTotal or 0),
+            self._restock.pendingQty or 0, itemLabel(self._restock.pendingItemID))
+        if not ahOpen then line = line .. "  " .. AH_CLOSED_TEXT end
+        status:SetText(line)
     elseif state == "READY" then
         local budget = self:GetRestockBudget()
         local line = format("Search complete: %d of %d found.",
             self._restock.foundCount or 0,
             self._restock.activeItems and #self._restock.activeItems or 0)
-        local spent = self:_RestockSpent(self._restock.runStartMoney,
-            (GetMoney and GetMoney()) or 0)
+        -- Spent is what this search spent (#60), never the wallet delta.
+        local spent = self._restock.spentEstimate or 0
         if budget > 0 then
             line = line .. format("  Spent %s of %d g.", self:FormatMoney(spent), budget)
         elseif spent > 0 then
             line = line .. format("  Spent %s.", self:FormatMoney(spent))
         end
         line = line .. format("  Gold: %s.", self:FormatMoney((GetMoney and GetMoney()) or 0))
+        if not ahOpen then line = line .. "  " .. AH_CLOSED_TEXT end
         status:SetText(line)
-    elseif not self:IsAuctionatorReady() then
-        status:SetText("|cffffcc00Restock needs the Auctionator addon to search and buy. "
-            .. "Targets still display below.|r")
-    elseif not self:GetLastScanResults() then
-        status:SetText("|cffffcc00Open the guild bank (or click Scan bank) so in-bank counts "
-            .. "are accurate.|r")
+    elseif blocker then
+        status:SetText("|cffffcc00" .. blocker.text .. "|r")
     else
         status:SetText("Each item shows its target, the amount in the bank, and how many to buy.")
     end
@@ -144,12 +158,14 @@ function GBL:BuildRestockTab(container)
     focus(scanBtn)
 
     -- State-specific action button. IDLE offers a search; SEARCHING/READY offer
-    -- a way back to IDLE.
+    -- a way back to IDLE; CONFIRMING and PRICED offer the purchase's own
+    -- Cancel, and PRICED the Confirm the quote waits for (#211).
+    local confirmIndex
     if state == "IDLE" then
         local searchBtn = AceGUI:Create("Button")
         searchBtn:SetText("Search auctions")
         searchBtn:SetWidth(140)
-        searchBtn:SetDisabled(not self:IsAuctionatorReady())
+        searchBtn:SetDisabled(blocker ~= nil)
         searchBtn:SetCallback("OnClick", function()
             self:StartRestockSearch()
         end)
@@ -172,7 +188,7 @@ function GBL:BuildRestockTab(container)
         local buyNextBtn = AceGUI:Create("Button")
         buyNextBtn:SetText(format("Buy next (%d left)", left))
         buyNextBtn:SetWidth(150)
-        buyNextBtn:SetDisabled(left == 0)
+        buyNextBtn:SetDisabled(left == 0 or not ahOpen)
         buyNextBtn:SetCallback("OnClick", function()
             self:StartRestockBuyNext()
         end)
@@ -190,6 +206,18 @@ function GBL:BuildRestockTab(container)
         controls:AddChild(budgetBox)
         focus(budgetBox)
 
+        -- The confirm-at-price pause (#211): on, a purchase shows its quoted
+        -- total and waits for Confirm; off, it confirms on its own as before.
+        local pauseCB = AceGUI:Create("CheckBox")
+        pauseCB:SetLabel("Confirm at price")
+        pauseCB:SetWidth(150)
+        pauseCB:SetValue(self:IsRestockConfirmAtPrice())
+        pauseCB:SetCallback("OnValueChanged", function(_w, _e, value)
+            self:SetRestockConfirmAtPrice(value)
+        end)
+        controls:AddChild(pauseCB)
+        focus(pauseCB)
+
         local doneBtn = AceGUI:Create("Button")
         doneBtn:SetText("Done")
         doneBtn:SetWidth(120)
@@ -199,15 +227,28 @@ function GBL:BuildRestockTab(container)
         end)
         controls:AddChild(doneBtn)
         focus(doneBtn)
-    elseif state == "CONFIRMING" then
-        -- A purchase is in flight. Offer an escape so a stuck step cannot
-        -- wedge the tab.
+    elseif state == "CONFIRMING" or state == "PRICED" then
+        -- A purchase is in flight. Its Cancel returns to the list (#211):
+        -- before the confirm is out it drops the purchase, after it the
+        -- purchase is kept as in the mail. In PRICED the quote waits for
+        -- Confirm, which the rebuild focuses so Enter confirms.
+        if state == "PRICED" then
+            local confirmBtn = AceGUI:Create("Button")
+            confirmBtn:SetText("Confirm")
+            confirmBtn:SetWidth(120)
+            confirmBtn:SetDisabled(not ahOpen)
+            confirmBtn:SetCallback("OnClick", function()
+                self:ConfirmRestockPurchase()
+            end)
+            controls:AddChild(confirmBtn)
+            focus(confirmBtn)
+            confirmIndex = focusN
+        end
         local cancelBtn = AceGUI:Create("Button")
         cancelBtn:SetText("Cancel")
         cancelBtn:SetWidth(120)
         cancelBtn:SetCallback("OnClick", function()
-            self:ResetRestockSearch()
-            self:RefreshRestockTab()
+            self:CancelRestockPurchase()
         end)
         controls:AddChild(cancelBtn)
         focus(cancelBtn)
@@ -233,10 +274,27 @@ function GBL:BuildRestockTab(container)
         lbl:SetFont(fontPath, fontSize, "")
         lbl:SetText("|cffffaa55Confirming purchase...|r")
         content:AddChild(lbl)
+    elseif state == "PRICED" then
+        local lbl = AceGUI:Create("Label")
+        lbl:SetFullWidth(true)
+        lbl:SetFont(fontPath, fontSize, "")
+        lbl:SetText("|cffffaa55Waiting for Confirm. Cancel drops the purchase; nothing is spent until you confirm.|r")
+        content:AddChild(lbl)
     elseif state == "READY" then
         self:_RestockView_RenderResults(content, focus)
     else
         self:_RestockView_RenderItems(content, focus)
+    end
+
+    -- The rebuild that enters PRICED lands focus on Confirm (#211), so Enter
+    -- confirms without a Tab walk first. Only that one: the price handler
+    -- sets focusConfirm and this build consumes it, so a rebuild from a sync
+    -- or a scan while the player has Tabbed onto Cancel cannot snap focus
+    -- back onto Confirm under their Enter.
+    if confirmIndex and self._restock.focusConfirm then
+        self._restock.focusConfirm = nil
+        self.A11Y.focusIndex = confirmIndex
+        self:RestoreFocus()
     end
 
     -- Keyboard navigation capture (in-game only; the mock frame has no
@@ -289,23 +347,12 @@ end
 -- deferred accessibility-branch change to SetFocusIndicator).
 ------------------------------------------------------------------------
 
---- Activate the currently focused widget by firing its OnClick callback.
+--- Activate the currently focused widget: the shared walk activator in
+-- UI/Accessibility.lua (OnClick for a button, a toggle for a CheckBox, a
+-- disabled widget refused), kept under this tab's name for its key handler.
 -- @return boolean true if a widget was fired
 function GBL:_RestockView_ActivateFocused()
-    local order = self.A11Y and self.A11Y.focusOrder
-    local idx = (self.A11Y and self.A11Y.focusIndex) or 0
-    local widget = order and idx > 0 and order[idx]
-    -- Same disabled check as the Sort tab: firing OnClick bypasses the
-    -- one AceGUI's own handler does, and this tab disables Buy buttons
-    -- when a budget cap is reached. The purchase path re-checks the
-    -- budget itself, so this is defence in depth rather than the only
-    -- gate, but a disabled button that responds to a key is still wrong.
-    if widget and widget.disabled then return false end
-    if widget and widget.Fire then
-        widget:Fire("OnClick")
-        return true
-    end
-    return false
+    return self:ActivateFocused()
 end
 
 --- Map a key press to a focus action. Returns true if handled (the caller then
@@ -430,9 +477,11 @@ function GBL:_RestockView_RenderResults(content, focus)
     local resultRows = st.resultRows or {}
     local bought = st.bought or {}
     local skipped = st.skipped or {}
-    local budgetBlocked = self:_RestockBudgetExceeded(
-        self:_RestockSpent(st.runStartMoney, (GetMoney and GetMoney()) or 0),
-        self:GetRestockBudget())
+    -- Every Buy disables once the search's own spend has reached the budget
+    -- (#60: the search's spend, never the wallet delta) or while the auction
+    -- house is closed (#211).
+    local buyBlocked = self:_RestockBudgetExceeded(st.spentEstimate or 0, self:GetRestockBudget())
+        or not self:_RestockAuctionHouseOpen()
 
     if #activeItems == 0 then
         local lbl = AceGUI:Create("Label")
@@ -480,7 +529,7 @@ function GBL:_RestockView_RenderResults(content, focus)
             local buyBtn = AceGUI:Create("Button")
             buyBtn:SetText(format("Buy %d", ref.needed or 0))
             buyBtn:SetWidth(110)
-            buyBtn:SetDisabled(budgetBlocked)
+            buyBtn:SetDisabled(buyBlocked)
             buyBtn:SetCallback("OnClick", function()
                 self:StartRestockBuy(idx)
             end)

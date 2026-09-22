@@ -62,6 +62,13 @@ describe("RestockView", function()
         MockWoW.guild.name = "Test Guild"
         MockWoW.guild.rankIndex = 0   -- GM: passes HasLayoutWrite for SetStockReserve
         GBL:OnEnable()
+        -- The auction house is open unless a case closes it (#211): every buy
+        -- control disables without the frame, and the mock has none.
+        _G.AuctionHouseFrame = { IsShown = function() return true end }
+    end)
+
+    after_each(function()
+        _G.AuctionHouseFrame = nil
     end)
 
     describe("GetRestockStatusDisplay", function()
@@ -190,7 +197,7 @@ describe("RestockView", function()
                 activeItems = { { itemID = 111, needed = 5 }, { itemID = 222, needed = 3 } },
                 resultRows = { [1] = { itemKey = { itemID = 111 }, minPrice = 1000 },
                                [2] = { itemKey = { itemID = 222 }, minPrice = 1000 } },
-                bought = { [1] = true }, skipped = {}, runStartMoney = 1000000,
+                bought = { [1] = true }, skipped = {}, walletBase = 1000000, spentAtBase = 0, spentEstimate = 0,
             }
             MockWoW.money = 1000000
             local container = build()
@@ -216,7 +223,7 @@ describe("RestockView", function()
                 activeItems = { { itemID = 111, needed = 5 }, { itemID = 222, needed = 3 } },
                 resultRows = { [1] = { itemKey = { itemID = 111 }, minPrice = 1000 },
                                [2] = { itemKey = { itemID = 222 }, minPrice = 1000 } },
-                bought = {}, skipped = {}, runStartMoney = 1000000,
+                bought = {}, skipped = {}, walletBase = 1000000, spentAtBase = 0, spentEstimate = 0,
             }
             MockWoW.money = 1000000
             local container = build()
@@ -232,7 +239,7 @@ describe("RestockView", function()
                 state = "READY",
                 activeItems = { { itemID = 111, needed = 5 } },
                 resultRows = { [1] = { itemKey = { itemID = 111 }, minPrice = 1000 } },
-                bought = {}, skipped = {}, runStartMoney = 1000000,
+                bought = {}, skipped = {}, walletBase = 1000000, spentAtBase = 0, spentEstimate = 0,
             }
             MockWoW.money = 1000000
             local container = build()
@@ -248,7 +255,7 @@ describe("RestockView", function()
                 state = "READY",
                 activeItems = { { itemID = 111, needed = 5 } },
                 resultRows = { [1] = { itemKey = { itemID = 111 }, minPrice = 1000 } },
-                bought = {}, skipped = {}, runStartMoney = 1000000,
+                bought = {}, skipped = {}, walletBase = 1000000, spentAtBase = 0, spentEstimate = 0,
             }
             MockWoW.money = 1000000  -- spent 0
             local container = build()
@@ -262,13 +269,13 @@ describe("RestockView", function()
                 state = "READY",
                 activeItems = { { itemID = 111, needed = 5 } },
                 resultRows = { [1] = { itemKey = { itemID = 111 }, minPrice = 1000 } },
-                bought = {}, skipped = {}, runStartMoney = 1000000,
+                bought = {}, skipped = {}, walletBase = 1000000, spentAtBase = 0, spentEstimate = 0,
             }
             MockWoW.money = 1000000  -- spent 0, no budget
             local banner = findChild(build(), "Label")
             assert.is_nil(banner._text:find("Spent", 1, true))
 
-            MockWoW.money = 900000  -- spent 10g, no budget
+            GBL._restock.spentEstimate = 100000  -- spent 10g, no budget
             banner = findChild(build(), "Label")
             assert.truthy(banner._text:find("Spent " .. GBL:FormatMoney(100000) .. ".", 1, true))
             assert.is_nil(banner._text:find(GBL:FormatMoney(100000) .. " of ", 1, true))  -- "1 of 1 found" is the count
@@ -479,6 +486,226 @@ describe("RestockView", function()
             GBL:OpenRestockTab()
             assert.is_true(Helpers.printContains("sort access"))
             assert.is_nil(GBL.tabGroup)
+        end)
+    end)
+    ------------------------------------------------------------------------
+    -- The flow's states on the tab (#211): Search disabled with its reason,
+    -- the confirm-at-price toggle, the PRICED controls with Confirm first in
+    -- the focus order, and the auction-house gate on every buy control.
+    ------------------------------------------------------------------------
+    describe("flow states (#211)", function()
+        local function build()
+            local AceGUI = LibStub("AceGUI-3.0")
+            local container = AceGUI:Create("SimpleGroup")
+            GBL:BuildRestockTab(container)
+            return container
+        end
+
+        local function findCheckBox(container, label)
+            for _, c in ipairs(container._children or {}) do
+                if c._type == "CheckBox" and c._label == label then return c end
+                local nested = findCheckBox(c, label)
+                if nested then return nested end
+            end
+            return nil
+        end
+
+        local function readyTwo()
+            GBL._restock = {
+                state = "READY",
+                activeItems = { { itemID = 111, needed = 5 }, { itemID = 222, needed = 3 } },
+                resultRows = { [1] = { itemKey = { itemID = 111 }, minPrice = 1000 },
+                               [2] = { itemKey = { itemID = 222 }, minPrice = 1000 } },
+                bought = {}, skipped = {}, walletBase = 1000000, spentAtBase = 0, spentEstimate = 0,
+            }
+            MockWoW.money = 1000000
+        end
+
+        before_each(function()
+            _G.Auctionator = {
+                API = { v1 = { ConvertToSearchString = function() return "x" end } },
+                EventBus = {},
+                Shopping = { Tab = { Events = { SearchEnd = "SearchEnd" } } },
+            }
+            _G.AuctionHouseFrame = { IsShown = function() return true end }
+            _G.AuctionatorShoppingFrame = { IsVisible = function() return true end }
+        end)
+
+        after_each(function()
+            _G.Auctionator = nil
+            _G.AuctionHouseFrame = nil
+            _G.AuctionatorShoppingFrame = nil
+        end)
+
+        it("disables Search in IDLE with the blocker's text on the banner", function()
+            _G.AuctionHouseFrame = nil
+            local container = build()
+            local banner = findChild(container, "Label")
+            assert.truthy(banner._text:find("Open the Auction House to search.", 1, true))
+            local btn = findButton(container, "Search auctions")
+            assert.is_not_nil(btn)
+            assert.is_true(btn.disabled)
+        end)
+
+        it("renders the confirm-at-price toggle from the setting and writes it back", function()
+            readyTwo()
+            GBL:SetRestockConfirmAtPrice(true)
+            local cb = findCheckBox(build(), "Confirm at price")
+            assert.is_not_nil(cb)
+            assert.is_true(cb:GetValue())
+            cb:SetValue(false)
+            cb:Fire("OnValueChanged", false)
+            assert.is_false(GBL:IsRestockConfirmAtPrice())
+            cb = findCheckBox(build(), "Confirm at price")
+            assert.is_false(cb:GetValue())
+        end)
+
+        it("Space on the focused toggle flips it (the CheckBox branch of the activator)", function()
+            readyTwo()
+            GBL:SetRestockConfirmAtPrice(true)
+            build()
+            local idx
+            for i, w in ipairs(GBL.A11Y.focusOrder) do
+                if w._type == "CheckBox" then idx = i end
+            end
+            assert.is_not_nil(idx)
+            GBL.A11Y.focusIndex = idx
+            assert.is_true(GBL:_RestockView_NavKey("SPACE", false))
+            assert.is_false(GBL:IsRestockConfirmAtPrice())
+        end)
+
+        it("renders the quote, Confirm and Cancel in PRICED, with Confirm focused", function()
+            readyTwo()
+            GBL._restock.state = "PRICED"
+            GBL._restock.pendingIndex = 1
+            GBL._restock.pendingItemID = 111
+            GBL._restock.pendingQty = 5
+            GBL._restock.pendingTotal = 52250
+            GBL._restock.focusConfirm = true   -- set by the price event that entered PRICED
+            local container = build()
+            local banner = findChild(container, "Label")
+            assert.truthy(banner._text:find("Quoted " .. GBL:FormatMoney(52250), 1, true))
+            assert.truthy(banner._text:find("5 x", 1, true))
+            assert.truthy(banner._text:find("Confirm?", 1, true))
+            local confirm = findButton(container, "Confirm")
+            assert.is_not_nil(confirm)
+            assert.is_not_nil(findButton(container, "Cancel"))
+            assert.is_nil(findButton(container, "Buy next (2 left)"))
+            assert.equals(confirm, GBL.A11Y.focusOrder[GBL.A11Y.focusIndex])
+            assert.is_nil(GBL._restock.focusConfirm)  -- consumed by that one build
+
+            -- Enter confirms: the activator reaches the focused Confirm.
+            assert.is_true(GBL:_RestockView_NavKey("ENTER", false))
+            assert.equals(1, #MockWoW.commodityPurchases.confirm)
+        end)
+
+        it("focuses Confirm only on the rebuild that enters PRICED, never on a later one", function()
+            -- A rebuild from a sync or a scan between the player's Tab to
+            -- Cancel and their Enter must not snap focus back onto Confirm.
+            readyTwo()
+            GBL:SetRestockConfirmAtPrice(true)
+            GBL:StartRestockBuy(1)
+            local MockAce = Helpers.MockAce
+            MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 1000, 5000)
+            assert.equals("PRICED", GBL._restock.state)
+            local container = build()
+            local confirm = findButton(container, "Confirm")
+            assert.equals(confirm, GBL.A11Y.focusOrder[GBL.A11Y.focusIndex])
+            GBL:_RestockView_NavKey("TAB", false)      -- onto Cancel
+            local cancel = findButton(container, "Cancel")
+            assert.equals(cancel, GBL.A11Y.focusOrder[GBL.A11Y.focusIndex])
+            container = build()                        -- an unrelated rebuild
+            assert.is_nil(GBL.A11Y.focusOrder[GBL.A11Y.focusIndex])  -- the walk starts over, nothing focused
+            assert.equals(0, GBL.A11Y.focusIndex)
+            assert.equals(0, #MockWoW.commodityPurchases.confirm)
+        end)
+
+        it("wires Cancel in CONFIRMING and PRICED to the purchase cancel, not the reset", function()
+            readyTwo()
+            GBL._restock.state = "CONFIRMING"
+            GBL._restock.pendingIndex = 1
+            GBL._restock.pendingItemID = 111
+            GBL._restock.pendingQty = 5
+            findButton(build(), "Cancel"):Fire("OnClick")
+            assert.equals("READY", GBL._restock.state)
+            assert.equals(2, #GBL._restock.activeItems)
+            assert.equals(1, #MockWoW.commodityPurchases.cancel)
+
+            GBL._restock.state = "PRICED"
+            GBL._restock.pendingIndex = 2
+            GBL._restock.pendingItemID = 222
+            GBL._restock.pendingQty = 3
+            GBL._restock.pendingTotal = 3000
+            findButton(build(), "Cancel"):Fire("OnClick")
+            assert.equals("READY", GBL._restock.state)
+            assert.equals(2, #GBL._restock.activeItems)
+            assert.equals(2, #MockWoW.commodityPurchases.cancel)
+        end)
+
+        it("disables Buy next and every Buy with the auction house closed, and says so", function()
+            readyTwo()
+            _G.AuctionHouseFrame = { IsShown = function() return false end }
+            local container = build()
+            assert.is_true(findButton(container, "Buy next (2 left)").disabled)
+            assert.is_true(findButton(container, "Buy 5").disabled)
+            assert.is_true(findButton(container, "Buy 3").disabled)
+            assert.truthy(findChild(container, "Label")._text:find("Open the Auction House to buy.", 1, true))
+
+            _G.AuctionHouseFrame = { IsShown = function() return true end }
+            container = build()
+            assert.is_falsy(findButton(container, "Buy next (2 left)").disabled)
+            assert.is_falsy(findButton(container, "Buy 5").disabled)
+        end)
+
+        it("disables Confirm with the auction house closed", function()
+            readyTwo()
+            GBL._restock.state = "PRICED"
+            GBL._restock.pendingIndex = 1
+            GBL._restock.pendingItemID = 111
+            GBL._restock.pendingQty = 5
+            GBL._restock.pendingTotal = 52250
+            _G.AuctionHouseFrame = { IsShown = function() return false end }
+            local container = build()
+            assert.is_true(findButton(container, "Confirm").disabled)
+            assert.is_falsy(findButton(container, "Cancel").disabled)
+        end)
+
+        it("shows Spent from what the search spent, not from the wallet (#60)", function()
+            readyTwo()
+            MockWoW.money = 900000  -- 10g left the wallet elsewhere
+            local banner = findChild(build(), "Label")
+            assert.is_nil(banner._text:find("Spent", 1, true))
+            GBL._restock.spentEstimate = 100000
+            banner = findChild(build(), "Label")
+            assert.truthy(banner._text:find("Spent " .. GBL:FormatMoney(100000) .. ".", 1, true))
+        end)
+
+        it("re-baselines the wallet when the tab comes into view, not on a rebuild while it is showing", function()
+            GBL:CreateMainFrame()
+            GBL.mainFrame:Show()
+            readyTwo()
+            MockWoW.money = 700000
+            GBL._restock.spentEstimate = 300000
+            GBL:SelectTab("restock")
+            assert.equals(700000, GBL._restock.walletBase)
+            assert.equals(300000, GBL._restock.spentAtBase)
+
+            -- RefreshUI after a sync receive or a rescan store lands here
+            -- too; with the tab already showing the baseline stays put.
+            MockWoW.money = 100000
+            GBL:SelectTab("restock")
+            assert.equals(700000, GBL._restock.walletBase)
+
+            -- Another tab, then back: the tab came into view again.
+            GBL:SelectTab("sort")
+            GBL:SelectTab("restock")
+            assert.equals(100000, GBL._restock.walletBase)
+
+            -- The window closed and reopened on this tab.
+            MockWoW.money = 50000
+            GBL.mainFrame:Fire("OnClose")
+            GBL:SelectTab("restock")
+            assert.equals(50000, GBL._restock.walletBase)
         end)
     end)
 end)

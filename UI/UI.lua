@@ -23,7 +23,12 @@ function GBL:CreateMainFrame()
     frame:SetLayout("Fill")
     frame:SetCallback("OnClose", function(widget)
         widget:Hide()
+        self:OnMainFrameHidden()
     end)
+    -- Escape and the bank-close cascade hide the frame without OnClose.
+    if frame.frame and frame.frame.HookScript then
+        frame.frame:HookScript("OnHide", function() self:OnMainFrameHidden() end)
+    end
 
     -- Let the Escape key close the window. AceGUI frames are anonymous, so WoW's
     -- CloseSpecialWindows (the Escape handler) cannot find this one on its own.
@@ -364,8 +369,30 @@ function GBL:SelectTab(tabName)
     elseif tabName == "layout" then
         self:BuildLayoutTab(self.tabGroup)
     elseif tabName == "restock" then
+        -- The tab coming into view is the one place the wallet baseline may
+        -- move (#60): a tab switch onto it, or the window opening on it. Not
+        -- RefreshRestockTab, which a purchase result triggers, and not the
+        -- SelectTab that RefreshUI runs after a sync receive or a rescan
+        -- while the tab is already showing, which can land inside the wallet
+        -- lag right after a purchase.
+        if not self._restockInView and self._RestockOnTabShown then
+            self:_RestockOnTabShown()
+        end
         self:BuildRestockTab(self.tabGroup)
     end
+    self._restockInView = (tabName == "restock") and self:IsMainFrameShown()
+end
+
+--- True while the main window is on screen.
+function GBL:IsMainFrameShown()
+    return self.mainFrame ~= nil and self.mainFrame.frame ~= nil
+        and self.mainFrame.frame.IsShown ~= nil and self.mainFrame.frame:IsShown() and true or false
+end
+
+--- The main window went away (its close button, Escape, the bank-close
+-- cascade): whatever tab was showing is not in view any more.
+function GBL:OnMainFrameHidden()
+    self._restockInView = false
 end
 
 --- Filter a records array to only records from the given player.

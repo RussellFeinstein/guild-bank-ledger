@@ -241,31 +241,11 @@ end
 -- Keyboard navigation
 ------------------------------------------------------------------------
 
---- Activate the focused widget. CheckBox fires OnValueChanged rather than
---- OnClick, so the toggle is driven directly for that widget type; firing
---- OnClick at a checkbox would do nothing and the key would read as dead.
+--- Activate the focused widget: the shared walk activator in
+--- UI/Accessibility.lua (OnClick for a button, a toggle for a CheckBox, a
+--- disabled widget refused), kept under this tab's name for its key handler.
 function GBL:_SortView_ActivateFocused()
-    local order = self.A11Y and self.A11Y.focusOrder
-    local idx = (self.A11Y and self.A11Y.focusIndex) or 0
-    local widget = order and idx > 0 and order[idx]
-    if not widget then return false end
-    -- A disabled widget is not activatable. AceGUI's own click handlers
-    -- check `disabled` before firing, but this function drives SetValue
-    -- and Fire directly (a CheckBox ignores OnClick), which walks past
-    -- that check. Returning false leaves the key propagating rather than
-    -- reporting a press that did nothing.
-    if widget.disabled then return false end
-    if widget.type == "CheckBox" and widget.GetValue and widget.SetValue then
-        local newValue = not widget:GetValue()
-        widget:SetValue(newValue)
-        if widget.Fire then widget:Fire("OnValueChanged", newValue) end
-        return true
-    end
-    if widget.Fire then
-        widget:Fire("OnClick")
-        return true
-    end
-    return false
+    return self:ActivateFocused()
 end
 
 --- Map a key press to a focus action. Returns true if handled (the caller

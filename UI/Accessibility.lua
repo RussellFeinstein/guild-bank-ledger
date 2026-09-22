@@ -371,6 +371,34 @@ function GBL:RestoreFocus()
     end
 end
 
+--- Activate the focused widget of the walk: OnClick for a button, a toggle
+-- for a CheckBox (which ignores OnClick; the value is set and OnValueChanged
+-- fired, the way its own click handler does). A disabled widget is refused
+-- and the key left to propagate: firing OnClick directly bypasses the check
+-- AceGUI's own handler makes, and a disabled button that answers a key lies
+-- about what it will do. One copy for every tab that captures keys (#211);
+-- the Sort and Restock tabs each had their own and the CheckBox branch was
+-- missing from one of them.
+-- @return boolean true if a widget was activated
+function GBL:ActivateFocused()
+    local order = self.A11Y and self.A11Y.focusOrder
+    local idx = (self.A11Y and self.A11Y.focusIndex) or 0
+    local widget = order and idx > 0 and order[idx]
+    if not widget then return false end
+    if widget.disabled then return false end
+    if widget.type == "CheckBox" and widget.GetValue and widget.SetValue then
+        local newValue = not widget:GetValue()
+        widget:SetValue(newValue)
+        if widget.Fire then widget:Fire("OnValueChanged", newValue) end
+        return true
+    end
+    if widget.Fire then
+        widget:Fire("OnClick")
+        return true
+    end
+    return false
+end
+
 ------------------------------------------------------------------------
 -- Frame position clamping
 ------------------------------------------------------------------------

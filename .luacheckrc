@@ -62,6 +62,7 @@ read_globals = {
 
     -- WoW utilities
     "C_AuctionHouse",
+    "AuctionHouseFrame",  -- the default auction house UI; nil until Blizzard_AuctionHouseUI loads
     "C_ChatBubbles",
     "C_Container",
     "C_Item",

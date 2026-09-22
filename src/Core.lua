@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.39.20"
+local VERSION = "0.40.0"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -145,6 +145,11 @@ local defaults = {
         -- that silently emptied someone's bags would be a surprise.
         sort = { chatLog = false, debugChat = false, includeBags = false },
         system = { chatLog = false, debugChat = false },
+        -- confirmAtPrice (#211): a Restock purchase pauses on the quoted
+        -- total and waits for a Confirm click. On by default: the quote is
+        -- the only point at which the real cost is known before the gold
+        -- moves, and the addon's own estimate is a lower bound.
+        restock = { confirmAtPrice = true },
         filters = { defaultDays = 7, defaultCategory = "ALL" },
         chatFilters = { muteAmbientNPCs = false },
     },
@@ -202,6 +207,14 @@ function GBL:OnEnable()
     -- Refresh layout-dependent tabs when a newer bank layout arrives via sync
     self:RegisterMessage("GBL_LAYOUT_CHANGED", "OnBankLayoutChanged")
 
+    -- The Restock tab's refresh triggers (#211): its preconditions read the
+    -- auction house and the last scan, so each change redraws the tab. One
+    -- registration here and none in the view: AceEvent keeps one callback
+    -- per object per event, and a second registration would shadow this one.
+    self:RegisterEvent("AUCTION_HOUSE_SHOW", "OnAuctionHouseToggled")
+    self:RegisterEvent("AUCTION_HOUSE_CLOSED", "OnAuctionHouseToggled")
+    self:RegisterMessage("GBL_SCAN_COMPLETE", "OnScanComplete")
+
     -- Initialize sync system (M5)
     self:InitSync()
 
@@ -222,6 +235,27 @@ function GBL:OnBankLayoutChanged()
     if self.RefreshLayoutTab then self:RefreshLayoutTab() end
     if self.RefreshSortTab then self:RefreshSortTab() end
     -- The Restock list is layout-driven, so a new layout/reserve must refresh it too.
+    if self.RefreshRestockTab then self:RefreshRestockTab() end
+end
+
+--- A scan finished (GBL_SCAN_COMPLETE): the Restock rows read stock from it and
+-- its Search precondition waits on it. Restock only: the Sort tab polls
+-- scanInProgress itself, and a second rebuild here would double every one
+-- of its refreshes and fire on each executor end-of-pass scan mid-run.
+function GBL:OnScanComplete()
+    if self.RefreshRestockTab then self:RefreshRestockTab() end
+end
+
+--- The auction house opened or closed (AUCTION_HOUSE_SHOW / _CLOSED). The
+-- flag is what Restock's gate reads first; a close also drops a quote or a
+-- start still waiting for its price, since the server discards its pending
+-- purchase with the session; then the tab redraws with its buy controls
+-- disabled and the reason on the banner.
+function GBL:OnAuctionHouseToggled(event)
+    self._auctionHouseOpen = (event == "AUCTION_HOUSE_SHOW")
+    if event == "AUCTION_HOUSE_CLOSED" and self._RestockOnAuctionHouseClosed then
+        self:_RestockOnAuctionHouseClosed()
+    end
     if self.RefreshRestockTab then self:RefreshRestockTab() end
 end
 

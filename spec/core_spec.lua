@@ -44,6 +44,27 @@ describe("Core", function()
             assert.is_not_nil(MockAce.registeredEvents["PLAYER_INTERACTION_MANAGER_FRAME_SHOW"])
         end)
 
+        -- The Restock tab's refresh triggers (#211, section 4) are registered
+        -- here and nowhere else: AceEvent keeps one callback per object per
+        -- event, so a second registration in a view would shadow this one.
+        it("registers the auction-house events and the scan message for the Restock tab (#211)", function()
+            assert.equals("OnAuctionHouseToggled", MockAce.registeredEvents["AUCTION_HOUSE_SHOW"])
+            assert.equals("OnAuctionHouseToggled", MockAce.registeredEvents["AUCTION_HOUSE_CLOSED"])
+            assert.equals("OnScanComplete", MockAce.registeredMessages["GBL_SCAN_COMPLETE"])
+        end)
+
+        it("refreshes the Restock tab and not the Sort tab from those handlers (#211)", function()
+            local restock, sort = 0, 0
+            local origR, origS = GBL.RefreshRestockTab, GBL.RefreshSortTab
+            GBL.RefreshRestockTab = function() restock = restock + 1 end
+            GBL.RefreshSortTab = function() sort = sort + 1 end
+            GBL:OnScanComplete()
+            GBL:OnAuctionHouseToggled()
+            GBL.RefreshRestockTab, GBL.RefreshSortTab = origR, origS
+            assert.equals(2, restock)
+            assert.equals(0, sort)  -- the Sort tab keeps its own scan poll
+        end)
+
         it("sets bankOpen on GuildBanker interaction", function()
             assert.is_false(GBL:IsBankOpen())
             MockAce.fireEvent("PLAYER_INTERACTION_MANAGER_FRAME_SHOW",

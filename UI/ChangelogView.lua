@@ -29,6 +29,18 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.40.0
+    {"0.40.0", "2026-09-20", {
+        Added = {
+            "Restock pauses on the Auction House's quoted total before spending: after Buy or Buy next the banner shows the real price for that quantity with Confirm and Cancel, Enter confirms, and nothing is spent until you do. A Confirm at price checkbox beside the budget turns the pause off, in which case each quote is confirmed automatically once it passes your budget and your gold, as before. A quote left unconfirmed for a minute is dropped and the row stays buyable.",
+        },
+        Fixed = {
+            "The Restock Spent figure and the budget counted gold spent anywhere while the addon window was closed, which could grey out every Buy button with nothing on screen saying why. Both now count only what the search itself bought, and the affordability check re-reads your wallet when the tab is shown.",
+            "Restock's Search button was enabled while its preconditions failed into chat. It is now disabled with the reason on the banner: Auctionator missing, the Auction House window not open, Auctionator's Shopping tab not on screen, no bank scan yet, or nothing to buy. Buy, Buy next and Confirm are disabled until the Auction House window is open, instead of starting a purchase the game ignores and giving the row up five seconds later.",
+            "Cancel during a purchase returns to the search results instead of discarding them. Before the confirm goes out it drops the purchase at the Auction House; after it, the purchase is kept as in the mail until the result shows.",
+            "A purchase completed by another addon while a Restock quote was waiting is no longer taken as Restock's own: the quote is dropped with a chat line and nothing is credited.",
+        },
+    }},
     -- v0.39.20
     {"0.39.20", "2026-09-20", {
         Fixed = {

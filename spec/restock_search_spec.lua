@@ -167,4 +167,96 @@ describe("Restock search", function()
             assert.is_true(Helpers.printContains("needs the Auctionator addon"))
         end)
     end)
+    ------------------------------------------------------------------------
+    -- Preconditions as disabled states (#211, section 4): one pure reader,
+    -- _RestockSearchBlocker, names the first failing precondition in the
+    -- table's order, and StartRestockSearch prints its text and returns.
+    ------------------------------------------------------------------------
+    describe("_RestockSearchBlocker (#211)", function()
+        local searchable = {
+            layout = layout({
+                [1] = { mode = "display", name = "A", items = { [100] = { slots = 1, perSlot = 5 } } },
+                [2] = { mode = "overflow" },
+            }),
+            reserves = {},
+            scanResults = {},  -- a scan that saw nothing: item 100 is short 5
+        }
+
+        local function stubAuctionator()
+            _G.Auctionator = {
+                API = { v1 = { ConvertToSearchString = function() return "x" end } },
+                EventBus = {},
+                Shopping = { Tab = { Events = { SearchEnd = "SearchEnd" } } },
+            }
+        end
+
+        before_each(function()
+            stubAuctionator()
+            _G.AuctionHouseFrame = { IsShown = function() return true end }
+            _G.AuctionatorShoppingFrame = { IsVisible = function() return true end }
+        end)
+
+        after_each(function()
+            _G.Auctionator = nil
+            _G.AuctionHouseFrame = nil
+            _G.AuctionatorShoppingFrame = nil
+        end)
+
+        it("is nil when every precondition holds, and hands back the buy list it built", function()
+            local blocker, buyList = GBL:_RestockSearchBlocker(searchable)
+            assert.is_nil(blocker)
+            assert.equals(1, #buyList)
+            assert.equals(100, buyList[1].itemID)
+            assert.equals(5, buyList[1].needed)
+        end)
+
+        it("names each precondition alone, with the text the banner shows", function()
+            _G.Auctionator = nil
+            local b = GBL:_RestockSearchBlocker(searchable)
+            assert.equals("auctionator", b.key)
+            assert.truthy(b.text:find("needs the Auctionator addon", 1, true))
+            stubAuctionator()
+
+            _G.AuctionHouseFrame = nil
+            b = GBL:_RestockSearchBlocker(searchable)
+            assert.equals("ah-closed", b.key)
+            assert.equals("Open the Auction House to search.", b.text)
+            _G.AuctionHouseFrame = { IsShown = function() return false end }
+            assert.equals("ah-closed", GBL:_RestockSearchBlocker(searchable).key)
+            _G.AuctionHouseFrame = { IsShown = function() return true end }
+
+            _G.AuctionatorShoppingFrame = { IsVisible = function() return false end }
+            b = GBL:_RestockSearchBlocker(searchable)
+            assert.equals("shopping-tab", b.key)
+            assert.equals("Open the Auctionator Shopping tab first, then search.", b.text)
+            _G.AuctionatorShoppingFrame = { IsVisible = function() return true end }
+
+            b = GBL:_RestockSearchBlocker({ layout = searchable.layout, reserves = {} })  -- no scan
+            assert.equals("no-scan", b.key)
+            assert.truthy(b.text:find("Waiting on the bank scan", 1, true))
+
+            b = GBL:_RestockSearchBlocker({
+                layout = searchable.layout, reserves = {},
+                scanResults = scan({ [1] = { [1] = { itemID = 100, count = 5 } } }),  -- at target
+            })
+            assert.equals("nothing", b.key)
+            assert.truthy(b.text:find("Nothing to buy", 1, true))
+        end)
+
+        it("reports the first failing precondition in the table's order", function()
+            _G.AuctionHouseFrame = nil                                                   -- 2 fails
+            _G.AuctionatorShoppingFrame = { IsVisible = function() return false end }   -- 3 fails
+            assert.equals("ah-closed", GBL:_RestockSearchBlocker({ layout = searchable.layout, reserves = {} }).key)
+            _G.AuctionHouseFrame = { IsShown = function() return true end }
+            assert.equals("shopping-tab", GBL:_RestockSearchBlocker({ layout = searchable.layout, reserves = {} }).key)
+        end)
+
+        it("StartRestockSearch prints the blocker's text and stays IDLE", function()
+            _G.AuctionHouseFrame = nil
+            GBL._restock = { state = "IDLE" }
+            GBL:StartRestockSearch()
+            assert.equals("IDLE", GBL._restock.state)
+            assert.is_true(Helpers.printContains("Open the Auction House to search."))
+        end)
+    end)
 end)
