@@ -65,6 +65,18 @@ describe("Core", function()
             assert.equals(0, sort)  -- the Sort tab keeps its own scan poll
         end)
 
+        it("registers PLAYER_MONEY for the Restock gold line, and its handler rewrites the line without a rebuild (#214)", function()
+            assert.equals("OnPlayerMoney", MockAce.registeredEvents["PLAYER_MONEY"])
+            local rewrites, rebuilds = 0, 0
+            local origM, origR = GBL._RestockOnMoneyChanged, GBL.RefreshRestockTab
+            GBL._RestockOnMoneyChanged = function() rewrites = rewrites + 1 end
+            GBL.RefreshRestockTab = function() rebuilds = rebuilds + 1 end
+            GBL:OnPlayerMoney()
+            GBL._RestockOnMoneyChanged, GBL.RefreshRestockTab = origM, origR
+            assert.equals(1, rewrites)
+            assert.equals(0, rebuilds)
+        end)
+
         it("sets bankOpen on GuildBanker interaction", function()
             assert.is_false(GBL:IsBankOpen())
             MockAce.fireEvent("PLAYER_INTERACTION_MANAGER_FRAME_SHOW",

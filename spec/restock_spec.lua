@@ -384,6 +384,23 @@ describe("Restock", function()
             assert.equals(1, rows[1].tabIndex)  -- shown under its display tab, not Reserves
         end)
 
+        -- Before a scan every row says so (#214, #43's restock half): the
+        -- view reads bank ? and no shortfall off this flag. toBuy is left
+        -- alone, since the no-scan precondition already keeps an unscanned
+        -- bank out of the buy list.
+        it("flags every row unscanned until a scan has completed (#214)", function()
+            local lay = layout({
+                [1] = { mode = "display", name = "Gems", items = { [100] = { slots = 2, perSlot = 10 } } },
+                [2] = { mode = "overflow" },
+            })
+            local rows = GBL:_RestockBuildItemUniverse({ layout = lay, reserves = {} })
+            assert.is_false(rows[1].scanned)
+            assert.equals(20, rows[1].toBuy)
+            rows = GBL:_RestockBuildItemUniverse({ layout = lay, reserves = {}, scanResults = scan({}) })
+            assert.is_true(rows[1].scanned)
+            assert.equals(20, rows[1].toBuy)
+        end)
+
         it("is empty when the layout has no display tabs", function()
             local rows = GBL:_RestockBuildItemUniverse({
                 layout = layout({ [1] = { mode = "overflow" } }),

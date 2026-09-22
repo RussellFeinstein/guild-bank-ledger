@@ -177,6 +177,17 @@ describe("Restock buy", function()
             assert.equals("READY", GBL._restock.state)  -- per-item stops after one
         end)
 
+        it("records the priced total beside the bought flag, for the row (#214)", function()
+            oneItem()
+            GBL:StartRestockBuy(1)
+            priceThenReady(4200, 21000)
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
+            assert.is_true(GBL._restock.bought[1])
+            assert.equals(21000, GBL._restock.boughtTotal[1])
+            GBL:ResetRestockSearch()
+            assert.is_nil(next(GBL._restock.boughtTotal))
+        end)
+
         it("returns to READY and clears pending on a failed purchase", function()
             oneItem()
             GBL:StartRestockBuy(1)
