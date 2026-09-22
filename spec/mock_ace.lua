@@ -487,6 +487,24 @@ function MockAce.install()
         end
         widget.DisableButton = function() end
         widget.ClearFocus = function() end
+        -- Real AceGUI Label and InteractiveLabel expose the FontString they
+        -- draw with as `widget.label` (both Constructors set self.label), and
+        -- production code reaches through it for the calls the widget itself
+        -- does not wrap: every ledger, gold-log and consumption cell calls
+        -- `lbl.label:SetWordWrap(false)`. The mock had no such field, so any
+        -- spec that rendered one of those three tabs threw on the first cell,
+        -- which is part of why the Own Transactions mode went four years
+        -- without a test (#222). Given to every widget, like the rest of the
+        -- mock's methods, rather than only to the two types that carry it.
+        widget.label = {
+            SetWordWrap = function() end,
+            SetJustifyH = function() end,
+            SetFont = function(_, font, height, flags)
+                widget._setFont = { font, height, flags }
+            end,
+            SetText = function(_, text) widget._text = text end,
+            GetText = function() return widget._text end,
+        }
         return widget
     end
 

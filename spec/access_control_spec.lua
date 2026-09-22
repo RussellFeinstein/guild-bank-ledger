@@ -107,14 +107,43 @@ describe("Access Control", function()
             assert.equals("own_transactions", GBL:GetAccessLevel())
         end)
 
-        it("defaults restricted mode to sync_only when nil", function()
+        -- The mode a GM gets by setting a threshold and choosing nothing is
+        -- Member, not Sync only (#222, views doc section 6): the quiet
+        -- default should be the one that still shows a member their own
+        -- record. Display-side only; the stored and advertised values are
+        -- unchanged, so an older client reads it as it always did.
+        it("defaults restricted mode to own_transactions when nil", function()
             MockWoW.guild.rankIndex = 5
             local guildData = GBL:GetGuildData()
             guildData.accessControl = {
                 rankThreshold = 2,
                 restrictedMode = nil,
             }
-            assert.equals("sync_only", GBL:GetAccessLevel())
+            assert.equals("own_transactions", GBL:GetAccessLevel())
+        end)
+
+        -- Fail closed while the rank is cold (#222). GetGuildInfo answers no
+        -- rank for the first seconds after login, and answering "full" there
+        -- handed a member the whole ledger until the first roster tick ran
+        -- RefreshAccessTabsIfChanged. The GM is caught by it too and gets the
+        -- restricted view for those seconds, which is the cheaper mistake.
+        it("returns the restricted mode when the rank is not loaded yet", function()
+            MockWoW.guild.name = "Test Guild"
+            MockWoW.guild.rankIndex = nil
+            local guildData = GBL:GetGuildData()
+            guildData.accessControl = {
+                rankThreshold = 3,
+                restrictedMode = "own_transactions",
+            }
+            assert.equals("own_transactions", GBL:GetAccessLevel())
+        end)
+
+        it("stays full with no rank and no threshold configured", function()
+            MockWoW.guild.name = "Test Guild"
+            MockWoW.guild.rankIndex = nil
+            local guildData = GBL:GetGuildData()
+            guildData.accessControl = nil
+            assert.equals("full", GBL:GetAccessLevel())
         end)
 
         it("returns full when guild data is nil", function()
@@ -159,33 +188,13 @@ describe("Access Control", function()
         end)
     end)
 
-    describe("FilterByPlayer", function()
-        it("filters records to the given player", function()
-            local records = {
-                { player = "Alice-Realm1", type = "deposit" },
-                { player = "Bob-Realm1", type = "withdraw" },
-                { player = "Alice-Realm1", type = "withdraw" },
-                { player = "Charlie-Realm2", type = "deposit" },
-            }
-            local filtered = GBL:FilterByPlayer(records, "Alice")
-            assert.equals(2, #filtered)
-            assert.equals("Alice-Realm1", filtered[1].player)
-            assert.equals("Alice-Realm1", filtered[2].player)
-        end)
-
-        it("returns empty table when no matches", function()
-            local records = {
-                { player = "Bob-Realm1", type = "withdraw" },
-            }
-            local filtered = GBL:FilterByPlayer(records, "Alice")
-            assert.equals(0, #filtered)
-        end)
-
-        it("handles empty records array", function()
-            local filtered = GBL:FilterByPlayer({}, "Alice")
-            assert.equals(0, #filtered)
-        end)
-    end)
+    -- FilterByPlayer and its three cases are gone with #222. It compared
+    -- StripRealm(record.player) against the bare current name, so a
+    -- same-named character on another realm passed and the member's own
+    -- alts did not, and its only two callers were the pre-filter in
+    -- SelectTab. The qualified comparison and the account's own rows are
+    -- FilterToOwnRecords, covered in spec/ui/member_view_spec.lua along
+    -- with the two paths that render through it.
 
     describe("MigrateAccessControl", function()
         it("initializes accessControl on schema v6 data", function()
