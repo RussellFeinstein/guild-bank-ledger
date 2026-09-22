@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.41.2] - 2026-09-22
 
 ### Fixed
 - The Member view (Own Transactions mode) now shows a member their own rows only. It never has: the tab was built from the filtered list and then redrawn from the unfiltered one two calls later, so under the banner "Showing your transactions only." a restricted member has been reading the whole guild's ledger since v0.15.0. The filter now lives in one place that both the build and every later refresh read, and it covers the Transactions, Gold Log and Consumption tabs.
