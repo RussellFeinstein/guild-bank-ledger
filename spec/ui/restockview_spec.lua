@@ -165,6 +165,10 @@ describe("RestockView", function()
             assert.equals("notfound", missing.status)
             -- A row the search never covered keeps the universe reading.
             assert.equals("short", GBL:GetRestockStatusDisplay(row({ itemID = 200 }), session()).status)
+            -- So does every searched row while the search is out: the results
+            -- are not in, and "not found" would be a lie for the duration.
+            assert.equals("short", GBL:GetRestockStatusDisplay(row(),
+                session({ state = "SEARCHING", resultRows = {} })).status)
         end)
 
         it("reads bought with its total, and skipped with the reason's prose", function()
@@ -273,7 +277,10 @@ describe("RestockView", function()
             assert.truthy(banner._text:find("Searching the Auction House", 1, true))
             local scroll = findChild(container, "ScrollFrame")
             assert.is_not_nil(findHeading(scroll, "Consumables"))
-            assert.is_not_nil(findLabelContaining(scroll, "target 20"))
+            local row = findLabelContaining(scroll, "target 20")
+            assert.is_not_nil(row)
+            assert.truthy(row._text:find("short 20", 1, true))
+            assert.is_nil(findLabelContaining(scroll, "not found"))
             assert.is_not_nil(findButton(container, "Cancel"))
             assert.is_nil(findButton(container, "Search auctions"))
         end)

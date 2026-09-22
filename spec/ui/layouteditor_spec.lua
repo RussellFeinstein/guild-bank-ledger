@@ -588,6 +588,12 @@ describe("LayoutEditor Store field", function()
         parent = AceGUI:Create("SimpleGroup")
         GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, true)
         assert.equals("= 40", findTotal(parent)._text)
+
+        -- The boundary: a Store equal to the total raises nothing.
+        GBL._reserveDraft = { [100] = 40 }
+        parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderItemRow(parent, 1, 100, true)
+        assert.equals("= 40", findTotal(parent)._text)
     end)
 
     it("renders the Store hint under the bulk row and a Store field on it", function()
