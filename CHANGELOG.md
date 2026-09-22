@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.41.0] - 2026-09-21
 
 ### Added
 - The Restock tab keeps its item list on screen through a search and a purchase. Every row shows its target, what the bank holds, what is in the mail, the shortfall and a status; after a search each row adds its lowest price and a Buy button carrying the estimated cost, the row being bought says so, and a bought row shows what it cost. Before the first bank scan of the session the rows read "bank ?" and "bank unknown" instead of a shortfall.
