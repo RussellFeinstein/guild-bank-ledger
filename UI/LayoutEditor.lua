@@ -610,10 +610,11 @@ function GBL:_LayoutEditor_RenderSingleTab(parent, tabIndex, writable)
 
     local heading = AceGUI:Create("Heading")
     heading:SetFullWidth(true)
-    -- GBL:GetTabName is the one namer (#236): live name, then the layout's
-    -- capture-time name, then the index. Passing the stored name keeps this
-    -- heading and the Restock group reading the same string in the window
-    -- before the bank has been opened, where the client answers nothing.
+    -- GBL:GetTabName is the namer (#236): the live name, then one this
+    -- session has read, then the layout's capture-time name, then the index.
+    -- Passing the stored name keeps this heading and the Restock group
+    -- reading the same string in the window before the bank has been opened,
+    -- where the client answers nothing and nothing has been cached yet.
     local prefix = "Tab " .. tabIndex
     local named = self:GetTabName(tabIndex, tab.name)
     heading:SetText(named == prefix and prefix or (prefix .. ": " .. named))
