@@ -69,6 +69,25 @@ describe("UI window persistence (v0.32.4)", function()
             assert.equals(500, bounds[2])
         end)
 
+        it("clears the in-view flag when the frame hides without OnClose", function()
+            -- Escape and the bank-close cascade hide the frame without
+            -- firing OnClose, which is why the OnHide hook exists beside
+            -- the OnClose callback. The mock records script handlers and
+            -- dispatches none, so the hook has to be fired by hand; the
+            -- flag it clears is what keeps a reopen onto Restock from
+            -- re-running the wallet baseline inside the post-purchase lag.
+            Helpers.MockWoW.guild.name = "Test Guild"
+            Helpers.MockWoW.guild.rankIndex = 0   -- GM: sort access
+            GBL:OpenRestockTab()
+            assert.is_true(GBL._restockInView, "precondition: Restock is in view")
+
+            local hooks = GBL.mainFrame.frame._hookScripts.OnHide
+            assert.is_table(hooks, "no OnHide hook on the main frame")
+            for _, fn in ipairs(hooks) do fn() end
+
+            assert.is_false(GBL._restockInView)
+        end)
+
         it("registers an OnMouseUp hook on each resize sizer", function()
             GBL:CreateMainFrame()
             for _, name in ipairs({ "sizer_se", "sizer_s", "sizer_e" }) do
@@ -258,13 +277,18 @@ describe("UI window persistence (v0.32.4)", function()
     -- This is the regression net for "future BuildXxxTab forgets the
     -- helper and silently re-opens the resize-anchor-loss bug."
     --
-    -- All eight builders are covered since #121.  BuildSortTab and
-    -- BuildLayoutTab were left out for three reasons, and all three
-    -- have gone: the mock's SelectTab fans out to OnGroupSelected now,
-    -- so the Layout tab's inner group builds its own content, and the
-    -- state the two were said to need (RegisterMessage, guild data,
-    -- _layoutDraft) is either supplied by the mock or initialised by
-    -- the builder itself.
+    -- All nine builders are covered since #121.  BuildSortTab and
+    -- BuildLayoutTab had been left out over state they were said to
+    -- need (RegisterMessage, guild data, _layoutDraft, and the mock's
+    -- no-op SelectTab); measured at #121, none of it blocks them, and
+    -- they pass with the old no-op mock too, so the fan-out is not
+    -- what let them in.  BuildRestockTab was never on the list at all.
+    --
+    -- Each case names the container it built into, because several
+    -- builders register more than one fill child and a bare count lets
+    -- them cover for each other: BuildLayoutTab registers the inner
+    -- TabGroup and then the scroll inside it, so dropping either one
+    -- alone left this net green.
     ----------------------------------------------------------------
 
     describe("every state-light tab builder registers a fill child", function()
@@ -287,10 +311,18 @@ describe("UI window persistence (v0.32.4)", function()
         -- #222 gave the mock its `label` FontString and none of the
         -- eight throws any more, so the call is bare: a builder that
         -- starts erroring here is a finding rather than noise.
-        local function buildAndCheck(buildFn)
-            buildFn()
-            local count = GBL._scrollFillContainers and #GBL._scrollFillContainers or 0
-            assert.is_true(count >= 1, "builder did not call AddFillChild")
+        -- Asserts the builder pinned a child to THE CONTAINER IT WAS
+        -- HANDED, which is the anchor the resize cascade re-applies. A
+        -- count alone passes when a builder registers a nested child and
+        -- forgets the outer one, which is the shape that re-opens the bug.
+        local function buildAndCheck(buildFn, container)
+            buildFn(container)
+            local registered = false
+            for _, entry in ipairs(GBL._scrollFillContainers or {}) do
+                if entry.parent == container then registered = true; break end
+            end
+            assert.is_true(registered,
+                "builder registered no fill child on the container it was given")
         end
 
         local function freshContainer()
@@ -298,35 +330,39 @@ describe("UI window persistence (v0.32.4)", function()
         end
 
         it("BuildTransactionsTab", function()
-            buildAndCheck(function() GBL:BuildTransactionsTab(freshContainer(), {}) end)
+            buildAndCheck(function(c) GBL:BuildTransactionsTab(c, {}) end, freshContainer())
         end)
 
         it("BuildGoldLogTab", function()
-            buildAndCheck(function() GBL:BuildGoldLogTab(freshContainer(), {}) end)
+            buildAndCheck(function(c) GBL:BuildGoldLogTab(c, {}) end, freshContainer())
         end)
 
         it("BuildConsumptionTab", function()
-            buildAndCheck(function() GBL:BuildConsumptionTab(freshContainer(), {}) end)
+            buildAndCheck(function(c) GBL:BuildConsumptionTab(c, {}) end, freshContainer())
         end)
 
         it("BuildAboutTab", function()
-            buildAndCheck(function() GBL:BuildAboutTab(freshContainer()) end)
+            buildAndCheck(function(c) GBL:BuildAboutTab(c) end, freshContainer())
         end)
 
         it("BuildChangelogTab", function()
-            buildAndCheck(function() GBL:BuildChangelogTab(freshContainer()) end)
+            buildAndCheck(function(c) GBL:BuildChangelogTab(c) end, freshContainer())
         end)
 
         it("BuildSyncTab", function()
-            buildAndCheck(function() GBL:BuildSyncTab(freshContainer()) end)
+            buildAndCheck(function(c) GBL:BuildSyncTab(c) end, freshContainer())
         end)
 
         it("BuildSortTab", function()
-            buildAndCheck(function() GBL:BuildSortTab(freshContainer()) end)
+            buildAndCheck(function(c) GBL:BuildSortTab(c) end, freshContainer())
         end)
 
         it("BuildLayoutTab", function()
-            buildAndCheck(function() GBL:BuildLayoutTab(freshContainer()) end)
+            buildAndCheck(function(c) GBL:BuildLayoutTab(c) end, freshContainer())
+        end)
+
+        it("BuildRestockTab", function()
+            buildAndCheck(function(c) GBL:BuildRestockTab(c) end, freshContainer())
         end)
     end)
 end)

@@ -756,7 +756,11 @@ describe("RestockView", function()
     describe("OpenRestockTab", function()
         it("opens to the Restock tab for a sort-access user", function()
             GBL:OpenRestockTab()  -- GM (rankIndex 0) has sort access
-            assert.equals("restock", GBL.tabGroup._selectedTab)
+            -- activeTab, not the group's _selectedTab: that field records
+            -- the value handed in even when the bar holds no such tab and
+            -- nothing was built (#121), so it cannot carry this claim.
+            assert.equals("restock", GBL.activeTab)
+            assert.is_true(GBL:IsMainFrameShown())
         end)
 
         it("declines and prints for a user without sort access", function()

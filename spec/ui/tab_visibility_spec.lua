@@ -99,19 +99,33 @@ describe("Access-gated tab visibility", function()
             assert.is_true(v.layout)
         end)
 
-        it("comes up with exactly one tab button selected, the active one", function()
+        it("marks the button it came up on, and clears it when another is picked", function()
             -- The rendered read rather than the stored one: _tabs says what
-            -- the bar holds, and this says which button it opened on.
+            -- the bar holds, and this says which button carries the
+            -- selection. Counted over the buttons ON SCREEN, because
+            -- BuildTabs hides the frames past a shrunken bar without
+            -- clearing their value, so two frames can carry one value and
+            -- SelectTab marks both; the visible one is the invariant.
             setPlayer("Gm", "TestRealm", 0)
             GBL:CreateMainFrame()
-            GBL:RebuildTabs()
 
-            local selected = {}
-            for _, t in ipairs(GBL.tabGroup.tabs or {}) do
-                if t.selected then selected[#selected + 1] = t.value end
+            local function selectedOnScreen()
+                local vals = {}
+                for _, t in ipairs(GBL.tabGroup.tabs or {}) do
+                    if t.selected and t:IsShown() then vals[#vals + 1] = t.value end
+                end
+                return vals
             end
-            assert.equals(1, #selected)
-            assert.equals(GBL.activeTab, selected[1])
+
+            local opened = selectedOnScreen()
+            assert.equals(1, #opened)
+            assert.equals(GBL.activeTab, opened[1])
+
+            GBL.tabGroup:SelectTab("sync")
+
+            local moved = selectedOnScreen()
+            assert.equals(1, #moved, "the tab it came from is still marked")
+            assert.equals("sync", moved[1])
         end)
     end)
 
