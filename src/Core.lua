@@ -70,6 +70,10 @@ end
 -- AceDB defaults
 local defaults = {
     global = {
+        -- The account's own characters, [Name-Realm] = lastSeen (#222).
+        -- Account level, not per guild, and never on the wire; see
+        -- RecordOwnCharacter.
+        characters = {},
         guilds = {
             ["*"] = {
                 transactions = {},
@@ -527,6 +531,39 @@ function GBL:RepairCorruptedPlayerRealms(playerRealms)
         end
     end
     return repaired
+end
+
+--- Record the logged-in character in the account roster (#222,
+-- docs/PLAN-views-and-access.md section 7).
+--
+-- `db.global.characters[Name-Realm] = lastSeen`. SavedVariables are
+-- account-wide, so each character that logs in writes itself into one
+-- table and the Member view can show a person the characters they play in
+-- this guild instead of only the one they are on. Account level rather
+-- than per guild, on the reasoning #52 already recorded: a character's
+-- home is the account, the guild is where its rows are.
+--
+-- It fills as characters log in and there is no backfill, because nothing
+-- on disk says which of a guild's names belong to this account. A member
+-- who has not logged in on an alt since updating does not see that alt's
+-- rows, which the user-facing copy says in as many words.
+--
+-- Never transmitted, and nothing attaches it to a message: recording
+-- locally is not a privacy event by this project's own rule, and the
+-- HELLO payload is built from a literal that does not name it.
+--
+-- Called from GUILD_ROSTER_UPDATE rather than OnEnable, and guarded on a
+-- resolved realm: the realm APIs can still be cold at enable time, and
+-- GetLocalRealm answers the "UnknownRealm" sentinel there. A key built
+-- from that sentinel would match no record and would never expire.
+function GBL:RecordOwnCharacter()
+    if not self.db or not self.db.global then return end
+    local name = UnitName("player")
+    if not name or name == "" then return end
+    local realm = self:GetLocalRealm()
+    if not realm or realm == "" or realm == "UnknownRealm" then return end
+    self.db.global.characters = self.db.global.characters or {}
+    self.db.global.characters[name .. "-" .. realm] = GetServerTime()
 end
 
 --- Build/update the persistent guild roster cache.
@@ -1751,6 +1788,9 @@ function GBL:GUILD_ROSTER_UPDATE()
     -- Update the persistent player→realm mapping
     self:BuildRosterCache()
 
+    -- Record this character in the account roster (#222).
+    self:RecordOwnCharacter()
+
     -- One-time retrigger of the migration ladder once roster is warm. Closes
     -- the cold-roster gap for migrations like MigrateRecoverPeerRealms that
     -- short-circuit on cold APIs at OnEnable time. Strict-gated migrations
@@ -1983,6 +2023,26 @@ function GBL:GetGuildName()
     return self._cachedGuildName
 end
 
+--- The player's guild rank, with the last value read this session standing
+-- in for a momentary nil (#222).
+--
+-- GetGuildInfo answers nothing at all for a few frames after a loading
+-- screen or a zone change, and reading that as a change is expensive:
+-- GetAccessLevel feeds _AccessTabSignature, so a transient would rebuild
+-- the tab bar, and in a sync_only guild RebuildTabs would collapse the tab
+-- list and leave the player parked on the Sync tab with their filters and
+-- scroll position gone, for a read that told us nothing. A real promotion
+-- or demotion still arrives as a number and replaces the cache.
+-- @return number|nil rank index, or nil if none has been read this session
+function GBL:GuildRankIndex()
+    local _, _, rankIndex = GetGuildInfo("player")
+    if rankIndex then
+        self._lastKnownRank = rankIndex
+        return rankIndex
+    end
+    return self._lastKnownRank
+end
+
 --- Check if the player is the Guild Master (rank 0).
 -- @return boolean true if rank index is exactly 0
 function GBL:IsGuildMaster()
@@ -2002,14 +2062,29 @@ function GBL:GetAccessLevel()
     local ac = guildData.accessControl
     if not ac or not ac.rankThreshold then return "full" end
 
-    local _, _, rankIndex = GetGuildInfo("player")
-    if not rankIndex then return "full" end
+    local rankIndex = self:GuildRankIndex()
+    -- Fail closed rather than open when no rank has been read at all this
+    -- session (#222). A threshold is configured, so someone meant this guild
+    -- to be restricted, and answering "full" hands a member the whole
+    -- ledger; the GM is caught by it too, which is the cheaper mistake.
+    --
+    -- This does not close the window right after login, and nothing here
+    -- can: GetGuildInfo returns the guild name and the rank together, so
+    -- while the rank is unknown GetGuildData is nil as well and the guard
+    -- two checks above has already answered "full". What it covers is a
+    -- guild whose data is known while a rank read comes back empty.
+    if not rankIndex then return ac.restrictedMode or "own_transactions" end
 
     if rankIndex <= ac.rankThreshold then
         return "full"
     end
 
-    return ac.restrictedMode or "sync_only"
+    -- A threshold with no mode chosen reads as Member rather than Sync only
+    -- (#222, views doc section 6): the mode a GM gets by not choosing should
+    -- still show a member their own record. Display-side only; the stored
+    -- and advertised values do not change, so an older client reads this
+    -- guild exactly as it did before.
+    return ac.restrictedMode or "own_transactions"
 end
 
 --- Convenience check for full addon access.

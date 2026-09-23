@@ -1398,6 +1398,74 @@ describe("Core", function()
         end)
     end)
 
+    -- The account roster behind the Member view's own rows (#222, views doc
+    -- section 7). SavedVariables are account-wide, so each character that
+    -- logs in writes itself into one table and the filter can match every
+    -- character the person plays in this guild. Local only: nothing here
+    -- reaches the wire, and the wire-contract spec's absolute HELLO key set
+    -- is what keeps it that way.
+    describe("account character roster", function()
+        before_each(function()
+            GBL:OnInitialize()
+            MockWoW.guild.name = "Test Guild"
+            GBL:OnEnable()
+            MockWoW.guildRoster = {}
+            GBL.db.global.characters = nil
+        end)
+
+        it("records the logged-in character under its qualified name", function()
+            MockWoW.player.name = "Katorriwl"
+            MockWoW.player.realm = "TestRealm"
+
+            GBL:GUILD_ROSTER_UPDATE()
+
+            local chars = GBL.db.global.characters
+            assert.is_not_nil(chars)
+            assert.is_not_nil(chars["Katorriwl-TestRealm"])
+        end)
+
+        it("writes nothing while the realm APIs are still cold", function()
+            MockWoW.player.name = "Katorriwl"
+            MockWoW.player.realm = nil
+            MockWoW.player.normalizedRealm = nil
+
+            GBL:GUILD_ROSTER_UPDATE()
+
+            -- GetLocalRealm answers the "UnknownRealm" sentinel here, and a
+            -- key built from it would match no record and never expire.
+            local chars = GBL.db.global.characters or {}
+            assert.is_nil(chars["Katorriwl-UnknownRealm"])
+            assert.is_nil(next(chars))
+        end)
+
+        it("adds a second character under its own key", function()
+            MockWoW.player.name = "Katorriwl"
+            MockWoW.player.realm = "TestRealm"
+            GBL:GUILD_ROSTER_UPDATE()
+
+            MockWoW.player.name = "Katalt"
+            GBL:GUILD_ROSTER_UPDATE()
+
+            local chars = GBL.db.global.characters
+            assert.is_not_nil(chars["Katorriwl-TestRealm"])
+            assert.is_not_nil(chars["Katalt-TestRealm"])
+        end)
+
+        it("refreshes the stamp of a character already recorded", function()
+            MockWoW.player.name = "Katorriwl"
+            MockWoW.player.realm = "TestRealm"
+            GBL.db.global.characters = { ["Katorriwl-TestRealm"] = 1 }
+
+            GBL:GUILD_ROSTER_UPDATE()
+
+            local chars = GBL.db.global.characters
+            assert.equals(MockWoW.serverTime, chars["Katorriwl-TestRealm"])
+            local n = 0
+            for _ in pairs(chars) do n = n + 1 end
+            assert.equals(1, n)
+        end)
+    end)
+
     describe("GUILD_ROSTER_UPDATE migration retrigger", function()
         local guildData
         before_each(function()
