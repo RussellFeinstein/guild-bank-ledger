@@ -46,16 +46,26 @@ end
 -- Tab name lookup
 ------------------------------------------------------------------------
 
---- Get the display name for a guild bank tab.
+--- Get the display name for a guild bank tab: the one helper every reader
+-- names a tab through (#236). The live name is the truth. `fallback` is a
+-- name the caller has stored, used only when the client answers nothing,
+-- which is the window before the bank has been opened this session; in it a
+-- capture-time name beats "Tab 3". It is type-tested because a synced layout
+-- copies `tabs[].name` verbatim (`copyTab`, src/BankLayout.lua), so a peer
+-- can put anything there.
 -- @param tab number Tab index
+-- @param fallback string|nil a stored name to use when the client has none
 -- @return string Tab name, or fallback to "Tab N"
-function GBL:GetTabName(tab)
+function GBL:GetTabName(tab, fallback)
     if not tab then return nil end
     if GetGuildBankTabInfo then
         local name = GetGuildBankTabInfo(tab)
         if name and name ~= "" then
             return name
         end
+    end
+    if type(fallback) == "string" and fallback ~= "" then
+        return fallback
     end
     return "Tab " .. tostring(tab)
 end

@@ -42,14 +42,6 @@ local function itemLabelFor(itemID)
     return "item " .. itemID
 end
 
-local function bankTabName(tabIndex)
-    if GetGuildBankTabInfo then
-        local name = GetGuildBankTabInfo(tabIndex)
-        if name and name ~= "" then return name end
-    end
-    return "Tab " .. tabIndex
-end
-
 --- Group slotOrder entries into contiguous same-item runs.
 --
 -- Pure function. Given `slotOrder[slotIndex] = itemID`, returns a
@@ -618,7 +610,11 @@ function GBL:_LayoutEditor_RenderSingleTab(parent, tabIndex, writable)
 
     local heading = AceGUI:Create("Heading")
     heading:SetFullWidth(true)
-    heading:SetText("Tab " .. tabIndex .. ": " .. bankTabName(tabIndex))
+    -- GBL:GetTabName is the one namer (#236): live name, then the layout's
+    -- capture-time name, then the index. Passing the stored name keeps this
+    -- heading and the Restock group reading the same string in the window
+    -- before the bank has been opened, where the client answers nothing.
+    heading:SetText("Tab " .. tabIndex .. ": " .. self:GetTabName(tabIndex, tab.name))
     parent:AddChild(heading)
 
     local dropdown = AceGUI:Create("Dropdown")
