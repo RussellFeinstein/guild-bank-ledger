@@ -46,6 +46,54 @@ describe("Ledger", function()
         end)
     end)
 
+    -- #236: one helper names a bank tab for every reader. The live name is the
+    -- truth; the caller's stored name is the fallback for the window before the
+    -- bank has been opened this session, when the client answers nothing.
+    describe("GetTabName", function()
+        it("returns the live name the client gives", function()
+            MockWoW.addTab("Raid Use 1")
+            MockWoW.addTab("Raid Use 2")
+            MockWoW.addTab("Raid Use 3")
+            assert.equals("Raid Use 3", GBL:GetTabName(3))
+        end)
+
+        it("prefers the live name over a stale stored one", function()
+            MockWoW.addTab("Raid Use 1")
+            MockWoW.addTab("Raid Use 2")
+            MockWoW.addTab("Raid Use 3")
+            assert.equals("Raid Use 3", GBL:GetTabName(3, "Potions"))
+        end)
+
+        it("falls back to the stored name when the client has no tab", function()
+            assert.equals("Potions", GBL:GetTabName(3, "Potions"))
+        end)
+
+        it("falls back to Tab N when there is no stored name either", function()
+            assert.equals("Tab 3", GBL:GetTabName(3))
+        end)
+
+        it("treats an empty live name as absent", function()
+            MockWoW.addTab("")
+            assert.equals("Potions", GBL:GetTabName(1, "Potions"))
+        end)
+
+        it("treats an empty stored name as absent", function()
+            assert.equals("Tab 3", GBL:GetTabName(3, ""))
+        end)
+
+        it("treats a non-string stored name as absent", function()
+            -- A synced layout reaches storage through copyTab, which copies
+            -- tabs[].name with no type check, so a peer can hand us anything.
+            assert.equals("Tab 3", GBL:GetTabName(3, {}))
+            assert.equals("Tab 3", GBL:GetTabName(3, 7))
+        end)
+
+        it("returns nil for a nil tab", function()
+            assert.is_nil(GBL:GetTabName(nil))
+            assert.is_nil(GBL:GetTabName(nil, "Potions"))
+        end)
+    end)
+
     describe("CreateTxRecord", function()
         it("builds complete record with category", function()
             local link = Helpers.makeItemLink(54321, "Healing Potion", 2)
