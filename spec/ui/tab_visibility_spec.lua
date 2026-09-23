@@ -6,8 +6,11 @@
 -- RefreshAccessTabsIfChanged rebuilds the tab bar when the roster/rank
 -- warms (cold-roster login) or a grant arrives, but only on a real change.
 --
--- Assertions inspect tabGroup._tabs (what SetTabs stored) rather than the
--- rendered tab buttons, so they do not depend on the no-op mock SelectTab.
+-- Most assertions inspect tabGroup._tabs (what SetTabs stored), which is
+-- the right read for "is this tab in the bar at all". Since #121 the mock
+-- selects a tab frame the way the library does, so the last case here can
+-- read the rendered selection instead: that one asks which button the bar
+-- came up on, which _tabs cannot answer.
 ------------------------------------------------------------------------
 
 local Helpers = require("spec.helpers")
@@ -94,6 +97,21 @@ describe("Access-gated tab visibility", function()
             assert.is_true(v.sort)
             assert.is_true(v.restock)
             assert.is_true(v.layout)
+        end)
+
+        it("comes up with exactly one tab button selected, the active one", function()
+            -- The rendered read rather than the stored one: _tabs says what
+            -- the bar holds, and this says which button it opened on.
+            setPlayer("Gm", "TestRealm", 0)
+            GBL:CreateMainFrame()
+            GBL:RebuildTabs()
+
+            local selected = {}
+            for _, t in ipairs(GBL.tabGroup.tabs or {}) do
+                if t.selected then selected[#selected + 1] = t.value end
+            end
+            assert.equals(1, #selected)
+            assert.equals(GBL.activeTab, selected[1])
         end)
     end)
 

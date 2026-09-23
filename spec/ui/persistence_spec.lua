@@ -258,11 +258,13 @@ describe("UI window persistence (v0.32.4)", function()
     -- This is the regression net for "future BuildXxxTab forgets the
     -- helper and silently re-opens the resize-anchor-loss bug."
     --
-    -- Skipped intentionally: BuildSortTab and BuildLayoutTab need
-    -- state plumbing (RegisterMessage, bank snapshot, guild data,
-    -- _layoutDraft, plus the AceGUI mock's no-op SelectTab) larger
-    -- than this PR's scope.  See project_ui_smoke_test_gaps memory
-    -- for the path to closing those gaps.
+    -- All eight builders are covered since #121.  BuildSortTab and
+    -- BuildLayoutTab were left out for three reasons, and all three
+    -- have gone: the mock's SelectTab fans out to OnGroupSelected now,
+    -- so the Layout tab's inner group builds its own content, and the
+    -- state the two were said to need (RegisterMessage, guild data,
+    -- _layoutDraft) is either supplied by the mock or initialised by
+    -- the builder itself.
     ----------------------------------------------------------------
 
     describe("every state-light tab builder registers a fill child", function()
@@ -278,17 +280,17 @@ describe("UI window persistence (v0.32.4)", function()
             AceGUI = LibStub("AceGUI-3.0")
         end)
 
-        -- Some builders crash partway through under the test mock
-        -- (e.g. Label.label:SetWordWrap is a real AceGUI feature the
-        -- mock does not stub).  That post-helper crash is unrelated to
-        -- the convention being tested: as long as AddFillChild was
-        -- reached BEFORE the crash, the convention holds.  pcall the
-        -- builder and assert on the registry afterward.
+        -- This used to pcall the builder, because some of them crashed
+        -- partway through under the mock (Label.label:SetWordWrap is a
+        -- real AceGUI feature the mock did not stub) and the convention
+        -- held as long as AddFillChild was reached before the crash.
+        -- #222 gave the mock its `label` FontString and none of the
+        -- eight throws any more, so the call is bare: a builder that
+        -- starts erroring here is a finding rather than noise.
         local function buildAndCheck(buildFn)
-            pcall(buildFn)
+            buildFn()
             local count = GBL._scrollFillContainers and #GBL._scrollFillContainers or 0
-            assert.is_true(count >= 1,
-                "builder did not call AddFillChild before any subsequent crash")
+            assert.is_true(count >= 1, "builder did not call AddFillChild")
         end
 
         local function freshContainer()
@@ -317,6 +319,14 @@ describe("UI window persistence (v0.32.4)", function()
 
         it("BuildSyncTab", function()
             buildAndCheck(function() GBL:BuildSyncTab(freshContainer()) end)
+        end)
+
+        it("BuildSortTab", function()
+            buildAndCheck(function() GBL:BuildSortTab(freshContainer()) end)
+        end)
+
+        it("BuildLayoutTab", function()
+            buildAndCheck(function() GBL:BuildLayoutTab(freshContainer()) end)
         end)
     end)
 end)
