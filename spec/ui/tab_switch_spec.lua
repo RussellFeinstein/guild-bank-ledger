@@ -153,9 +153,13 @@ describe("Tab switching through the TabGroup", function()
         link:Fire("OnClick")
 
         assert.equals("transactions", GBL.activeTab)
-        assert.equals("Fluphie-TestRealm", GBL._pendingSearchText)
-        assert.is_true(transactionsRendered(),
+        local search = widgetWithLabel(GBL.tabGroup, "EditBox", "Search")
+        assert.is_not_nil(search,
             "the player link switched tabs without building Transactions")
+        -- The click parks the name on _pendingSearchText and the build
+        -- consumes it into the filters, so the rendered box is where the
+        -- cross-tab navigation actually shows up (UI/UI.lua).
+        assert.equals("Fluphie-TestRealm", search._text)
     end)
 
     it("builds nothing for a value the tab bar does not hold", function()
