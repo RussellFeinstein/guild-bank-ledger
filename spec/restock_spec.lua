@@ -323,21 +323,6 @@ describe("Restock", function()
             assert.equals("Raid Use 3", rows[1].group)
         end)
 
-        it("names a group the same way every other reader names the tab", function()
-            MockWoW.addTab("Raid Use 1")
-            MockWoW.addTab("Raid Use 2")
-            MockWoW.addTab("Raid Use 3")
-            local rows = GBL:_RestockBuildItemUniverse({
-                layout = layout({
-                    [3] = { mode = "display", name = "Potions",
-                            items = { [100] = { slots = 1, perSlot = 5 } } },
-                    [4] = { mode = "overflow" },
-                }),
-                reserves = {},
-            })
-            assert.equals(GBL:GetTabName(3, "Potions"), rows[1].group)
-        end)
-
         it("keeps the stored name for a tab the client cannot name yet", function()
             -- Before the bank has been opened this session GetGuildBankTabInfo
             -- answers nothing, and the capture-time name beats the index.

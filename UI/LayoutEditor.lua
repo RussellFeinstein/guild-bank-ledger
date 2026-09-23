@@ -614,7 +614,9 @@ function GBL:_LayoutEditor_RenderSingleTab(parent, tabIndex, writable)
     -- capture-time name, then the index. Passing the stored name keeps this
     -- heading and the Restock group reading the same string in the window
     -- before the bank has been opened, where the client answers nothing.
-    heading:SetText("Tab " .. tabIndex .. ": " .. self:GetTabName(tabIndex, tab.name))
+    local prefix = "Tab " .. tabIndex
+    local named = self:GetTabName(tabIndex, tab.name)
+    heading:SetText(named == prefix and prefix or (prefix .. ": " .. named))
     parent:AddChild(heading)
 
     local dropdown = AceGUI:Create("Dropdown")
@@ -628,7 +630,11 @@ function GBL:_LayoutEditor_RenderSingleTab(parent, tabIndex, writable)
     dropdown:SetWidth(380)
     dropdown:SetDisabled(not writable)
     dropdown:SetCallback("OnValueChanged", function(_widget, _event, value)
-        draft.tabs[tabIndex] = { mode = value }
+        -- Carry the tab's name across the replacement: it is the
+        -- fallback the headings read when the client cannot name the tab
+        -- (#236), and Save would push the loss to every peer.
+        local keptName = draft.tabs[tabIndex] and draft.tabs[tabIndex].name
+        draft.tabs[tabIndex] = { mode = value, name = keptName }
         if value == "display" then
             draft.tabs[tabIndex].items = {}
             draft.tabs[tabIndex].slotOrder = {}
@@ -712,7 +718,7 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
     captureBtn:SetDisabled(not writable)
 
     local function applyCapture()
-        local ok, captured, err = pcall(self.CaptureTabLayout, self, tabIndex)
+        local ok, captured, err = pcall(self.CaptureTabLayout, self, tabIndex, tab.name)
         if not ok then
             self:Print(format("|cffff5555Capture tab %d crashed:|r %s",
                 tabIndex, tostring(captured)))  -- captured holds pcall error

@@ -486,7 +486,9 @@ function GBL:_RestockBuildItemUniverse(opts)
         -- stays as the fallback for the window before the bank has been opened
         -- this session, where the client answers nothing and a capture-time
         -- name beats the index. A synced layout can key tabs by string.
-        local groupName = self:GetTabName(tonumber(tabIndex) or tabIndex, tab.name)
+        local idx = tonumber(tabIndex)
+        local groupName = idx and self:GetTabName(idx, tab.name)
+            or ("Tab " .. tostring(tabIndex))
 
         -- Order items by their first slotOrder position, falling back to itemID,
         -- so the list reads in the same left-to-right order as the bank tab.

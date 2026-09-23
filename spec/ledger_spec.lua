@@ -88,6 +88,40 @@ describe("Ledger", function()
             assert.equals("Tab 3", GBL:GetTabName(3, 7))
         end)
 
+        it("remembers a name it read while the bank was open", function()
+            -- src/Core.lua's own BackfillTabNames says the read "only works
+            -- while the bank is open", and the Restock tab is used at the
+            -- auction house. A name this session has already seen beats the
+            -- layout's capture-time one, and it is a reading rather than a
+            -- guess.
+            MockWoW.addTab("Raid Use 1")
+            MockWoW.addTab("Raid Use 2")
+            MockWoW.addTab("Raid Use 3")
+            assert.equals("Raid Use 3", GBL:GetTabName(3))
+            MockWoW.guildBank.tabs = {}      -- the bank frame closes
+            assert.equals("Raid Use 3", GBL:GetTabName(3, "Potions"))
+        end)
+
+        it("prefers a fresh read over the one it remembers", function()
+            MockWoW.addTab("Raid Use 1")
+            assert.equals("Raid Use 1", GBL:GetTabName(1))
+            MockWoW.guildBank.tabs[1].name = "Raid Use One"
+            assert.equals("Raid Use One", GBL:GetTabName(1))
+        end)
+
+        it("escapes the escape introducer in a stored name", function()
+            -- tabs[].name reaches storage from a peer through copyTab, which
+            -- validates nothing, and from here it reaches heading:SetText on
+            -- two tabs. A lone "|" is WoW's escape introducer.
+            assert.equals("||cffff0000red||r", GBL:GetTabName(3, "|cffff0000red|r"))
+        end)
+
+        it("returns one value, not the pair gsub gives", function()
+            local name, extra = GBL:GetTabName(3, "Potions")
+            assert.equals("Potions", name)
+            assert.is_nil(extra)
+        end)
+
         it("returns nil for a nil tab", function()
             assert.is_nil(GBL:GetTabName(nil))
             assert.is_nil(GBL:GetTabName(nil, "Potions"))

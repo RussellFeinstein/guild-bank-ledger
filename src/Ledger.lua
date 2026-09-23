@@ -46,26 +46,44 @@ end
 -- Tab name lookup
 ------------------------------------------------------------------------
 
---- Get the display name for a guild bank tab: the one helper every reader
--- names a tab through (#236). The live name is the truth. `fallback` is a
--- name the caller has stored, used only when the client answers nothing,
--- which is the window before the bank has been opened this session; in it a
--- capture-time name beats "Tab 3". It is type-tested because a synced layout
--- copies `tabs[].name` verbatim (`copyTab`, src/BankLayout.lua), so a peer
--- can put anything there.
+--- Name a guild bank tab, in four steps (#236): the live name, then one
+-- this session has already read, then the caller's stored name, then the
+-- index. Every live reader goes through here; a transaction record is the
+-- exception and keeps the name it was created under.
+--
+-- The session cache is what makes this work away from the bank.
+-- BackfillTabNames below says the live read "only works while the bank is
+-- open", and the Restock tab is worked at the auction house, so the live
+-- branch answers nothing exactly where the name is wanted. A remembered
+-- name is a reading rather than a guess, and it is per session, so a rename
+-- is picked up on the next bank visit.
+--
+-- `fallback` is for the window before the bank has been opened at all,
+-- where a capture-time name still beats "Tab 3". It is type-tested and its
+-- escape introducer is doubled, because a synced layout copies
+-- `tabs[].name` verbatim (`copyTab`, src/BankLayout.lua) and `Validate`
+-- never looks at it, so a peer can put anything there and it lands in
+-- SetText on two tabs.
 -- @param tab number Tab index
--- @param fallback string|nil a stored name to use when the client has none
+-- @param fallback string|nil a stored name to use when nothing else names it
 -- @return string Tab name, or fallback to "Tab N"
 function GBL:GetTabName(tab, fallback)
     if not tab then return nil end
+    local key = tonumber(tab) or tab
     if GetGuildBankTabInfo then
         local name = GetGuildBankTabInfo(tab)
         if name and name ~= "" then
+            self._tabNamesSeen = self._tabNamesSeen or {}
+            self._tabNamesSeen[key] = name
             return name
         end
     end
+    local seen = self._tabNamesSeen and self._tabNamesSeen[key]
+    if seen then return seen end
     if type(fallback) == "string" and fallback ~= "" then
-        return fallback
+        -- A lone "|" is WoW's escape introducer, and this one came from a
+        -- peer's layout through copyTab, which validates nothing.
+        return (fallback:gsub("|", "||"))
     end
     return "Tab " .. tostring(tab)
 end
