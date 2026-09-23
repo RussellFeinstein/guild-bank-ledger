@@ -277,6 +277,92 @@ end
 Helpers.MockWoW = MockWoW
 Helpers.MockAce = MockAce
 
+------------------------------------------------------------------------
+-- Driving the mock timer queue (#117)
+--
+-- Four helpers, each with its own filter rule, and the rule is the whole
+-- point: a pump that stops discriminating passes vacuously. Pick by what
+-- the test means, not by what happens to make it green.
+--
+--   fireTimersAt(delay)     exactly one delay, errors on no match
+--   timersAt(delay)         counts without firing
+--   drainZeroDelayTimers()  delay == 0 only, one hop per round
+--   drainAllTimers()        everything, to empty, bounded
+--
+-- The sync suite keeps its own beside these in spec/sync_helpers.lua
+-- (fireAckTimeout, fireNextChunkDelay, drainSend, fireReceiveTimeout),
+-- because their rules are about the protocol rather than about the clock.
+--
+-- Three traps in the harness, in one place rather than rediscovered per
+-- spec. Each has cost a session at least once.
+--
+--   1. MockWoW.fireTimers SNAPSHOTS the queue and cannot cascade
+--      (spec/mock_wow.lua). A self-rescheduling chain needs one call per
+--      hop, so a single call looks like a chain that stopped.
+--   2. C_Timer.NewTicker inserts into the same MockWoW.pendingTimers as
+--      After, so anything that drains to empty also fires the 120s send
+--      hard timer and the HELLO heartbeat, aborting the thing under test.
+--      That is why the two narrow drains exist.
+--   3. Wall-clock gates (INTER_CHUNK_GAP_FLOOR) read MockWoW.serverTime,
+--      which nothing advances on its own. A drive-to-completion loop has
+--      to move it or it spins on chunk one forever; Sync.drainSend is the
+--      one that does, by 2s a round.
+------------------------------------------------------------------------
+
+--- The live timers at exactly this delay: uncancelled, unfired, not run yet.
+--
+-- Takes the delay from a production export rather than a literal. Thirteen
+-- spec sites once searched for a hardcoded `timer.delay == 8`, and when the
+-- constant moved to 3 every one of them matched nothing and passed anyway.
+-- @param delay number The delay to match, from the production constant
+-- @return number How many are pending
+function Helpers.timersAt(delay)
+    local n = 0
+    for _, t in ipairs(MockWoW.pendingTimers) do
+        if not t.cancelled and t.delay == delay then n = n + 1 end
+    end
+    return n
+end
+
+--- Fire only the timers at exactly this delay, leaving every other one alone.
+--
+-- Errors when it matches nothing rather than returning quietly, which is what
+-- keeps it from being a vacuous pass: a test that means "the step timeout
+-- fires" has not tested anything if no such timer was pending.
+-- @param delay number The delay to match, from the production constant
+-- @return number How many fired
+function Helpers.fireTimersAt(delay)
+    local keep, fire = {}, {}
+    for _, t in ipairs(MockWoW.pendingTimers) do
+        if not t.cancelled and t.delay == delay then
+            fire[#fire + 1] = t
+        else
+            keep[#keep + 1] = t
+        end
+    end
+    if #fire == 0 then
+        error("no timer pending at delay " .. tostring(delay), 2)
+    end
+    MockWoW.pendingTimers = keep
+    for _, t in ipairs(fire) do t.callback() end
+    return #fire
+end
+
+--- Drive every pending timer repeatedly until the queue empties or the cap.
+--
+-- The blunt one, and the right one when a test wants the whole cascade: the
+-- sort executor's pump self-reschedules and its end of pass adds settle and
+-- scan timers, so a run needs several rounds. Read trap 2 above before
+-- reaching for it anywhere a long-lived ticker is pending.
+-- @param maxRounds number|nil Safety cap (default 60)
+function Helpers.drainAllTimers(maxRounds)
+    maxRounds = maxRounds or 60
+    for _ = 1, maxRounds do
+        if #MockWoW.pendingTimers == 0 then return end
+        MockWoW.fireTimers()
+    end
+end
+
 --- Fire pending zero-delay timers until none are left, one round at a time.
 --
 -- For driving a C_Timer.After(0) work chain, where each hop schedules the next

@@ -14,13 +14,11 @@ end
 
 --- Drive C_Timer callbacks repeatedly until no more are pending OR a safety cap.
 --- The pump self-reschedules via C_Timer.After and end-of-pass adds settle/scan
---- timers, so several rounds are needed for a run to complete.
+--- timers, so several rounds are needed for a run to complete. The body moved
+--- to spec/helpers.lua's timer family (#117), which carries the harness traps;
+--- the local name stays because these specs read as "drain the run".
 local function drainTimers(maxRounds)
-    maxRounds = maxRounds or 60
-    for _ = 1, maxRounds do
-        if #MockWoW.pendingTimers == 0 then return end
-        MockWoW.fireTimers()
-    end
+    return Helpers.drainAllTimers(maxRounds)
 end
 
 --- Count items of itemID across all slots of a tab.
