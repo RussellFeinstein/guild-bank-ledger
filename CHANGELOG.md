@@ -5,6 +5,19 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.41.3] - 2026-09-22
+
+### Fixed
+- The Restock tab's group headings now show what the guild bank calls each tab today. They used to show the name the layout recorded when the tab was captured, so a tab renamed since then kept its old heading on the Restock tab while the Layout tab showed the new one. Both tabs read the live name now, and fall back to the last name seen this session and then to the layout's, which is what the headings show before the bank has been opened.
+
+## [0.41.2] - 2026-09-22
+
+### Fixed
+- The Member view (Own Transactions mode) now shows a member their own rows only. It never has: the tab was built from the filtered list and then redrawn from the unfiltered one two calls later, so under the banner "Showing your transactions only." a restricted member has been reading the whole guild's ledger since v0.15.0. The filter now lives in one place that both the build and every later refresh read, and it covers the Transactions, Gold Log and Consumption tabs.
+- A member's own rows now mean their account rather than one character: every character you have logged in on since updating shows in the view, matched on the full Name-Realm, so an alt's rows are yours and a stranger who shares your name on another realm is not. Each character records itself locally the first time it logs in, so an alt you have not played since updating is not in the view yet, and the list never leaves your machine.
+- A momentary loss of your guild rank, in the frames after a loading screen, no longer changes what the window shows or rebuilds its tabs. A guild with a rank threshold set now also shows the restricted view rather than the full one when no rank has been read at all.
+- A rank threshold set without choosing a mode now means Member rather than Sync only, so the quiet default is the one that still shows a member their own record. The stored value is unchanged; the Sync tab's dropdown now reads Member and Sync only.
+
 ## [0.41.1] - 2026-09-22
 
 ### Fixed

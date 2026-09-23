@@ -24,6 +24,18 @@ Both live in one file, `WTF/Account/<id>/SavedVariables/GuildBankLedger.lua`.
 **`GuildBankLedgerDB`** is the AceDB store. Everything the addon records about a guild hangs off
 `global.guilds["<Guild Name>"]`. It is account-wide, so a player's alts share one copy.
 
+One key sits beside `guilds` rather than inside it: **`global.characters`**, `[Name-Realm] = lastSeen`,
+written by `RecordOwnCharacter` (`src/Core.lua`) for the logged-in character on every
+`GUILD_ROSTER_UPDATE` once the realm resolves, and never for the `"UnknownRealm"` sentinel. It is the
+account's own characters and nothing else, so the Member view can show a person every character they
+play rather than the one they are on (#222, `docs/PLAN-views-and-access.md` section 7). Account level
+rather than per guild, on the reasoning #52 records: a character's home is the account, the guild is
+where its rows are. It fills as characters log in and is never backfilled, because nothing on disk
+says which of a guild's names belong to this account. It is never transmitted: the HELLO payload is
+built from a literal in `src/Sync.lua` that does not name it, and nothing else reads it. Note that
+HELLO is the one message type `spec/wire_contract_spec.lua` holds to builder parity rather than to an
+absolute key set, so that spec would not catch a field added to both builders.
+
 **`GuildBankLedgerAuditDB`** is a raw global, deliberately not AceDB and deliberately not guild-keyed.
 Its collection unit is the account's SavedVariables file, and each session carries player, realm and
 guild in its own header. See the Conventions section of `CLAUDE.md` for why it must not be migrated
@@ -57,7 +69,7 @@ Thirteen keys reach disk:
 | `syncState` | `{lastSyncTimestamp, syncVersion, peers}`. See the name collision in section 3 |
 | `accessControl` | `{rankThreshold, restrictedMode, configuredBy, configuredAt}` |
 | `sortAccess` | `{rankThreshold, delegates, updatedBy, updatedAt}`. Two-tier sort policy |
-| `bankLayout` | `{version, updatedBy, updatedAt, tabs}`. Tabs keyed by index, items keyed by itemID. Overflow-mode tabs may carry an optional numeric `overflowPriority` (fill order, lower first; layout schema 2, #57) |
+| `bankLayout` | `{version, updatedBy, updatedAt, tabs}`. Tabs keyed by index, items keyed by itemID. Overflow-mode tabs may carry an optional numeric `overflowPriority` (fill order, lower first; layout schema 2, #57). `tabs[].name` is a capture-time snapshot of `GetGuildBankTabInfo`, used as a fallback for display and never as the tab's name: a rename in the bank does not reach it, and nothing rewrites it (#236) |
 | `stockReserves` | `[itemID] = count` |
 | `schemaVersion` | Integer. See section 7 |
 

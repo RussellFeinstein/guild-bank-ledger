@@ -38,10 +38,12 @@ Every guild member running the addon automatically logs and shares data. No setu
 
 ## Access Control
 
-The GM sets a rank threshold. Players below it are restricted to one of two modes (GM's choice):
+The GM sets a rank threshold. Players below it get one of two views (GM's choice, Member by default):
 
-- **Sync Only** — restricted users see only the Sync tab (still contribute data)
-- **Own Transactions Only** — restricted users see all tabs but only their own data
+- **Member**: the history tabs show that person's own rows and nothing from anyone else. It covers the characters you have logged in on since updating, not only the one you are on; each character records itself locally on first login, and that list never leaves your machine
+- **Sync only**: only the Sync tab (they still contribute data)
+
+What Member promises is what the addon shows: it does not display other members' rows. Every client holds the guild's whole history, because that is how guild-wide sync converges, so this is a display rule rather than a claim about what sits in your SavedVariables.
 
 Settings sync to all guild members automatically.
 

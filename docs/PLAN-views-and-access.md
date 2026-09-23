@@ -118,6 +118,37 @@ sample early and the button late. It gets no view of its own here.
 
 ## 5. The live defect: members have never seen a filtered list
 
+**Built (#222, 2026-09-22).** `GBL:RecordsForView(guildData)` in `UI/UI.lua` is the one place an
+access level decides which rows a tab renders, read by both `SelectTab` and `RefreshUI`, and it
+hands `sync_only` two empty tables. `FilterToOwnRecords` matches `ResolvePlayerName(record.player)`
+against `GetOwnCharacterNames()`, the account roster plus the logged-in character; both skip the
+`UnknownRealm` sentinel, so a cold realm empties the set rather than keying it to something no
+record carries. `FilterByPlayer` and its bare-name compare are gone with their three tests, and
+`spec/ui/member_view_spec.lua` renders the three history tabs in the mode. `GetAccessLevel` reads
+a configured threshold with no mode as `own_transactions`, and `GBL:GuildRankIndex` caches the
+last rank read so a momentary nil does not flip the tab signature. The Sync tab's dropdown reads
+Member and Sync only over the same wire values. Section 16's roster cases are in
+`spec/core_spec.lua`.
+
+Three things this section proposed that the build changed, each from the code review:
+
+- **The ambiguous bare name fails closed.** This section accepts the resolver's limit for
+  pre-2026-04-13 rows, but a `playerRealms[name] == false` name resolves to the local realm on
+  both sides, so a stranger's rows would render as the member's own under a promise that says
+  otherwise. Those records are refused instead, at the cost of hiding the member's own rows of
+  that shape. A bare name with no roster entry at all still cannot be told apart.
+- **The window right after login stays open**, and cannot be closed in `GetAccessLevel`:
+  `GetGuildInfo` returns the guild name and the rank together, so while the rank is unknown there
+  is no guild data to read a threshold from and the function has already answered `full`. What
+  ships covers a known guild whose rank read comes back empty. Closing the login window needs the
+  last guild remembered on disk, which is a second persisted key and a behaviour change; it
+  belongs with My record rather than with a hotfix.
+- **The account roster fills as characters log in and is never backfilled**, because nothing on
+  disk says which of a guild's names belong to this account. The user-facing copy says "the
+  characters you have logged in on since updating" rather than every character.
+
+What follows is the reading that produced the fix, kept as the record of how the defect looked.
+
 Verified by reading the call chain on `eda34ea`; the red spec in section 16 is the run.
 
 `GBL:ToggleMainFrame` (`UI/UI.lua:258-267`) calls `CreateMainFrame`, whose last act is
