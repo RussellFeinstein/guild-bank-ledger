@@ -861,13 +861,7 @@ describe("Sync session lifecycle", function()
             assert.is_true(GBL:GetSyncStatus().combatPaused)
 
             -- Fire the cooldown ticker
-            for i = #MockWoW.pendingTimers, 1, -1 do
-                local t = MockWoW.pendingTimers[i]
-                if t.delay == GBL.SYNC_COMBAT_COOLDOWN and not t.cancelled then
-                    t.callback()
-                    break
-                end
-            end
+            Helpers.fireTimersAt(GBL.SYNC_COMBAT_COOLDOWN)
 
             assert.is_false(GBL:GetSyncStatus().combatPaused)
         end)
@@ -885,13 +879,7 @@ describe("Sync session lifecycle", function()
             GBL:OnCombatEnd()
 
             -- Fire cooldown
-            for i = #MockWoW.pendingTimers, 1, -1 do
-                local t = MockWoW.pendingTimers[i]
-                if t.delay == GBL.SYNC_COMBAT_COOLDOWN and not t.cancelled then
-                    t.callback()
-                    break
-                end
-            end
+            Helpers.fireTimersAt(GBL.SYNC_COMBAT_COOLDOWN)
 
             local helloSent = false
             for _, msg in ipairs(MockAce.sentCommMessages) do
@@ -987,13 +975,7 @@ describe("Sync session lifecycle", function()
 
             -- Clear combat via cooldown
             GBL:OnCombatEnd()
-            for i = #MockWoW.pendingTimers, 1, -1 do
-                local t = MockWoW.pendingTimers[i]
-                if t.delay == GBL.SYNC_COMBAT_COOLDOWN and not t.cancelled then
-                    t.callback()
-                    break
-                end
-            end
+            Helpers.fireTimersAt(GBL.SYNC_COMBAT_COOLDOWN)
 
             -- combatPaused cleared but zonePaused still set
             assert.is_false(GBL:GetSyncStatus().combatPaused)

@@ -572,8 +572,8 @@ describe("Sync request and serve", function()
         end
 
         -- Only the first chunk leaves synchronously, so a send has to be
-        -- driven to completion before asking what it offered.
-
+        -- driven to completion before asking what it offered; Sync.drainSend
+        -- is what does that (spec/sync_helpers.lua).
         local function serve(payload)
             GBL:HandleSyncRequest("OfficerB", request(payload))
             Sync.drainSend(GBL, "OfficerB")
@@ -1773,12 +1773,6 @@ describe("Sync request and serve", function()
                 end
                 return out
             end
-
-            --- ACK each chunk and fire the inter-chunk gap so the whole
-            --- session actually goes out, the way a healthy peer drives it.
-            --- The clock has to move: SendNextChunk enforces a wall-clock gap
-            --- floor between issues, and against a frozen GetTime it just
-            --- reschedules itself and the send never leaves chunk one.
 
             local function recordsSent()
                 local total = 0

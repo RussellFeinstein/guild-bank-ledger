@@ -1359,6 +1359,13 @@ describe("Restock buy", function()
             assert.is_true(GBL._restock.priceIn)
             assert.equals(0, liveStepTimers())
             assert.equals(1, livePauseTimers())  -- the one timer slot, re-armed for the pause
+            -- Asking for the delay that is NOT pending has to fail rather than
+            -- fire whatever is. This is the one place the suite holds one
+            -- delay live and another absent, so it is the only place the
+            -- shared helper's filter and its error-on-no-match can be caught
+            -- doing nothing (#117: both survived a mutation pass without it).
+            assert.has_error(fireStepTimers)
+            assert.equals(1, livePauseTimers(), "the pause timer survives the refusal")
             assert.equals(1, count("price in, awaiting confirm"))
             -- The READY that follows the price clears the throttle and confirms nothing.
             MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")

@@ -12,15 +12,6 @@ local function openBank(GBL)
     GBL.bankOpen = true
 end
 
---- Drive C_Timer callbacks repeatedly until no more are pending OR a safety cap.
---- The pump self-reschedules via C_Timer.After and end-of-pass adds settle/scan
---- timers, so several rounds are needed for a run to complete. The body moved
---- to spec/helpers.lua's timer family (#117), which carries the harness traps;
---- the local name stays because these specs read as "drain the run".
-local function drainTimers(maxRounds)
-    return Helpers.drainAllTimers(maxRounds)
-end
-
 --- Count items of itemID across all slots of a tab.
 local function countItem(tabIndex, itemID)
     local tab = MockWoW.guildBank.tabs[tabIndex]
@@ -83,7 +74,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.is_false(ok)
             assert.matches("already running", err)
             GBL:CancelSortExecution()
-            drainTimers()
+            Helpers.drainAllTimers()
         end)
     end)
 
@@ -95,7 +86,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 20 } },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
             assert.is_not_nil(result)
             assert.is_true(result.ok, result.reason)
             assert.equals(0, countItem(1, 100))
@@ -110,7 +101,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "split", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 20 } },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
             assert.is_true(result.ok, result.reason)
             assert.equals(30, countItem(1, 100))
             assert.equals(20, countItem(2, 100))
@@ -130,7 +121,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                     { op = "move", srcTab = 1, srcSlot = 3, dstTab = 2, dstSlot = 3, itemID = 102, count = 5 },
                 },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
             assert.is_true(result.ok, result.reason)
             assert.equals(3, result.total)
             assert.equals(3, result.done)
@@ -154,7 +145,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             }, function(r) result = r end)
             -- Op 1 issued synchronously inside startPass; cancel before tick 2 fires.
             GBL:CancelSortExecution()
-            drainTimers()
+            Helpers.drainAllTimers()
             assert.is_not_nil(result)
             assert.is_false(result.ok)
             assert.matches("cancelled", result.reason)
@@ -174,7 +165,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             }, function(r) result = r end)
             GBL.bankOpen = false
             GBL:_SortExecutorOnBankClosed()
-            drainTimers()
+            Helpers.drainAllTimers()
             assert.is_false(result.ok)
             assert.matches("bank closed", result.reason)
         end)
@@ -186,7 +177,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
             assert.is_true(result.ok, result.reason)
             assert.matches("no layout", result.reason)
             assert.equals(1, result.passes)
@@ -206,7 +197,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.is_function(onUpdate)
             onUpdate(frame, 0.2)   -- primes
             onUpdate(frame, 0.2)   -- records a 200ms hitch
-            drainTimers()
+            Helpers.drainAllTimers()
             assert.is_nil(frame:GetScript("OnUpdate"), "sampler detached at finish")
         end)
 
@@ -243,7 +234,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             }, function(r) result = r end)
             GBL:_sortNoteRescanTick()
             GBL:_sortNoteRescanTick()
-            drainTimers()
+            Helpers.drainAllTimers()
             assert.equals(2, result.externalRescans)
         end)
 
@@ -268,7 +259,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             assert.is_truthy(after and after.opIndex > (before.opIndex or 0),
                 "watchdog should have re-kicked the pump (opIndex advanced)")
             GBL:CancelSortExecution()
-            drainTimers()
+            Helpers.drainAllTimers()
         end)
 
         it("emits a per-op SortInfo line", function()
@@ -277,7 +268,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
             }, function() end)
-            drainTimers()
+            Helpers.drainAllTimers()
             local sawOp = false
             for _, e in ipairs(GBL:GetLog("sort") or {}) do
                 if e.message and e.message:find("Sort op %d+/%d+:") then
@@ -338,7 +329,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
         --- StartPeriodicRescan) through the spies so its pre-test calls do not
         --- contaminate per-test counters. Run AFTER spy install.
         local function flushBankOpenedChain(s)
-            drainTimers()
+            Helpers.drainAllTimers()
             s.startCalls, s.stopCalls, s.rescanCalls = 0, 0, 0
         end
 
@@ -354,7 +345,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             }, function(r) result = r end)
             assert.equals(1, s.stopCalls, "StopPeriodicRescan fired at sort start")
             assert.is_false(GBL._rescanActive, "rescan paused during sort")
-            drainTimers()
+            Helpers.drainAllTimers()
             assert.equals(1, s.startCalls, "StartPeriodicRescan fired at finish")
             assert.is_true(GBL._rescanActive, "rescan restored after finish")
             assert.is_true(result.ok, result.reason)
@@ -370,7 +361,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
             }, function() end)
-            drainTimers()
+            Helpers.drainAllTimers()
             assert.equals(0, s.startCalls,
                 "StartPeriodicRescan should not fire when rescan was not active at start")
             restoreRescanFns(s)
@@ -390,7 +381,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             Helpers.populateTab(1, slots)
             local result
             GBL:ExecuteSortPlan({ ops = ops }, function(r) result = r end)
-            drainTimers(120)
+            Helpers.drainAllTimers(120)
             assert.is_true(result.ok, result.reason)
             assert.equals(2, s.rescanCalls,
                 "expected exactly 2 flushes for 30 ops at flush-every-15")
@@ -419,7 +410,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                         dstTab = 2, dstSlot = 20, itemID = 100, count = 20 }
             Helpers.populateTab(1, slots)
             GBL:ExecuteSortPlan({ ops = ops }, function() end, { includeBags = true })
-            drainTimers(120)
+            Helpers.drainAllTimers(120)
             assert.equals(0, s.rescanCalls,
                 "one short of the flush count plus a refusal should not flush")
             restoreRescanFns(s)
@@ -443,7 +434,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                         dstTab = 2, dstSlot = 20, itemID = 100, count = 20 }
             Helpers.populateTab(1, slots)
             GBL:ExecuteSortPlan({ ops = ops }, function() end, { includeBags = true })
-            drainTimers(120)
+            Helpers.drainAllTimers(120)
             assert.equals(1, s.rescanCalls,
                 "the fifteenth issued op should still flush exactly once")
             restoreRescanFns(s)
@@ -461,7 +452,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             end
             Helpers.populateTab(1, slots)
             GBL:ExecuteSortPlan({ ops = ops }, function() end)
-            drainTimers(120)
+            Helpers.drainAllTimers(120)
             assert.equals(0, s.rescanCalls,
                 "should not flush when rescanWasActive=false")
             restoreRescanFns(s)
@@ -501,7 +492,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                     self:_sortNoteRescanTick()
                 end
             end
-            drainTimers()
+            Helpers.drainAllTimers()
             s.startCalls, s.rescanCalls = 0, 0
             return s
         end
@@ -538,7 +529,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             GBL._rescanActive = true
             local result
             GBL:ExecuteSortPlan(nOpPlan(30), function(r) result = r end)
-            drainTimers(120)
+            Helpers.drainAllTimers(120)
             assert.is_true(result.ok, result.reason)
             assert.equals(1, sortLines("flushes=2"),
                 "30 issued ops at flush-every-15 is two flushes")
@@ -554,7 +545,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             GBL._rescanActive = true
             local result
             GBL:ExecuteSortPlan(nOpPlan(30), function(r) result = r end)
-            drainTimers(120)
+            Helpers.drainAllTimers(120)
             assert.equals(2, result.flushes)
             assert.equals(0, result.externalRescans)
             restore(s)
@@ -566,7 +557,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             local result
             GBL:ExecuteSortPlan(nOpPlan(2), function(r) result = r end)
             GBL:_sortNoteRescanTick()
-            drainTimers(120)
+            Helpers.drainAllTimers(120)
             assert.equals(1, result.externalRescans)
             assert.equals(0, result.flushes)
             restore(s)
@@ -579,7 +570,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             GBL._rescanActive = true
             local result
             GBL:ExecuteSortPlan(nOpPlan(30), function(r) result = r end)
-            drainTimers(120)
+            Helpers.drainAllTimers(120)
             assert.equals(2, s.rescanCalls, "the executor did issue two flushes")
             assert.equals(0, result.flushes, "neither of them actually ran")
             assert.equals(0, result.externalRescans)
@@ -590,7 +581,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             local s = spyRescan()
             GBL._rescanActive = true
             GBL:ExecuteSortPlan(nOpPlan(2), function() end)
-            drainTimers(120)
+            Helpers.drainAllTimers(120)
             assert.equals(0, sortLines("extrescans="),
                 "a quiet run should not carry the term at all")
             assert.equals(1, sortLines("flushes=0"),
@@ -600,7 +591,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             GBL._rescanActive = false
             GBL:ExecuteSortPlan(nOpPlan(2), function() end)
             GBL:_sortNoteRescanTick()
-            drainTimers(120)
+            Helpers.drainAllTimers(120)
             assert.equals(1, sortLines("extrescans=1"))
             restore(s)
         end)
@@ -611,7 +602,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             local result
             GBL:ExecuteSortPlan(nOpPlan(2), function(r) result = r end)
             for _ = 1, 10 do GBL:_sortNoteRescanTick() end
-            drainTimers(120)
+            Helpers.drainAllTimers(120)
             assert.equals(10, result.externalRescans, "all ten counted")
             assert.equals(1, sortLines("Sort env: a periodic rescan fired"),
                 "but named once, because the count carries the rest")
@@ -622,7 +613,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             local s = spyRescan()
             GBL._rescanActive = true
             GBL:ExecuteSortPlan(nOpPlan(2), function() end)
-            drainTimers(120)
+            Helpers.drainAllTimers(120)
             assert.equals(1, s.startCalls)
             assert.is_true(GBL:IsPeriodicRescanActive())
             assert.equals(1, sortLines("Sort: resumed the periodic rescan"))
@@ -639,7 +630,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             GBL:ExecuteSortPlan(nOpPlan(4), function(r) result = r end)
             GBL.bankOpen = false
             GBL:_SortExecutorOnBankClosed()
-            drainTimers(120)
+            Helpers.drainAllTimers(120)
             assert.is_false(result.ok)
             assert.equals(1, s.startCalls, "finish still tries")
             assert.is_false(GBL:IsPeriodicRescanActive(), "and Ledger refuses")
@@ -656,7 +647,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
             assert.is_not_nil(result)
             assert.is_boolean(result.ok)
             assert.is_number(result.done)
@@ -727,7 +718,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 2, dstSlot = 2, itemID = 100, count = 5 },
                 },
             }, function() end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             local p = firstPayload(function(m) return m.issuedOpIndex == 1 end)
             assert.is_not_nil(p, "op 1 was issued and no payload said so")
@@ -749,7 +740,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 2, dstSlot = 2, itemID = 100, count = 3 },
                 },
             }, function() end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             local p = firstPayload(function(m) return m.failedOpIndex == 1 end)
             assert.is_not_nil(p, "op 1 was refused and no payload said so")
@@ -776,7 +767,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 2, dstSlot = 3, itemID = 100, count = 3 },
                 },
             }, function() end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             local all = progressPayloads()
             local last = all[#all]
@@ -809,7 +800,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 2, dstSlot = 3, itemID = 100, count = 3 },
                 },
             }, function() end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             local checked = 0
             for _, p in ipairs(progressPayloads()) do
@@ -833,7 +824,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             local fin = firstPayload(function(m) return m.phase == "finish" end)
             assert.is_not_nil(fin, "no finish payload")
@@ -872,7 +863,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 2, dstSlot = 2, itemID = 100, count = 9 },
                 },
             }, function() end, { layout = simpleLayout() })
-            drainTimers(120)
+            Helpers.drainAllTimers(120)
             GBL.PlanSort = realPlanSort
 
             local swap = firstPayload(function(m) return m.phase == "planupdated" end)
@@ -950,7 +941,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = -1, srcSlot = 1,
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
             }, function(r) result = r end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.is_not_nil(result)
             assert.is_true(result.ok, result.reason)
@@ -969,7 +960,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "split", srcTab = -1, srcSlot = 1,
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
             }, function(r) result = r end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.is_true(result.ok, result.reason)
             assert.equals(30, countBagItem(0, 100))
@@ -988,7 +979,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             local info = GBL:_sortExecutorGetPumpInfo()
             assert.is_true(info.includeBags)
             GBL:CancelSortExecution()
-            drainTimers()
+            Helpers.drainAllTimers()
         end)
 
         -- ExecuteSortPlan stored only opts.layout and endOfPass re-planned
@@ -1010,7 +1001,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = -1, srcSlot = 1,
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
             }, function() end, { includeBags = true, layout = layoutWithDemand(20) })
-            drainTimers()
+            Helpers.drainAllTimers()
             GBL.PlanSort = realPlanSort
 
             assert.is_true(called, "endOfPass should re-plan")
@@ -1036,7 +1027,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 20 } },
             }, function() end, { layout = layoutWithDemand(20) })
-            drainTimers()
+            Helpers.drainAllTimers()
             GBL.PlanSort = realPlanSort
 
             assert.is_true(called, "endOfPass should re-plan")
@@ -1059,7 +1050,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 20 } },
             }, function() end, { layout = layoutWithDemand(20) })
-            drainTimers()
+            Helpers.drainAllTimers()
             GBL.PlanSort = realPlanSort
 
             assert.is_not_nil(seen, "replan passed no opts at all")
@@ -1080,7 +1071,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 20 } },
             }, function() end, { layout = layoutWithDemand(20) })
-            drainTimers()
+            Helpers.drainAllTimers()
             GBL.PlanSort = realPlanSort
 
             assert.is_not_nil(seen and seen.coverage)
@@ -1101,7 +1092,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = -1, srcSlot = 1,
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
             }, function(r) result = r end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.is_not_nil(result)
             assert.equals(20, countBagItem(0, 100))
@@ -1136,7 +1127,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = -1, srcSlot = 1,
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
             }, function(r) result = r end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(50, countBagItem(0, 999))
             assert.equals(0, countItem(1, 999))
@@ -1156,7 +1147,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = -1, srcSlot = 4,
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
             }, function(r) result = r end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(1, result.bagOpsSkipped)
             assert.equals(0, countItem(1, 100))
@@ -1176,7 +1167,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = -1, srcSlot = 1,
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
             }, function(r) result = r end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(1, result.bagOpsSkipped)
             assert.equals(12, countBagItem(0, 100))
@@ -1197,7 +1188,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = -7, srcSlot = 1,
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
             }, function(r) result = r end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(1, result.bagOpsSkipped)
             assert.is_not_nil(findLine("skipped: T-7/1 no-bag"),
@@ -1219,7 +1210,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                     ops = { { op = "move", srcTab = -1, srcSlot = 1,
                               dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
                 }, function(r) result = r end, { includeBags = true })
-                drainTimers()
+                Helpers.drainAllTimers()
             end)
             _G.C_Container = realContainer
             assert.is_true(ok, tostring(err))
@@ -1247,7 +1238,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                     ops = { { op = "split", srcTab = -1, srcSlot = 1,
                               dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
                 }, function(r) result = r end, { includeBags = true })
-                drainTimers()
+                Helpers.drainAllTimers()
             end)
             _G.C_Container.SplitContainerItem = realSplit
             assert.is_true(ok, tostring(err))
@@ -1273,7 +1264,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = -1, srcSlot = 1,
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
             }, function() end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(40, countBagItem(0, 100),
                 "only the 20 the op asked for should have left the bag")
@@ -1293,7 +1284,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 1, dstSlot = 2, itemID = 100, count = 20 },
                 },
             }, function(r) result = r end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(2, result.bagOpsSkipped)
             assert.is_not_nil(result.bagSkipReasons, "no per-reason breakdown")
@@ -1312,7 +1303,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = -1, srcSlot = 1,
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
             }, function() end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             -- Probe with the surrounding commas: a bare "0 ops issued" is a
             -- substring of "10 ops issued" and would pass on the wrong run.
@@ -1342,7 +1333,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 },
             }, function(r) result = r end, { includeBags = true })
             GBL:CancelSortExecution()
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.is_not_nil(result)
             assert.equals(0, result.done)
@@ -1365,7 +1356,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = -1, srcSlot = 1,
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
             }, function() end, { includeBags = true, layout = layoutWithDemand(20) })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.is_not_nil(
                 findLine("Sort bags: 1 deposit(s) issued, 0 skipped, still in bags: 0"),
@@ -1407,7 +1398,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 1, dstSlot = 2, itemID = 100, count = 15 },
                 },
             }, function() end, { includeBags = true, layout = layoutWithDemand(20) })
-            drainTimers(120)
+            Helpers.drainAllTimers(120)
             GBL.PlanSort = realPlanSort
 
             assert.is_true(calls >= 2,
@@ -1436,7 +1427,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 1, dstSlot = 3, itemID = 100, count = 20 },
                 },
             }, function() end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.is_not_nil(findLine("[empty:1 locked:1 short-stack:1]"),
                 "expected the three reasons in sorted order: "
@@ -1460,7 +1451,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
             }, function(r) result = r end,
                { includeBags = true, layout = layoutWithDemand(20) })
-            drainTimers()
+            Helpers.drainAllTimers()
             GBL.PlanSort = realPlanSort
 
             assert.is_not_nil(findLine("still in bags: 3 (1 unplaceable)"),
@@ -1486,7 +1477,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 },
             }, function() end, { includeBags = true, layout = layoutWithDemand(20) })
             GBL:_SortExecutorOnBankClosed()
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.is_not_nil(findLine("still in bags: unknown (no replan)"),
                 "an aborted run should not claim a count it never measured: "
@@ -1506,7 +1497,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 1, dstSlot = 2, itemID = 100, count = 20 },
                 },
             }, function() end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.is_not_nil(
                 findLine("0 deposit(s) issued, 2 skipped [locked:1 short-stack:1]"),
@@ -1523,7 +1514,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 200, count = 10 } },
             }, function() end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.is_not_nil(findLine("Sort bags: 0 deposit(s) issued, 0 skipped"),
                 "bags on with no bag ops should still say so")
@@ -1535,7 +1526,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 200, count = 10 } },
             }, function() end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.is_nil(findLine("Sort bags:"),
                 "a bank-only run should not carry a bag line")
@@ -1551,7 +1542,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 200, count = 10 } },
             }, function() end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             local start = findLine("starting execution")
             assert.is_not_nil(start, "no start line")
@@ -1565,7 +1556,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 200, count = 10 } },
             }, function() end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             local start = findLine("starting execution")
             assert.is_not_nil(start, "no start line")
@@ -1587,7 +1578,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 1, dstSlot = 2, itemID = 100, count = 15 },
                 },
             }, function(r) result = r end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(1, result.bagOpsIssued)
             assert.equals(1, result.bagOpsSkipped)
@@ -1608,7 +1599,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 1, dstSlot = 1, itemID = 100, count = 20 },
                 },
             }, function(r) result = r end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(2, result.done)
             assert.equals(1, result.bagOpsIssued)
@@ -1637,7 +1628,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 1, dstSlot = 3, itemID = 100, count = 20 },
                 },
             }, function(r) result = r end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(2, result.bagOpsIssued)
             assert.equals(1, result.bagOpsSkipped)
@@ -1655,7 +1646,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = -1, srcSlot = 3,
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
             }, function() end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             local blob = {}
             for _, e in ipairs(GBL:GetLog("sort") or {}) do
@@ -1668,7 +1659,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
 
         -- Every op refused means the bank never changes, so the replan
         -- returns the same op count and convergence has to stop the run.
-        -- The cap on drainTimers is what would expose a loop.
+        -- The cap on Helpers.drainAllTimers is what would expose a loop.
         it("finishes rather than looping when every bag op is refused", function()
             Helpers.populateBag(0, {
                 [1] = { itemID = 100, name = "Flask", count = 20, locked = true },
@@ -1679,7 +1670,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 20 } },
             }, function(r) result = r end,
                { includeBags = true, layout = layoutWithDemand(20) })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.is_not_nil(result, "run never finished")
             assert.equals(1, result.bagOpsSkipped)
@@ -1713,7 +1704,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.is_not_nil(result, "run never finished")
             assert.equals(3, countItem(2, 777),
@@ -1731,7 +1722,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(1, result.skippedOps)
             assert.equals(1, (result.skipReasons or {})["empty"])
@@ -1754,7 +1745,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 2, dstSlot = 2, itemID = 100, count = 5 },
                 },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(2, result.skippedOps)
             assert.is_not_nil(findLine("0 ops issued"),
@@ -1772,7 +1763,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 2, dstSlot = 3, itemID = 100, count = 5 },
                 },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(1, result.skippedOps)
             assert.is_not_nil(findLine("skipped=1"),
@@ -1790,7 +1781,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(0, result.skippedOps)
             assert.is_nil(findLine("skipped="),
@@ -1811,7 +1802,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.is_not_nil(result, "run never finished")
             assert.equals(0, result.skippedOps, "no op should be refused on a client we cannot read")
@@ -1830,7 +1821,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(1, result.skippedOps)
             assert.equals(3, countItem(1, 100), "the short stack should be left alone")
@@ -1851,7 +1842,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(0, result.skippedOps)
             assert.equals(5, countItem(2, 100), "the destination was sized for five")
@@ -1880,7 +1871,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "split", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
             }, function() end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(0, splits, "an exact-count take should not go through the split API")
             assert.equals(1, pickups[1][1])
@@ -1936,7 +1927,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 1, dstSlot = 3, itemID = 100, count = 14 },
                 },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(0, result.skippedOps,
                 "the run's own write must not be refused on a stale read")
@@ -1982,7 +1973,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 1, dstSlot = 1, itemID = 100, count = 10 },
                 },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(0, result.skippedOps)
             assert.equals(20, countItem(2, 100), "the split leaves the rest in the pivot")
@@ -2010,7 +2001,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 2, srcSlot = 5,
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 30 } },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(1, result.skippedOps)
             assert.equals(1, (result.skipReasons or {})["empty"])
@@ -2044,7 +2035,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
             -- of the viewed slot before op 2's tick.
             assert.equals(30, countItem(2, 100), "fixture: op 1 should have landed")
             MockWoW.guildBank.tabs[2].slots[5].count = 3
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(1, result.skippedOps)
             assert.is_not_nil(findLine("skipped: T2/5 short-stack (have 3)"),
@@ -2095,7 +2086,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 2, dstSlot = 6, itemID = 100, count = 5 },
                 },
             }, function(r) result = r end, { layout = { tabs = {} } })
-            drainTimers(120)
+            Helpers.drainAllTimers(120)
 
             assert.equals(2, calls, "fixture needs a second pass")
             assert.equals(2, result.passes)
@@ -2130,7 +2121,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 1, dstSlot = 1, itemID = 100, count = 10 },
                 },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(2, result.skippedOps)
             assert.equals(1, (result.skipReasons or {})["lift-failed"])
@@ -2165,7 +2156,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "split", srcTab = 2, srcSlot = 5,
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 10 } },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(1, result.skippedOps, "the failed lift should be refused")
             assert.equals(1, (result.skipReasons or {})["lift-failed"])
@@ -2213,7 +2204,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 3, dstSlot = 3, itemID = 100, count = 10 },
                 },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(3, result.skippedOps)
             assert.equals(1, (result.skipReasons or {})["empty"])
@@ -2248,7 +2239,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.is_not_nil(result, "run never finished")
             assert.equals(0, result.skippedOps,
@@ -2269,7 +2260,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             local line = findLine("Sort lift probe:")
             assert.is_not_nil(line, "the probe line should be written")
@@ -2319,7 +2310,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                       dstTab = 3, dstSlot = 2, itemID = 101, count = 5 },
                 },
             }, function() end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             local line = findLine("Sort lift probe:")
             assert.is_not_nil(line)
@@ -2337,7 +2328,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = -1, srcSlot = 1,
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 5 } },
             }, function(r) result = r end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(1, result.bagOpsIssued)
             assert.is_nil(result.liftProbe, "bag lifts should leave the probe untouched")
@@ -2358,7 +2349,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = -1, srcSlot = 1,
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 5 } },
             }, function(r) result = r end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(1, result.skippedOps)
             assert.equals(1, (result.skipReasons or {})["lift-failed"])
@@ -2380,7 +2371,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = -1, srcSlot = 1,
                           dstTab = 1, dstSlot = 1, itemID = 100, count = 5 } },
             }, function(r) result = r end, { includeBags = true })
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(0, result.bagOpsIssued, "a refused op is not a deposit")
             assert.equals(1, result.bagOpsSkipped)
@@ -2401,7 +2392,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(0, result.skippedOps)
             assert.equals(5, countItem(2, 100))
@@ -2429,7 +2420,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
 
             local result
             GBL:ExecuteSortPlan({ ops = ops }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(GBL.SORT_LIFT_GUARD_FUSE, result.skippedOps,
                 "exactly the fuse's worth of ops should be refused")
@@ -2473,7 +2464,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
 
             local result
             GBL:ExecuteSortPlan({ ops = ops }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(6, result.skippedOps,
                 "every failed lift should stay refused once the guard has proven it works")
@@ -2504,7 +2495,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(0, result.skippedOps)
             assert.equals(5, countItem(2, 100), "the op should still have moved")
@@ -2531,7 +2522,7 @@ describe("SortExecutor (fire-and-forget pump)", function()
                 ops = { { op = "move", srcTab = 1, srcSlot = 1,
                           dstTab = 2, dstSlot = 1, itemID = 100, count = 5 } },
             }, function(r) result = r end)
-            drainTimers()
+            Helpers.drainAllTimers()
 
             assert.equals(1, result.cursorStuck,
                 "the displaced stack left on the cursor should be counted")
