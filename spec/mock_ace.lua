@@ -313,9 +313,13 @@ function MockAce.install()
             -- Real AceGUI's TabGroup Constructor initialises both of these
             -- (AceGUIContainer-TabGroup.lua), so a group whose SetTabs was
             -- never called still has an empty tab list to walk and a status
-            -- table to record into. The mock built `tabs` lazily inside
-            -- SetTabs, which would leave SelectTab's walk nothing to
-            -- iterate over on every hand-built container in the suite.
+            -- table to record into; the mock built `tabs` lazily inside
+            -- SetTabs instead. Nothing in the suite needs this today, and
+            -- the mutation pass says so: SetTabs keeps its own
+            -- `self.tabs = self.tabs or {}`, and every SelectTab the suite
+            -- makes runs on a bar RebuildTabs built. It is here because the
+            -- library has it, and it is what the first spec to select on a
+            -- group with no SetTabs will need.
             tabs = {},
             localstatus = {},
         }
