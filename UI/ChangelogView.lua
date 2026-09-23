@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.41.3
+    {"0.41.3", "2026-09-22", {
+        Fixed = {
+            "The Restock tab's group headings now show what the guild bank calls each tab today. They used to show the name the layout recorded when the tab was captured, so a tab renamed since then kept its old heading on the Restock tab while the Layout tab showed the new one. Both tabs read the live name now, and fall back to the last name seen this session and then to the layout's, which is what the headings show before the bank has been opened.",
+        },
+    }},
     -- v0.41.1
     {"0.41.1", "2026-09-22", {
         Fixed = {
