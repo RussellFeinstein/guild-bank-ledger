@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- The Restock tab's group headings now show what the guild bank calls each tab today. They read the name the layout stored when the tab was captured, so a tab renamed since then kept its old heading on the Restock tab while the Layout tab showed the new one. Both tabs now read the live name, and the stored name is used only before the bank has been opened in a session, when the game has no name to give.
+
 ## [0.41.1] - 2026-09-22
 
 ### Fixed
