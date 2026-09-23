@@ -162,6 +162,28 @@ describe("Tab switching through the TabGroup", function()
         assert.equals("Fluphie-TestRealm", search._text)
     end)
 
+    it("hides the tab buttons a shrunken bar no longer uses", function()
+        -- BuildTabs hides the frames past the new list rather than dropping
+        -- them, and it leaves their value on them, so SelectTab can still
+        -- match one. That is the library's behaviour and the mock keeps it;
+        -- what a shrink must not do is leave the retired buttons on screen.
+        GBL:CreateMainFrame()
+        local wide = #GBL.tabGroup._tabs
+
+        MockWoW.player.name = "Member"
+        MockWoW.guild.rankIndex = 5
+        GBL:RebuildTabs()
+
+        local narrow = #GBL.tabGroup._tabs
+        assert.is_true(narrow < wide, "precondition: the member's bar is shorter")
+
+        local shown = 0
+        for _, t in ipairs(GBL.tabGroup.tabs) do
+            if t:IsShown() then shown = shown + 1 end
+        end
+        assert.equals(narrow, shown)
+    end)
+
     it("builds nothing for a value the tab bar does not hold", function()
         -- A member has no Layout tab, so the value matches nothing and
         -- real AceGUI fires no callback at all. The window stays where
