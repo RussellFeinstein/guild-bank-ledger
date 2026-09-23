@@ -434,7 +434,14 @@ function MockAce.install()
         widget.SetTitle = function(self, t) self._title = t end
         widget.SetStatusText = function(self, t) self._statusText = t end
         widget.SetAutoAdjustHeight = function() end
-        widget.SetStatusTable = function(self, t) self._statusTable = t end
+        -- Real AceGUI stores it as `status` and asserts it is a table (a
+        -- container reads its own state back out of it); `_statusTable` is
+        -- the mock's older accessor and existing specs read it.
+        widget.SetStatusTable = function(self, t)
+            assert(type(t) == "table")
+            self._statusTable = t
+            self.status = t
+        end
         widget.EnableResize = function() end
         -- Mock AceGUI Container helpers used by post-resize layout cascade.
         widget.DoLayout    = function() end
@@ -444,38 +451,6 @@ function MockAce.install()
         -- A small mock frame is enough; production code only uses it as a
         -- SetPoint target, and the parent's mock SetPoint accepts any args.
         widget.content = { _isMockContent = true }
-        widget.SetTabs = function(self, tabs)
-            self._tabs = tabs
-            self.tablist = tabs
-            -- Create mock tab button frames matching real AceGUI TabGroup
-            self.tabs = self.tabs or {}
-            for i, def in ipairs(tabs) do
-                if not self.tabs[i] then
-                    self.tabs[i] = {
-                        value = def.value,
-                        _points = {},
-                        ClearAllPoints = function(t) t._points = {} end,
-                        SetPoint = function(t, ...) table.insert(t._points, {...}) end,
-                        GetWidth = function() return 80 end,
-                        GetFontString = function()
-                            return { GetStringWidth = function() return 40 end }
-                        end,
-                        SetText = function() end,
-                        SetDisabled = function() end,
-                        Show = function() end,
-                        Hide = function() end,
-                    }
-                end
-                self.tabs[i].value = def.value
-            end
-            -- Mock titletext (matches real AceGUI TabGroup field)
-            if not self.titletext then
-                self.titletext = { GetText = function() return "" end }
-            end
-            if self.BuildTabs then self:BuildTabs() end
-        end
-        widget.BuildTabs = function() end
-        widget.SelectTab = function(self, tab) self._selectedTab = tab end
         widget.SetFullHeight = function() end
         widget.SetFontObject = function() end
         widget.SetJustifyH = function() end
@@ -511,6 +486,118 @@ function MockAce.install()
             SetText = function(self, text) self._text = text end,
             GetText = function(self) return self._text end,
         }
+
+        ------------------------------------------------------------------
+        -- TabGroup only.
+        --
+        -- These are gated on the type because this constructor is shared by
+        -- every widget and real AceGUI only puts them on a TabGroup. A Frame
+        -- with a SelectTab is not a harmless extra: UI/UI.lua points the main
+        -- frame's status table at `self.db.profile.ui`, so `mainFrame:SelectTab(x)`
+        -- errors in game and would have written `selected` straight into the
+        -- SavedVariables profile here, with no fire and nothing to notice it.
+        ------------------------------------------------------------------
+        if widgetType == "TabGroup" then
+            -- Real AceGUI's Constructor initialises all three
+            -- (AceGUIContainer-TabGroup.lua), so a group whose SetTabs was
+            -- never called still has a list to walk, a status table to record
+            -- into and a title to read. `localstatus` is the load-bearing one:
+            -- nothing calls SetStatusTable on a tab group, so it is the only
+            -- table `status.selected` can land in, and dropping it errors
+            -- every UI spec from inside SelectTab. `tabs` is insurance for the
+            -- first spec that selects on a group with no SetTabs; a mutation
+            -- pass showed nothing needs it today, because BuildTabs makes the
+            -- list and every SelectTab the suite makes runs on a bar
+            -- RebuildTabs built.
+            widget.tabs = {}
+            widget.localstatus = {}
+            widget.titletext = { GetText = function() return "" end }
+
+            -- The library's split, and it matters: production REPLACES
+            -- BuildTabs (UI/UI.lua wraps it to right-align the utility tabs)
+            -- and calls the original from the wrapper. With the frame work
+            -- inside SetTabs, a wrapper that forgot the original still left a
+            -- populated tab list and no spec could tell. In the client the
+            -- list is built here and nowhere else, so forgetting it opens the
+            -- window with no tab buttons and no content.
+            widget.SetTabs = function(self, tabs)
+                -- The mock's older accessor for the tab list specs read.
+                self._tabs = tabs
+                self.tablist = tabs
+                self:BuildTabs()
+            end
+
+            widget.BuildTabs = function(self)
+                local tablist = self.tablist
+                if not tablist then return end
+                for i, def in ipairs(tablist) do
+                    if not self.tabs[i] then
+                        self.tabs[i] = {
+                            _points = {},
+                            ClearAllPoints = function(t) t._points = {} end,
+                            SetPoint = function(t, ...) table.insert(t._points, {...}) end,
+                            GetWidth = function() return 80 end,
+                            GetFontString = function()
+                                return { GetStringWidth = function() return 40 end }
+                            end,
+                            SetText = function() end,
+                            SetDisabled = function() end,
+                            SetSelected = function(t, sel) t.selected = sel end,
+                            Show = function(t) t._shown = true end,
+                            Hide = function(t) t._shown = false end,
+                            IsShown = function(t) return t._shown end,
+                        }
+                    end
+                    self.tabs[i].value = def.value
+                    self.tabs[i]:Show()
+                end
+                -- Real BuildTabs hides the frames past the new list but leaves
+                -- their `value` on them, and SelectTab walks every frame,
+                -- hidden ones included. So a bar that shrank (a demotion,
+                -- sync_only arriving over HELLO) can still match a stale
+                -- value, and OpenRestockTab is a caller that passes a literal
+                -- rather than a validated one. Replicated rather than
+                -- corrected: a mock stricter than the library hides that.
+                for i = #tablist + 1, #self.tabs do
+                    self.tabs[i]:Hide()
+                end
+            end
+
+            -- Real SelectTab, followed step for step: mark the matching tab
+            -- frame and clear the rest, record the value on the status table
+            -- whether or not anything matched, and fire OnGroupSelected ONLY
+            -- when the value is one the group currently holds. It was
+            -- `self._selectedTab = tab` and nothing else, so every production
+            -- tab switch was a no-op under test (#121): RebuildTabs selecting
+            -- the default tab, RefreshUI's unbuilt branch, the Consumption
+            -- player link, OpenRestockTab, and the Layout tab's inner group
+            -- building its own content.
+            --
+            -- Two things not to change. The fire is guarded, or a spec builds
+            -- a tab the group does not hold. And nothing is released here:
+            -- production's GBL:SelectTab calls ReleaseChildren itself, so a
+            -- release here would release twice.
+            widget.SelectTab = function(self, tab)
+                local status = self.status or self.localstatus
+                local found
+                for _, t in ipairs(self.tabs) do
+                    if t.value == tab then
+                        t:SetSelected(true)
+                        found = true
+                    else
+                        t:SetSelected(false)
+                    end
+                end
+                status.selected = tab
+                -- The mock's own accessor, older than the fan-out. Written
+                -- above the guard like status.selected, so it records a
+                -- selection the group refused; read GBL.activeTab to tell a
+                -- refused selection from one that built something.
+                self._selectedTab = tab
+                if found then self:Fire("OnGroupSelected", tab) end
+            end
+        end
+
         return widget
     end
 

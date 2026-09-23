@@ -6,8 +6,11 @@
 -- RefreshAccessTabsIfChanged rebuilds the tab bar when the roster/rank
 -- warms (cold-roster login) or a grant arrives, but only on a real change.
 --
--- Assertions inspect tabGroup._tabs (what SetTabs stored) rather than the
--- rendered tab buttons, so they do not depend on the no-op mock SelectTab.
+-- Most assertions inspect tabGroup._tabs (what SetTabs stored), which is
+-- the right read for "is this tab in the bar at all". Since #121 the mock
+-- selects a tab frame the way the library does, so the last case here can
+-- read the rendered selection instead: that one asks which button the bar
+-- came up on, which _tabs cannot answer.
 ------------------------------------------------------------------------
 
 local Helpers = require("spec.helpers")
@@ -94,6 +97,35 @@ describe("Access-gated tab visibility", function()
             assert.is_true(v.sort)
             assert.is_true(v.restock)
             assert.is_true(v.layout)
+        end)
+
+        it("marks the button it came up on, and clears it when another is picked", function()
+            -- The rendered read rather than the stored one: _tabs says what
+            -- the bar holds, and this says which button carries the
+            -- selection. Counted over the buttons ON SCREEN, because
+            -- BuildTabs hides the frames past a shrunken bar without
+            -- clearing their value, so two frames can carry one value and
+            -- SelectTab marks both; the visible one is the invariant.
+            setPlayer("Gm", "TestRealm", 0)
+            GBL:CreateMainFrame()
+
+            local function selectedOnScreen()
+                local vals = {}
+                for _, t in ipairs(GBL.tabGroup.tabs or {}) do
+                    if t.selected and t:IsShown() then vals[#vals + 1] = t.value end
+                end
+                return vals
+            end
+
+            local opened = selectedOnScreen()
+            assert.equals(1, #opened)
+            assert.equals(GBL.activeTab, opened[1])
+
+            GBL.tabGroup:SelectTab("sync")
+
+            local moved = selectedOnScreen()
+            assert.equals(1, #moved, "the tab it came from is still marked")
+            assert.equals("sync", moved[1])
         end)
     end)
 

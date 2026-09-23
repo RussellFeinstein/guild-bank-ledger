@@ -141,9 +141,10 @@ authoritative and its version column as historical.
     working reference).
 - Modified: add `UI/RestockView.lua` to the `.toc` immediately before `UI/UI.lua` (UI.lua must load
   last); load it in `spec/helpers.lua`.
-- Tests `spec/ui/restockview_spec.lua` (pure helpers only; the mock `SelectTab` is a no-op, so the
-  render path is verified in-game): status display is distinct per state; focus order is populated and
-  `AdvanceFocus` wraps; exported-helper reachability (a rename guard).
+- Tests `spec/ui/restockview_spec.lua` (pure helpers when this was written, because the mock
+  `SelectTab` was a no-op and the render path could only be checked in game; since #121 the mock
+  fans out and the tab renders under test): status display is distinct per state; focus order is
+  populated and `AdvanceFocus` wraps; exported-helper reachability (a rename guard).
 - Done when, in-game, the catalog and coverage group render behind `HasSortAccess`, "Add to catalog"
   persists, an absent Auctionator shows the notice, and the pure helpers pass busted.
 
@@ -225,8 +226,10 @@ on the singleton and must not survive `/reload`.
    window offers the row again (#209). The pending-purchase design in `PLAN-restock-ux.md` closes it.
 5. Commodity-only. `StartCommoditiesPurchase` works for commodities only; surface non-commodity
    catalog items gracefully (found but unbuyable).
-6. The mock `SelectTab` is a no-op, so the render path is not testable in busted. Keep the view a thin
-   shell over pure helpers and test those.
+6. The mock `SelectTab` was a no-op when this was written, so the render path was not testable in
+   busted and the view was kept a thin shell over pure helpers. #121 closed that: the mock fans out
+   to `OnGroupSelected` like the library, so the tab builds under test and the pure helpers are a
+   preference rather than a constraint.
 7. The accessibility indicator is net-new. The visible focus ring and key capture are real work in M3
    (a v1.0 gate).
 8. Background events versus active tab. Update `self._restock` unconditionally; guard

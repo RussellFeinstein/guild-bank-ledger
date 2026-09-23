@@ -417,8 +417,9 @@ Two PRs come out of this doc, and both lead with their test list.
 **The hotfix (section 18, item 1), red first.** One spec, `spec/ui/member_view_spec.lua`, with a
 fixture guild in `own_transactions` mode (threshold 3, the player at rank 5) holding four rows
 inside the 30-day window: the member's own, a foreign member's, a same-named character on another
-realm, and the member's alt (in the roster). Because the mock AceGUI `SelectTab` is a no-op
-(`project_ui_smoke_test_gaps`, #121), the spec calls `GBL:SelectTab("transactions")` itself, then
+realm, and the member's alt (in the roster). The spec calls `GBL:SelectTab("transactions")` itself
+to name the tab under test; it had to while the mock AceGUI `SelectTab` was a no-op, and #121 gave
+the mock the library's fan-out, so `CreateMainFrame` builds the default tab on its own now. Then
 `GBL:RefreshUI()` twice, then drives the sync-receive path's refresh, and after each asserts on the
 array handed to the renderer (`_ledgerTransactions`) and on the built rows: the own row and the alt
 row present, the foreign and the cross-realm rows absent. Before the fix the assertion after the

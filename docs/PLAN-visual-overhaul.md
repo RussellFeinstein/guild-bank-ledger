@@ -450,10 +450,11 @@ every high-contrast key at or above 7:1 once the section 4 replacements land; un
 assertion is written and marked pending with the four failing values named, so the gate cannot
 be forgotten.
 
-GBL's own tab strip retires the mock's `SelectTab` no-op (`project_ui_smoke_test_gaps`, #121): a
-tab select is a GBL function that builds the view, so `spec/ui/tab_visibility_spec.lua`'s rebuild
-assertions can read a built tree instead of pcall-ing builders that crash on the mock's missing
-`.label`.
+GBL's own tab strip removes the mock's TabGroup from the path entirely: a tab select becomes a GBL
+function that builds the view, with no library callback in between. That was the argument for it
+while the mock's `SelectTab` was a no-op; #121 gave the mock the library's fan-out and #222 gave it
+the `.label` FontString the builders reach through, so the rebuild assertions read a built tree
+today and the strip inherits working coverage rather than unlocking it.
 
 Test-first applies to every build step in section 9 and not to this doc: each step's plan opens
 with its test list, red before green, the way `docs/PLAN-restock-ux.md` section 13 prescribes.

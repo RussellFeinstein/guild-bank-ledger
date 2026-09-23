@@ -13,8 +13,10 @@
 -- its two siblings), what the render path produced (_ledgerFiltered),
 -- and the player cell of every row that reached the screen.
 --
--- The mock AceGUI SelectTab is a no-op (#121), so the spec calls
--- GBL:SelectTab itself, the way RebuildTabs does in the client.
+-- The spec calls GBL:SelectTab itself to name the tab under test. It did
+-- so because the mock's TabGroup SelectTab was a no-op and nothing else
+-- would build the tab; since #121 the mock fans out, so CreateMainFrame
+-- has already built Transactions by the time these cases select it.
 ------------------------------------------------------------------------
 
 local Helpers = require("spec.helpers")
