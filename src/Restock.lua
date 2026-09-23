@@ -480,10 +480,15 @@ function GBL:_RestockBuildItemUniverse(opts)
 
     for _, tabIndex in ipairs(tabIndices) do
         local tab = layout.tabs[tabIndex]
-        local groupName = tab.name
-        if groupName == nil or groupName == "" then
-            groupName = "Tab " .. tostring(tabIndex)
-        end
+        -- The live name first (#236). layout.tabs[i].name is snapshotted when
+        -- the tab is captured and nothing refreshes it, so a rename in the bank
+        -- left this list disagreeing with the Layout tab on the same screen. It
+        -- stays as the fallback for the window before the bank has been opened
+        -- this session, where the client answers nothing and a capture-time
+        -- name beats the index. A synced layout can key tabs by string.
+        local idx = tonumber(tabIndex)
+        local groupName = idx and self:GetTabName(idx, tab.name)
+            or ("Tab " .. tostring(tabIndex))
 
         -- Order items by their first slotOrder position, falling back to itemID,
         -- so the list reads in the same left-to-right order as the bank tab.

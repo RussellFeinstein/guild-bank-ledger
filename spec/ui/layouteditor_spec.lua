@@ -463,6 +463,67 @@ describe("LayoutEditor._LayoutEditor_ApplyReserveDraft", function()
     end)
 end)
 
+describe("LayoutEditor tab heading", function()
+    local MockWoW = Helpers.MockWoW
+    local GBL
+
+    before_each(function()
+        Helpers.setupMocks()
+        GBL = Helpers.loadAddon()
+        GBL:OnInitialize()
+        MockWoW.guild.name = "Test Guild"
+        MockWoW.guild.rankIndex = 0
+        GBL:OnEnable()
+        GBL.RefreshLayoutTab = function() end   -- isolate the callbacks from the rebuild
+        GBL._layoutDraft = { tabs = { [3] = { mode = "ignore", name = "Potions" } } }
+        GBL._layoutDirty = false
+    end)
+
+    local function headingText(parent)
+        for _, child in ipairs(parent._children or {}) do
+            if child._type == "Heading" then return child._text end
+        end
+    end
+
+    local function widgetOfType(parent, wtype)
+        for _, child in ipairs(parent._children or {}) do
+            if child._type == wtype then return child end
+        end
+    end
+
+    local function render(tabIndex)
+        local AceGUI = LibStub("AceGUI-3.0")
+        local parent = AceGUI:Create("SimpleGroup")
+        GBL:_LayoutEditor_RenderSingleTab(parent, tabIndex, true)
+        return parent
+    end
+
+    it("names the heading from the client", function()
+        MockWoW.addTab("Raid Use 1")
+        MockWoW.addTab("Raid Use 2")
+        MockWoW.addTab("Raid Use 3")
+        assert.equals("Tab 3: Raid Use 3", headingText(render(3)))
+    end)
+
+    it("falls back to the name the layout stored", function()
+        -- The window before the bank has been opened this session. Without the
+        -- fallback this read "Tab 3: Tab 3" while the Restock tab said Potions.
+        assert.equals("Tab 3: Potions", headingText(render(3)))
+    end)
+
+    it("does not repeat the index when nothing names the tab", function()
+        assert.equals("Tab 5", headingText(render(5)))
+    end)
+
+    it("keeps the tab's name when the mode changes", function()
+        -- The dropdown replaces the whole tab table. Since #236 that table
+        -- carries the fallback, and Save pushes the loss to every peer.
+        local parent = render(3)
+        widgetOfType(parent, "Dropdown"):Fire("OnValueChanged", "display")
+        assert.equals("Potions", GBL._layoutDraft.tabs[3].name)
+    end)
+end)
+
 describe("LayoutEditor Store field", function()
     local MockWoW = Helpers.MockWoW
     local GBL

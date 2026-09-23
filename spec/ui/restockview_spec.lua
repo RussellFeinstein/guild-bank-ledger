@@ -314,6 +314,18 @@ describe("RestockView", function()
             assert.is_not_nil(findLabelContaining(scroll, "|T"))
         end)
 
+        it("draws the bank tab's current name, not the one the layout stored", function()
+            -- #236: Russell's guild renamed tab 1 after the layout captured it,
+            -- and this list kept calling it by the old name while the Layout tab
+            -- on the same screen showed the new one.
+            configureLayout()
+            MockWoW.addTab("Raid Use 1")
+            local container = build()
+            local scroll = findChild(container, "ScrollFrame")
+            assert.is_not_nil(findHeading(scroll, "Raid Use 1"))
+            assert.is_nil(findHeading(scroll, "Consumables"))
+        end)
+
         it("renders a heading per display tab", function()
             local ok = GBL:SaveBankLayout({
                 tabs = {

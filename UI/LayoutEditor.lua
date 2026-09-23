@@ -42,14 +42,6 @@ local function itemLabelFor(itemID)
     return "item " .. itemID
 end
 
-local function bankTabName(tabIndex)
-    if GetGuildBankTabInfo then
-        local name = GetGuildBankTabInfo(tabIndex)
-        if name and name ~= "" then return name end
-    end
-    return "Tab " .. tabIndex
-end
-
 --- Group slotOrder entries into contiguous same-item runs.
 --
 -- Pure function. Given `slotOrder[slotIndex] = itemID`, returns a
@@ -618,7 +610,14 @@ function GBL:_LayoutEditor_RenderSingleTab(parent, tabIndex, writable)
 
     local heading = AceGUI:Create("Heading")
     heading:SetFullWidth(true)
-    heading:SetText("Tab " .. tabIndex .. ": " .. bankTabName(tabIndex))
+    -- GBL:GetTabName is the namer (#236): the live name, then one this
+    -- session has read, then the layout's capture-time name, then the index.
+    -- Passing the stored name keeps this heading and the Restock group
+    -- reading the same string in the window before the bank has been opened,
+    -- where the client answers nothing and nothing has been cached yet.
+    local prefix = "Tab " .. tabIndex
+    local named = self:GetTabName(tabIndex, tab.name)
+    heading:SetText(named == prefix and prefix or (prefix .. ": " .. named))
     parent:AddChild(heading)
 
     local dropdown = AceGUI:Create("Dropdown")
@@ -632,7 +631,11 @@ function GBL:_LayoutEditor_RenderSingleTab(parent, tabIndex, writable)
     dropdown:SetWidth(380)
     dropdown:SetDisabled(not writable)
     dropdown:SetCallback("OnValueChanged", function(_widget, _event, value)
-        draft.tabs[tabIndex] = { mode = value }
+        -- Carry the tab's name across the replacement: it is the
+        -- fallback the headings read when the client cannot name the tab
+        -- (#236), and Save would push the loss to every peer.
+        local keptName = draft.tabs[tabIndex] and draft.tabs[tabIndex].name
+        draft.tabs[tabIndex] = { mode = value, name = keptName }
         if value == "display" then
             draft.tabs[tabIndex].items = {}
             draft.tabs[tabIndex].slotOrder = {}
@@ -716,7 +719,7 @@ function GBL:_LayoutEditor_RenderDisplayDetails(parent, tabIndex, writable)
     captureBtn:SetDisabled(not writable)
 
     local function applyCapture()
-        local ok, captured, err = pcall(self.CaptureTabLayout, self, tabIndex)
+        local ok, captured, err = pcall(self.CaptureTabLayout, self, tabIndex, tab.name)
         if not ok then
             self:Print(format("|cffff5555Capture tab %d crashed:|r %s",
                 tabIndex, tostring(captured)))  -- captured holds pcall error

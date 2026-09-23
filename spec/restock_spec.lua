@@ -305,6 +305,38 @@ describe("Restock", function()
             assert.equals(200, rows[2].itemID)
         end)
 
+        -- #236: the layout snapshots a tab's name when the tab is captured and
+        -- nothing refreshes it, so a rename in the bank left this list naming
+        -- tabs the Layout tab on the same screen already called something else.
+        it("reads the bank tab's current name over the stored one", function()
+            MockWoW.addTab("Raid Use 1")
+            MockWoW.addTab("Raid Use 2")
+            MockWoW.addTab("Raid Use 3")
+            local rows = GBL:_RestockBuildItemUniverse({
+                layout = layout({
+                    [3] = { mode = "display", name = "Potions",
+                            items = { [100] = { slots = 1, perSlot = 5 } } },
+                    [4] = { mode = "overflow" },
+                }),
+                reserves = {},
+            })
+            assert.equals("Raid Use 3", rows[1].group)
+        end)
+
+        it("keeps the stored name for a tab the client cannot name yet", function()
+            -- Before the bank has been opened this session GetGuildBankTabInfo
+            -- answers nothing, and the capture-time name beats the index.
+            local rows = GBL:_RestockBuildItemUniverse({
+                layout = layout({
+                    [3] = { mode = "display", name = "Potions",
+                            items = { [100] = { slots = 1, perSlot = 5 } } },
+                    [4] = { mode = "overflow" },
+                }),
+                reserves = {},
+            })
+            assert.equals("Potions", rows[1].group)
+        end)
+
         it("falls back to a Tab N heading when a display tab has no name", function()
             local rows = GBL:_RestockBuildItemUniverse({
                 layout = layout({

@@ -507,6 +507,26 @@ describe("BankLayout", function()
             assert.equals(101, template.slotOrder[5])
         end)
 
+        it("keeps a previous name when the client has none", function()
+            -- The capture is the only writer of tabs[].name, and since #236
+            -- that field is the fallback two headings read. Overwriting a good
+            -- name with nothing would sync the loss to the whole guild.
+            MockWoW.guildBank.tabs[1].name = nil
+            local template = GBL:CaptureTabLayout(1, "Potions")
+            assert.equals("Potions", template.name)
+        end)
+
+        it("prefers the client's name over the previous one", function()
+            local template = GBL:CaptureTabLayout(1, "Old Name")
+            assert.equals("Potions", template.name)
+        end)
+
+        it("treats an empty client name as none", function()
+            MockWoW.guildBank.tabs[1].name = ""
+            local template = GBL:CaptureTabLayout(1, "Potions")
+            assert.equals("Potions", template.name)
+        end)
+
         it("returns an error when no scan exists for the tab", function()
             local template, err = GBL:CaptureTabLayout(99)
             assert.is_nil(template)

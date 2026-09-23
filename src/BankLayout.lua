@@ -371,7 +371,7 @@ end
 -- @param tabIndex number
 -- @return table|nil template table { mode="display", items=..., slotOrder=..., name= }
 -- @return string|nil error message on failure
-function GBL:CaptureTabLayout(tabIndex)
+function GBL:CaptureTabLayout(tabIndex, previousName)
     if type(tabIndex) ~= "number" then
         return nil, "tabIndex must be numeric"
     end
@@ -415,15 +415,19 @@ function GBL:CaptureTabLayout(tabIndex)
         finalItems[itemID] = { slots = entry.slots, perSlot = bestSize }
     end
 
+    -- The capture is the only writer of tabs[].name, and since #236 that
+    -- field is the fallback two headings read, so a capture taken while the
+    -- client cannot name the tab keeps what the caller already had rather
+    -- than syncing the loss to the guild.
     local tabName = nil
     if GetGuildBankTabInfo then
         local name = GetGuildBankTabInfo(tabIndex)
-        tabName = name
+        if name and name ~= "" then tabName = name end
     end
 
     return {
         mode = "display",
-        name = tabName,
+        name = tabName or previousName,
         items = finalItems,
         slotOrder = slotOrder,
     }, nil
