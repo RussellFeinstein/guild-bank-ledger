@@ -776,16 +776,18 @@ describe("Wire contract", function()
     --
     -- Mutations that must turn this red: drop any key from
     -- BuildReceiptMessage; make any of them conditional; stop reading any of
-    -- the six figures in HandleReceipt.
+    -- the seven figures in HandleReceipt.
     --------------------------------------------------------------------
     describe("SYNC_RECEIPT", function()
-        -- Unconditional, `remaining` included. SYNC_DATA omits its optional
-        -- fields to stay byte-identical to a build that predates them; a
-        -- message type introduced whole has no predecessor to match, and the
-        -- absolute set is worth more than the handful of bytes.
+        -- Unconditional. SYNC_DATA omits its optional fields to stay
+        -- byte-identical to a build that predates them; a message type
+        -- introduced whole has no predecessor to match, and the absolute set
+        -- is worth more than the handful of bytes. No `remaining`: the sender
+        -- authored that number and attached it to the final chunk, so echoing
+        -- it back is the second stored copy this file's own rule refuses.
         local SYNC_RECEIPT_KEYS = {
             "duped", "guild", "itemDuped", "itemStored", "moneyDuped",
-            "moneyStored", "protocolVersion", "rejected", "remaining",
+            "moneyStored", "protocolVersion", "rejectFields", "rejected",
             "stored", "type",
         }
 
@@ -794,7 +796,7 @@ describe("Wire contract", function()
                 stored = 3, duped = 5,
                 itemStored = 2, itemDuped = 2,
                 moneyStored = 1, moneyDuped = 3,
-                rejected = 1, remaining = 4,
+                rejected = 1, rejectFields = "itemID x1",
             })
         end
 
@@ -825,7 +827,7 @@ describe("Wire contract", function()
             assert.is_truthy(line:find("money: 75%% %(3/4%)"), line)
             -- The two fields with no home in the redundancy prose.
             assert.is_truthy(line:find("rejected 1", 1, true), line)
-            assert.is_truthy(line:find("4 bucket(s) remaining", 1, true), line)
+            assert.is_truthy(line:find("(itemID x1)", 1, true), line)
         end)
     end)
 end)

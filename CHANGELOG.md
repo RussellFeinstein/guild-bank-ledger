@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The duplicate figure a sync reports is no longer inflated by the session before it. When a sync was cut short by a guildmate going into combat and a late piece of that sync arrived afterwards, the per-type and rejected counts from the first one were still standing and were counted into the second one's figure. It only ever showed up in the sync log, which is why it went unnoticed, and it is fixed here because that figure now travels to the other member.
+
 ### Added
 - After a sync finishes, the receiving client tells the client that sent the data how much of it was already held. That figure was only ever written into the receiver's own log, so the member whose client decides what to send next could not see it. Both sides now record the same numbers, and `/gbl synclog` on either one reads the same session. Nothing about what gets sent changes yet: the measurement comes first, and what to do about it is decided from real runs rather than guessed at.
 
