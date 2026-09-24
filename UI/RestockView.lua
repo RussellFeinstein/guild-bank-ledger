@@ -625,13 +625,23 @@ function GBL:_RestockView_RenderItems(content, focus)
             figures = format("target %d || bank %s", row.target or 0,
                 row.scanned == false and "?" or tostring(row.stock or 0))
             if pending > 0 then
-                -- What was bought and not yet seen in the bank (#209). An
-                -- unconfirmed entry is a confirm whose result never arrived.
-                local age = self:_RestockFormatAge(GetServerTime() - (row.pendingAt or 0))
-                if row.pendingUnconfirmed then
-                    figures = figures .. format(" || %d bought, result unknown (%s), check your mail", pending, age)
-                else
-                    figures = figures .. format(" || in the mail %d (%s)", pending, age)
+                -- What was bought and not yet seen in the bank (#209). The two
+                -- parts are named apart (#215): a purchase on its way is not
+                -- the same thing as a confirm whose result never arrived, and
+                -- one summed figure under the second wording said both were in
+                -- doubt. Each carries its own age, because the entry keeps the
+                -- earliest purchase time and the unconfirmed part keeps its own.
+                local now = GetServerTime()
+                local confirmed = row.pendingConfirmed or pending
+                local unconfirmed = row.pendingUnconfirmedQty or 0
+                if confirmed > 0 then
+                    figures = figures .. format(" || in the mail %d (%s)", confirmed,
+                        self:_RestockFormatAge(now - (row.pendingAt or 0)))
+                end
+                if unconfirmed > 0 then
+                    figures = figures .. format(" || %d bought, result unknown (%s), check your mail",
+                        unconfirmed,
+                        self:_RestockFormatAge(now - (row.pendingUnconfirmedAt or row.pendingAt or 0)))
                 end
             end
             if row.scanned ~= false then

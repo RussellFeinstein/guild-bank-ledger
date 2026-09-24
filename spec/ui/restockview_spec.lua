@@ -589,6 +589,32 @@ describe("RestockView", function()
                 assert.is_nil(findLabelContaining(scroll, "in the mail"))
             end)
 
+            -- #215: one summed figure under the unconfirmed wording said both
+            -- parts were in doubt ("11 bought, result unknown"). Each part is
+            -- named with its own age now, since the entry keeps the earliest
+            -- purchase time and the unconfirmed part keeps its own.
+            it("names the two parts apart, each with its own age", function()
+                GBL:_RestockAddPending(55555, 8)
+                MockWoW.serverTime = 3600 * 475200 + 7200
+                GBL:_RestockAddPending(55555, 3, { unconfirmed = true })
+                local container = build()
+                local scroll = findChild(container, "ScrollFrame")
+                local row = findLabelContaining(scroll, "in the mail 8 (2h ago)")
+                assert.is_not_nil(row)
+                assert.truthy(row._text:find("3 bought, result unknown (0s ago), check your mail", 1, true))
+                assert.is_nil(row._text:find("11 bought", 1, true))
+            end)
+
+            -- The entry had no row at all, so the only control that can clear
+            -- it was unreachable and it re-applied when the item came back.
+            it("renders an entry for an item the layout does not name", function()
+                GBL:GetRestockData().pending[99999] = { qty = 4, buyer = buyer, at = 3600 * 475200 }
+                local container = build()
+                local scroll = findChild(container, "ScrollFrame")
+                assert.is_not_nil(findLabelContaining(scroll, "in the mail 4"))
+                assert.is_not_nil(findButton(scroll, "Clear"))
+            end)
+
             it("removes the entry and rebuilds without the modifier when Clear is pressed", function()
                 GBL:GetRestockData().pending[55555] = { qty = 20, buyer = buyer, at = 3600 * 475200 }
                 GBL.activeTab = "restock"
