@@ -1603,31 +1603,74 @@ function GBL:MigrateRecoverPeerRealms(guildData)
     return rewrites
 end
 
---- Run migration for all guild data namespaces.
-function GBL:MigrateAllGuilds()
-    if not self.db or not self.db.global or not self.db.global.guilds then return end
-    for _, guildData in pairs(self.db.global.guilds) do
-        -- Repair playerRealms corruption FIRST so any migration that consults
-        -- the cache (and InitSync's seed loop downstream) sees clean data.
-        -- BuildRosterCache also calls this on every GUILD_ROSTER_UPDATE, but
-        -- that fires AFTER OnEnable -> InitSync, leaving a cold-startup window
-        -- where the seed loop would canonicalize bare names to bare via the
-        -- corruption-rejecting fallback in CanonicalPeerKey.
-        if guildData.playerRealms then
-            self:RepairCorruptedPlayerRealms(guildData.playerRealms)
-        end
-        self:MigrateOccurrenceScheme(guildData)
-        self:MigrateSchemaV2ToV3(guildData)
-        self:MigrateOccurrenceToPerSlot(guildData)
-        self:MigrateDeduplicateRecords(guildData)
-        self:MigrateCrossSlotDedup(guildData)
-        self:MigrateAccessControl(guildData)
-        self:MigrateRepairEpochTimestamps(guildData)
-        self:MigrateSortAccessShape(guildData)
-        self:MigrateNormalizePeerNames(guildData)
-        self:MigrateNormalizeStoredRealms(guildData)
-        self:MigrateRecoverPeerRealms(guildData)
+--- Run the migration ladder for one guild.
+-- Split out of MigrateAllGuilds so a raise costs one guild instead of every
+-- guild after it in the walk (#263). Every rung is dispatched through self:
+-- so a spec can observe or stub an individual one.
+-- @param guildData table Guild data from AceDB
+function GBL:MigrateGuild(guildData)
+    -- Repair playerRealms corruption FIRST so any migration that consults
+    -- the cache (and InitSync's seed loop downstream) sees clean data.
+    -- BuildRosterCache also calls this on every GUILD_ROSTER_UPDATE, but
+    -- that fires AFTER OnEnable -> InitSync, leaving a cold-startup window
+    -- where the seed loop would canonicalize bare names to bare via the
+    -- corruption-rejecting fallback in CanonicalPeerKey.
+    if guildData.playerRealms then
+        self:RepairCorruptedPlayerRealms(guildData.playerRealms)
     end
+    self:MigrateOccurrenceScheme(guildData)
+    self:MigrateSchemaV2ToV3(guildData)
+    self:MigrateOccurrenceToPerSlot(guildData)
+    self:MigrateDeduplicateRecords(guildData)
+    self:MigrateCrossSlotDedup(guildData)
+    self:MigrateAccessControl(guildData)
+    self:MigrateRepairEpochTimestamps(guildData)
+    self:MigrateSortAccessShape(guildData)
+    self:MigrateNormalizePeerNames(guildData)
+    self:MigrateNormalizeStoredRealms(guildData)
+    self:MigrateRecoverPeerRealms(guildData)
+end
+
+--- Run migration for all guild data namespaces.
+-- Each guild migrates under pcall. Before #263 a raise inside any rung
+-- abandoned every guild after it in the pairs walk, and did so silently:
+-- AceAddon runs OnEnable under safecall, so the error never reached the
+-- player, and no migration writes to any log. Those guilds then sat
+-- unmigrated for the rest of the session while the bank-open and
+-- /gbl cleanup paths, both reachable without OnEnable finishing, went on
+-- using them.
+-- @return number Number of guilds whose migration raised
+function GBL:MigrateAllGuilds()
+    if not self.db or not self.db.global or not self.db.global.guilds then return 0 end
+    self._migrationFailed = self._migrationFailed or {}
+
+    local failed = 0
+    for name, guildData in pairs(self.db.global.guilds) do
+        local entered = guildData.schemaVersion
+        local ok, err = pcall(self.MigrateGuild, self, guildData)
+        if ok then
+            self._migrationFailed[name] = nil
+        else
+            failed = failed + 1
+            -- Rungs rewrite record ids in place and reset the hash cache only
+            -- on their way out, so a raise between the two leaves a warm cache
+            -- describing ids that no longer exist. Cold at OnEnable, warm at
+            -- the roster-warm retrigger and at every bank open after it.
+            self:ResetHashCache()
+            if not self._migrationFailed[name] then
+                self._migrationFailed[name] = true
+                -- Both versions: where this attempt started, and where the
+                -- guild is left for the next session's ladder to resume from.
+                -- They differ, and a raise inside MigrateCrossSlotDedup leaves
+                -- the 4 it drops to on entry rather than the 5 it was gated on.
+                self:SystemError("Migration failed for %s at schema %s (entered at %s): %s",
+                    tostring(name), tostring(guildData.schemaVersion),
+                    tostring(entered), tostring(err))
+                self:Print("Migration error for " .. tostring(name) .. ": " .. tostring(err))
+            end
+        end
+    end
+    return failed
 end
 
 --- Repair player names after roster becomes available.

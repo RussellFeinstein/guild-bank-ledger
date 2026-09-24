@@ -416,4 +416,131 @@ describe("schemaVersion", function()
             assert.equals(0, cleanups)
         end)
     end)
+
+    -----------------------------------------------------------------------
+    -- 6. One guild's bad data must not strand the rest of the walk (#263)
+    -----------------------------------------------------------------------
+
+    describe("MigrateAllGuilds survives a guild that raises", function()
+        -- Two guilds. The second is materialised through AceDB's `guilds["*"]`
+        -- template by indexing it, the idiom spec/core_spec.lua:525 uses, so it
+        -- arrives fully defaulted rather than as a partial literal.
+        local BOOM = "migration exploded on purpose"
+
+        -- `pairs` order over the guild table is not controllable, so a case
+        -- written as "guild A raises, guild B still finishes" passes on unfixed
+        -- code whenever the walk happens to reach B first. These stub the rung to
+        -- raise on its FIRST call whatever guild that is, record which guild that
+        -- was, and assert about the other one.
+        local function raiseOnFirstGuild(rung)
+            local victim
+            local original = GBL[rung]
+            GBL[rung] = function(self, gd)
+                if not victim then
+                    victim = gd
+                    error(BOOM, 0)
+                end
+                return original(self, gd)
+            end
+            return function() return victim, original end
+        end
+
+        local function twoGuilds()
+            local other = GBL.db.global.guilds["Early Guild"]
+            guildData.schemaVersion = 1
+            other.schemaVersion = 1
+            return other
+        end
+
+        it("continues to the next guild when one guild's migration raises", function()
+            local other = twoGuilds()
+            -- Rung 3, so the guild it hits is left below 6 and in the window
+            -- where DeduplicateRecords used to skip a rung for good.
+            local read = raiseOnFirstGuild("MigrateOccurrenceToPerSlot")
+
+            GBL:MigrateAllGuilds()
+
+            local victim, original = read()
+            GBL.MigrateOccurrenceToPerSlot = original
+            assert.is_not_nil(victim, "the stub never fired")
+            local survivor = (victim == guildData) and other or guildData
+            assert.equals(11, survivor.schemaVersion,
+                "the guild after the failing one did not finish its ladder")
+            assert.equals(3, victim.schemaVersion,
+                "the failing guild should be left where the raise happened")
+        end)
+
+        it("logs one system ERROR naming the guild and both versions, and prints once", function()
+            twoGuilds()
+            local read = raiseOnFirstGuild("MigrateOccurrenceToPerSlot")
+            Helpers.clearPrints()
+
+            GBL:MigrateAllGuilds()
+
+            local victim, original = read()
+            GBL.MigrateOccurrenceToPerSlot = original
+            local errors = {}
+            for _, e in ipairs(GBL:GetLog("system")) do
+                if e.level == "ERROR" then errors[#errors + 1] = e.message end
+            end
+            assert.equals(1, #errors)
+            -- The guild by name, where it is LEFT (3, which is what the next
+            -- session resumes from), where this attempt STARTED (1), and the
+            -- error itself. Both versions, because they differ and a reader
+            -- wants each: one says how far it got, the other says where it is.
+            local name = (victim == guildData) and "TestGuild" or "Early Guild"
+            assert.is_truthy(errors[1]:find(name, 1, true), errors[1])
+            assert.is_truthy(errors[1]:find("schema 3", 1, true), errors[1])
+            assert.is_truthy(errors[1]:find("entered at 1", 1, true), errors[1])
+            assert.is_truthy(errors[1]:find(BOOM, 1, true), errors[1])
+            assert.is_true(Helpers.printContains(BOOM))
+        end)
+
+        it("names a guild that keeps failing only once per session", function()
+            twoGuilds()
+            local original = GBL.MigrateOccurrenceToPerSlot
+            GBL.MigrateOccurrenceToPerSlot = function() error(BOOM, 0) end
+
+            local firstFailures = GBL:MigrateAllGuilds()
+            local secondFailures = GBL:MigrateAllGuilds()
+
+            GBL.MigrateOccurrenceToPerSlot = original
+            local n = 0
+            for _, e in ipairs(GBL:GetLog("system")) do
+                if e.level == "ERROR" then n = n + 1 end
+            end
+            -- Both guilds fail, so two lines on the first walk and none on the
+            -- second: the 500-entry system buffer is what a capture reader has.
+            assert.equals(2, n)
+            assert.equals(2, firstFailures)
+            assert.equals(2, secondFailures)
+        end)
+
+        it("resets the hash cache when a migration raises", function()
+            -- Counted relative to the moment of the raise rather than absolutely:
+            -- how many rungs reset the cache on the way in depends on the fixture
+            -- (MigrateOccurrenceScheme returns early on a guild with no records,
+            -- before its own reset), and that is not what this case is about. What
+            -- it asserts is that the failure branch resets exactly once, whatever
+            -- ran before it.
+            guildData.schemaVersion = 1
+            local resets, atRaise = 0, nil
+            local originalReset = GBL.ResetHashCache
+            GBL.ResetHashCache = function(self) resets = resets + 1 end
+            local originalRung = GBL.MigrateOccurrenceToPerSlot
+            GBL.MigrateOccurrenceToPerSlot = function()
+                atRaise = resets
+                error(BOOM, 0)
+            end
+
+            GBL:MigrateAllGuilds()
+
+            GBL.MigrateOccurrenceToPerSlot = originalRung
+            GBL.ResetHashCache = originalReset
+            assert.is_not_nil(atRaise, "the stub never fired")
+            -- A raise leaves ids rewritten by the rungs that did run against a
+            -- cache keyed on the old ones, so the branch must clear it.
+            assert.equals(atRaise + 1, resets)
+        end)
+    end)
 end)
