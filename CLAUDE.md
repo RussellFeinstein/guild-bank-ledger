@@ -280,4 +280,4 @@ Helpers:
 
 ## Version
 
-Current: 0.41.3 (see `VERSION` file)
+Current: 0.41.4 (see `VERSION` file)
