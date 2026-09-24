@@ -209,6 +209,23 @@ describe("RestockView", function()
             assert.equals("instock", bank.status)
         end)
 
+        -- #215 added rows for an entry the layout does not name: target 0,
+        -- toBuy 0, pending N. The shortfall test could not see them, so all
+        -- three encodings read in stock beside the row's own "in the mail N".
+        it("reads in the mail for a row whose only reason to exist is the mail", function()
+            local d = GBL:GetRestockStatusDisplay(
+                row({ target = 0, stock = 0, pending = 5, toBuy = 0 }), nil)
+            assert.equals("inmail", d.status)
+            assert.equals("in the mail", d.text)
+        end)
+
+        it("reads in the mail while any part of the entry is unconfirmed", function()
+            local d = GBL:GetRestockStatusDisplay(
+                row({ target = 0, stock = 0, pending = 5, toBuy = 0,
+                      pendingUnconfirmed = true }), nil)
+            assert.equals("inmail", d.status)
+        end)
+
         it("decorates a searched row from the session: priced, not a commodity, not found", function()
             local priced = GBL:GetRestockStatusDisplay(row(), session())
             assert.equals("priced", priced.status)

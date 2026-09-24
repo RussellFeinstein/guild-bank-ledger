@@ -1408,6 +1408,60 @@ describe("Restock buy", function()
         end)
     end)
 
+    -- The code review of this PR reproduced both of these.
+    describe("the review's findings on the park (#215)", function()
+        local function pending(itemID)
+            return GBL:GetRestockData().pending[itemID]
+        end
+
+        it("does not re-add a parked quantity the player cleared by hand", function()
+            oneItem()
+            GBL:StartRestockBuy(1)
+            priceThenReady(4200, 21000)
+            fireStepTimers()
+            assert.is_not_nil(pending(100))
+            assert.is_true(GBL:ClearRestockPending(100))      -- the Clear this PR added
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED") -- the late result
+            assert.is_nil(pending(100))                       -- the Clear stands
+        end)
+
+        it("does not re-add a parked quantity a deposit already settled", function()
+            oneItem()
+            GBL:StartRestockBuy(1)
+            priceThenReady(4200, 21000)
+            fireStepTimers()
+            local gd = GBL:GetGuildData()
+            assert.is_true(GBL:_RestockOnRecordStored({
+                type = "deposit", player = GBL:ResolvePlayerName(MockWoW.player.name),
+                itemID = 100, count = 5, timestamp = GetServerTime() }, gd))
+            assert.is_nil(pending(100))
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
+            assert.is_nil(pending(100))   -- already in the bank, not in the mail
+        end)
+
+        -- Keeping the record (finding 6) blocks every buy while it stands, and
+        -- the teardown has already dropped the buy events, so no result can
+        -- arrive to clear it. It says so once and retries when the tab is next
+        -- shown, which is the first moment the store is reachable again.
+        it("names a refused park and retries it when the tab is next shown", function()
+            oneItem()
+            GBL._restock.unanswered = { index = 1, itemID = 100, qty = 5, total = 21000 }
+            MockWoW.guild.name = nil
+            GBL:_RestockSearchTeardown("reset")
+            assert.is_not_nil(GBL._restock.unanswered)
+            local warned = false
+            for _, e in ipairs(GBL:GetLog("system")) do
+                if e.message:find("could not be recorded", 1, true) then warned = true end
+            end
+            assert.is_true(warned)
+
+            MockWoW.guild.name = "Test Guild"
+            GBL:_RestockOnTabShown()
+            assert.is_nil(GBL._restock.unanswered)
+            assert.equals(5, GBL:_RestockPendingParts(pending(100)).unconfirmed)
+        end)
+    end)
+
     describe("confirm at price (#211)", function()
         before_each(function()
             GBL:SetRestockConfirmAtPrice(true)

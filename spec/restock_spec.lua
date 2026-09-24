@@ -888,6 +888,95 @@ describe("Restock", function()
             end)
         end)
 
+        -- The code review of this PR reproduced each of these against the
+        -- real code. They are defects this PR introduced or left open, not
+        -- pre-existing ones, except where the case says otherwise.
+        describe("the review's findings (#215)", function()
+            it("does not raise on a pending value that is not a table", function()
+                -- An unclean shutdown can leave a NUL-zeroed SavedVariables
+                -- file, and the universe already filters for type table, so
+                -- the codebase treats this as reachable.
+                GBL:GetRestockData().pending[8001] = 5
+                assert.is_true(GBL:_RestockAddPending(8001, 2))
+                assert.equals(2, GBL:_RestockPendingParts(
+                    GBL:GetRestockData().pending[8001]).confirmed)
+                GBL:GetRestockData().pending[8002] = "oops"
+                assert.is_false(GBL:ClearRestockPending(8002))
+            end)
+
+            it("coerces the two timestamps, so a missing one does not open the window", function()
+                local parts = GBL:_RestockPendingParts({ qty = 5 })
+                assert.is_nil(parts.at)
+                parts = GBL:_RestockPendingParts({ qty = 5, at = {} })
+                assert.is_nil(parts.at)
+                parts = GBL:_RestockPendingParts({ qty = 5, at = "1000" })
+                assert.equals(1000, parts.at)
+            end)
+
+            it("refuses a deposit against an entry with no purchase time", function()
+                local gd = GBL:GetGuildData()
+                gd.restock.pending[100] = { qty = 5, buyer = buyer,
+                                            buyers = { [buyer] = true } }
+                assert.is_false(GBL:_RestockOnRecordStored({
+                    type = "deposit", player = buyer, itemID = 100, count = 5,
+                    timestamp = 3600 * 475200 }, gd))
+                assert.equals(5, GBL:_RestockPendingParts(gd.restock.pending[100]).total)
+            end)
+
+            it("merges an entry that exists under both key shapes", function()
+                local p = GBL:GetRestockData().pending
+                p[100] = { qty = 5, buyer = buyer, buyers = { [buyer] = true }, at = 2000 }
+                p["100"] = { qty = 3, buyer = buyer, buyers = { [buyer] = true }, at = 1000 }
+                assert.is_true(GBL:_RestockAddPending(100, 1))
+                assert.is_nil(p["100"])
+                local parts = GBL:_RestockPendingParts(p[100])
+                assert.equals(9, parts.total)
+                assert.equals(1000, parts.at)   -- the earlier purchase
+            end)
+
+            it("stamps the confirmed part with its own time too", function()
+                MockWoW.serverTime = 3600 * 475200
+                GBL:_RestockAddPending(100, 5, { unconfirmed = true })
+                MockWoW.serverTime = 3600 * 475200 + 7200
+                GBL:_RestockAddPending(100, 3)
+                local parts = GBL:_RestockPendingParts(GBL:GetRestockData().pending[100])
+                assert.equals(3600 * 475200, parts.at)              -- the window anchor
+                assert.equals(3600 * 475200, parts.unconfirmedAt)
+                assert.equals(3600 * 475200 + 7200, parts.confirmedAt)
+            end)
+
+            it("leaves the store untouched when it refuses a deposit", function()
+                local gd = GBL:GetGuildData()
+                local old = { qty = 7, buyer = buyer, buyers = { [buyer] = true },
+                              at = 3600 * 475200, unconfirmed = true }
+                gd.restock.pending[100] = old
+                assert.is_false(GBL:_RestockOnRecordStored({
+                    type = "deposit", player = "Stranger-TestRealm", itemID = 100,
+                    count = 5, timestamp = 3600 * 475200 }, gd))
+                -- The pre-split shape is still on disk: a refusal must not
+                -- rewrite it, or a false return no longer means untouched.
+                assert.equals(7, old.qty)
+                assert.is_true(old.unconfirmed)
+                assert.is_nil(old.unconfirmedQty)
+            end)
+
+            -- The guard shipped in the first cut could never fire: StoreTx has
+            -- one production caller and reconstructSyncRecord rewrites the
+            -- timestamp first, so IsValidTimestamp never failed there.
+            it("is told by the sync intake that rewrote the timestamp", function()
+                local rec = { type = "deposit", player = buyer, itemID = 100,
+                              count = 5, timestamp = 0, id = "x:0" }
+                local ok, _, rewritten = GBL:_ReconstructSyncRecord(rec, "Peer-TestRealm")
+                assert.is_true(ok)
+                assert.is_true(rewritten)
+                local good = { type = "deposit", player = buyer, itemID = 100,
+                               count = 5, timestamp = 3600 * 475200, id = "y:0" }
+                local ok2, _, rewritten2 = GBL:_ReconstructSyncRecord(good, "Peer-TestRealm")
+                assert.is_true(ok2)
+                assert.is_falsy(rewritten2)
+            end)
+        end)
+
         describe("_RestockFormatAge", function()
             it("renders seconds, minutes, hours and days", function()
                 assert.equals("0s ago", GBL:_RestockFormatAge(-5))
