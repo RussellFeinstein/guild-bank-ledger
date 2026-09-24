@@ -374,4 +374,24 @@ describe("Tab switching through the TabGroup", function()
         assert.is_true(GBL._restockInView,
             "the window is up on Restock and the in-view flag says otherwise")
     end)
+
+    it("switches an open window from another tab to Restock", function()
+        -- The warm path. CreateMainFrame returns early on a window that is
+        -- already up, so the group selection is the only thing that moves
+        -- it. This was the whole of OpenRestockTab before the cold path was
+        -- split out of it, and nothing in the suite drove it: every other
+        -- OpenRestockTab case starts from a closed window, so dropping this
+        -- call left the suite green.
+        GBL:CreateMainFrame()
+        GBL.mainFrame:Show()
+        GBL.tabGroup:SelectTab("goldlog")
+        assert.equals("goldlog", GBL.activeTab, "precondition: on another tab")
+
+        GBL:OpenRestockTab()
+
+        assert.equals("restock", GBL.activeTab)
+        assert.is_true(rendersText(GBL.tabGroup, "Budget:"),
+            "the Restock tab is not on screen")
+        assert.is_true(GBL._restockInView)
+    end)
 end)

@@ -99,6 +99,37 @@ describe("Access-gated tab visibility", function()
             assert.is_true(v.layout)
         end)
 
+        it("shows a sync_only rank only Sync, Changelog and About", function()
+            -- The one branch of GBL:AccessTabs that nothing owned. The four
+            -- cases above all drive the full tab set, and sync_only's own
+            -- coverage is in RecordsForView rather than the bar, so a
+            -- mutation dropping this branch was invisible to the whole suite
+            -- until #244's refusal cases caught it as a precondition.
+            --
+            -- The grant is load-bearing: it pins that sort access does not
+            -- put bank tabs into this bar, which is the configuration #244
+            -- is about. A rank can sit below the view threshold and above
+            -- the sort one, and the view family wins.
+            setPlayer("Member", "TestRealm", 5)
+            local gd = GBL:GetGuildData()
+            gd.accessControl = { rankThreshold = 1, restrictedMode = "sync_only" }
+            grant("sort", 9)
+            GBL:CreateMainFrame()
+            GBL:RebuildTabs()
+
+            local v = tabSet()
+            assert.is_true(v.sync)
+            assert.is_true(v.changelog)
+            assert.is_true(v.about)
+            assert.is_nil(v.transactions)
+            assert.is_nil(v.goldlog)
+            assert.is_nil(v.consumption)
+            assert.is_nil(v.sort)
+            assert.is_nil(v.restock)
+            assert.is_nil(v.layout)
+            assert.equals(3, #GBL.tabGroup._tabs)
+        end)
+
         it("marks the button it came up on, and clears it when another is picked", function()
             -- The rendered read rather than the stored one: _tabs says what
             -- the bar holds, and this says which button carries the
