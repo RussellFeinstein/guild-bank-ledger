@@ -40,40 +40,62 @@ end
 -- AceDB mock
 ---------------------------------------------------------------------------
 
-local function deepCopy(orig)
-    if type(orig) ~= "table" then return orig end
-    local copy = {}
-    for k, v in pairs(orig) do
-        copy[k] = deepCopy(v)
-    end
-    return copy
-end
-
+--- Copy defaults in, the way AceDB does at login.
+--
+-- Transcribed branch for branch from Libs/AceDB-3.0/AceDB-3.0.lua:88-131,
+-- for the same reason removeDefaults below it is: a partial port is how this
+-- mock came to model a fresh install and never an upgrade. Three things it
+-- was missing, each with its own case in spec/savedvariables_spec.lua.
+--
+-- A vivified table starts EMPTY and has the template copied into it. The old
+-- version deep-copied the template, which copies the literal "*" key along
+-- with everything else, so every table declaring a nested wildcard was born
+-- holding a phantom entry. guilds["*"].playerStats is the one that matters:
+-- seven production sites walk it with pairs, five of them migrations.
+--
+-- The already-existing-tables loop applies the template to tables ALREADY in
+-- the file, which is the upgrade path. Without it a key stripped at logout
+-- never comes back at the next login.
+--
+-- The scalar wildcard, the nil-key guard and the ** merge are unreachable
+-- from this addon's defaults and are ported anyway; see removeDefaults.
 local function applyDefaults(target, defaults)
     if type(defaults) ~= "table" then return end
     for k, v in pairs(defaults) do
-        if k == "*" then
-            -- Wildcard default: set metatable for auto-vivification
-            setmetatable(target, {
-                __index = function(t, key)
-                    local new = deepCopy(v)
-                    if type(new) == "table" then
-                        applyDefaults(new, v)
+        if k == "*" or k == "**" then
+            if type(v) == "table" then
+                setmetatable(target, {
+                    __index = function(t, k2)
+                        if k2 == nil then return nil end
+                        local tbl = {}
+                        applyDefaults(tbl, v)
+                        rawset(t, k2, tbl)
+                        return tbl
+                    end,
+                })
+                -- handle already existing tables in the SV
+                for dk, dv in pairs(target) do
+                    if not rawget(defaults, dk) and type(dv) == "table" then
+                        applyDefaults(dv, v)
                     end
-                    rawset(t, key, new)
-                    return new
-                end,
-            })
-        elseif type(v) == "table" then
-            if target[k] == nil then
-                target[k] = {}
+                end
+            else
+                -- a non-table wildcard is just a value every key answers with
+                setmetatable(target, {
+                    __index = function(t, k2) return k2 ~= nil and v or nil end,
+                })
             end
+        elseif type(v) == "table" then
+            if not rawget(target, k) then rawset(target, k, {}) end
             if type(target[k]) == "table" then
                 applyDefaults(target[k], v)
+                if defaults["**"] then
+                    applyDefaults(target[k], defaults["**"])
+                end
             end
         else
-            if target[k] == nil then
-                target[k] = v
+            if rawget(target, k) == nil then
+                rawset(target, k, v)
             end
         end
     end
