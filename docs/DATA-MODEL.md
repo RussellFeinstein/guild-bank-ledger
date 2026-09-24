@@ -344,8 +344,10 @@ there is no later pass that notices. All three are realm canonicalization, and t
 
 The mechanism is executable from #77. `spec/savedvariables_spec.lua` round-trips a guild at
 the default and reads 8 back with nothing on disk in between, and round-trips one at 11 and
-finds 11 on disk, which is this paragraph as two assertions. #76 is the guard that stops
-someone raising the value; this is the evidence for why it is worth guarding.
+finds 11 on disk, which is this paragraph as two assertions. **That file is the guard against
+the default being raised**, and it shipped in PR #261 under #77. #76 shipped the other half,
+`spec/schema_version_spec.lua`, which pins the ladder the default is the entry point to. Raising
+the default reds the first file and leaves the second green, which is the split to expect.
 
 The migration chain is the second half of the story. The 9 to 10 and 10 to 11 migrations gate on
 **strict equality**, not `>=`:
@@ -363,37 +365,58 @@ in order, and 8 is its entry point. `GUILD_ROSTER_UPDATE` retriggers `MigrateAll
 session so a cold-roster short-circuit gets a warm retry without waiting for the next login.
 
 The 8 to 9 migration is **not** one of the strict pair. `MigrateNormalizePeerNames` gates on
-`>= 9` (`src/Core.lua:1360`), the same loose form every migration below it uses, and called on its
-own it will advance a guild at 3 straight to 9. What stops that is the call order in
+`>= 9` (`src/Core.lua:1360`), the loose form every migration below it uses, and called on its
+own it will advance a guild at 3 straight to 9. (One of those loose gates is not quite the same
+shape: `MigrateOccurrenceScheme` reads `guildData.schemaVersion >= 2` at `:287` with no `or 0`,
+where the other seven read `(guildData.schemaVersion or 0) >= N`. A nil version raises there,
+inside a `MigrateAllGuilds` loop that is not `pcall`-protected, so it aborts the ladder for that
+guild and every guild after it in the `pairs` walk. Recorded on #263 beside the other nil raise.) What stops that is the call order in
 `MigrateAllGuilds` (`:1607`), which reaches it only once the rungs below have run, so the
 protection for the low half of the ladder is the order and not the gates. `spec/schema_version_spec.lua`
 asserts that order as a sequence rather than as an endpoint, because a guild that jumped straight to
 11 also arrives at 11.
 
-**Verdict: correct as it stands, and pinned by a test since #76.** This is the one disagreement
-in this document that must not be resolved by making the two sides agree. Until #76 nothing in the
-suite failed if someone raised the default in good faith. `spec/savedvariables_spec.lua` now asserts
-the value and its round trip against a real AceDB, and `spec/schema_version_spec.lua` asserts the
-gates behaviourally: the ladder walked one rung at a time, each strict gate refused from above, and
-every write of the version outside the ladder. The low side of both gates was already covered in
-`spec/core_spec.lua` (each "refuses to bump from schema 8", plus a "from schema 9" on the 10 to 11
-migration). Neither file changes the value or the gates, which stay as they are.
+**Verdict: correct as it stands, and pinned by tests as of 2026-09-24.** This is the one
+disagreement in this document that must not be resolved by making the two sides agree. Two files
+carry it and it is worth knowing which does what, because they fail on different mutations.
+`spec/savedvariables_spec.lua` (#77, PR #261) asserts the value and its round trip against a real
+AceDB, so it is what reds if the default is raised. `spec/schema_version_spec.lua` (#76) asserts
+the ladder the default is the entry point to: walked one rung at a time in order, each rung
+bumping by exactly one, and every write of the version that is not a rung. Its sequence assertion
+is also what reds if either strict gate is loosened to `>=`, since a guild above a gate is refused
+by both forms and only the ladder sees the rung that then gets skipped. The below-the-rung side of
+both gates was already covered in `spec/core_spec.lua` (each "refuses to bump from schema 8", plus
+a "from schema 9" on the 10 to 11 migration). Neither file changes the value or the gates, which
+stay as they are.
 
-Two more places write the version, both outside the ladder.
+Two writes are not rungs. One of them sits inside a rung, so "outside the ladder" is the wrong
+axis; what they share is that neither advances the progression.
 
-`MigrateCrossSlotDedup` drops it to 4 on entry (`src/Core.lua:1081`) so its pass 1 re-runs the
-same-slot dedup, whose own gate is `>= 5`, then leaves at 6. That one is deliberate and the write is
-load-bearing: without it the nested call is entered at 5, returns 0, and pass 1 silently does
-nothing.
+`MigrateCrossSlotDedup` **is** rung 5, and on entry it drops the version to 4
+(`src/Core.lua:1081`) so its pass 1 can re-run the same-slot dedup, whose own gate is `>= 5`, then
+leaves at 6. That write is deliberate and load-bearing: without it the nested call is entered at 5,
+returns 0, and pass 1 silently does nothing.
 
 `GBL:DeduplicateRecords` sets it to 5 to force that same legacy pass and is written to restore it
 afterwards (`src/Core.lua:2851-2857`). **It cannot.** The branch is entered only when the version is
-below 6, and the restore is guarded by `if savedSchema > 6`, so it is false on every path into it; a
-guild at 5 comes back at 6. The same line raises on a guild whose `schemaVersion` is nil, because the
-gate reads `(x or 0)` and the compare reads the raw value. Neither is reachable in production, since
-`OnInitialize` runs `MigrateAllGuilds` (`:197`) before it loops `DeduplicateRecords` (`:204`) and
-AceDB restores the default for any guild whose key was stripped. Filed as #263; both are pinned as
-characterization in `spec/schema_version_spec.lua` meanwhile.
+below 6, and the restore is guarded by `if savedSchema > 6`, so it is false on every path into it,
+and `MigrateCrossSlotDedup` leaves the guild at 6 wherever it started. The harm window is 1 to 3,
+measured: from 4 or 5 the forced write loses nothing, because the nested 4 to 5 pass still runs and
+6 is where the ladder would have left the guild anyway, while from 3 the forced 5 satisfies
+`MigrateOccurrenceToPerSlot`'s `>= 4` gate before it ever runs and no later pass revisits it. The
+same line also raises on a guild whose `schemaVersion` is nil, because the gate reads `(x or 0)` and
+the compare reads the raw value.
+
+**Neither is reachable in production, and the reason is not the call order.** `DeduplicateRecords`
+has three call sites and only one of them is ordered after the ladder (`GBL:OnEnable` runs
+`MigrateAllGuilds` at `:197` and then loops it at `:204`; the other two are `GBL:OnBankOpened` at
+`:1885` and `GBL:RunCleanup`, which `/gbl cleanup` invokes, at `:3045`). What covers all three is
+that no migration below 6 has a non-bumping early return, so once the ladder has run no guild is
+left under 6: measured at every starting version from 0 to 8, and with a cold realm and a cold
+roster, the walk never ends below 6. The nil case is covered by AceDB restoring the default for any
+guild whose key was stripped, and by nothing else; the ladder is no protection there, because
+`MigrateOccurrenceScheme` raises on the same nil at `:287` before `DeduplicateRecords` is reached.
+Filed as #263; both are pinned as characterization in `spec/schema_version_spec.lua` meanwhile.
 
 ## 8. What validation guarantees, and what it does not
 
@@ -645,6 +668,7 @@ All under the **Data model integrity** milestone.
 | 5 | `NormalizeRecordId` can rewrite a money record from an item record | closed in v0.37.0 (#68) |
 | 5 | Sync intake does not normalize the money `type` | #68 |
 | 7 | Nothing stops the `schemaVersion` default being raised | closed in #76 |
+| 7 | `DeduplicateRecords` cannot restore the version it borrows, and raises on a nil | #263 |
 | 8 | Intake accepts corrupted records | closed in v0.37.0 (#68) |
 | 8 | 223 corrupted records already stored | #75 |
 | 8 | Rejections counted as duplicates | closed in v0.37.0 (#68) |
