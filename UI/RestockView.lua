@@ -508,32 +508,34 @@ function GBL:OpenRestockTab()
         return
     end
 
-    -- A closed window opens straight onto Restock instead of building the
-    -- default tab and releasing it a line later. CreateMainFrame ends in
-    -- RebuildTabs, which selects whatever activeTab holds and validates it
-    -- against the bar it just built, and the check above has already
-    -- established that bar holds this tab.
-    local cold = not self.mainFrame
-    if cold then self.activeTab = "restock" end
-
     self:CreateMainFrame()
     self.mainFrame:Show()
 
-    if cold then
-        -- SelectTab already ran, inside CreateMainFrame, which hides the
-        -- frame before it reaches RebuildTabs. So its closing rule,
-        -- `(tabName == "restock") and IsMainFrameShown()`, read false on a
-        -- tab that is now on screen. Re-run that same rule rather than
-        -- asserting true, so a fallback selection cannot set it wrongly.
-        -- It matters because a false flag lets the next RefreshUI move the
-        -- wallet baseline a second time, inside the purchase lag (#60), and
-        -- the IsMainFrameShown term cannot simply come out of SelectTab: a
-        -- RefreshUI while the window is hidden would then set the flag with
-        -- nothing left to clear it.
-        self._restockInView = (self.activeTab == "restock") and self:IsMainFrameShown()
-    elseif self.tabGroup then
-        self.tabGroup:SelectTab("restock")
-    end
+    -- Already showing it: the Show above is the whole of what this command
+    -- has left to do. Selecting again would run GBL:SelectTab, which is a
+    -- ReleaseChildren rebuild, and real AceGUI SelectTab has no
+    -- already-selected short-circuit. In the confirm-at-price pause that
+    -- rebuild drops the focus the pause put on Confirm: st.focusConfirm was
+    -- consumed by the build that entered PRICED, and ClearFocusOrder resets
+    -- focusIndex, so the player's next Enter confirms nothing. The sibling
+    -- redraw path guards exactly this through _RestockStateReadsBlocker.
+    if not self.tabGroup or self.activeTab == "restock" then return end
+
+    self.tabGroup:SelectTab("restock")
+    if self.activeTab == "restock" then return end
+
+    -- The select matched nothing, so the bar does not hold a tab the gate
+    -- above has just said this rank may reach. The bar is the stale one:
+    -- HasAccessTab reads the access families live, while the bar is only
+    -- rebuilt by RefreshAccessTabsIfChanged on a GUILD_ROSTER_UPDATE, and a
+    -- guild rank change is not an accessControl change. playerInTier reads
+    -- GetGuildInfo raw, so a rank crossing the sort threshold has access at
+    -- once, and nothing in the addon calls GuildRoster, so the wait for that
+    -- tick is unbounded. Without this the window opens on whatever tab it
+    -- held with no switch and no message, which is the silent half of #244
+    -- arriving from the other direction.
+    self:RebuildTabs()
+    self.tabGroup:SelectTab("restock")
 end
 
 ------------------------------------------------------------------------

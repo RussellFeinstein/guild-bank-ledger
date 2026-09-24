@@ -346,33 +346,75 @@ describe("Tab switching through the TabGroup", function()
         assert.is_true(Helpers.printContains("not one of the tabs"))
     end)
 
-    it("opens a cold window onto Restock without building Transactions", function()
-        -- CreateMainFrame's RebuildTabs builds whatever activeTab holds, so
-        -- /gbl restock on a closed window rendered the whole
-        -- virtual-scrolling ledger and released it on the next line. The
-        -- in-view flag rides on the same change: SelectTab closes with
-        -- `(tabName == "restock") and IsMainFrameShown()`, and
-        -- CreateMainFrame hides the frame before RebuildTabs, so a tab
-        -- built in there is built hidden and the flag has to be put right
-        -- once the window is up. A false flag moves the wallet baseline
-        -- again on the next refresh, inside the purchase lag (#60).
+    -- Counts calls to the named GBL builders for the body of one test.
+    local function countBuilds(names)
         local built = {}
-        for _, name in ipairs({ "BuildTransactionsTab", "BuildRestockTab" }) do
+        for _, name in ipairs(names) do
             local orig = GBL[name]
             GBL[name] = function(gbl, ...)
                 built[name] = (built[name] or 0) + 1
                 return orig(gbl, ...)
             end
         end
+        return built
+    end
+
+    it("rebuilds a stale tab bar rather than going silent", function()
+        -- The gate reads the access families live; the bar is only rebuilt by
+        -- RefreshAccessTabsIfChanged on a GUILD_ROSTER_UPDATE, and a guild
+        -- rank change is not an accessControl change. playerInTier reads
+        -- GetGuildInfo raw (src/Core.lua), so a rank that crosses the sort
+        -- threshold has sort access at once while the bar still has no
+        -- Restock tab, and nothing in the addon ever calls GuildRoster, so
+        -- the wait is unbounded. AceGUI fires nothing for a value the bar
+        -- does not hold, so without the retry the window is yanked open on
+        -- whatever tab it held, with no switch and no message: the second of
+        -- the two failures #244 exists to remove, arriving by the other
+        -- direction.
+        MockWoW.player.name = "Hand"
+        MockWoW.guild.rankIndex = 5
+        GBL:CreateMainFrame()
+        GBL.mainFrame:Show()
+        assert.is_nil(tabSet().restock, "precondition: no sort access, no Restock tab")
+
+        local gd = GBL:GetGuildData()
+        gd.sortAccess = {
+            write = { rankThreshold = nil, delegates = {} },
+            sort  = { rankThreshold = 9, delegates = {} },
+            updatedAt = 100,
+        }
+        assert.is_true(GBL:HasAccessTab("restock"),
+            "precondition: the computed list has caught up")
+        assert.is_nil(tabSet().restock, "precondition: the bar has not")
 
         GBL:OpenRestockTab()
 
         assert.equals("restock", GBL.activeTab)
-        assert.equals(1, built.BuildRestockTab or 0)
-        assert.equals(0, built.BuildTransactionsTab or 0,
-            "the cold open built the ledger and threw it away")
-        assert.is_true(GBL._restockInView,
-            "the window is up on Restock and the in-view flag says otherwise")
+        assert.is_true(rendersText(GBL.tabGroup, "Budget:"),
+            "the Restock tab is not on screen")
+        assert.is_true(tabSet().restock, "the bar was never reconciled")
+    end)
+
+    it("does not rebuild the tab it is already showing", function()
+        -- GBL:SelectTab is a ReleaseChildren rebuild, and real AceGUI
+        -- SelectTab has no already-selected short-circuit. During the
+        -- confirm-at-price pause that rebuild drops the focus the pause put
+        -- on Confirm: st.focusConfirm was consumed by the build that entered
+        -- PRICED, and ClearFocusOrder resets focusIndex to 0, so the
+        -- player's next Enter confirms nothing. The sibling redraw path
+        -- guards exactly this (_RestockStateReadsBlocker, src/Restock.lua).
+        GBL:CreateMainFrame()
+        GBL.mainFrame:Show()
+        GBL.tabGroup:SelectTab("restock")
+        assert.equals("restock", GBL.activeTab, "precondition: already on Restock")
+
+        local built = countBuilds({ "BuildRestockTab" })
+        GBL:OpenRestockTab()
+
+        assert.equals(0, built.BuildRestockTab or 0,
+            "/gbl restock rebuilt the tab it was already showing")
+        assert.equals("restock", GBL.activeTab)
+        assert.is_true(GBL:IsMainFrameShown())
     end)
 
     it("switches an open window from another tab to Restock", function()

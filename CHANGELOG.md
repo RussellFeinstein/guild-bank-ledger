@@ -8,10 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- `/gbl restock` no longer opens the Restock tab for a rank whose tab bar does not hold it, and now says why instead. A guild can leave a rank in Sync only while that rank still holds sort access, and in that state the command put the whole Restock tab on screen under the "Restricted view" banner, then rebuilt it again on every bank open and every completed sync. Where the tab bar had never held Restock at all, the command did nothing and said nothing.
+- `/gbl restock` no longer opens the Restock tab for a rank whose tab bar does not hold it, and now says why instead. A guild can leave a rank in Sync only while that rank still holds sort access, and in that state the command put the whole Restock tab on screen under the "Restricted view" banner, and once it had, every later bank open and every completed sync rebuilt it. Where the bar had never held Restock, the window opened on whichever tab the rank does get and nothing explained why the command had not worked.
+- `/gbl restock` now switches to Restock when your rank has just been granted sort access. The tab bar is only rebuilt when the guild roster next updates, which nothing in the addon asks for, so the command could open the window on whatever tab it was showing and say nothing for the rest of the session.
 
 ### Changed
-- `/gbl restock` on a closed window now opens straight onto the Restock tab. It used to build the transaction list first and throw it away, which on a long history is the slowest thing the window does.
+- A refused `/gbl restock` no longer opens the ledger window at all. It used to open it and then fail to switch tabs, so the window appeared on whichever tab your rank does get.
 
 ## [0.41.3] - 2026-09-22
 
