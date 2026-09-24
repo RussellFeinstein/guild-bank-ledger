@@ -1125,11 +1125,18 @@ describe("Sync session lifecycle", function()
                 guild = "Test Guild",
             })
 
-            -- Data should still have been stored (ACK sent)
-            assert.is_true(#MockAce.sentCommMessages >= 1)
-            local ok, data = GBL:Deserialize(MockAce.sentCommMessages[#MockAce.sentCommMessages].text)
-            assert.is_true(ok)
-            assert.equals("ACK", data.type)
+            -- Data should still have been stored (ACK sent). Searched rather
+            -- than read off the tail: this is the final chunk, so since #237
+            -- the completed receive whispers a SYNC_RECEIPT after the ACK and
+            -- the last message is no longer the one this test is about.
+            local sawAck = false
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(sent.text)
+                if ok and type(data) == "table" and data.type == "ACK" then
+                    sawAck = true
+                end
+            end
+            assert.is_true(sawAck, "expected an ACK for the chunk received while paused")
         end)
 
         it("DisableSync clears zone pause state", function()

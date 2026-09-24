@@ -763,4 +763,71 @@ describe("Wire contract", function()
                 "a combat abort says so")
         end)
     end)
+
+    --------------------------------------------------------------------
+    -- SYNC_RECEIPT (#237)
+    --
+    -- One builder and one call site, so the parity half of the rule above
+    -- does not apply and the absolute key set carries the whole weight. The
+    -- second half is a one-sided proof that the reader reads what the builder
+    -- writes: key parity is blind to an addition, and a field written by the
+    -- builder that nothing consumes is precisely how an instrument decays
+    -- into bytes nobody looks at.
+    --
+    -- Mutations that must turn this red: drop any key from
+    -- BuildReceiptMessage; make any of them conditional; stop reading any of
+    -- the seven figures in HandleReceipt.
+    --------------------------------------------------------------------
+    describe("SYNC_RECEIPT", function()
+        -- Unconditional. SYNC_DATA omits its optional fields to stay
+        -- byte-identical to a build that predates them; a message type
+        -- introduced whole has no predecessor to match, and the absolute set
+        -- is worth more than the handful of bytes. No `remaining`: the sender
+        -- authored that number and attached it to the final chunk, so echoing
+        -- it back is the second stored copy this file's own rule refuses.
+        local SYNC_RECEIPT_KEYS = {
+            "duped", "guild", "itemDuped", "itemStored", "moneyDuped",
+            "moneyStored", "protocolVersion", "rejectFields", "rejected",
+            "stored", "type",
+        }
+
+        local function built()
+            return GBL:BuildReceiptMessage({
+                stored = 3, duped = 5,
+                itemStored = 2, itemDuped = 2,
+                moneyStored = 1, moneyDuped = 3,
+                rejected = 1, rejectFields = "itemID x1",
+            })
+        end
+
+        it("carries every key", function()
+            assert.same(SYNC_RECEIPT_KEYS, keySet(built()))
+        end)
+
+        it("carries them at zero too, so one session shape reaches the wire", function()
+            assert.same(SYNC_RECEIPT_KEYS, keySet(GBL:BuildReceiptMessage({})))
+        end)
+
+        it("reports every figure the builder wrote", function()
+            GBL:HandleReceipt("PeerA", built())
+
+            local line
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message:find("Receipt from", 1, true) then
+                    line = entry.message
+                    break
+                end
+            end
+            assert.is_not_nil(line, "HandleReceipt wrote no line")
+
+            -- stored and duped, through the total the reader derives.
+            assert.is_truthy(line:find("63%% duped %(5/8 received%)"), line)
+            -- The two halves, each as its own segment.
+            assert.is_truthy(line:find("items: 50%% %(2/4%)"), line)
+            assert.is_truthy(line:find("money: 75%% %(3/4%)"), line)
+            -- The two fields with no home in the redundancy prose.
+            assert.is_truthy(line:find("rejected 1", 1, true), line)
+            assert.is_truthy(line:find("(itemID x1)", 1, true), line)
+        end)
+    end)
 end)

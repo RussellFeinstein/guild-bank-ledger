@@ -345,6 +345,45 @@ function GBL:BuildBusyMessage(reason)
     }
 end
 
+--- Build a SYNC_RECEIPT: what a completed receive made of what it was served.
+-- Every field is unconditional, `remaining` included. SYNC_DATA leaves its
+-- optional fields off the wire to keep an uncapped session byte-identical to
+-- one built before those fields existed; a message type introduced whole has
+-- no predecessor to stay identical to, and an absolute key set is what the
+-- wire-contract spec can hold it to.
+--
+-- `stored` and `duped` are NOT the sums of the four halves beside them.
+-- CleanupWithEventCounts runs inside FinishReceiving and decrements the total
+-- alone, so `stored` is what the receiver KEPT rather than what it took in,
+-- and it is the figure the receiver's own Redundancy line reports. The two
+-- logs are meant to be read against each other, which is the whole point.
+-- `received` is absent and derived by the reader: two stored copies of one
+-- number can disagree and nothing on the wire would say which was right. The
+-- capped session's `remaining` bucket count is absent for the same reason and
+-- is not an oversight: the SENDER authored that number and attached it to the
+-- final SYNC_DATA, so echoing it back carries nothing it does not already
+-- hold. `rejectFields` is the opposite case and is worth its bytes, because
+-- the peer holding the records is the only side that can act on which field
+-- failed, and it is the side that cannot see it.
+-- @param fields table { stored, duped, itemStored, itemDuped, moneyStored,
+--                       moneyDuped, rejected, rejectFields }
+-- @return table SYNC_RECEIPT message
+function GBL:BuildReceiptMessage(fields)
+    return {
+        type = "SYNC_RECEIPT",
+        protocolVersion = PROTOCOL_VERSION,
+        guild = self:GetGuildName(),
+        stored = fields.stored or 0,
+        duped = fields.duped or 0,
+        itemStored = fields.itemStored or 0,
+        itemDuped = fields.itemDuped or 0,
+        moneyStored = fields.moneyStored or 0,
+        moneyDuped = fields.moneyDuped or 0,
+        rejected = fields.rejected or 0,
+        rejectFields = fields.rejectFields or "",
+    }
+end
+
 --- Build a SYNC_DATA message carrying one chunk of a send.
 -- eventCounts and remaining are both optional on the wire. Passing either as
 -- nil leaves the key off the message entirely rather than sending an explicit
@@ -381,6 +420,7 @@ local syncState = {
     sendChunkSentAt = 0,
 
     receiving = false,
+    receiveRequested = false,
     receiveSource = nil,
     receiveExpected = 0,
     receiveGot = 0,
@@ -1010,6 +1050,8 @@ function GBL:OnSyncMessage(_prefix, message, distribution, sender)
         self:HandleLayoutRequest(sender, data)
     elseif msgType == "LAYOUT_DATA" then
         self:HandleLayoutData(sender, data)
+    elseif msgType == "SYNC_RECEIPT" then
+        self:HandleReceipt(sender, data)
     end
 end
 
@@ -1697,6 +1739,34 @@ function GBL:SendSyncRequestTo(target, sinceTimestamp)
     return true
 end
 
+--- Zero every per-session receive counter, and the flag saying we asked for
+-- the session. The one writer, because there were four reset sites carrying
+-- four different subsets of this list: RequestSync set all of it (three
+-- fields twice), FinishReceiving's teardown set all of it, HandleBusy left
+-- the six per-type and reject counters standing, and HandleSyncData's
+-- auto-bootstrap reset two fields. So a session that ended through BUSY or a
+-- missed abort handed its item, money and reject counts to the next one, and
+-- the Redundancy line reported them as that session's. Harmless-looking while
+-- the figure stayed in one client's log; since #237 it crosses the wire and
+-- is read by the peer that served the records, so it had to be fixed before
+-- the receipt could mean anything.
+local function clearReceiveCounters()
+    syncState.receiveExpected = 0
+    syncState.receiveGot = 0
+    syncState.receiveStored = 0
+    syncState.receiveDuped = 0
+    syncState.receiveItemStored = 0
+    syncState.receiveItemDuped = 0
+    syncState.receiveMoneyStored = 0
+    syncState.receiveMoneyDuped = 0
+    syncState.receiveItemRejected = 0
+    syncState.receiveMoneyRejected = 0
+    syncState.receiveRejectFields = {}
+    syncState.receiveRemaining = nil
+    syncState.receiveNormalized = 0
+    syncState.receiveRequested = false
+end
+
 --- Send a SYNC_REQUEST to a specific peer.
 -- @param target string Target player name
 -- @param sinceTimestamp number Only request transactions after this time
@@ -1723,22 +1793,9 @@ function GBL:RequestSync(target, sinceTimestamp)
 
     syncState.receiving = true
     syncState.receiveSource = self:CanonicalPeerKey(target)
-    syncState.receiveGot = 0
-    syncState.receiveStored = 0
-    syncState.receiveDuped = 0
-    syncState.receiveItemStored = 0
-    syncState.receiveItemDuped = 0
-    syncState.receiveMoneyStored = 0
-    syncState.receiveMoneyDuped = 0
-    syncState.receiveItemRejected = 0
-    syncState.receiveMoneyRejected = 0
-    syncState.receiveRejectFields = {}
-    syncState.receiveRemaining = nil
-    syncState.receiveNormalized = 0
-    syncState.receiveItemRejected = 0
-    syncState.receiveMoneyRejected = 0
-    syncState.receiveRejectFields = {}
-    syncState.receiveExpected = 0
+    clearReceiveCounters()
+    -- We asked for this one, which is what earns it a receipt at the end.
+    syncState.receiveRequested = true
     syncState.receiveStartTime = GetServerTime()
 
     sinceTimestamp = sinceTimestamp or 0
@@ -3269,8 +3326,13 @@ function GBL:HandleSyncData(sender, data)
         if not data.transactions and not data.moneyTransactions then return end
         syncState.receiving = true
         syncState.receiveSource = self:CanonicalPeerKey(sender)
-        syncState.receiveGot = 0
-        syncState.receiveStored = 0
+        clearReceiveCounters()
+        -- Left false: we did not ask for this, so it earns no receipt. That is
+        -- what stops a retransmitted FINAL chunk (the ACK was lost, the sender
+        -- resends, we are no longer receiving) from bootstrapping a one-chunk
+        -- session of pure duplicates and whispering a second receipt reading
+        -- 100% duped for a session that already sent one.
+        syncState.receiveRequested = false
         if data.chunk and data.chunk > 1 then
             self:AddAuditEntry("Auto-bootstrap at chunk " .. data.chunk
                 .. " from " .. sender
@@ -3456,7 +3518,7 @@ function GBL:HandleSyncData(sender, data)
 
     -- Complete if this was the last chunk
     if data.chunk and data.totalChunks and data.chunk >= data.totalChunks then
-        self:FinishReceiving(sender)
+        self:FinishReceiving(sender, true)
     end
 end
 
@@ -3507,9 +3569,126 @@ function GBL:HandleAck(sender, data)
     end)
 end
 
---- Clean up receiving state and persist sync metadata.
--- @param sender string The peer we synced from
-function GBL:FinishReceiving(sender)
+--- Render the reject-field histogram the intake keeps, sorted so two captures
+-- of one session read identically. One writer, shared by the receiver's WARN
+-- and by the receipt, so the sender is handed the same words the receiver
+-- printed rather than a second wording of them.
+-- @param map table|nil field name to count
+-- @return string "itemID x7, timestamp x5", or "" when there were none
+local function rejectFieldText(map)
+    local fields = {}
+    for field, count in pairs(map or {}) do
+        fields[#fields + 1] = tostring(field) .. " x" .. tostring(count)
+    end
+    table.sort(fields)
+    return table.concat(fields, ", ")
+end
+
+--- Is this a figure a receipt could honestly carry? A count, never negative,
+-- never NaN or infinite. AceSerializer round-trips all three, and rendered
+-- they read as measurements ("200% duped", "nan% duped") on the one message
+-- type whose only job is to be a measurement, so they are refused rather than
+-- printed.
+local function isCount(n)
+    return type(n) == "number" and n == n and n >= 0
+        and n < math.huge and math.floor(n) == n
+end
+
+--- The redundancy prose both sides print, so the receiver's Redundancy line
+-- and the sender's Receipt line cannot drift into describing one session two
+-- ways. Returns nil when nothing was received, which is what suppresses both.
+-- @return string|nil "N% duped (d/t received) - items: x% (a/b), money: ..."
+local function redundancyText(stored, duped, itemStored, itemDuped,
+                              moneyStored, moneyDuped)
+    stored = tonumber(stored) or 0
+    duped = tonumber(duped) or 0
+    local total = stored + duped
+    if total <= 0 then return nil end
+
+    local segments = {}
+    local function segment(label, segStored, segDuped)
+        segStored = tonumber(segStored) or 0
+        segDuped = tonumber(segDuped) or 0
+        local segTotal = segStored + segDuped
+        if segTotal <= 0 then return end
+        local pct = math.floor(100 * segDuped / segTotal + 0.5)
+        segments[#segments + 1] = label .. ": " .. pct
+            .. "% (" .. segDuped .. "/" .. segTotal .. ")"
+    end
+    segment("items", itemStored, itemDuped)
+    segment("money", moneyStored, moneyDuped)
+
+    local line = math.floor(100 * duped / total + 0.5)
+        .. "% duped (" .. duped .. "/" .. total .. " received)"
+    if #segments > 0 then
+        line = line .. " - " .. table.concat(segments, ", ")
+    end
+    return line
+end
+
+--- Read a peer's receipt for a session we served (#237).
+-- Log-only by design: the tranche-rotation change waits for two receipts to
+-- say the same thing. The figures are the receiver's, computed on its side
+-- from what it did with our records, and unreachable from here any other way.
+-- A receipt with nothing to report is dropped rather than logged as zeroes.
+-- @param sender string Raw sender name
+-- @param data table SYNC_RECEIPT payload
+function GBL:HandleReceipt(sender, data)
+    if type(data) ~= "table" then return end
+    local key = tostring(self:CanonicalPeerKey(sender))
+
+    -- Refused rather than rendered. This is the one message type whose only
+    -- job is to be a measurement, so a figure that cannot be one is damage,
+    -- and printed it would read as a reading.
+    if not (isCount(data.stored) and isCount(data.duped)
+        and isCount(data.rejected) and isCount(data.itemStored)
+        and isCount(data.itemDuped) and isCount(data.moneyStored)
+        and isCount(data.moneyDuped)) then
+        self:SyncWarn("Unreadable receipt from %s, dropped", key)
+        return
+    end
+
+    local body = redundancyText(data.stored, data.duped,
+        data.itemStored, data.itemDuped, data.moneyStored, data.moneyDuped)
+    -- A session in which every record was refused has no percentage and is
+    -- exactly the session the sender most needs told about: it is holding
+    -- records nobody can accept and will keep serving them. That reading is
+    -- why #68 gave rejects a counter of their own.
+    if not body and data.rejected <= 0 then return end
+
+    local line = "Receipt from " .. key .. ": "
+        .. (body or "nothing stored or duped")
+    if data.rejected > 0 then
+        line = line .. ", rejected " .. data.rejected
+        if type(data.rejectFields) == "string" and data.rejectFields ~= "" then
+            line = line .. " (" .. data.rejectFields .. ")"
+        end
+    end
+    -- A receipt from a peer we never served is not evidence about anything,
+    -- and this log is what the redundancy decision is read from. Named rather
+    -- than dropped: dropping it silently would hide a real receipt whenever
+    -- the served-peer record turns out narrower than the cases that produce
+    -- one, and that cannot be checked before release.
+    if not syncState.capLastTranche[key] then
+        line = line .. " (unsolicited, no session served to this peer)"
+    end
+    self:SyncInfo("%s", line)
+end
+
+--- Clean up receiving state and persist sync metadata: the teardown for a
+-- receive that finished AND for every one that was aborted.
+-- @param sender string The peer that was serving us
+-- @param completed boolean|nil true ONLY from the branch that runs when the
+--   last chunk has arrived. Every abort path leaves it nil, and a receipt goes
+--   out only when it is true: FinishReceiving is the single teardown for both
+--   outcomes, a partial session's redundancy is a real percentage over an
+--   unrepresentative sample, and the combat abort would put a fresh whisper on
+--   the wire in the same frame as the BUSY it sends. Deriving it from
+--   receiveGot >= receiveExpected instead would read true for the teardown of
+--   a session whose last chunk arrived without a `chunk` field, which never
+--   reaches the completion branch and is exactly the malformed peer a receipt
+--   should not be sent for.
+function GBL:FinishReceiving(sender, completed)
     local totalStored = syncState.receiveStored
     -- Read before the cleanup below, which decrements totalStored, and before
     -- the teardown that zeroes the counters.
@@ -3567,28 +3746,11 @@ function GBL:FinishReceiving(sender)
     local itemDuped_s = syncState.receiveItemDuped or 0
     local moneyStored_s = syncState.receiveMoneyStored or 0
     local moneyDuped_s = syncState.receiveMoneyDuped or 0
-    local totalGot = totalStored + totalDuped
-    if totalGot > 0 then
-        local totalDupPct = math.floor(100 * totalDuped / totalGot + 0.5)
-        local segments = {}
-        local itemTotal = itemStored_s + itemDuped_s
-        if itemTotal > 0 then
-            local itemPct = math.floor(100 * itemDuped_s / itemTotal + 0.5)
-            segments[#segments + 1] = "items: " .. itemPct
-                .. "% (" .. itemDuped_s .. "/" .. itemTotal .. ")"
-        end
-        local moneyTotal = moneyStored_s + moneyDuped_s
-        if moneyTotal > 0 then
-            local moneyPct = math.floor(100 * moneyDuped_s / moneyTotal + 0.5)
-            segments[#segments + 1] = "money: " .. moneyPct
-                .. "% (" .. moneyDuped_s .. "/" .. moneyTotal .. ")"
-        end
-        local line = "Redundancy from " .. (sender or "unknown") .. ": "
-            .. totalDupPct .. "% duped (" .. totalDuped .. "/" .. totalGot .. " received)"
-        if #segments > 0 then
-            line = line .. " - " .. table.concat(segments, ", ")
-        end
-        self:AddAuditEntry(line)
+    local redundancy = redundancyText(totalStored, totalDuped,
+        itemStored_s, itemDuped_s, moneyStored_s, moneyDuped_s)
+    if redundancy then
+        self:AddAuditEntry("Redundancy from " .. (sender or "unknown")
+            .. ": " .. redundancy)
     end
 
     -- Rejects get their own line and their own vocabulary. Folded into the dupe
@@ -3596,14 +3758,42 @@ function GBL:FinishReceiving(sender)
     -- nothing but corrupt records read as a peer we had fully converged with.
     local rejected = (syncState.receiveItemRejected or 0)
         + (syncState.receiveMoneyRejected or 0)
+    local rejectedFields = rejectFieldText(syncState.receiveRejectFields)
     if rejected > 0 then
-        local fields = {}
-        for field, count in pairs(syncState.receiveRejectFields or {}) do
-            fields[#fields + 1] = field .. " x" .. count
-        end
-        table.sort(fields)
         self:SyncWarn("Rejected %d record(s) from %s: %s",
-            rejected, tostring(sender or "unknown"), table.concat(fields, ", "))
+            rejected, tostring(sender or "unknown"), rejectedFields)
+    end
+
+    -- The figure the v0.28.8 decision rule asks for is computed here, and the
+    -- side that decides what the next session carries is the sender, which
+    -- holds capLastTranche. One whisper closes that gap (#237). Suppressed on
+    -- an empty session for the same reason the Redundancy line above is, and
+    -- on an abort for the reasons on this function's own doc comment.
+    -- Built here, where the counters still stand, and SENT below once the
+    -- receive state is down. compressMessage and SendSyncWhisper both reach
+    -- code that can raise (a missing library, the roster walk, CTL), and
+    -- unwinding from this point would leave `receiving` true with the timer
+    -- armed, which blocks every future pull until the MAX_RECEIVE_DURATION
+    -- watchdog. OnCombatStart already orders its own BUSY this way.
+    --
+    -- `syncState.receiveRequested` is the second condition and not a
+    -- belt-and-braces one: without it a retransmitted final chunk arriving
+    -- after this session was torn down bootstraps a one-chunk session of pure
+    -- duplicates, reaches the completion branch again, and whispers a second
+    -- receipt reading 100% duped for a session already reported.
+    local receipt
+    if completed and syncState.receiveRequested
+        and (redundancy or rejected > 0) then
+        receipt = self:BuildReceiptMessage({
+            stored = totalStored,
+            duped = totalDuped,
+            itemStored = itemStored_s,
+            itemDuped = itemDuped_s,
+            moneyStored = moneyStored_s,
+            moneyDuped = moneyDuped_s,
+            rejected = rejected,
+            rejectFields = rejectedFields,
+        })
     end
 
     if syncState.receiveTimer then
@@ -3613,22 +3803,22 @@ function GBL:FinishReceiving(sender)
 
     syncState.receiving = false
     syncState.receiveSource = nil
-    syncState.receiveExpected = 0
-    syncState.receiveGot = 0
-    syncState.receiveStored = 0
-    syncState.receiveDuped = 0
-    syncState.receiveItemStored = 0
-    syncState.receiveItemDuped = 0
-    syncState.receiveMoneyStored = 0
-    syncState.receiveMoneyDuped = 0
-    syncState.receiveItemRejected = 0
-    syncState.receiveMoneyRejected = 0
-    syncState.receiveRejectFields = {}
-    syncState.receiveRemaining = nil
-    syncState.receiveNormalized = 0
+    clearReceiveCounters()
     syncState.receiveStartTime = 0
     syncState.receiveNackCount = 0
     syncState.receiveSinceTimestamp = 0
+
+    if receipt then
+        local receiptTo = self:CanonicalPeerKey(sender)
+        local sent = self:SendSyncWhisper(PREFIX,
+            compressMessage(self:Serialize(receipt)), receiptTo)
+        -- The outcome, not the attempt (#90's rule for HELLO replies). A
+        -- missing Receipt line on the serving side is otherwise unreadable:
+        -- a blocked whisper, a peer on an older build and a message lost on
+        -- the wire all look identical from over there.
+        self:SyncInfo("Receipt to %s: %s", tostring(receiptTo),
+            sent and "sent" or "not sent, peer offline")
+    end
 
     self:SendMessage("GBL_SYNC_COMPLETE", sender, totalStored)
 
@@ -4201,12 +4391,7 @@ function GBL:HandleBusy(sender, data)
         end
         syncState.receiving = false
         syncState.receiveSource = nil
-        syncState.receiveExpected = 0
-        syncState.receiveGot = 0
-        syncState.receiveStored = 0
-        syncState.receiveDuped = 0
-        syncState.receiveNormalized = 0
-        syncState.receiveRemaining = nil
+        clearReceiveCounters()
         syncState.receiveStartTime = 0
         syncState.receiveNackCount = 0
         syncState.receiveSinceTimestamp = 0
