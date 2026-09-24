@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.41.5] - 2026-09-24
 
 ### Fixed
 - A purchase the auction house never answered is no longer forgotten when you reload. The addon kept that record only for the rest of the session, so a reload, a logout or a disconnect before you searched again lost it, the next search offered the row as though nothing had been bought, and the gold went out twice. It is written down the moment the purchase stops answering now, and the row says the result is unknown until you clear it or the items turn up in the bank.
@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A deposit that arrives from another member with a broken timestamp no longer clears a purchase of yours that is still in the mail.
 - A Clear button on a pending row works in the rare case something else wrote the entry under a different key. It did nothing at all there, and the purchase could never be settled by a deposit either.
 - A pending entry that carries no buyer name no longer raises an error partway through recording a purchase, which left the buy flow stuck.
+- A row for an item that is not in your bank layout no longer reads as in stock. Its icon, its colour and its words all said there was nothing to do, right beside its own line saying how much of it is in the mail, which is the only reason that row is there at all.
+- Each part of a pending row shows its own age. The figure for what is on its way used to show the age of the oldest purchase on that item, so something bought seconds ago could say it was bought hours ago and send you to an empty mailbox.
+- A late result from the auction house no longer undoes a Clear you pressed, and no longer counts items as still in the mail after you have deposited them.
+- If the addon cannot record a purchase at all, it now says so in the log instead of leaving every Buy button disabled for the rest of the session with nothing explaining why.
 
 ## [0.41.4] - 2026-09-24
 
