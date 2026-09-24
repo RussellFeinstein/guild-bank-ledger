@@ -284,7 +284,7 @@ end
 -- New scheme: occurrences are sequential per-prefix regardless of timeSlot.
 -- @param guildData table Guild data from AceDB
 function GBL:MigrateOccurrenceScheme(guildData)
-    if not guildData or guildData.schemaVersion >= 2 then return end
+    if not guildData or (guildData.schemaVersion or 0) >= 2 then return end
 
     -- Remove corrupted records (AceSerializer field boundary corruption)
     local function isCorrupted(record)
@@ -1357,7 +1357,12 @@ end
 --
 -- Idempotent: bare keys and cross-realm keys pass through untouched.
 function GBL:MigrateNormalizePeerNames(guildData)
-    if not guildData or (guildData.schemaVersion or 0) >= 9 then return 0 end
+    -- Strict prerequisite, like the two rungs above it (:1422, :1530) and for
+    -- the same reason. A loose `>= 9` advances any guild below 9, skipping the
+    -- 4 to 8 work for good. Nothing called it that way, because MigrateAllGuilds
+    -- reaches it only at 8, but that left the call order as the only thing
+    -- protecting the low half of the ladder.
+    if not guildData or (guildData.schemaVersion or 0) ~= 8 then return 0 end
 
     local localRealm = self:GetLocalRealm()
     if localRealm == "UnknownRealm" then return 0 end

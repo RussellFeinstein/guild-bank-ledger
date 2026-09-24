@@ -292,34 +292,26 @@ describe("schemaVersion", function()
     end)
 
     ---------------------------------------------------------------------------
-    -- 3. Migration 9's gate is the loose form, and the call order is the
-    --    reason that is safe
+    -- 3. Migration 9's gate, strict since #263 like its two successors
     ---------------------------------------------------------------------------
 
     describe("MigrateNormalizePeerNames", function()
-        it("advances a guild at 3 straight to 9 when called on its own (characterization)", function()
-            -- Its gate is `>= 9` (src/Core.lua:1360) rather than the strict form
-            -- its two successors carry one rung up each (`~= 9` at :1422 and
-            -- `~= 10` at :1530); the strict form here would be `~= 8`. So on its
-            -- own it will advance any guild below 9 and the 4 to 8 work is
-            -- skipped. Nothing in production calls it
-            -- that way: MigrateAllGuilds reaches it only at 8, which the ladder
-            -- cases above assert. Recorded rather than blessed, so that if the
-            -- gate is ever tightened this case is the one that has to change.
-            --
-            -- Tightening it IS a safe improvement, and measured: changing :1360
-            -- to `~= 8` reds exactly this case in the whole 2551-case suite and
-            -- nothing else, because the ladder only ever reaches the migration
-            -- at 8. It is not done in this PR because src/Core.lua is packaged,
-            -- so the one-line change turns a test-only PR into a version stamp
-            -- across six artifacts plus a tag, pushed to every auto-updating
-            -- install, to harden a path nothing in production can reach. Worth
-            -- doing as part of the next release that touches this file.
+        it("refuses a guild below 8 rather than advancing it", function()
+            -- Its gate is `~= 8`, the strict form its two successors carry one
+            -- rung up each (`~= 9` at src/Core.lua:1422, `~= 10` at :1530), and
+            -- for the same reason: a loose `>= 9` here advances any guild below
+            -- 9 and the 4 to 8 work is skipped for good. Nothing in production
+            -- called it that way, because MigrateAllGuilds reaches it only at 8,
+            -- but that made the call order the only thing protecting the low half
+            -- of the ladder. The gate protects it now too.
             guildData.schemaVersion = 3
+            guildData.knownPeers = { ["Katorriwl"] = { lastSeen = 1000 } }
 
-            GBL:MigrateNormalizePeerNames(guildData)
+            local merged = GBL:MigrateNormalizePeerNames(guildData)
 
-            assert.equals(9, guildData.schemaVersion)
+            assert.equals(0, merged)
+            assert.equals(3, guildData.schemaVersion)
+            assert.is_not_nil(guildData.knownPeers["Katorriwl"])
         end)
     end)
 
