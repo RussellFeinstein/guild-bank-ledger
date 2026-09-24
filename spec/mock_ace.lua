@@ -40,40 +40,128 @@ end
 -- AceDB mock
 ---------------------------------------------------------------------------
 
-local function deepCopy(orig)
-    if type(orig) ~= "table" then return orig end
-    local copy = {}
-    for k, v in pairs(orig) do
-        copy[k] = deepCopy(v)
-    end
-    return copy
-end
-
+--- Copy defaults in, the way AceDB does at login.
+--
+-- Transcribed branch for branch from Libs/AceDB-3.0/AceDB-3.0.lua:88-131,
+-- for the same reason removeDefaults below it is: a partial port is how this
+-- mock came to model a fresh install and never an upgrade. Two things it was
+-- missing outright, each with its own case in spec/savedvariables_spec.lua,
+-- and three branches it never had at all (below).
+--
+-- A vivified table starts EMPTY and has the template copied into it. The old
+-- version deep-copied the template, which copies the literal "*" key along
+-- with everything else, so every table declaring a nested wildcard was born
+-- holding a phantom entry. guilds["*"].playerStats is the one that matters:
+-- seven production sites walk it with pairs, four of them inside migrations,
+-- and two of the seven resolve every name they find and write it back
+-- (src/Core.lua:761 in MigrateSchemaV2ToV3, and :1704 in RepairPlayerNames,
+-- which runs from OnEnable rather than the migration chain). The other five
+-- are clear-and-repopulate loops. So one migration was resolving the phantom
+-- and storing the result, which is enough.
+--
+-- The already-existing-tables loop applies the template to tables ALREADY in
+-- the file, which is the upgrade path. Without it a key stripped at logout
+-- never comes back at the next login.
+--
+-- The scalar wildcard, the nil-key guard and the ** merge are unreachable
+-- from this addon's defaults and are ported anyway; see removeDefaults.
 local function applyDefaults(target, defaults)
-    if type(defaults) ~= "table" then return end
     for k, v in pairs(defaults) do
-        if k == "*" then
-            -- Wildcard default: set metatable for auto-vivification
-            setmetatable(target, {
-                __index = function(t, key)
-                    local new = deepCopy(v)
-                    if type(new) == "table" then
-                        applyDefaults(new, v)
+        if k == "*" or k == "**" then
+            if type(v) == "table" then
+                setmetatable(target, {
+                    __index = function(t, k2)
+                        if k2 == nil then return nil end
+                        local tbl = {}
+                        applyDefaults(tbl, v)
+                        rawset(t, k2, tbl)
+                        return tbl
+                    end,
+                })
+                -- handle already existing tables in the SV
+                for dk, dv in pairs(target) do
+                    if not rawget(defaults, dk) and type(dv) == "table" then
+                        applyDefaults(dv, v)
                     end
-                    rawset(t, key, new)
-                    return new
-                end,
-            })
-        elseif type(v) == "table" then
-            if target[k] == nil then
-                target[k] = {}
+                end
+            else
+                -- a non-table wildcard is just a value every key answers with
+                setmetatable(target, {
+                    __index = function(t, k2) return k2 ~= nil and v or nil end,
+                })
             end
+        elseif type(v) == "table" then
+            if not rawget(target, k) then rawset(target, k, {}) end
             if type(target[k]) == "table" then
                 applyDefaults(target[k], v)
+                if defaults["**"] then
+                    applyDefaults(target[k], defaults["**"])
+                end
             end
         else
-            if target[k] == nil then
-                target[k] = v
+            if rawget(target, k) == nil then
+                rawset(target, k, v)
+            end
+        end
+    end
+end
+
+--- Strip every value that still equals its default, the way AceDB does
+--- before the SavedVariables file is written.
+--
+-- Transcribed branch for branch from Libs/AceDB-3.0/AceDB-3.0.lua:134-176.
+-- Three of its branches are unreachable from this addon's own defaults and
+-- are ported anyway, because a partial port is how the read path came to
+-- model a login and never a logout: the "**" table branch, the "*" scalar
+-- branch, and the blocker argument that only "**" passes. GBL declares two
+-- "*" table wildcards and no "**" at all (src/Core.lua, guilds and
+-- playerStats). spec/savedvariables_spec.lua covers all three against a real
+-- AceDB rather than against hand-written expectations, the nested case for
+-- the table-branch blocker included.
+--
+-- What that comparison cannot see: luassert compares tables with metatables
+-- ignored, so it would agree with a port that left a live wildcard metatable
+-- on a stripped table. The dedicated "metatable clear" cases cover that, so
+-- this is not a diff of the whole function and the two halves are separate.
+--
+-- The metatable clear on the first line is load-bearing twice over: it stops
+-- the walk creating subtables through the very wildcard it is stripping, and
+-- it is what lets a spec assert a key is absent without the read putting it
+-- back.
+local function removeDefaults(db, defaults, blocker)
+    setmetatable(db, nil)
+    for k, v in pairs(defaults) do
+        if k == "*" or k == "**" then
+            if type(v) == "table" then
+                for key, value in pairs(db) do
+                    if type(value) == "table" then
+                        -- not named in the defaults: strip the whole template
+                        if defaults[key] == nil and (not blocker or blocker[key] == nil) then
+                            removeDefaults(value, v)
+                            if next(value) == nil then
+                                db[key] = nil
+                            end
+                        -- named: strip only ** content, blocking the key table
+                        elseif k == "**" then
+                            removeDefaults(value, v, defaults[key])
+                        end
+                    end
+                end
+            elseif k == "*" then
+                for key, value in pairs(db) do
+                    if defaults[key] == nil and v == value then
+                        db[key] = nil
+                    end
+                end
+            end
+        elseif type(v) == "table" and type(db[k]) == "table" then
+            removeDefaults(db[k], v, blocker and blocker[k])
+            if next(db[k]) == nil then
+                db[k] = nil
+            end
+        else
+            if db[k] == defaults[k] and (not blocker or blocker[k] == nil) then
+                db[k] = nil
             end
         end
     end
@@ -97,6 +185,31 @@ local function createAceDB(svName, defaults)
         if defaults.profile then
             applyDefaults(db.profile, defaults.profile)
         end
+    end
+
+    -- A session boundary, which the mock could not express before #77.
+    -- _simulateLogout strips in place, so db.global and db.profile become
+    -- the on-disk image; _simulateLogin is the next login over that file.
+    -- Run the pair to model an upgrade: what AceDB does to a guild ALREADY
+    -- in the file is a different path from what it does to a fresh one.
+    db._defaults = defaults
+
+    db._simulateLogout = function(self)
+        local d = self._defaults
+        if d then
+            if d.global then removeDefaults(self.global, d.global) end
+            if d.profile then removeDefaults(self.profile, d.profile) end
+        end
+        return self
+    end
+
+    db._simulateLogin = function(self)
+        local d = self._defaults
+        if d then
+            if d.global then applyDefaults(self.global, d.global) end
+            if d.profile then applyDefaults(self.profile, d.profile) end
+        end
+        return self
     end
 
     MockAce.dbInstance = db
