@@ -266,4 +266,112 @@ describe("Tab switching through the TabGroup", function()
         assert.equals("layout", GBL.tabGroup._selectedTab)
         assert.equals("transactions", GBL.activeTab)
     end)
+
+    ------------------------------------------------------------------------
+    -- OpenRestockTab against the bar (#244)
+    --
+    -- The /gbl restock entry gates on HasSortAccess and then hands the
+    -- group a literal, so the tab bar never gets a say. The two access
+    -- families are independent (docs/PLAN-views-and-access.md section 3):
+    -- the view family decides the tab set and the bank family decides the
+    -- bank tools, so a guild can leave a rank in sync_only while it still
+    -- holds sort access. That is legal configuration and it is the
+    -- arrangement these cases use.
+    --
+    -- Two different failures come out of it, which is why there are two
+    -- refusal cases. A bar that SHRANK out of Restock keeps a hidden frame
+    -- carrying the value, so the literal matches and the whole tab renders
+    -- under the restricted banner. A bar that NEVER held it matches
+    -- nothing, so the window silently stays where it was and the player is
+    -- told nothing at all.
+    ------------------------------------------------------------------------
+
+    -- A rank the guild put in sync_only that still holds sort access.
+    local function syncOnlyWithSortAccess()
+        local gd = GBL:GetGuildData()
+        gd.accessControl = { rankThreshold = 1, restrictedMode = "sync_only" }
+        gd.sortAccess = {
+            write = { rankThreshold = nil, delegates = {} },
+            sort  = { rankThreshold = 9, delegates = {} },
+            updatedAt = 100,
+        }
+        MockWoW.player.name = "Hand"
+        MockWoW.guild.rankIndex = 5
+    end
+
+    it("refuses /gbl restock when the rank's bar lost the Restock tab", function()
+        -- The window came up wide, so every tab frame exists. Access
+        -- control then puts this rank in sync_only: RebuildTabs builds the
+        -- three-tab bar and moves activeTab to sync, but BuildTabs only
+        -- hides the surplus frames and leaves their value on them.
+        GBL:CreateMainFrame()
+        assert.is_true(tabSet().restock, "precondition: the bar came up wide")
+
+        syncOnlyWithSortAccess()
+        GBL:RebuildTabs()
+        assert.is_nil(tabSet().restock, "precondition: the bar lost Restock")
+        assert.equals("sync", GBL.activeTab, "precondition: parked on Sync")
+
+        GBL:OpenRestockTab()
+
+        assert.equals("sync", GBL.activeTab)
+        assert.is_false(rendersText(GBL.tabGroup, "Budget:"),
+            "the Restock tab rendered for a rank whose bar does not hold it")
+        assert.is_true(Helpers.printContains("not one of the tabs"))
+    end)
+
+    it("says so when the bar never held Restock, rather than doing nothing", function()
+        -- No stale frame here: the bar is built narrow from the start, so
+        -- the value matches nothing and today the click is a silent no-op.
+        syncOnlyWithSortAccess()
+        GBL:CreateMainFrame()
+        assert.is_nil(tabSet().restock, "precondition: the bar came up narrow")
+        assert.equals("sync", GBL.activeTab)
+
+        GBL:OpenRestockTab()
+
+        assert.equals("sync", GBL.activeTab)
+        assert.is_true(Helpers.printContains("not one of the tabs"),
+            "the command did nothing and said nothing")
+    end)
+
+    it("opens no window at all when the rank cannot reach Restock", function()
+        -- The sort-access refusal above it opens nothing either, so the two
+        -- refusals behave alike from the player's side.
+        syncOnlyWithSortAccess()
+
+        GBL:OpenRestockTab()
+
+        assert.is_nil(GBL.tabGroup, "a refused /gbl restock opened the window")
+        assert.is_true(Helpers.printContains("not one of the tabs"))
+    end)
+
+    it("opens a cold window onto Restock without building Transactions", function()
+        -- CreateMainFrame's RebuildTabs builds whatever activeTab holds, so
+        -- /gbl restock on a closed window rendered the whole
+        -- virtual-scrolling ledger and released it on the next line. The
+        -- in-view flag rides on the same change: SelectTab closes with
+        -- `(tabName == "restock") and IsMainFrameShown()`, and
+        -- CreateMainFrame hides the frame before RebuildTabs, so a tab
+        -- built in there is built hidden and the flag has to be put right
+        -- once the window is up. A false flag moves the wallet baseline
+        -- again on the next refresh, inside the purchase lag (#60).
+        local built = {}
+        for _, name in ipairs({ "BuildTransactionsTab", "BuildRestockTab" }) do
+            local orig = GBL[name]
+            GBL[name] = function(gbl, ...)
+                built[name] = (built[name] or 0) + 1
+                return orig(gbl, ...)
+            end
+        end
+
+        GBL:OpenRestockTab()
+
+        assert.equals("restock", GBL.activeTab)
+        assert.equals(1, built.BuildRestockTab or 0)
+        assert.equals(0, built.BuildTransactionsTab or 0,
+            "the cold open built the ledger and threw it away")
+        assert.is_true(GBL._restockInView,
+            "the window is up on Restock and the in-view flag says otherwise")
+    end)
 end)
