@@ -115,39 +115,16 @@ describe("Restock buy", function()
         return n
     end
 
-    -- The timers still able to fire at a given delay: NewTicker handles the
-    -- flow has not cancelled. A settled step or a reset leaves none. The one
-    -- step timer is armed at RESTOCK_STEP_TIMEOUT for a start or a confirm and
-    -- at RESTOCK_PAUSE_TIMEOUT while a quote waits for the player (#211).
-    local function liveTimers(delay)
-        local n = 0
-        for _, t in ipairs(MockWoW.pendingTimers) do
-            if not t.cancelled and t.delay == delay then n = n + 1 end
-        end
-        return n
-    end
-    local function liveStepTimers() return liveTimers(GBL.RESTOCK_STEP_TIMEOUT) end
-    local function livePauseTimers() return liveTimers(GBL.RESTOCK_PAUSE_TIMEOUT) end
-
-    -- Fire only the live timers at a delay, leaving every other pending timer
-    -- in place. Errors when there is none: a helper that matches nothing
-    -- passes vacuously (the #92 lesson).
-    local function fireTimers(delay)
-        local keep, fire = {}, {}
-        for _, t in ipairs(MockWoW.pendingTimers) do
-            if not t.cancelled and t.delay == delay then
-                fire[#fire + 1] = t
-            else
-                keep[#keep + 1] = t
-            end
-        end
-        assert(#fire > 0, "no timer pending at delay " .. tostring(delay))
-        MockWoW.pendingTimers = keep
-        for _, t in ipairs(fire) do t.callback() end
-        return #fire
-    end
-    local function fireStepTimers() return fireTimers(GBL.RESTOCK_STEP_TIMEOUT) end
-    local function firePauseTimers() return fireTimers(GBL.RESTOCK_PAUSE_TIMEOUT) end
+    -- The shared timer family is in spec/helpers.lua (#117), which carries the
+    -- filter rules and the three harness traps. These four wrappers stay
+    -- because the delay they name is the intent: the one step timer is armed
+    -- at RESTOCK_STEP_TIMEOUT for a start or a confirm and at
+    -- RESTOCK_PAUSE_TIMEOUT while a quote waits for the player (#211), and a
+    -- settled step or a reset leaves neither pending.
+    local function liveStepTimers() return Helpers.timersAt(GBL.RESTOCK_STEP_TIMEOUT) end
+    local function livePauseTimers() return Helpers.timersAt(GBL.RESTOCK_PAUSE_TIMEOUT) end
+    local function fireStepTimers() return Helpers.fireTimersAt(GBL.RESTOCK_STEP_TIMEOUT) end
+    local function firePauseTimers() return Helpers.fireTimersAt(GBL.RESTOCK_PAUSE_TIMEOUT) end
 
     -- The measured good sequence for one purchase, after its start: the price
     -- in the response frame, then the READY that carries the confirm out.
@@ -1382,6 +1359,13 @@ describe("Restock buy", function()
             assert.is_true(GBL._restock.priceIn)
             assert.equals(0, liveStepTimers())
             assert.equals(1, livePauseTimers())  -- the one timer slot, re-armed for the pause
+            -- Asking for the delay that is NOT pending has to fail rather than
+            -- fire whatever is. This is the one place the suite holds one
+            -- delay live and another absent, so it is the only place the
+            -- shared helper's filter and its error-on-no-match can be caught
+            -- doing nothing (#117: both survived a mutation pass without it).
+            assert.has_error(fireStepTimers)
+            assert.equals(1, livePauseTimers(), "the pause timer survives the refusal")
             assert.equals(1, count("price in, awaiting confirm"))
             -- The READY that follows the price clears the throttle and confirms nothing.
             MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")

@@ -317,6 +317,10 @@ describe("Sync send path", function()
     ---------------------------------------------------------------------------
 
     describe("ACK timeout target liveness", function()
+        -- Already the shape #117 wants: a named wrapper over the shared
+        -- Sync.fireAckTimeout, where the local part is the intent. The clock
+        -- advance is the scenario, a peer that has gone quiet long enough for
+        -- the timeout to mean something, not a way of finding the timer.
         local function fireOneAckTimeout()
             MockWoW.serverTime = MockWoW.serverTime + 10
             fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
@@ -446,6 +450,16 @@ describe("Sync send path", function()
                 end
                 return c
             end
+            -- Deliberately NOT folded into Sync.fireNextChunkDelay at #117,
+            -- though the two look alike. That one takes the NEWEST match in
+            -- 0.05 < delay <= 1.0 and errors on none; this one takes the
+            -- OLDEST in 0 < delay <= maxDelay and returns nil, which the two
+            -- callers below turn into their own assertion message. This test
+            -- is about which of two pending timers fires and in what order,
+            -- so the direction is the thing under test rather than an
+            -- implementation detail, and swapping it could quietly change
+            -- what the case exercises. Left as a test-specific pump on
+            -- purpose; the shared family is in spec/helpers.lua.
             local function fireFirstShortTimer(maxDelay)
                 for _, timer in ipairs(MockWoW.pendingTimers) do
                     if not timer.cancelled and not timer.fired

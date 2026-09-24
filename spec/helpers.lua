@@ -277,6 +277,142 @@ end
 Helpers.MockWoW = MockWoW
 Helpers.MockAce = MockAce
 
+------------------------------------------------------------------------
+-- Driving the mock timer queue (#117)
+--
+-- Four helpers, each with its own filter rule, and the rule is the whole
+-- point: a pump that stops discriminating passes vacuously. Pick by what
+-- the test means, not by what happens to make it green.
+--
+--   fireTimersAt(delay)     exactly one delay, errors on no match
+--   timersAt(delay)         counts without firing
+--   drainZeroDelayTimers()  delay == 0 only, one hop per round
+--   drainAllTimers()        everything, to empty, bounded
+--
+-- The sync suite keeps its own beside these in spec/sync_helpers.lua
+-- (fireAckTimeout, fireNextChunkDelay, drainSend, fireReceiveTimeout).
+-- The difference is QUEUE SEMANTICS, not subject matter: Sync.fireAckTimeout
+-- matches an exact delay from a production export and errors on no match,
+-- which is fireTimersAt's rule exactly, but it fires only the FIRST match and
+-- LEAVES it in the queue, relying on production's own Cancel to retire it.
+-- The retry loop in spec/sync_send_spec.lua walks forward past cancelled
+-- timers and several sites count #MockWoW.pendingTimers directly, so swapping
+-- one family for the other silently changes what those tests observe. They
+-- are not interchangeable; do not fold them on the strength of the signature.
+--
+-- Four traps in the harness, in one place rather than rediscovered per
+-- spec. Each has cost a session at least once.
+--
+--   1. MockWoW.fireTimers SNAPSHOTS the queue and cannot cascade
+--      (spec/mock_wow.lua). A self-rescheduling chain needs one call per
+--      hop, so a single call looks like a chain that stopped.
+--   2. C_Timer.NewTicker inserts into the same MockWoW.pendingTimers as
+--      After, so anything that drains to empty also fires the 120s send
+--      hard timer and the HELLO heartbeat, aborting the thing under test.
+--      That is why the two narrow drains exist.
+--   3. Wall-clock gates (INTER_CHUNK_GAP_FLOOR) read MockWoW.serverTime,
+--      which nothing advances on its own. A drive-to-completion loop has
+--      to move it or it spins on chunk one forever; Sync.drainSend is the
+--      one that does, by 2s a round.
+--   4. A SPENT timer is not always gone. The sync family marks `t.fired`
+--      and leaves the timer in the queue, so anything that only checks
+--      `cancelled` counts it as live and fires it again. These helpers
+--      skip `fired` for that reason, and they remove what they fire, so
+--      the two conventions can be mixed in one spec without a spent ACK
+--      timer reading as pending.
+------------------------------------------------------------------------
+
+--- The live timers at exactly this delay: uncancelled, unfired, not run yet.
+--
+-- Takes the delay from a production export rather than a literal. Thirteen
+-- spec sites once searched for a hardcoded `timer.delay == 8`, and when the
+-- constant moved to 3 every one of them matched nothing and passed anyway.
+-- A nil delay is an error rather than a count of zero. Every use of this in an
+-- `assert.equals(0, ...)` position would otherwise keep passing the day its
+-- constant is renamed or removed, which is that same failure wearing the other
+-- face: fireTimersAt guards it by erroring on no match, and a counter that
+-- returns a number cannot.
+-- @param delay number The delay to match, from the production constant
+-- @return number How many are pending
+function Helpers.timersAt(delay)
+    if delay == nil then
+        error("timersAt(nil): the delay constant is missing or renamed", 2)
+    end
+    local n = 0
+    for _, t in ipairs(MockWoW.pendingTimers) do
+        if not t.cancelled and not t.fired and t.delay == delay then
+            n = n + 1
+        end
+    end
+    return n
+end
+
+--- Fire only the timers at exactly this delay, leaving every other one alone.
+--
+-- Errors when it matches nothing rather than returning quietly, which is what
+-- keeps it from being a vacuous pass: a test that means "the step timeout
+-- fires" has not tested anything if no such timer was pending.
+-- @param delay number The delay to match, from the production constant
+-- @return number How many fired
+function Helpers.fireTimersAt(delay)
+    if delay == nil then
+        error("fireTimersAt(nil): the delay constant is missing or renamed")
+    end
+    local keep, fire = {}, {}
+    for _, t in ipairs(MockWoW.pendingTimers) do
+        if not t.cancelled and not t.fired and t.delay == delay then
+            fire[#fire + 1] = t
+        else
+            keep[#keep + 1] = t
+        end
+    end
+    -- No level on the error: every caller reaches this through a wrapper that
+    -- binds the constant (fireStepTimers and its siblings), so blaming the
+    -- caller's line would name the wrapper for all of them. The delay in the
+    -- message is what identifies which one refused.
+    if #fire == 0 then
+        error("no timer pending at delay " .. tostring(delay))
+    end
+    MockWoW.pendingTimers = keep
+    local fired = 0
+    for _, t in ipairs(fire) do
+        -- Re-checked rather than trusted from the partition above: a callback
+        -- may cancel a sibling in the same batch, which production does
+        -- routinely (arming a step timer cancels the previous one).
+        if not t.cancelled then
+            t.callback()
+            fired = fired + 1
+        end
+    end
+    return fired
+end
+
+--- Drive every pending timer repeatedly until the queue empties or the cap.
+--
+-- The blunt one, and the right one when a test wants the whole cascade: the
+-- sort executor's pump self-reschedules and its end of pass adds settle and
+-- scan timers, so a run needs several rounds. Read trap 2 above before
+-- reaching for it anywhere a long-lived ticker is pending.
+--
+-- It returns quietly at the cap, and unlike drainZeroDelayTimers one screen
+-- down it deliberately does NOT error there. That difference was measured, not
+-- assumed: making it error reds 78 sort executor cases, because a finished run
+-- normally leaves something pending (the stall watchdog re-arms, the end of
+-- pass schedules a settle and a scan), so an empty queue is not this helper's
+-- success condition the way it is for a zero-delay chain. What the caller gets
+-- instead is the round count, so a test that does care can assert it came in
+-- under the cap.
+-- @param maxRounds number|nil Safety cap (default 60)
+-- @return number How many rounds ran
+function Helpers.drainAllTimers(maxRounds)
+    maxRounds = maxRounds or 60
+    for round = 1, maxRounds do
+        if #MockWoW.pendingTimers == 0 then return round - 1 end
+        MockWoW.fireTimers()
+    end
+    return maxRounds
+end
+
 --- Fire pending zero-delay timers until none are left, one round at a time.
 --
 -- For driving a C_Timer.After(0) work chain, where each hop schedules the next

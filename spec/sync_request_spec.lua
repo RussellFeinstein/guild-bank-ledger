@@ -572,32 +572,11 @@ describe("Sync request and serve", function()
         end
 
         -- Only the first chunk leaves synchronously, so a send has to be
-        -- driven to completion before asking what it offered.
-        local function drainSend(target)
-            for _ = 1, 4000 do
-                if not GBL:GetSyncStatus().sending then break end
-                local idx = tonumber(
-                    GBL:GetSyncStatus().sendProgress:match("^(%d+)"))
-                GBL:HandleAck(target, { chunk = idx })
-                MockWoW.serverTime = MockWoW.serverTime + 2
-                local fired = false
-                for i = #MockWoW.pendingTimers, 1, -1 do
-                    local t = MockWoW.pendingTimers[i]
-                    if not t.cancelled and not t.fired and t.delay
-                        and t.delay > 0 and t.delay <= 2.0 then
-                        t.fired = true
-                        t.callback()
-                        fired = true
-                        break
-                    end
-                end
-                if not fired then break end
-            end
-        end
-
+        -- driven to completion before asking what it offered; Sync.drainSend
+        -- is what does that (spec/sync_helpers.lua).
         local function serve(payload)
             GBL:HandleSyncRequest("OfficerB", request(payload))
-            drainSend("OfficerB")
+            Sync.drainSend(GBL, "OfficerB")
 
             local ids = {}
             for _, sent in ipairs(MockAce.sentCommMessages) do
@@ -1795,33 +1774,6 @@ describe("Sync request and serve", function()
                 return out
             end
 
-            --- ACK each chunk and fire the inter-chunk gap so the whole
-            --- session actually goes out, the way a healthy peer drives it.
-            --- The clock has to move: SendNextChunk enforces a wall-clock gap
-            --- floor between issues, and against a frozen GetTime it just
-            --- reschedules itself and the send never leaves chunk one.
-            local function drainSend(target)
-                for _ = 1, 4000 do
-                    if not GBL:GetSyncStatus().sending then break end
-                    local idx = tonumber(
-                        GBL:GetSyncStatus().sendProgress:match("^(%d+)"))
-                    GBL:HandleAck(target, { chunk = idx })
-                    MockWoW.serverTime = MockWoW.serverTime + 2
-                    local fired = false
-                    for i = #MockWoW.pendingTimers, 1, -1 do
-                        local t = MockWoW.pendingTimers[i]
-                        if not t.cancelled and not t.fired and t.delay
-                            and t.delay > 0 and t.delay <= 2.0 then
-                            t.fired = true
-                            t.callback()
-                            fired = true
-                            break
-                        end
-                    end
-                    if not fired then break end
-                end
-            end
-
             local function recordsSent()
                 local total = 0
                 for _, chunk in ipairs(sentChunks()) do
@@ -1837,7 +1789,7 @@ describe("Sync request and serve", function()
                 local held = #guildData.transactions
 
                 Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
-                drainSend("OfficerB")
+                Sync.drainSend(GBL, "OfficerB")
 
                 local sent = recordsSent()
                 assert.is_true(sent > 0, "a capped session still sends something")
@@ -1859,7 +1811,7 @@ describe("Sync request and serve", function()
             it("puts remaining on the final chunk only", function()
                 seedOverCap()
                 Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
-                drainSend("OfficerB")
+                Sync.drainSend(GBL, "OfficerB")
 
                 local chunks = sentChunks()
                 assert.is_true(#chunks > 0)
@@ -1876,7 +1828,7 @@ describe("Sync request and serve", function()
                 GBL:ResetHashCache()
 
                 Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
-                drainSend("OfficerB")
+                Sync.drainSend(GBL, "OfficerB")
 
                 for _, chunk in ipairs(sentChunks()) do
                     assert.is_nil(chunk.remaining)
@@ -1888,7 +1840,7 @@ describe("Sync request and serve", function()
             it("serves the deferred buckets on the next request", function()
                 seedOverCap()
                 Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
-                drainSend("OfficerB")
+                Sync.drainSend(GBL, "OfficerB")
                 local firstPass = {}
                 for _, chunk in ipairs(sentChunks()) do
                     for _, rec in ipairs(chunk.transactions or {}) do
@@ -1899,7 +1851,7 @@ describe("Sync request and serve", function()
                 MockAce.sentCommMessages = {}
                 GBL:FinishSending()
                 Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
-                drainSend("OfficerB")
+                Sync.drainSend(GBL, "OfficerB")
 
                 local secondPassHasNew = false
                 for _, chunk in ipairs(sentChunks()) do
