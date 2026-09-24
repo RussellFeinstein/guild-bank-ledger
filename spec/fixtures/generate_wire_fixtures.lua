@@ -97,6 +97,7 @@ end
 local UPSTREAM = {
     ["LibStub.lua"] = "Libs/LibStub/LibStub.lua",
     ["AceSerializer-3.0.lua"] = "Libs/AceSerializer-3.0/AceSerializer-3.0.lua",
+    ["AceDB-3.0.lua"] = "Libs/AceDB-3.0/AceDB-3.0.lua",
 }
 
 --- Collapse SVN keyword expansion and line endings before comparing.
