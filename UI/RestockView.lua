@@ -488,10 +488,23 @@ function GBL:RefreshRestockTab()
 end
 
 --- Open the main window and switch to the Restock tab (the /gbl restock entry).
--- Gated on sort access; the tab only exists in the bar for those users.
+--
+-- Two gates, because sort access is not the whole answer (#244). The view
+-- family and the bank family are independent (docs/PLAN-views-and-access.md
+-- section 3), so a guild can leave a rank in sync_only while it still holds
+-- sort access, and that rank's bar is Sync, Changelog and About. Handing the
+-- group a literal "restock" got past it two ways: a bar that shrank still
+-- holds a hidden frame carrying the value, so AceGUI matched it and built the
+-- tab under the restricted banner, and a bar that never held it matched
+-- nothing and the command went silent. HasAccessTab answers both, from the
+-- same producer RebuildTabs builds the bar from.
 function GBL:OpenRestockTab()
     if not (self.HasSortAccess and self:HasSortAccess()) then
         self:Print("Restock requires sort access for this guild.")
+        return
+    end
+    if not self:HasAccessTab("restock") then
+        self:Print("Restock is not one of the tabs your rank can open in this guild.")
         return
     end
     self:CreateMainFrame()
