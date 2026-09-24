@@ -273,4 +273,105 @@ describe("SavedVariables", function()
             assert.same({ "Alice-Realm" }, sortedKeys(stats))
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- The read path, against the library it stands in for
+    ---------------------------------------------------------------------------
+
+    describe("wildcard vivification", function()
+        it("creates a table with no literal wildcard key in it", function()
+            -- The mock built a vivified table by deep-copying the template,
+            -- which copies the literal "*" key along with everything else.
+            -- copyDefaults starts from an empty table, so a real client's
+            -- playerStats is empty here and the suite's held one phantom
+            -- player. Seven production sites walk this table with pairs and
+            -- five of them are migrations that resolve every name they find,
+            -- so under the old mock they migrated a player no client can have.
+            local stats = db.global.guilds["TestGuild"].playerStats
+            assert.same({}, sortedKeys(stats))
+            assert.is_nil(rawget(stats, "*"))
+        end)
+
+        it("re-applies the template to a guild already in the file", function()
+            -- copyDefaults has a second loop for tables already present in
+            -- the SavedVariables, which the mock never had, so it modelled a
+            -- fresh install and never an upgrade. Every migration spec in the
+            -- suite runs against the shape this produces.
+            db.global.guilds["TestGuild"].schemaVersion = 11
+            db:_simulateLogout()
+            db:_simulateLogin()
+
+            local guild = db.global.guilds["TestGuild"]
+            assert.same(DECLARED, sortedKeys(guild))
+            assert.equals(11, guild.schemaVersion)
+            assert.is_table(guild.transactions)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- Branches this addon's defaults cannot reach, ported anyway
+    --
+    -- GBL declares two "*" table wildcards and no "**", no scalar wildcard and
+    -- nothing that passes a blocker. Those branches are transcribed from the
+    -- library all the same, because porting only the reachable half is how the
+    -- mock came to model a login and never a logout. Synthetic defaults here,
+    -- so a future defaults block that does reach them finds them working.
+    ---------------------------------------------------------------------------
+
+    describe("wildcard forms GBL does not use", function()
+        local function synthetic(defaults)
+            return _G.LibStub("AceDB-3.0"):New("SyntheticDB", defaults)
+        end
+
+        it("serves a scalar wildcard without storing it", function()
+            local sdb = synthetic({ global = { limits = { ["*"] = 7 } } })
+            assert.equals(7, sdb.global.limits.anything)
+            assert.same({}, sortedKeys(sdb.global.limits))
+        end)
+
+        it("answers a nil key with nil rather than vivifying", function()
+            local sdb = synthetic({ global = { bags = { ["*"] = { size = 0 } } } })
+            assert.is_nil(sdb.global.bags[nil])
+        end)
+
+        it("merges a ** template into every named sibling", function()
+            local sdb = synthetic({
+                global = {
+                    tabs = {
+                        ["**"] = { shared = true },
+                        named = { own = 1 },
+                    },
+                },
+            })
+            assert.is_true(sdb.global.tabs.named.shared)
+            assert.equals(1, sdb.global.tabs.named.own)
+        end)
+
+        it("strips a scalar wildcard value that never diverged", function()
+            local sdb = synthetic({ global = { limits = { ["*"] = 7 } } })
+            sdb.global.limits.a = 7   -- equals the wildcard default
+            sdb.global.limits.b = 9   -- does not
+            sdb:_simulateLogout()
+            assert.same({ "b" }, sortedKeys(rawget(sdb.global, "limits")))
+        end)
+
+        it("strips ** content from a named key but blocks the key own defaults",
+        function()
+            local sdb = synthetic({
+                global = {
+                    tabs = {
+                        ["**"] = { shared = true },
+                        named = { own = 1 },
+                    },
+                },
+            })
+            local _ = sdb.global.tabs.named.shared
+            sdb.global.tabs.named.extra = 2
+            sdb:_simulateLogout()
+
+            local named = rawget(rawget(sdb.global, "tabs"), "named")
+            assert.is_nil(rawget(named, "shared"))
+            assert.equals(2, named.extra)
+        end)
+    end)
 end)
