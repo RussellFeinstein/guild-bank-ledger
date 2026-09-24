@@ -18,8 +18,39 @@
 ------------------------------------------------------------------------
 
 local Helpers = require("spec.helpers")
+local Vendor = require("spec.vendor_helpers")
 local MockWoW = Helpers.MockWoW
 local MockAce = Helpers.MockAce
+
+-- A REAL AceDB, to pin the mock port against. Six of these shims are globals
+-- AceDB reads once at load to build its profile keys, which this addon never
+-- uses: it keys by guild under `global`. CreateFrame is the seventh, because
+-- AceDB owns one frame solely to catch PLAYER_LOGOUT and mock_wow frames have
+-- no RegisterEvent. Same rule as wire_helpers and strmatch: a global a
+-- vendored library needs at load and production never reads is shimmed for
+-- the load and restored, rather than becoming a permanent entry in mock_wow,
+-- which exists to describe the client the addon actually talks to.
+local RealAceDB = Vendor.loadVendored(
+    { "LibStub.lua", "AceDB-3.0.lua" },
+    "AceDB-3.0",
+    {
+        GetRealmName = function() return "TestRealm" end,
+        UnitName = function() return "Tester" end,
+        UnitClass = function() return "Warrior", "WARRIOR" end,
+        UnitRace = function() return "Human", "Human" end,
+        UnitFactionGroup = function() return "Alliance" end,
+        GetLocale = function() return "enUS" end,
+        GetCurrentRegion = function() return 1 end,
+        GetCurrentRegionName = function() return "US" end,
+        CreateFrame = function()
+            return {
+                RegisterEvent = function() end,
+                UnregisterEvent = function() end,
+                SetScript = function() end,
+            }
+        end,
+    }
+)
 
 -- Sorted, so a failure prints a readable diff rather than a pairs-order jumble.
 local function sortedKeys(t)
@@ -372,6 +403,105 @@ describe("SavedVariables", function()
             local named = rawget(rawget(sdb.global, "tabs"), "named")
             assert.is_nil(rawget(named, "shared"))
             assert.equals(2, named.extra)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- The differential: this mock against the library it stands in for
+    --
+    -- Everything above asserts section 2 against the port in spec/mock_ace.lua.
+    -- A port can only ever agree with itself, and what section 2 is accused of
+    -- is resting on a reading of AceDB rather than on anything executable, so
+    -- a port trusted on its own reproduces that defect one level down. These
+    -- cases hand the SAME defaults table to a real AceDB and compare the file
+    -- each one leaves behind.
+    --
+    -- RegisterDefaults(nil) is the public seam onto removeDefaults: copyDefaults
+    -- and removeDefaults are both file-locals and cannot be called directly.
+    ---------------------------------------------------------------------------
+
+    describe("against a real AceDB", function()
+        -- Run the same script against both and hand back the two on-disk
+        -- images. The defaults table is the addon's own, read off the mock
+        -- instance, so this compares production defaults and not a copy of
+        -- them that could drift.
+        local function bothImages(script)
+            local defaults = db._defaults
+
+            script(db.global.guilds["TestGuild"])
+            db:_simulateLogout()
+
+            local sv = {}
+            local realDb = RealAceDB:New(sv, defaults)
+            script(realDb.global.guilds["TestGuild"])
+            realDb:RegisterDefaults(nil)
+
+            return db.global, sv.global
+        end
+
+        it("agrees on a guild that was only ever read", function()
+            local mine, theirs = bothImages(function() end)
+            assert.same(theirs, mine)
+        end)
+
+        it("agrees on a guild that diverged in one scalar", function()
+            local mine, theirs = bothImages(function(g) g.schemaVersion = 11 end)
+            assert.same(theirs, mine)
+        end)
+
+        it("agrees on a player with one diverged field", function()
+            local mine, theirs = bothImages(function(g)
+                g.playerStats["Alice-Realm"].totalDepositCount = 2
+            end)
+            assert.same(theirs, mine)
+        end)
+
+        it("agrees on a player who only ever held defaults", function()
+            local mine, theirs = bothImages(function(g)
+                local _ = g.playerStats["Ghost-Realm"]
+                g.schemaVersion = 11
+            end)
+            assert.same(theirs, mine)
+        end)
+
+        it("agrees on the five declared-and-absent keys after a read", function()
+            local mine, theirs = bothImages(function(g)
+                for _, key in ipairs(ABSENT_WHEN_UNTOUCHED) do
+                    local _ = g[key]
+                end
+                g.schemaVersion = 11
+            end)
+            assert.same(theirs, mine)
+        end)
+
+        it("agrees when every declared key has diverged at once", function()
+            local mine, theirs = bothImages(function(g)
+                for _, entry in ipairs(SURVIVES_WHEN_DIVERGED) do
+                    entry.diverge(g)
+                end
+            end)
+            assert.same(theirs, mine)
+        end)
+
+        it("agrees that an undeclared key survives the strip", function()
+            local mine, theirs = bothImages(function(g)
+                g.eventCounts = {}
+                g.schemaVersion = 11
+            end)
+            assert.same(theirs, mine)
+        end)
+
+        it("agrees on what a fresh vivification contains", function()
+            local sv = {}
+            local realDb = RealAceDB:New(sv, db._defaults)
+            assert.same(
+                sortedKeys(realDb.global.guilds["TestGuild"]),
+                sortedKeys(db.global.guilds["TestGuild"])
+            )
+            assert.same(
+                sortedKeys(realDb.global.guilds["TestGuild"].playerStats),
+                sortedKeys(db.global.guilds["TestGuild"].playerStats)
+            )
         end)
     end)
 end)
