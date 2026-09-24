@@ -90,6 +90,7 @@
           - 'spec/categories_spec.lua'
           - 'spec/data_integrity_spec.lua'
           - 'spec/epoch_timestamp_spec.lua'
+          - 'spec/schema_version_spec.lua'
           - 'spec/rescan_spec.lua'
           - 'docs/DATA-MODEL.md'
 
