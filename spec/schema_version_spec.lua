@@ -37,7 +37,7 @@
 --      version at or above 6, which is the branch that does not run. The
 --      cases here are characterization and say so in their names, because
 --      what they record is a defect (the restore line cannot fire, and it
---      raises on a nil) filed separately rather than fixed here.
+--      raises on a nil), filed as #263 rather than fixed here.
 --
 -- MigrateCrossSlotDedup writes the version a fourth time, inside itself, and
 -- that one is deliberate: see its describe below.
@@ -273,7 +273,8 @@ describe("schemaVersion", function()
             -- advanced past migrations for the same reason this whole file
             -- exists. Unreachable in production, because OnInitialize runs
             -- MigrateAllGuilds (:197) before it loops DeduplicateRecords
-            -- (:204); recorded here so a fix or a deletion is visible in a diff.
+            -- (:204); recorded here so a fix or a deletion is visible in a
+            -- diff. Filed as #263.
             guildData.schemaVersion = 5
 
             GBL:DeduplicateRecords(guildData)
@@ -286,7 +287,7 @@ describe("schemaVersion", function()
             -- compares the raw value, so a nil gets into the branch and then
             -- into a numeric compare. AceDB puts the default back for any guild
             -- whose key was stripped, so this needs a guild table that never
-            -- came from GetGuildData.
+            -- came from GetGuildData. Filed as #263 with the case above.
             guildData.schemaVersion = nil
 
             local ok, err = pcall(function() return GBL:DeduplicateRecords(guildData) end)

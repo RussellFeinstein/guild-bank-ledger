@@ -331,7 +331,7 @@ timestamp as `hourSlot * 3600`, which is the start of the hour rather than the o
 
 ## 7. The schema ladder, and why the default is 8
 
-`schemaVersion` defaults to **8** (`src/Core.lua:122`) even though migrations exist through 11. This
+`schemaVersion` defaults to **8** (`src/Core.lua:124`) even though migrations exist through 11. This
 reads as a stale value and it is not one. Do not raise it.
 
 The reason is AceDB before it is anything about the migration chain. `removeDefaults` strips any scalar
@@ -351,8 +351,8 @@ The migration chain is the second half of the story. The 9 to 10 and 10 to 11 mi
 **strict equality**, not `>=`:
 
 ```lua
-if not guildData or (guildData.schemaVersion or 0) ~= 9  then return 0 end   -- src/Core.lua:1371
-if not guildData or (guildData.schemaVersion or 0) ~= 10 then return 0 end   -- src/Core.lua:1479
+if not guildData or (guildData.schemaVersion or 0) ~= 9  then return 0 end   -- src/Core.lua:1422
+if not guildData or (guildData.schemaVersion or 0) ~= 10 then return 0 end   -- src/Core.lua:1530
 ```
 
 Both sites carry comments explaining it. Several migrations short-circuit when the realm APIs are
@@ -362,14 +362,37 @@ run first, permanently skipping the intermediate work. Strict equality forces th
 in order, and 8 is its entry point. `GUILD_ROSTER_UPDATE` retriggers `MigrateAllGuilds` once per
 session so a cold-roster short-circuit gets a warm retry without waiting for the next login.
 
-**Verdict: correct as it stands, and being pinned by a test, issue #76.** This is the one disagreement
-in this document that must not be resolved by making the two sides agree. Nothing in the suite fails
-today if someone raises the default in good faith, so the fix is a regression test that asserts the
-value and asserts the gates behaviourally, not a change to either.
+The 8 to 9 migration is **not** one of the strict pair. `MigrateNormalizePeerNames` gates on
+`>= 9` (`src/Core.lua:1360`), the same loose form every migration below it uses, and called on its
+own it will advance a guild at 3 straight to 9. What stops that is the call order in
+`MigrateAllGuilds` (`:1607`), which reaches it only once the rungs below have run, so the
+protection for the low half of the ladder is the order and not the gates. `spec/schema_version_spec.lua`
+asserts that order as a sequence rather than as an endpoint, because a guild that jumped straight to
+11 also arrives at 11.
 
-Third place the version is written, outside the ladder and worth knowing: `GBL:DeduplicateRecords`
-temporarily sets it to 5 to force the legacy cross-slot pass and restores it afterwards
-(`src/Core.lua:2678-2685`).
+**Verdict: correct as it stands, and pinned by a test since #76.** This is the one disagreement
+in this document that must not be resolved by making the two sides agree. Until #76 nothing in the
+suite failed if someone raised the default in good faith. `spec/savedvariables_spec.lua` now asserts
+the value and its round trip against a real AceDB, and `spec/schema_version_spec.lua` asserts the
+gates behaviourally: the ladder walked one rung at a time, each strict gate refused from above and
+from the rung below, and every write of the version outside the ladder. Neither is a change to the
+value or to the gates, which stay as they are.
+
+Two more places write the version, both outside the ladder.
+
+`MigrateCrossSlotDedup` drops it to 4 on entry (`src/Core.lua:1081`) so its pass 1 re-runs the
+same-slot dedup, whose own gate is `>= 5`, then leaves at 6. That one is deliberate and the write is
+load-bearing: without it the nested call is entered at 5, returns 0, and pass 1 silently does
+nothing.
+
+`GBL:DeduplicateRecords` sets it to 5 to force that same legacy pass and is written to restore it
+afterwards (`src/Core.lua:2851-2857`). **It cannot.** The branch is entered only when the version is
+below 6, and the restore is guarded by `if savedSchema > 6`, so it is false on every path into it; a
+guild at 5 comes back at 6. The same line raises on a guild whose `schemaVersion` is nil, because the
+gate reads `(x or 0)` and the compare reads the raw value. Neither is reachable in production, since
+`OnInitialize` runs `MigrateAllGuilds` (`:197`) before it loops `DeduplicateRecords` (`:204`) and
+AceDB restores the default for any guild whose key was stripped. Filed as #263; both are pinned as
+characterization in `spec/schema_version_spec.lua` meanwhile.
 
 ## 8. What validation guarantees, and what it does not
 
@@ -620,7 +643,7 @@ All under the **Data model integrity** milestone.
 | 5 | Item records with no `itemID` collide in the money branch | #69 (locally scanned, unscheduled); sync-received closed in v0.37.0 (#68) |
 | 5 | `NormalizeRecordId` can rewrite a money record from an item record | closed in v0.37.0 (#68) |
 | 5 | Sync intake does not normalize the money `type` | #68 |
-| 7 | Nothing stops the `schemaVersion` default being raised | #76 |
+| 7 | Nothing stops the `schemaVersion` default being raised | closed in #76 |
 | 8 | Intake accepts corrupted records | closed in v0.37.0 (#68) |
 | 8 | 223 corrupted records already stored | #75 |
 | 8 | Rejections counted as duplicates | closed in v0.37.0 (#68) |
@@ -639,5 +662,5 @@ identity-affecting idea in this document as costing a forced guild-wide update f
 What that leaves open, in rough order of how much it still hurts: #75 (the 223 damaged records
 already on disk, which #68 stops growing but does not repair, and which can now reuse
 `GBL:RepairSyncRecordItemFields`), #69 (the same itemID-less shape produced by local scans rather
-than by sync, still unscheduled), #71, #72, #76 and #64. None of those touch record
+than by sync, still unscheduled), #71, #72, #263 and #64. None of those touch record
 identity, so none of them cost a floor raise.
