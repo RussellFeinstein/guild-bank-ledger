@@ -16,7 +16,7 @@
 -- Three places write schemaVersion.
 --
 --   1. The ladder. MigrateAllGuilds (src/Core.lua:1607) calls eleven
---      migrations in order and each one bumps by one rung. Every gate below 9
+--      migrations in order, ten of which bump by one rung. Every gate below 9
 --      is the loose `>= N` form, so what keeps a guild from skipping rungs is
 --      the CALL ORDER, not the gates; the tests here assert that order
 --      directly rather than the endpoint, because a guild that jumped
@@ -108,10 +108,13 @@ describe("schemaVersion", function()
                     entry = { name = name, before = gd.schemaVersion }
                     seen[#seen + 1] = entry
                 end
+                -- No pcall around this: depth is local to one walk() call and
+                -- a migration that throws fails the test outright, so there is
+                -- nothing to keep balanced and a pcall would only flatten the
+                -- callee's return values.
                 depth = depth + 1
-                local ok, result = pcall(originals[name], self, gd)
+                local result = originals[name](self, gd)
                 depth = depth - 1
-                if not ok then error(result, 0) end
                 if entry then entry.after = gd.schemaVersion end
                 return result
             end
