@@ -145,6 +145,17 @@ describe("schemaVersion", function()
 
         GBL:MigrateAllGuilds()
 
+        -- The walk is pcall-protected since #263, so a raise inside a wrapped
+        -- rung (a luassert failure included) is caught, logged and swallowed
+        -- rather than failing the case, and it leaves depth at 1 so every later
+        -- record is dropped without a word. Nothing here expects a migration to
+        -- fail, so any ERROR on the system channel is that happening.
+        for _, e in ipairs(GBL:GetLog("system")) do
+            if e.level == "ERROR" then
+                error("a migration raised inside walk(): " .. e.message, 0)
+            end
+        end
+
         -- Restored by walking LADDER, not pairs(originals): a renamed or
         -- misspelled LADDER entry never enters that table, so pairs would skip
         -- it and leave a wrapper installed whose body indexes nil.
@@ -218,16 +229,21 @@ describe("schemaVersion", function()
             guildData.schemaVersion = 1
             guildData.playerRealms = { ["Alice"] = "Aerie Peak" }
 
-            local calls, firstRungSeen = 0, false
+            -- Recorded and asserted AFTER the walk, never from inside a wrapper.
+            -- Since #263 the walk runs each guild under pcall, so an assertion
+            -- that fails inside a wrapped call is caught and logged as a
+            -- migration failure and the case passes anyway. Proven: swapping
+            -- these two calls in MigrateGuild left this case green when the
+            -- check lived in the wrapper.
+            local order = {}
             local repair = GBL.RepairCorruptedPlayerRealms
             local rung1 = GBL.MigrateOccurrenceScheme
             GBL.RepairCorruptedPlayerRealms = function(self, t)
-                calls = calls + 1
-                assert.is_false(firstRungSeen, "repair ran after the first rung")
+                order[#order + 1] = "repair"
                 return repair(self, t)
             end
             GBL.MigrateOccurrenceScheme = function(self, gd)
-                firstRungSeen = true
+                order[#order + 1] = "rung1"
                 return rung1(self, gd)
             end
 
@@ -235,7 +251,7 @@ describe("schemaVersion", function()
 
             GBL.RepairCorruptedPlayerRealms = repair
             GBL.MigrateOccurrenceScheme = rung1
-            assert.equals(1, calls)
+            assert.same({ "repair", "rung1" }, order)
         end)
     end)
 
