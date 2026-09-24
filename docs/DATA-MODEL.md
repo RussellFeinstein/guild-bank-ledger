@@ -80,6 +80,14 @@ AceDB strips any value equal to its default before the SavedVariables file is wr
 modified therefore leaves no trace on disk. **Absence from the file means "never diverged from the
 default", not "missing".** At runtime the key is present, because `copyDefaults` puts it back.
 
+Every claim in this section is asserted by `spec/savedvariables_spec.lua` from #77, which
+is why the counts below are worth keeping exact: the seventeen declared keys, the five that
+are absent when untouched and the twelve that survive once they diverge are each pinned,
+and so is the arithmetic between them, so a key added to the defaults block and to neither
+list fails the suite. Those cases run against a hand port of AceDB in `spec/mock_ace.lua`,
+and eight more run the same defaults through a real AceDB from `spec/vendor/` and compare
+the file each leaves behind, because a port can only ever agree with itself.
+
 Five declared keys are absent from the live file for that reason (`dailySummaries` and
 `weeklySummaries` left this list when #62 removed their declarations along with the tiered
 storage module):
@@ -334,6 +342,11 @@ default value is the stored value of every guild at that version.** Raising it t
 warning, it silently advances all of those guilds to 11 without running migrations 9, 10 or 11, and
 there is no later pass that notices. All three are realm canonicalization, and the loss is permanent.
 
+The mechanism is executable from #77. `spec/savedvariables_spec.lua` round-trips a guild at
+the default and reads 8 back with nothing on disk in between, and round-trips one at 11 and
+finds 11 on disk, which is this paragraph as two assertions. #76 is the guard that stops
+someone raising the value; this is the evidence for why it is worth guarding.
+
 The migration chain is the second half of the story. The 9 to 10 and 10 to 11 migrations gate on
 **strict equality**, not `>=`:
 
@@ -463,7 +476,7 @@ and returns `"SER:<n>"`, `Deserialize` hands the same table object back), so for
 life no test encoded a byte. Numeric key survival and payload size were in-game claims only.
 
 **Closed in v0.36.1 by golden wire-contract fixtures.** `spec/wire_contract_spec.lua` runs a real
-AceSerializer (`spec/wire_helpers.lua` loads it, stashing and restoring the mock LibStub registry
+AceSerializer (`spec/vendor_helpers.lua` loads it, stashing and restoring the mock LibStub registry
 around the load). `src/Sync.lua` exposes the record codec through `_StripForSync`,
 `_ReconstructSyncRecord` and `_EstimateRecordBytes`, which have no production callers and exist only
 so the format can be pinned. Numeric keys do survive, as numbers, with no string-keyed twin.
@@ -552,10 +565,21 @@ both and they still agree. That was measured rather than assumed: removing `guil
 absolute key set, with the parity assertion kept beside it to catch a call site being re-inlined or
 handed the wrong arguments.
 
-There is a second untested boundary of the same kind, and it is the larger one. `spec/mock_ace.lua`
-models AceDB's read path (`applyDefaults`, `:52-79`) and has no `removeDefaults` at all. Default
+There was a second untested boundary of the same kind, and it was the larger one. `spec/mock_ace.lua`
+modelled AceDB's read path (`applyDefaults`) and had no `removeDefaults` at all. Default
 stripping is the mechanism behind every claim in section 2 and behind the schemaVersion result in
-section 7, and the suite cannot check any of it. Issue #77.
+section 7, and the suite could check none of it.
+
+**Closed in #77.** Both halves of AceDB are transcribed from the library branch for branch
+now, `removeDefaults` and `copyDefaults` alike, with `_simulateLogout` and `_simulateLogin`
+on the mock db to express a session boundary. Three read-path gaps went with it, and the
+one worth remembering is that the mock built a vivified table by deep-copying the
+template, which copies the literal `"*"` key into it, so every `guildData.playerStats` in
+the suite held a phantom player that no client can have. Seven production sites walk that
+table with `pairs` and five are migrations that resolve every name they find, so the suite
+had been migrating it for as long as the mock has existed. Nothing went red when it
+disappeared, because nothing had ever asserted what that table contains, only what the
+fixtures put in it.
 
 ## Open questions
 
@@ -599,7 +623,7 @@ All under the **Data model integrity** milestone.
 | 8 | 223 corrupted records already stored | #75 |
 | 8 | Rejections counted as duplicates | closed in v0.37.0 (#68) |
 | 9 | Numeric keys and payload size untested across the wire | closed in v0.36.1 |
-| 9 | AceDB's write path unmodelled in the suite | #77 |
+| 9 | AceDB's write path unmodelled in the suite | closed in #77 |
 | 9 | `eventCounts` is unreachable where the empty-chunk SYNC_DATA builder writes it | dead write closed in v0.37.3 |
 | 9 | SYNC_DATA and BUSY each built in two places | closed in v0.37.13 (#70); HELLO still a pair |
 | - | Per-player category totals declared, never accumulated | #64 |
@@ -613,5 +637,5 @@ identity-affecting idea in this document as costing a forced guild-wide update f
 What that leaves open, in rough order of how much it still hurts: #75 (the 223 damaged records
 already on disk, which #68 stops growing but does not repair, and which can now reuse
 `GBL:RepairSyncRecordItemFields`), #69 (the same itemID-less shape produced by local scans rather
-than by sync, still unscheduled), #71, #72, #76, #77 and #64. None of those touch record
+than by sync, still unscheduled), #71, #72, #76 and #64. None of those touch record
 identity, so none of them cost a floor raise.
