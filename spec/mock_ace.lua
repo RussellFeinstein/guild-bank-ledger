@@ -555,9 +555,12 @@ function MockAce.install()
                 -- their `value` on them, and SelectTab walks every frame,
                 -- hidden ones included. So a bar that shrank (a demotion,
                 -- sync_only arriving over HELLO) can still match a stale
-                -- value, and OpenRestockTab is a caller that passes a literal
-                -- rather than a validated one. Replicated rather than
-                -- corrected: a mock stricter than the library hides that.
+                -- value. That was reachable from OpenRestockTab until #244 put
+                -- a membership check on it; no production caller reaches it
+                -- deliberately now, so the specs that want the behaviour drive
+                -- this widget's SelectTab directly. Replicated rather than
+                -- corrected: a mock stricter than the library hides what the
+                -- client would do.
                 for i = #tablist + 1, #self.tabs do
                     self.tabs[i]:Hide()
                 end

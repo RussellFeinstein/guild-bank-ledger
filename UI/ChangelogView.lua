@@ -29,6 +29,16 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.41.4
+    {"0.41.4", "2026-09-24", {
+        Fixed = {
+            "/gbl restock no longer opens the Restock tab for a rank whose tab bar does not hold it. A guild can leave a rank in Sync only while that rank still holds sort access, and in that state the command put the whole Restock tab on screen under the restricted-view banner, and every later bank open and completed sync rebuilt it. Where the bar had never held Restock, the window opened on whichever tab the rank does get and nothing explained why the command had not worked.",
+            "/gbl restock now switches to Restock when your rank has just been granted sort access. The tab bar is only rebuilt when the guild roster next updates, which nothing in the addon asks for, so the command could open the window on whatever tab it was showing and say nothing for the rest of the session.",
+        },
+        Changed = {
+            "A refused /gbl restock no longer opens the ledger window at all. It used to open it and then fail to switch tabs, so the window appeared on whichever tab your rank does get.",
+        },
+    }},
     -- v0.41.3
     {"0.41.3", "2026-09-22", {
         Fixed = {

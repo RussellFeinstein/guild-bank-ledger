@@ -149,40 +149,65 @@ function GBL:_RefillScrollContainers()
     end
 end
 
+--- The tabs this player's access allows, in bar order. The one producer of
+-- that list (#244): RebuildTabs puts it in the bar and HasAccessTab answers
+-- questions about it, so the two cannot drift into disagreeing about what a
+-- rank may reach.
+-- @return table array of { value, text }
+function GBL:AccessTabs()
+    local accessLevel = self:GetAccessLevel()
+    if accessLevel == "sync_only" then
+        return {
+            { value = "sync", text = "Sync" },
+            { value = "changelog", text = "Changelog" },
+            { value = "about", text = "About" },
+        }
+    end
+
+    local tabs = {
+        { value = "transactions", text = "Transactions" },
+        { value = "goldlog", text = "Gold Log" },
+        { value = "consumption", text = "Consumption" },
+    }
+    -- Sort tab: any sort-access tier (execute-only or layout-write).
+    -- Restock rides the same sort-access gate (it acts on the same layout).
+    if self.HasSortAccess and self:HasSortAccess() then
+        table.insert(tabs, { value = "sort", text = "Sort" })
+        table.insert(tabs, { value = "restock", text = "Restock" })
+    end
+    -- Layout tab: only the layout-write tier edits templates, so it stays
+    -- hidden from sort-only users (the Sort tab tells them to ask an officer).
+    if self.HasLayoutWrite and self:HasLayoutWrite() then
+        table.insert(tabs, { value = "layout", text = "Layout" })
+    end
+    table.insert(tabs, { value = "sync", text = "Sync" })
+    table.insert(tabs, { value = "changelog", text = "Changelog" })
+    table.insert(tabs, { value = "about", text = "About" })
+    return tabs
+end
+
+--- True when this player's access allows the named tab.
+--
+-- Computed rather than read off tabGroup.tablist, which would also be
+-- correct against the stale hidden frames (those live past #tablist rather
+-- than in it) but only as fresh as the last RefreshAccessTabsIfChanged: a
+-- player demoted over HELLO would keep reaching the tab until the next
+-- roster tick. This answers "may this rank reach it now".
+-- @param value string tab value, e.g. "restock"
+-- @return boolean
+function GBL:HasAccessTab(value)
+    for _, t in ipairs(self:AccessTabs()) do
+        if t.value == value then return true end
+    end
+    return false
+end
+
 --- Build the tab list based on the player's access level.
 -- Called on frame creation and when access control settings change.
 function GBL:RebuildTabs()
     if not self.tabGroup then return end
 
-    local accessLevel = self:GetAccessLevel()
-    local tabs
-    if accessLevel == "sync_only" then
-        tabs = {
-            { value = "sync", text = "Sync" },
-            { value = "changelog", text = "Changelog" },
-            { value = "about", text = "About" },
-        }
-    else
-        tabs = {
-            { value = "transactions", text = "Transactions" },
-            { value = "goldlog", text = "Gold Log" },
-            { value = "consumption", text = "Consumption" },
-        }
-        -- Sort tab: any sort-access tier (execute-only or layout-write).
-        -- Restock rides the same sort-access gate (it acts on the same layout).
-        if self.HasSortAccess and self:HasSortAccess() then
-            table.insert(tabs, { value = "sort", text = "Sort" })
-            table.insert(tabs, { value = "restock", text = "Restock" })
-        end
-        -- Layout tab: only the layout-write tier edits templates, so it stays
-        -- hidden from sort-only users (the Sort tab tells them to ask an officer).
-        if self.HasLayoutWrite and self:HasLayoutWrite() then
-            table.insert(tabs, { value = "layout", text = "Layout" })
-        end
-        table.insert(tabs, { value = "sync", text = "Sync" })
-        table.insert(tabs, { value = "changelog", text = "Changelog" })
-        table.insert(tabs, { value = "about", text = "About" })
-    end
+    local tabs = self:AccessTabs()
 
     self.tabGroup:SetTabs(tabs)
 

@@ -94,6 +94,30 @@ HELLO once configured.
 "Officer" and "bank hand" are labels for this doc. The addon never reads a rank name; it reads the
 index, and a guild that draws its lines elsewhere sets different thresholds.
 
+**The two families are independent and their thresholds are separate numbers**, so a rank can sit
+below the view threshold and above the sort one. The table above pairs them the way a guild would
+normally configure them rather than the way the code constrains them; that combination is legal
+configuration, not a misconfiguration to guard against.
+
+**Where they disagree, `sync_only` wins and `own_transactions` does not, and only the first of those
+is decided (#244).** `GBL:AccessTabs` (`UI/UI.lua`) special-cases `sync_only` and returns Sync,
+Changelog and About whatever the bank family says. Every other level falls through to the full list
+and inserts Sort and Restock on `HasSortAccess` alone, so an `own_transactions` member holding sort
+access gets both tabs, which the mode table in section 6 says they should not. Note also what the
+bank family does here: it decides whether Sort, Restock and Layout exist at all, not merely what
+they may do once present. The `own_transactions` contradiction is filed rather than settled here,
+because voiding a grant a GM made by name is a policy call rather than a bug fix.
+
+**What is decided is that the allowed set has one producer, and that callers ask it rather than the
+bar.** `AccessTabs` builds the list, `GBL:HasAccessTab(value)` answers questions about it, and
+`RebuildTabs` puts it in the bar. A caller opening a tab by name asks `HasAccessTab` and deliberately
+not the bar, because the bar is only rebuilt on a `GUILD_ROSTER_UPDATE` and so lags a rank change in
+both directions: reading it would let a demoted player keep opening a tab, while computing it means a
+promoted one can ask for a tab the bar has not grown yet. `OpenRestockTab` covers the second by
+reading `activeTab` back after selecting and rebuilding the bar when the select found nothing. The
+doors that still ask the bank family alone, the three sort slash commands among them, are filed as
+#244's siblings.
+
 ## 4. What each role comes for
 
 **The leadership set (ranks 0 to 3).** Who took what and when (Transactions, with the type, item,
@@ -184,7 +208,7 @@ This is the one item this doc files regardless of anything else in it, marked `l
 ## 6. The three modes: wire values kept, what each shows
 
 The stored and advertised values stay `full`, `own_transactions` and `sync_only`. That is not
-inertia. `RebuildTabs` (`UI/UI.lua:157-185`) treats every level other than `sync_only` as the full
+inertia. `GBL:AccessTabs` (`UI/UI.lua`, the list `RebuildTabs` builds the bar from since #244) treats every level other than `sync_only` as the full
 tab set, and only the exact string `own_transactions` triggers the pre-filter, so a new mode value
 arriving by HELLO from an updated GM would give every member on an older client the whole ledger.
 A renamed mode is a privacy regression for the length of the adoption window. The wire value is
