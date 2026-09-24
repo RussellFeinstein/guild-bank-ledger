@@ -122,7 +122,9 @@ for vendored, upstream in pairs(UPSTREAM) do
         print(("ok  %s matches %s"):format(vendored, upstream))
     else
         print(("!! %s differs from %s. Upstream has moved. Copy it over and run the "
-            .. "full suite: a real behavior change shows up as fixtures that stop decoding.")
+            .. "full suite. A real behavior change surfaces differently per library: "
+            .. "for the serializer as wire fixtures that stop decoding, for AceDB as "
+            .. "the \"against a real AceDB\" cases in spec/savedvariables_spec.lua.")
             :format(vendored, upstream))
         problems = problems + 1
     end

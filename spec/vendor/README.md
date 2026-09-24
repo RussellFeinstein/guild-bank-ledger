@@ -50,6 +50,12 @@ measured live as `syncState.lastChunkBytes`.
 
 ## Keeping these honest
 
+**Nothing runs this check for you.** It lives in
+`spec/fixtures/generate_wire_fixtures.lua`, an authoring aid run by hand, and CI runs
+only `busted` and `luacheck`; the check also no-ops without a `Libs/` tree, which CI
+never has. So the freshness note above is a reason to run it when touching this
+directory, not a promise that a stale copy will announce itself.
+
 `spec/fixtures/generate_wire_fixtures.lua` checks these copies against `Libs/`
 when `Libs/` is present, and reports any difference. So the test run is
 deterministic everywhere, and a developer with the real libraries still finds out

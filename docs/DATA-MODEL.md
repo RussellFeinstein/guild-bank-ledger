@@ -576,8 +576,10 @@ on the mock db to express a session boundary. Three read-path gaps went with it,
 one worth remembering is that the mock built a vivified table by deep-copying the
 template, which copies the literal `"*"` key into it, so every `guildData.playerStats` in
 the suite held a phantom player that no client can have. Seven production sites walk that
-table with `pairs` and five are migrations that resolve every name they find, so the suite
-had been migrating it for as long as the mock has existed. Nothing went red when it
+table with `pairs`, four of them inside migrations, and two resolve every name they find and
+write it back (`src/Core.lua:761` in `MigrateSchemaV2ToV3`, and `:1704` in
+`RepairPlayerNames`, which is not a migration). So one migration had been storing a
+resolved phantom for as long as the mock has existed. Nothing went red when it
 disappeared, because nothing had ever asserted what that table contains, only what the
 fixtures put in it.
 

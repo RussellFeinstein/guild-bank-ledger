@@ -44,14 +44,20 @@ end
 --
 -- Transcribed branch for branch from Libs/AceDB-3.0/AceDB-3.0.lua:88-131,
 -- for the same reason removeDefaults below it is: a partial port is how this
--- mock came to model a fresh install and never an upgrade. Three things it
--- was missing, each with its own case in spec/savedvariables_spec.lua.
+-- mock came to model a fresh install and never an upgrade. Two things it was
+-- missing outright, each with its own case in spec/savedvariables_spec.lua,
+-- and three branches it never had at all (below).
 --
 -- A vivified table starts EMPTY and has the template copied into it. The old
 -- version deep-copied the template, which copies the literal "*" key along
 -- with everything else, so every table declaring a nested wildcard was born
 -- holding a phantom entry. guilds["*"].playerStats is the one that matters:
--- seven production sites walk it with pairs, five of them migrations.
+-- seven production sites walk it with pairs, four of them inside migrations,
+-- and two of the seven resolve every name they find and write it back
+-- (src/Core.lua:761 in MigrateSchemaV2ToV3, and :1704 in RepairPlayerNames,
+-- which runs from OnEnable rather than the migration chain). The other five
+-- are clear-and-repopulate loops. So one migration was resolving the phantom
+-- and storing the result, which is enough.
 --
 -- The already-existing-tables loop applies the template to tables ALREADY in
 -- the file, which is the upgrade path. Without it a key stripped at logout
@@ -60,7 +66,6 @@ end
 -- The scalar wildcard, the nil-key guard and the ** merge are unreachable
 -- from this addon's defaults and are ported anyway; see removeDefaults.
 local function applyDefaults(target, defaults)
-    if type(defaults) ~= "table" then return end
     for k, v in pairs(defaults) do
         if k == "*" or k == "**" then
             if type(v) == "table" then
@@ -110,8 +115,14 @@ end
 -- model a login and never a logout: the "**" table branch, the "*" scalar
 -- branch, and the blocker argument that only "**" passes. GBL declares two
 -- "*" table wildcards and no "**" at all (src/Core.lua, guilds and
--- playerStats). spec/savedvariables_spec.lua covers all three synthetically
--- and diffs this whole function against the real library.
+-- playerStats). spec/savedvariables_spec.lua covers all three against a real
+-- AceDB rather than against hand-written expectations, the nested case for
+-- the table-branch blocker included.
+--
+-- What that comparison cannot see: luassert compares tables with metatables
+-- ignored, so it would agree with a port that left a live wildcard metatable
+-- on a stripped table. The dedicated "metatable clear" cases cover that, so
+-- this is not a diff of the whole function and the two halves are separate.
 --
 -- The metatable clear on the first line is load-bearing twice over: it stops
 -- the walk creating subtables through the very wildcard it is stripping, and

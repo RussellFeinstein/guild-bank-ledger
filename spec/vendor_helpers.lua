@@ -16,6 +16,16 @@
 -- This module restores every global it disturbs, and never touches the addon's
 -- own mixed-in Serialize/Deserialize or its AceDB instance.
 --
+-- Restoring the globals is not the same as isolating the library, and the
+-- difference matters. A loaded library keeps resolving LibStub from the global
+-- namespace at CALL time, so AceDB's initdb runs
+-- LibStub:GetLibrary("CallbackHandler-1.0", true) against whatever _G.LibStub is
+-- then, which under this suite is the mock, and caches the answer in a
+-- file-local for the rest of the process. That is harmless today only because
+-- the mock registers no CallbackHandler, so the lookup returns nil and AceDB
+-- falls back to its own dummy. Register one and the vendored library starts
+-- calling mock code. Found by the code review of #77.
+--
 -- Loading notes, each one learned the hard way:
 --   * require() cannot be used. The module names contain a dot
 --     ("AceSerializer-3.0"), which require turns into a path separator. dofile

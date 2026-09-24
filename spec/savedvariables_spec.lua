@@ -53,10 +53,16 @@ local RealAceDB = Vendor.loadVendored(
 )
 
 -- Sorted, so a failure prints a readable diff rather than a pairs-order jumble.
+-- A non-string key renders bracketed, because this codebase treats the
+-- number-versus-string distinction as load-bearing (a synced layout arrives
+-- string-keyed and src/Restock.lua number-coerces it back), and a plain
+-- tostring would let a case pass under either shape.
 local function sortedKeys(t)
     local keys = {}
     if type(t) == "table" then
-        for k in pairs(t) do keys[#keys + 1] = tostring(k) end
+        for k in pairs(t) do
+            keys[#keys + 1] = type(k) == "string" and k or ("[" .. tostring(k) .. "]")
+        end
     end
     table.sort(keys)
     return keys
@@ -69,6 +75,7 @@ local DECLARED = {
     "snapshots", "sortAccess", "stockAlerts", "stockReserves", "syncState",
     "teams", "transactions",
 }
+table.sort(DECLARED)  -- compared against sortedKeys, so the order is the mechanism
 
 -- Section 2's "declared but absent, and why that is normal" table. Five.
 -- dailySummaries and weeklySummaries left this list when #62 removed the tiered
@@ -315,9 +322,11 @@ describe("SavedVariables", function()
             -- which copies the literal "*" key along with everything else.
             -- copyDefaults starts from an empty table, so a real client's
             -- playerStats is empty here and the suite's held one phantom
-            -- player. Seven production sites walk this table with pairs and
-            -- five of them are migrations that resolve every name they find,
-            -- so under the old mock they migrated a player no client can have.
+            -- player. Seven production sites walk this table with pairs, four
+            -- of them inside migrations, and two resolve every name they find
+            -- and write it back (src/Core.lua:761 in MigrateSchemaV2ToV3, and
+            -- :1704 in RepairPlayerNames, which is not a migration). So one
+            -- migration was storing a resolved player no client can have.
             local stats = db.global.guilds["TestGuild"].playerStats
             assert.same({}, sortedKeys(stats))
             assert.is_nil(rawget(stats, "*"))
@@ -350,30 +359,65 @@ describe("SavedVariables", function()
     ---------------------------------------------------------------------------
 
     describe("wildcard forms GBL does not use", function()
-        local function synthetic(defaults)
-            return _G.LibStub("AceDB-3.0"):New("SyntheticDB", defaults)
+        -- Build the same synthetic defaults on BOTH implementations.
+        --
+        -- The first cut of these cases resolved `_G.LibStub("AceDB-3.0")`,
+        -- which at test time is the mock, so they asserted the port against
+        -- hand-written expectations. That is the self-agreement this file
+        -- exists to reject, and it landed on exactly the branches the
+        -- production differential below cannot reach, since GBL declares no
+        -- "**", no scalar wildcard and passes no blocker. Found by the code
+        -- review of this PR.
+        --
+        -- createAceDB claims MockAce.dbInstance unconditionally, which the
+        -- repo CLAUDE.md names as breaking the single-instance assumption, so
+        -- the slot is put back.
+        local function bothSynthetic(defaults)
+            local savedInstance = MockAce.dbInstance
+            local mine = _G.LibStub("AceDB-3.0"):New("SyntheticDB", defaults)
+            MockAce.dbInstance = savedInstance
+
+            local sv = {}
+            local theirs = RealAceDB:New(sv, defaults)
+            return mine, theirs, sv
+        end
+
+        -- Run a script on both, strip both, hand back the two on-disk images.
+        local function stripBoth(defaults, script)
+            local mine, theirs, sv = bothSynthetic(defaults)
+            script(mine.global)
+            script(theirs.global)
+            mine:_simulateLogout()
+            theirs:RegisterDefaults(nil)
+            return mine.global, sv.global
         end
 
         it("serves a scalar wildcard without storing it", function()
-            local sdb = synthetic({ global = { limits = { ["*"] = 7 } } })
-            assert.equals(7, sdb.global.limits.anything)
-            assert.same({}, sortedKeys(sdb.global.limits))
+            local mine, theirs = bothSynthetic({ global = { limits = { ["*"] = 7 } } })
+            assert.equals(7, mine.global.limits.anything)
+            assert.same({}, sortedKeys(mine.global.limits))
+            assert.equals(theirs.global.limits.anything, mine.global.limits.anything)
+            assert.same(sortedKeys(theirs.global.limits), sortedKeys(mine.global.limits))
         end)
 
         it("answers a nil key with nil rather than vivifying", function()
-            local sdb = synthetic({ global = { bags = { ["*"] = { size = 0 } } } })
-            assert.is_nil(sdb.global.bags[nil])
+            local mine, theirs = bothSynthetic({
+                global = { bags = { ["*"] = { size = 0 } } },
+            })
+            assert.is_nil(mine.global.bags[nil])
+            assert.is_nil(theirs.global.bags[nil])
         end)
 
         it("answers a nil key with nil for a scalar wildcard too", function()
             -- The table wildcard and the scalar wildcard each have their own
             -- nil guard in the library, and only the first had a case here.
-            local sdb = synthetic({ global = { limits = { ["*"] = 7 } } })
-            assert.is_nil(sdb.global.limits[nil])
+            local mine, theirs = bothSynthetic({ global = { limits = { ["*"] = 7 } } })
+            assert.is_nil(mine.global.limits[nil])
+            assert.is_nil(theirs.global.limits[nil])
         end)
 
         it("merges a ** template into every named sibling", function()
-            local sdb = synthetic({
+            local mine, theirs = bothSynthetic({
                 global = {
                     tabs = {
                         ["**"] = { shared = true },
@@ -381,34 +425,43 @@ describe("SavedVariables", function()
                     },
                 },
             })
-            assert.is_true(sdb.global.tabs.named.shared)
-            assert.equals(1, sdb.global.tabs.named.own)
+            assert.is_true(mine.global.tabs.named.shared)
+            assert.equals(1, mine.global.tabs.named.own)
+            assert.equals(theirs.global.tabs.named.shared, mine.global.tabs.named.shared)
+            assert.equals(theirs.global.tabs.named.own, mine.global.tabs.named.own)
         end)
 
         it("strips a scalar wildcard value that never diverged", function()
-            local sdb = synthetic({ global = { limits = { ["*"] = 7 } } })
-            sdb.global.limits.a = 7   -- equals the wildcard default
-            sdb.global.limits.b = 9   -- does not
-            sdb:_simulateLogout()
-            assert.same({ "b" }, sortedKeys(rawget(sdb.global, "limits")))
+            local mine, theirs = stripBoth(
+                { global = { limits = { ["*"] = 7 } } },
+                function(g)
+                    g.limits.a = 7   -- equals the wildcard default
+                    g.limits.b = 9   -- does not
+                end
+            )
+            assert.same({ "b" }, sortedKeys(rawget(mine, "limits")))
+            assert.same(theirs, mine)
         end)
 
         it("strips ** content from a named key that has no say in it", function()
-            local sdb = synthetic({
-                global = {
-                    tabs = {
-                        ["**"] = { shared = true },
-                        named = { own = 1 },
+            local mine, theirs = stripBoth(
+                {
+                    global = {
+                        tabs = {
+                            ["**"] = { shared = true },
+                            named = { own = 1 },
+                        },
                     },
                 },
-            })
-            local _ = sdb.global.tabs.named.shared
-            sdb.global.tabs.named.extra = 2
-            sdb:_simulateLogout()
-
-            local named = rawget(rawget(sdb.global, "tabs"), "named")
+                function(g)
+                    local _ = g.tabs.named.shared
+                    g.tabs.named.extra = 2
+                end
+            )
+            local named = rawget(rawget(mine, "tabs"), "named")
             assert.is_nil(rawget(named, "shared"))
             assert.equals(2, named.extra)
+            assert.same(theirs, mine)
         end)
 
         it("blocks the ** strip for a key the named table declares itself", function()
@@ -419,27 +472,92 @@ describe("SavedVariables", function()
             -- leaves it alone. With `named = { own = 1 }` and a ** template of
             -- `{ shared = true }` no key is in both, blocker[k] is nil every
             -- time, and dropping the whole term changes nothing.
-            local sdb = synthetic({
-                global = {
-                    tabs = {
-                        ["**"] = { shared = true },
-                        named = { shared = false, own = 1 },
+            local mine, theirs = stripBoth(
+                {
+                    global = {
+                        tabs = {
+                            ["**"] = { shared = true },
+                            named = { shared = false, own = 1 },
+                        },
                     },
                 },
-            })
-            assert.is_false(sdb.global.tabs.named.shared)
-            sdb.global.tabs.named.shared = true
-
-            sdb:_simulateLogout()
-
+                function(g)
+                    assert.is_false(g.tabs.named.shared)
+                    g.tabs.named.shared = true
+                end
+            )
             -- Checked in steps: without the blocker the ** pass strips shared,
             -- the named pass then strips own, and the empty table collapses, so
             -- a single chained read would raise instead of reporting.
-            local tabs = rawget(sdb.global, "tabs")
+            local tabs = rawget(mine, "tabs")
             assert.is_not_nil(tabs, "tabs collapsed")
             local named = rawget(tabs, "named")
             assert.is_not_nil(named, "named collapsed: the ** strip was not blocked")
             assert.is_true(rawget(named, "shared"))
+            assert.same(theirs, mine)
+        end)
+
+        it("blocks the ** strip inside a nested wildcard template", function()
+            -- removeDefaults carries the blocker term TWICE, once in the
+            -- scalar compare and once in the table branch, and the case above
+            -- only reaches the first. The second needs a ** template that
+            -- itself declares a wildcard, so the recursion enters the table
+            -- branch with a blocker in hand. Same observability rule: the
+            -- value equals the wildcard default and differs from the named
+            -- key own default, so only the blocker decides.
+            local mine, theirs = stripBoth(
+                {
+                    global = {
+                        tabs = {
+                            ["**"] = { ["*"] = { n = 0 } },
+                            named = { special = { n = 7 } },
+                        },
+                    },
+                },
+                function(g)
+                    assert.equals(7, g.tabs.named.special.n)
+                    g.tabs.named.special.n = 0
+                end
+            )
+            local tabs = rawget(mine, "tabs")
+            assert.is_not_nil(tabs, "tabs collapsed")
+            local named = rawget(tabs, "named")
+            assert.is_not_nil(named, "named collapsed")
+            local special = rawget(named, "special")
+            assert.is_not_nil(special, "special collapsed: the nested ** strip was not blocked")
+            assert.equals(0, rawget(special, "n"))
+            assert.same(theirs, mine)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- The profile section
+    ---------------------------------------------------------------------------
+
+    describe("the profile half", function()
+        -- Asserted against the port alone, and this says so rather than
+        -- implying the differential covers it. A real AceDB keeps the profile
+        -- at `sv.profiles[<profile key>]` and this mock has no profile system
+        -- at all, so the two have no comparable shape. `_simulateLogout` and
+        -- `_simulateLogin` both walk `defaults.profile`, which is where `ui`,
+        -- `scanning`, `sync`, `sort` and `restock` live, so it needed saying.
+        it("strips a profile value that never diverged", function()
+            db.profile.ui.scale = 2.0
+            db:_simulateLogout()
+
+            local ui = rawget(db.profile, "ui")
+            assert.is_not_nil(ui, "the whole ui table collapsed")
+            assert.equals(2.0, rawget(ui, "scale"))
+            assert.is_nil(rawget(ui, "width"), "an untouched profile default reached disk")
+        end)
+
+        it("puts profile defaults back at the next login", function()
+            db.profile.ui.scale = 2.0
+            db:_simulateLogout()
+            db:_simulateLogin()
+
+            assert.equals(2.0, db.profile.ui.scale)
+            assert.equals(1000, db.profile.ui.width)
         end)
     end)
 
@@ -455,25 +573,37 @@ describe("SavedVariables", function()
     --
     -- RegisterDefaults(nil) is the public seam onto removeDefaults: copyDefaults
     -- and removeDefaults are both file-locals and cannot be called directly.
+    --
+    -- What it cannot see: luassert compares tables with metatables ignored, so
+    -- a mock that left a live wildcard metatable on a stripped table would
+    -- agree here. That is what the dedicated "metatable clear" describe above
+    -- is for, and why this is not a diff of the whole function.
     ---------------------------------------------------------------------------
 
     describe("against a real AceDB", function()
-        -- Run the same script against both and hand back the two on-disk
-        -- images. The defaults table is the addon's own, read off the mock
-        -- instance, so this compares production defaults and not a copy of
-        -- them that could drift.
+        -- Both sides are built the same way, from the addon own defaults table
+        -- read off the mock instance. An earlier cut compared the instance that
+        -- OnInitialize had already driven against a freshly built real one,
+        -- which balances only while OnInitialize writes nothing under global:
+        -- one migration run at init, or RecordOwnCharacter firing earlier, and
+        -- all eight cases red while the port is correct. Found by the code
+        -- review of this PR.
         local function bothImages(script)
             local defaults = db._defaults
 
-            script(db.global.guilds["TestGuild"])
-            db:_simulateLogout()
+            local savedInstance = MockAce.dbInstance
+            local mine = _G.LibStub("AceDB-3.0"):New("GuildBankLedgerDB", defaults)
+            MockAce.dbInstance = savedInstance
+
+            script(mine.global.guilds["TestGuild"])
+            mine:_simulateLogout()
 
             local sv = {}
-            local realDb = RealAceDB:New(sv, defaults)
-            script(realDb.global.guilds["TestGuild"])
-            realDb:RegisterDefaults(nil)
+            local theirs = RealAceDB:New(sv, defaults)
+            script(theirs.global.guilds["TestGuild"])
+            theirs:RegisterDefaults(nil)
 
-            return db.global, sv.global
+            return mine.global, sv.global
         end
 
         it("agrees on a guild that was only ever read", function()
@@ -529,15 +659,20 @@ describe("SavedVariables", function()
         end)
 
         it("agrees on what a fresh vivification contains", function()
+            local savedInstance = MockAce.dbInstance
+            local mine = _G.LibStub("AceDB-3.0"):New("GuildBankLedgerDB", db._defaults)
+            MockAce.dbInstance = savedInstance
+
             local sv = {}
-            local realDb = RealAceDB:New(sv, db._defaults)
+            local theirs = RealAceDB:New(sv, db._defaults)
+
             assert.same(
-                sortedKeys(realDb.global.guilds["TestGuild"]),
-                sortedKeys(db.global.guilds["TestGuild"])
+                sortedKeys(theirs.global.guilds["TestGuild"]),
+                sortedKeys(mine.global.guilds["TestGuild"])
             )
             assert.same(
-                sortedKeys(realDb.global.guilds["TestGuild"].playerStats),
-                sortedKeys(db.global.guilds["TestGuild"].playerStats)
+                sortedKeys(theirs.global.guilds["TestGuild"].playerStats),
+                sortedKeys(mine.global.guilds["TestGuild"].playerStats)
             )
         end)
     end)
