@@ -94,6 +94,15 @@ HELLO once configured.
 "Officer" and "bank hand" are labels for this doc. The addon never reads a rank name; it reads the
 index, and a guild that draws its lines elsewhere sets different thresholds.
 
+**The two families are independent, and where they disagree the view family wins (#244).** The table
+above pairs them the way a guild would normally configure them, not the way the code constrains
+them: the thresholds are separate numbers, so a rank can sit below the view threshold and above the
+sort one, and a guild that has chosen `sync_only` for that rank has a member holding sort access
+whose tab set is Sync and Help. The view family decides which tabs exist and the bank family decides
+only what the bank tabs may do once they are there, so the tab bar is the authority on what a rank
+can reach and anything opening a tab by name asks it first (`GBL:HasAccessTab`, `UI/UI.lua`). This
+was implicit until `/gbl restock` got past it two ways at once, which is #244.
+
 ## 4. What each role comes for
 
 **The leadership set (ranks 0 to 3).** Who took what and when (Transactions, with the type, item,

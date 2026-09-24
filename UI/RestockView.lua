@@ -507,9 +507,31 @@ function GBL:OpenRestockTab()
         self:Print("Restock is not one of the tabs your rank can open in this guild.")
         return
     end
+
+    -- A closed window opens straight onto Restock instead of building the
+    -- default tab and releasing it a line later. CreateMainFrame ends in
+    -- RebuildTabs, which selects whatever activeTab holds and validates it
+    -- against the bar it just built, and the check above has already
+    -- established that bar holds this tab.
+    local cold = not self.mainFrame
+    if cold then self.activeTab = "restock" end
+
     self:CreateMainFrame()
     self.mainFrame:Show()
-    if self.tabGroup then
+
+    if cold then
+        -- SelectTab already ran, inside CreateMainFrame, which hides the
+        -- frame before it reaches RebuildTabs. So its closing rule,
+        -- `(tabName == "restock") and IsMainFrameShown()`, read false on a
+        -- tab that is now on screen. Re-run that same rule rather than
+        -- asserting true, so a fallback selection cannot set it wrongly.
+        -- It matters because a false flag lets the next RefreshUI move the
+        -- wallet baseline a second time, inside the purchase lag (#60), and
+        -- the IsMainFrameShown term cannot simply come out of SelectTab: a
+        -- RefreshUI while the window is hidden would then set the flag with
+        -- nothing left to clear it.
+        self._restockInView = (self.activeTab == "restock") and self:IsMainFrameShown()
+    elseif self.tabGroup then
         self.tabGroup:SelectTab("restock")
     end
 end

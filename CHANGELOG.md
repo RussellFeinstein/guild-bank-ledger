@@ -5,6 +5,14 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- `/gbl restock` no longer opens the Restock tab for a rank whose tab bar does not hold it, and now says why instead. A guild can leave a rank in Sync only while that rank still holds sort access, and in that state the command put the whole Restock tab on screen under the "Restricted view" banner, then rebuilt it again on every bank open and every completed sync. Where the tab bar had never held Restock at all, the command did nothing and said nothing.
+
+### Changed
+- `/gbl restock` on a closed window now opens straight onto the Restock tab. It used to build the transaction list first and throw it away, which on a long history is the slowest thing the window does.
+
 ## [0.41.3] - 2026-09-22
 
 ### Fixed
