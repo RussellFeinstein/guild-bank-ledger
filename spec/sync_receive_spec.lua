@@ -1508,4 +1508,260 @@ describe("Sync receive and intake", function()
                 "expected '50% dup' in per-chunk line, got: " .. chunkLine)
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- SYNC_RECEIPT (#237)
+    --
+    -- The receiver whispers its redundancy figures to the peer that served it,
+    -- so the number the v0.28.8 decision rule asks for exists on the side that
+    -- holds capLastTranche. Log-only: nothing on the sending side acts on it.
+    ---------------------------------------------------------------------------
+
+    describe("SYNC_RECEIPT", function()
+        local function makeItemTx(idSuffix)
+            return {
+                type = "deposit", player = "Thrall",
+                itemID = 12345, classID = 0, subclassID = 5,
+                count = 5, tab = 1,
+                timestamp = 3600 * 475100,
+                id = "deposit|Thrall|12345|5|1|475100:" .. idSuffix,
+            }
+        end
+
+        local function makeMoneyTx(idSuffix)
+            return {
+                type = "deposit", player = "Thrall",
+                amount = 10000,
+                timestamp = 3600 * 475100,
+                id = "money|Thrall|deposit|10000|" .. idSuffix,
+            }
+        end
+
+        local function findReceipt()
+            for _, sent in ipairs(MockAce.sentCommMessages) do
+                if sent.distribution == "WHISPER" then
+                    local ok, data = GBL:Deserialize(sent.text)
+                    if ok and type(data) == "table"
+                        and data.type == "SYNC_RECEIPT" then
+                        return data, sent
+                    end
+                end
+            end
+            return nil
+        end
+
+        --- Drive a receive that ends the way the completion branch ends it:
+        -- the last chunk arrives and HandleSyncData calls FinishReceiving.
+        local function completeReceive(fields)
+            fields = fields or {}
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:RequestSync("OfficerB", 0)
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 1,
+                transactions = fields.transactions or {},
+                moneyTransactions = fields.moneyTransactions or {},
+                remaining = fields.remaining,
+            })
+        end
+
+        describe("the receiver's emit", function()
+            it("whispers a receipt to the peer that served the session", function()
+                completeReceive({ transactions = { makeItemTx("a") } })
+
+                local receipt, sent = findReceipt()
+                assert.is_not_nil(receipt, "expected a SYNC_RECEIPT whisper")
+                assert.equals("OfficerB", sent.target)
+                assert.equals("WHISPER", sent.distribution)
+            end)
+
+            it("carries the guild and the protocol version, like BUSY", function()
+                completeReceive({ transactions = { makeItemTx("a") } })
+
+                local receipt = findReceipt()
+                assert.equals("Test Guild", receipt.guild)
+                assert.equals(GBL.SYNC_PROTOCOL_VERSION, receipt.protocolVersion)
+            end)
+
+            it("reports the same figures the Redundancy line reports", function()
+                -- 2 of 4 items and 3 of 4 money already held, which is the
+                -- fixture the redundancy-metric describe above uses.
+                guildData.seenTxHashes[makeItemTx("a").id] = 3600 * 475100
+                guildData.seenTxHashes[makeItemTx("b").id] = 3600 * 475100
+                guildData.seenTxHashes[makeMoneyTx("a").id] = 3600 * 475100
+                guildData.seenTxHashes[makeMoneyTx("b").id] = 3600 * 475100
+                guildData.seenTxHashes[makeMoneyTx("c").id] = 3600 * 475100
+
+                completeReceive({
+                    transactions = {
+                        makeItemTx("a"), makeItemTx("b"),
+                        makeItemTx("c"), makeItemTx("d"),
+                    },
+                    moneyTransactions = {
+                        makeMoneyTx("a"), makeMoneyTx("b"), makeMoneyTx("c"),
+                        makeMoneyTx("d"),
+                    },
+                })
+
+                local receipt = findReceipt()
+                assert.equals(3, receipt.stored)
+                assert.equals(5, receipt.duped)
+                assert.equals(2, receipt.itemStored)
+                assert.equals(2, receipt.itemDuped)
+                assert.equals(1, receipt.moneyStored)
+                assert.equals(3, receipt.moneyDuped)
+                assert.equals(0, receipt.rejected)
+            end)
+
+            it("sends nothing at all for an empty session", function()
+                completeReceive()
+
+                assert.is_nil(findReceipt(),
+                    "an empty session has nothing to report")
+            end)
+
+            it("does not send on an aborted receive", function()
+                GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+                GBL:RequestSync("OfficerB", 0)
+                -- Chunk 1 of 2 arrives, so records were stored, and then the
+                -- session is torn down the way every abort path tears it down.
+                GBL:HandleSyncData("OfficerB", {
+                    chunk = 1, totalChunks = 2,
+                    transactions = { makeItemTx("a") },
+                    moneyTransactions = {},
+                })
+                GBL:FinishReceiving("OfficerB")
+
+                assert.is_nil(findReceipt(),
+                    "a partial session's redundancy is not the session's")
+            end)
+
+            it("carries the capped session's remaining bucket count", function()
+                completeReceive({
+                    transactions = { makeItemTx("a") },
+                    remaining = 4,
+                })
+
+                local receipt = findReceipt()
+                assert.equals(4, receipt.remaining)
+            end)
+
+            it("reports remaining as zero when the session was not capped", function()
+                completeReceive({ transactions = { makeItemTx("a") } })
+
+                local receipt = findReceipt()
+                assert.equals(0, receipt.remaining)
+            end)
+
+            it("counts rejected records apart from duplicates", function()
+                completeReceive({
+                    transactions = {
+                        makeItemTx("a"),
+                        -- No id and no itemID: refused at intake rather than
+                        -- stored or deduped.
+                        { type = "deposit", player = "Thrall", count = 1 },
+                    },
+                })
+
+                local receipt = findReceipt()
+                assert.equals(1, receipt.stored)
+                assert.equals(0, receipt.duped)
+                assert.equals(1, receipt.rejected)
+            end)
+        end)
+
+        describe("the sender's handler", function()
+            local function receipt(fields)
+                fields = fields or {}
+                return {
+                    type = "SYNC_RECEIPT",
+                    protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                    guild = "Test Guild",
+                    stored = fields.stored or 3,
+                    duped = fields.duped or 5,
+                    itemStored = fields.itemStored or 2,
+                    itemDuped = fields.itemDuped or 2,
+                    moneyStored = fields.moneyStored or 1,
+                    moneyDuped = fields.moneyDuped or 3,
+                    rejected = fields.rejected or 0,
+                    remaining = fields.remaining or 0,
+                }
+            end
+
+            local function findReceiptLine()
+                for _, entry in ipairs(GBL:GetAuditTrail()) do
+                    if entry.message:find("Receipt from", 1, true) then
+                        return entry.message
+                    end
+                end
+                return nil
+            end
+
+            it("writes one line carrying the peer and the whole-session figure", function()
+                GBL:HandleReceipt("OfficerB", receipt())
+
+                local line = findReceiptLine()
+                assert.is_not_nil(line, "expected a Receipt line on the sync log")
+                assert.is_truthy(line:find("Receipt from OfficerB", 1, true))
+                -- 5 duped of 8 received = 62.5%, rounded the way the
+                -- Redundancy line rounds it.
+                assert.is_truthy(line:find("63%% duped %(5/8 received%)"),
+                    "expected '63% duped (5/8 received)', got: " .. line)
+            end)
+
+            it("carries the item and money split", function()
+                GBL:HandleReceipt("OfficerB", receipt())
+
+                local line = findReceiptLine()
+                assert.is_truthy(line:find("items: 50%% %(2/4%)"),
+                    "expected 'items: 50% (2/4)', got: " .. line)
+                assert.is_truthy(line:find("money: 75%% %(3/4%)"),
+                    "expected 'money: 75% (3/4)', got: " .. line)
+            end)
+
+            it("omits a segment whose record type was absent", function()
+                GBL:HandleReceipt("OfficerB", receipt({
+                    stored = 2, duped = 2,
+                    itemStored = 2, itemDuped = 2,
+                    moneyStored = 0, moneyDuped = 0,
+                }))
+
+                local line = findReceiptLine()
+                assert.is_nil(line:find("money:", 1, true),
+                    "money segment should be omitted, got: " .. line)
+                assert.is_truthy(line:find("items:", 1, true))
+            end)
+
+            it("names rejected records only when there were some", function()
+                GBL:HandleReceipt("OfficerB", receipt())
+                assert.is_nil(findReceiptLine():find("rejected", 1, true),
+                    "rejected should be absent at zero")
+
+                GBL:ClearLog("sync")
+                GBL:HandleReceipt("OfficerB", receipt({ rejected = 7 }))
+                assert.is_truthy(findReceiptLine():find("rejected 7", 1, true))
+            end)
+
+            it("names the buckets a capped session left behind", function()
+                GBL:HandleReceipt("OfficerB", receipt({ remaining = 4 }))
+
+                assert.is_truthy(findReceiptLine():find("4 bucket(s) remaining", 1, true))
+            end)
+
+            it("says nothing rather than erroring on a receipt with no figures", function()
+                assert.has_no.errors(function()
+                    GBL:HandleReceipt("OfficerB", { type = "SYNC_RECEIPT" })
+                end)
+            end)
+
+            it("is reached through the dispatch chain", function()
+                GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+                GBL:OnSyncMessage(GBL.SYNC_PREFIX,
+                    GBL:Serialize(receipt()), "WHISPER", "OfficerB")
+
+                assert.is_not_nil(findReceiptLine(),
+                    "OnSyncMessage should route SYNC_RECEIPT to HandleReceipt")
+            end)
+        end)
+    end)
 end)
