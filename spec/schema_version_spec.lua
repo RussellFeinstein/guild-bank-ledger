@@ -27,8 +27,10 @@
 --      because MigrateNormalizePeerNames short-circuits on cold realm APIs
 --      and leaves the guild at 8; a loose gate there would let 10 or 11 be
 --      reached from 8 and strand the 8 -> 9 work for good. spec/core_spec.lua
---      already pins both from BELOW (each "refuses to bump from schema 8").
---      This file pins them from above and at 9, which nothing did.
+--      already pins the low side: each carries a "refuses to bump from schema
+--      8", and MigrateRecoverPeerRealms also carries a "refuses to bump from
+--      schema 9" (:1344). What nothing covered is the side ABOVE the gate, a
+--      guild already at 11, which is what this file adds.
 --
 --   3. DeduplicateRecords (src/Core.lua:2846), which writes the version
 --      outside the ladder to force the legacy cross-slot pass. It had no
@@ -166,7 +168,8 @@ describe("schemaVersion", function()
     end)
 
     ---------------------------------------------------------------------------
-    -- 2. The strict gates, from above and from the rung below
+    -- 2. The strict gates, from above. The low side is already covered in
+    --    spec/core_spec.lua, which is why neither of these sets 8 or 9.
     ---------------------------------------------------------------------------
 
     describe("the strict gates", function()
@@ -179,21 +182,6 @@ describe("schemaVersion", function()
             assert.equals(0, rewrites)
             assert.equals(11, guildData.schemaVersion)
             assert.equals("Aerie Peak", guildData.playerRealms["Alice"])
-        end)
-
-        it("MigrateRecoverPeerRealms does not run a guild still at 9", function()
-            -- The rung below it. A loose `>= 10` gate would pass 9 through and
-            -- skip the 9 -> 10 work permanently; the from-8 case in
-            -- spec/core_spec.lua does not reach this one, because 8 fails a
-            -- `>= 10` gate too.
-            guildData.schemaVersion = 9
-            guildData.knownPeers = { ["Katorriwl"] = { lastSeen = 1000 } }
-
-            local rewrites = GBL:MigrateRecoverPeerRealms(guildData)
-
-            assert.equals(0, rewrites)
-            assert.equals(9, guildData.schemaVersion)
-            assert.is_not_nil(guildData.knownPeers["Katorriwl"])
         end)
 
         it("MigrateRecoverPeerRealms does not re-run a guild at 11", function()
