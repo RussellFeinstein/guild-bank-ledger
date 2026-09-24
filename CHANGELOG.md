@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.41.6] - 2026-09-24
 
 ### Fixed
 - The duplicate figure a sync reports is no longer inflated by the session before it. When a sync was cut short by a guildmate going into combat and a late piece of that sync arrived afterwards, the per-type and rejected counts from the first one were still standing and were counted into the second one's figure. It only ever showed up in the sync log, which is why it went unnoticed, and it is fixed here because that figure now travels to the other member.
