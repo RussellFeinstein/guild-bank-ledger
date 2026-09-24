@@ -346,24 +346,21 @@ describe("schemaVersion", function()
     end)
 
     ---------------------------------------------------------------------------
-    -- 5. DeduplicateRecords, the write outside the ladder (#263)
+    -- 5. DeduplicateRecords no longer writes the version at all (#263)
     ---------------------------------------------------------------------------
 
-    describe("DeduplicateRecords writes the version outside the ladder", function()
-        it("skips a rung a guild below 4 still owed, for good (characterization)", function()
-            -- src/Core.lua:2851-2857 forces the version to 5 to open
-            -- MigrateCrossSlotDedup's gate, then restores it only
-            -- `if savedSchema > 6`. The branch is entered only below 6, so the
-            -- restore cannot fire on any path into it and the guild is left at
-            -- 6 wherever it started.
+    describe("DeduplicateRecords", function()
+        it("leaves a guild below 6 where it is, and the ladder still owes it the rung", function()
+            -- It used to force the version to 5 to open MigrateCrossSlotDedup's
+            -- gate and restore it with `if savedSchema > 6`, inside a branch
+            -- entered only below 6, so the restore could not fire and the guild
+            -- was left at 6 wherever it started. From 3 that satisfied
+            -- MigrateOccurrenceToPerSlot's `>= 4` gate before it ever ran and no
+            -- later pass revisited it.
             --
-            -- The fixture is 3 and not 5 on purpose. At 4 and 5 the forced
-            -- write loses nothing (the nested 4 to 5 pass runs, and 6 is where
-            -- the ladder would have left the guild anyway), so a case starting
-            -- there asserts the CORRECT outcome and cannot see the defect. The
-            -- harm window is 1 to 3: from 3, MigrateOccurrenceToPerSlot's
-            -- `>= 4` gate is satisfied by the forced 5 before it ever runs, and
-            -- no later pass revisits it.
+            -- The fixture is 3 and not 5 for that reason: at 4 and 5 the forced
+            -- write lost nothing, so a case starting there asserts the correct
+            -- outcome and cannot see the defect. The harm window was 1 to 3.
             guildData.schemaVersion = 3
 
             -- Entry versions rather than a call count: MigrateAllGuilds calls
@@ -378,26 +375,24 @@ describe("schemaVersion", function()
             end
 
             GBL:DeduplicateRecords(guildData)
-            assert.equals(6, guildData.schemaVersion)
-            assert.same({}, enteredAt, "the 3 to 4 migration was reached after all")
+            assert.equals(3, guildData.schemaVersion,
+                "the cleanup moved the version, which is not its job")
+            assert.same({}, enteredAt, "the cleanup ran a migration")
 
-            -- And it is permanent: the ladder will not come back for it. It is
-            -- called once more, at 6, where its own gate turns it away.
+            -- The ladder still owes it the rung, and reaches it at 3, in order.
             GBL:MigrateAllGuilds()
             GBL.MigrateOccurrenceToPerSlot = original
 
             assert.equals(11, guildData.schemaVersion)
-            assert.same({ 6 }, enteredAt,
-                "the ladder reached the skipped rung at a version below 4")
+            assert.same({ 3 }, enteredAt,
+                "the ladder did not reach the owed rung below 4")
         end)
 
-        it("raises on a guild whose schemaVersion is nil, after the legacy pass has run (characterization)", function()
-            -- The gate reads `(guildData.schemaVersion or 0)` and the restore
-            -- compares the raw value, so a nil passes the gate and reaches a
-            -- numeric compare. The operands are matched rather than just the
-            -- word "compare": every other raise on this path would be a
-            -- different pair, and the assertion has to be able to tell a fix to
-            -- this line from a fix somewhere else.
+        it("does not raise on a guild whose schemaVersion is nil, and still cleans up", function()
+            -- The old gate read `(guildData.schemaVersion or 0)` while the
+            -- restore compared the raw value, so a nil passed the gate and then
+            -- reached a numeric compare and raised. With no version handling
+            -- left in the function there is nothing to compare.
             --
             -- Nilling the field on a guild from GetGuildData is enough because
             -- AceDB copies scalar defaults INTO each guild table rather than
@@ -415,13 +410,12 @@ describe("schemaVersion", function()
             local ok, err = pcall(function() return GBL:DeduplicateRecords(guildData) end)
 
             GBL.CleanupWithEventCounts = original
-            assert.is_false(ok)
-            assert.is_truthy(tostring(err):match("attempt to compare number with nil"))
-            -- The end state, so a fix cannot move the raise and still pass: the
-            -- legacy pass has already completed and left 6, and the count-based
-            -- cleanup below it never ran at all.
-            assert.equals(6, guildData.schemaVersion)
-            assert.equals(0, cleanups)
+            assert.is_true(ok, tostring(err))
+            -- The count-based cleanup is the whole of the function now, so it
+            -- runs exactly once, and the version is left alone rather than
+            -- being written to 6 on the way past.
+            assert.equals(1, cleanups)
+            assert.is_nil(guildData.schemaVersion)
         end)
     end)
 

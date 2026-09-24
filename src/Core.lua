@@ -2886,28 +2886,27 @@ function GBL:PrintHelp()
     self:Print("  /gbl help    - Show this help message")
 end
 
---- Run both dedup passes (same-slot + cross-slot) without schema guards.
--- Called on every login/reload and after each sync receive to ensure
--- dirty data from any source is cleaned up promptly.
+--- Run the count-based dedup pass, with no schema guards and no schema writes.
+-- Called after a bank scan and from /gbl cleanup. Uses API-observed ground
+-- truth (eventCounts), and its safe default is to trim nothing where it has
+-- none, so it is harmless on a guild the migration ladder has not reached.
+--
+-- It used to run a legacy pass for a guild below schema 6 as well, by forcing
+-- the version to 5 to open MigrateCrossSlotDedup's gate. That was #263: the
+-- restore was guarded by `if savedSchema > 6` inside a branch entered only
+-- below 6, so it could never fire, and a guild at 1 to 3 was advanced to 6
+-- with the rungs it still owed skipped for good. The branch is gone rather
+-- than repaired, because MigrateCrossSlotDedup IS rung 6 and the ladder runs
+-- it in order for any guild below 6; reaching it out of order here could only
+-- ever lose the rungs beneath it. Since the ladder migrates each guild under
+-- pcall, a guild that arrives here below 6 is one whose own migration raised,
+-- on the same data, and it is named once per session on the system channel.
 -- @param guildData table Guild data from AceDB
 -- @return number Number of duplicate records removed
 function GBL:DeduplicateRecords(guildData)
     if not guildData then return 0 end
 
-    -- Legacy anchor-based cleanup: only for data that hasn't been migrated yet.
-    -- Once eventCounts is populated, CleanupWithEventCounts is authoritative.
-    local legacyRemoved = 0
-    if (guildData.schemaVersion or 0) < 6 then
-        local savedSchema = guildData.schemaVersion
-        guildData.schemaVersion = 5
-        legacyRemoved = self:MigrateCrossSlotDedup(guildData)
-        if savedSchema > 6 then guildData.schemaVersion = savedSchema end
-    end
-
-    -- Count-based cleanup (uses API-observed ground truth)
-    local countRemoved = self:CleanupWithEventCounts(guildData)
-
-    return legacyRemoved + countRemoved
+    return self:CleanupWithEventCounts(guildData)
 end
 
 --- Remove excess records using persisted eventCounts as ground truth.
