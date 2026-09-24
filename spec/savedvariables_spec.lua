@@ -365,6 +365,13 @@ describe("SavedVariables", function()
             assert.is_nil(sdb.global.bags[nil])
         end)
 
+        it("answers a nil key with nil for a scalar wildcard too", function()
+            -- The table wildcard and the scalar wildcard each have their own
+            -- nil guard in the library, and only the first had a case here.
+            local sdb = synthetic({ global = { limits = { ["*"] = 7 } } })
+            assert.is_nil(sdb.global.limits[nil])
+        end)
+
         it("merges a ** template into every named sibling", function()
             local sdb = synthetic({
                 global = {
@@ -386,8 +393,7 @@ describe("SavedVariables", function()
             assert.same({ "b" }, sortedKeys(rawget(sdb.global, "limits")))
         end)
 
-        it("strips ** content from a named key but blocks the key own defaults",
-        function()
+        it("strips ** content from a named key that has no say in it", function()
             local sdb = synthetic({
                 global = {
                     tabs = {
@@ -403,6 +409,37 @@ describe("SavedVariables", function()
             local named = rawget(rawget(sdb.global, "tabs"), "named")
             assert.is_nil(rawget(named, "shared"))
             assert.equals(2, named.extra)
+        end)
+
+        it("blocks the ** strip for a key the named table declares itself", function()
+            -- The blocker exists for exactly one arrangement, and a fixture
+            -- without it cannot see the argument at all: the value has to
+            -- EQUAL the ** default, so the ** pass wants to strip it, and
+            -- DIFFER from the named key own default, so the later named pass
+            -- leaves it alone. With `named = { own = 1 }` and a ** template of
+            -- `{ shared = true }` no key is in both, blocker[k] is nil every
+            -- time, and dropping the whole term changes nothing.
+            local sdb = synthetic({
+                global = {
+                    tabs = {
+                        ["**"] = { shared = true },
+                        named = { shared = false, own = 1 },
+                    },
+                },
+            })
+            assert.is_false(sdb.global.tabs.named.shared)
+            sdb.global.tabs.named.shared = true
+
+            sdb:_simulateLogout()
+
+            -- Checked in steps: without the blocker the ** pass strips shared,
+            -- the named pass then strips own, and the empty table collapses, so
+            -- a single chained read would raise instead of reporting.
+            local tabs = rawget(sdb.global, "tabs")
+            assert.is_not_nil(tabs, "tabs collapsed")
+            local named = rawget(tabs, "named")
+            assert.is_not_nil(named, "named collapsed: the ** strip was not blocked")
+            assert.is_true(rawget(named, "shared"))
         end)
     end)
 
