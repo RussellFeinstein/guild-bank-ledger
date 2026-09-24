@@ -134,8 +134,9 @@ end
 -- Pending purchases (#209): bought at the auction house and not yet seen in
 -- the bank. An auction-house purchase arrives by mail, so the bank scan
 -- cannot see it until the buyer collects and deposits it, and a search in
--- that window offered the row again. pending[itemID] = { qty, buyer, at,
--- unconfirmed } is per guild and persisted beside the budget (the mail
+-- that window offered the row again. pending[itemID] = { qty, unconfirmedQty,
+-- buyer, buyers, at, unconfirmedAt } is per guild and persisted beside the
+-- budget (the mail
 -- outlives a session), local to the account and not synced (the mail is the
 -- buyer's). Cleared by the ledger's deposit records for the buyer
 -- (_RestockOnRecordStored), never by the bank scan, which cannot tell the
@@ -156,6 +157,117 @@ local function buyerName(self)
     return self:ResolvePlayerName(UnitName("player") or "Unknown")
 end
 
+--- One entry, two quantities (#215). `qty` is confirmed, meaning the client
+-- saw the purchase result; `unconfirmedQty` is a confirm whose result it
+-- never saw, so a late success can settle the second into the first and a
+-- late failure can take it back out. **This is the one place either number
+-- becomes a reading**, and the `unconfirmed` boolean the first cut stored is
+-- derived here rather than kept beside them, because two stored copies of
+-- one fact can disagree and nothing would say which was right.
+-- An entry written before the split carries `qty` plus that boolean, which
+-- reads as wholly unconfirmed; a plain one reads as wholly confirmed. The
+-- mapping is written from what _RestockAddPending used to store, not from
+-- any of the prose copies of the shape, which did not agree with each other.
+-- @param entry table|nil
+-- @return table { confirmed, unconfirmed, total, at, unconfirmedAt, isUnconfirmed }
+function GBL:_RestockPendingParts(entry)
+    if type(entry) ~= "table" then
+        return { confirmed = 0, unconfirmed = 0, total = 0, isUnconfirmed = false }
+    end
+    local confirmed = tonumber(entry.qty) or 0
+    local unconfirmed = tonumber(entry.unconfirmedQty)
+    if not unconfirmed then
+        -- Pre-split: the boolean covered the whole quantity.
+        unconfirmed = entry.unconfirmed and confirmed or 0
+        if entry.unconfirmed then confirmed = 0 end
+    end
+    if confirmed < 0 then confirmed = 0 end
+    if unconfirmed < 0 then unconfirmed = 0 end
+    return {
+        confirmed = confirmed,
+        unconfirmed = unconfirmed,
+        total = confirmed + unconfirmed,
+        at = entry.at,
+        unconfirmedAt = entry.unconfirmedAt or entry.at,
+        isUnconfirmed = unconfirmed > 0,
+    }
+end
+
+-- Find an entry whatever key shape wrote it, and re-key it by number so the
+-- store heals itself (InitSync consolidates a stale knownPeers key the same
+-- way). The universe has always tolerated a string key while both readers
+-- indexed by number, so such an entry rendered with a Clear that did nothing
+-- and could never be settled by a deposit.
+local function takeEntry(pending, itemID)
+    if type(pending) ~= "table" or not itemID then return nil end
+    local entry = pending[itemID]
+    if entry ~= nil then return entry end
+    local key = tostring(itemID)
+    entry = pending[key]
+    if entry ~= nil then
+        pending[key] = nil
+        pending[itemID] = entry
+    end
+    return entry
+end
+
+-- Bring a pre-split entry onto the two-quantity shape in place, through the
+-- one reading above, so every writer below can assume it.
+local function normalizeEntry(self, entry)
+    local p = self:_RestockPendingParts(entry)
+    entry.qty = p.confirmed
+    entry.unconfirmedQty = p.unconfirmed
+    entry.unconfirmedAt = p.unconfirmed > 0 and p.unconfirmedAt or nil
+    entry.unconfirmed = nil
+    return entry
+end
+
+-- Move quantity between the two parts, or out of the entry altogether.
+-- Returns false when there is no entry or nothing parked to move, which is
+-- what tells a caller its eager park never landed.
+local function movePending(self, itemID, qty, settle)
+    itemID = tonumber(itemID)
+    qty = tonumber(qty) or 0
+    if not itemID or qty <= 0 then return false end
+    local data = getStore(self)
+    if not data then return false end
+    local entry = takeEntry(data.pending, itemID)
+    if not entry then return false end
+    normalizeEntry(self, entry)
+    if entry.unconfirmedQty <= 0 then return false end
+    local moved = math.min(qty, entry.unconfirmedQty)
+    entry.unconfirmedQty = entry.unconfirmedQty - moved
+    if settle then entry.qty = entry.qty + moved end
+    if entry.unconfirmedQty <= 0 then entry.unconfirmedAt = nil end
+    local parts = self:_RestockPendingParts(entry)
+    if parts.total <= 0 then
+        data.pending[itemID] = nil
+    end
+    self:SystemInfo("Restock pending: it:%d x%d %s, %d in the mail",
+        itemID, moved, settle and "confirmed by a late result" or "taken back",
+        parts.total)
+    return true
+end
+
+--- A late COMMODITY_PURCHASE_SUCCEEDED for a purchase parked when the step
+-- timer gave up: move it to the confirmed part rather than adding a second
+-- copy of the same quantity.
+-- @param itemID number
+-- @param qty number > 0
+-- @return boolean settled
+function GBL:_RestockSettlePending(itemID, qty)
+    return movePending(self, itemID, qty, true)
+end
+
+--- A late COMMODITY_PURCHASE_FAILED: nothing was bought after all, so take
+-- the parked quantity back out. An entry left at nothing is removed.
+-- @param itemID number
+-- @param qty number > 0
+-- @return boolean reversed
+function GBL:_RestockReversePending(itemID, qty)
+    return movePending(self, itemID, qty, false)
+end
+
 --- Record a purchase as pending: create the entry or add to it. A second
 -- purchase keeps the earlier `at` so the ledger window covers both, and an
 -- unconfirmed flag stays set until the entry clears. The store is per
@@ -173,19 +285,39 @@ function GBL:_RestockAddPending(itemID, qty, flags)
     if not data then return false end
     local unconfirmed = flags and flags.unconfirmed or nil
     local who = buyerName(self)
-    local entry = data.pending[itemID]
+    local now = GetServerTime()
+    local entry = takeEntry(data.pending, itemID)
     if entry then
-        entry.qty = (entry.qty or 0) + qty
+        normalizeEntry(self, entry)
+        -- The buyer key is guarded: an entry carrying none indexed the set
+        -- with nil and raised "table index is nil" before the purchase was
+        -- recorded, leaving the flow stuck in CONFIRMING.
+        entry.buyer = entry.buyer or who
         entry.buyers = entry.buyers or { [entry.buyer] = true }
         entry.buyers[who] = true
-        if unconfirmed then entry.unconfirmed = true end
+        if unconfirmed then
+            entry.unconfirmedQty = entry.unconfirmedQty + qty
+            -- Its own stamp: `at` is deliberately the earliest purchase, so
+            -- a park landing on an old entry would otherwise render that
+            -- purchase age for one made seconds ago.
+            entry.unconfirmedAt = entry.unconfirmedAt or now
+        else
+            entry.qty = entry.qty + qty
+        end
     else
-        entry = { qty = qty, buyer = who, buyers = { [who] = true }, at = GetServerTime(),
-                  unconfirmed = unconfirmed }
+        entry = { qty = 0, unconfirmedQty = 0, buyer = who,
+                  buyers = { [who] = true }, at = now }
+        if unconfirmed then
+            entry.unconfirmedQty = qty
+            entry.unconfirmedAt = now
+        else
+            entry.qty = qty
+        end
         data.pending[itemID] = entry
     end
     self:SystemInfo("Restock pending: it:%d x%d added%s, %d in the mail",
-        itemID, qty, unconfirmed and " (result unknown)" or "", entry.qty)
+        itemID, qty, unconfirmed and " (result unknown)" or "",
+        self:_RestockPendingParts(entry).total)
     return true
 end
 
@@ -197,10 +329,11 @@ function GBL:ClearRestockPending(itemID)
     itemID = tonumber(itemID)
     local data = getStore(self)
     if not itemID or not data then return false end
-    local entry = data.pending[itemID]
+    local entry = takeEntry(data.pending, itemID)
     if not entry then return false end
+    local total = self:_RestockPendingParts(entry).total
     data.pending[itemID] = nil
-    self:SystemInfo("Restock pending: it:%d cleared by hand (x%d)", itemID, entry.qty or 0)
+    self:SystemInfo("Restock pending: it:%d cleared by hand (x%d)", itemID, total)
     return true
 end
 
@@ -211,14 +344,24 @@ end
 -- the record was stored for and creates nothing.
 -- @param record table the stored transaction record
 -- @param guildData table the guild it was stored in
+-- @param opts table|nil { timestampRewritten = true } from StoreTx
 -- @return boolean changed
-function GBL:_RestockOnRecordStored(record, guildData)
+function GBL:_RestockOnRecordStored(record, guildData, opts)
     if type(record) ~= "table" or record.type ~= "deposit" then return false end
+    -- StoreTx replaces an invalid timestamp with now, in place, before this
+    -- runs, so the record cannot be asked and the fact has to be handed in
+    -- (#215). A sync-received copy of an old deposit with a corrupt or
+    -- epoch-0 timestamp (#93) would otherwise read as now, pass the window,
+    -- and clear an entry whose purchase is still in the mail. The entry
+    -- stays and the player clears it by hand, which is the safe direction:
+    -- a wrong keep costs one click, a wrong clear costs the gold again.
+    if opts and opts.timestampRewritten then return false end
     local pending = guildData and guildData.restock and guildData.restock.pending
     if not pending then return false end
     local itemID = tonumber(record.itemID)
-    local entry = itemID and pending[itemID]
+    local entry = takeEntry(pending, itemID)
     if not entry then return false end
+    normalizeEntry(self, entry)
     local buyers = entry.buyers
     if not ((buyers and buyers[record.player]) or record.player == entry.buyer) then return false end
     local dt = (record.timestamp or 0) - (entry.at or 0)
@@ -227,13 +370,24 @@ function GBL:_RestockOnRecordStored(record, guildData)
     if count <= 0 then return false end
     -- The offset is logged so a capture can say which way the ledger's hour
     -- rounding goes; a run of positive readings is the case for a zero window.
-    local left = (entry.qty or 0) - count
+    -- The confirmed part drains first (#215): a real deposit is more likely
+    -- to be the purchase whose result we saw, and draining the unconfirmed
+    -- part first would drop the flag while goods are still owed.
+    local take = count
+    local fromConfirmed = math.min(take, entry.qty)
+    entry.qty = entry.qty - fromConfirmed
+    take = take - fromConfirmed
+    if take > 0 then
+        local fromUnconfirmed = math.min(take, entry.unconfirmedQty)
+        entry.unconfirmedQty = entry.unconfirmedQty - fromUnconfirmed
+    end
+    if entry.unconfirmedQty <= 0 then entry.unconfirmedAt = nil end
+    local left = self:_RestockPendingParts(entry).total
     if left <= 0 then
         pending[itemID] = nil
         self:SystemInfo("Restock pending: it:%d deposit x%d by %s, cleared (recorded %+ds after the purchase)",
             itemID, count, record.player, dt)
     else
-        entry.qty = left
         self:SystemInfo("Restock pending: it:%d deposit x%d by %s, %d left (recorded %+ds after the purchase)",
             itemID, count, record.player, left, dt)
     end
@@ -447,7 +601,8 @@ function GBL:_RestockBuildItemUniverse(opts)
         -- What is in the mail counts as stock for the shortfall (#209); a
         -- foreign deposit can push the sum past the target, hence the clamp.
         local pend = pendingByID[itemID]
-        local pending = (pend and tonumber(pend.qty)) or 0
+        local pp = pend and self:_RestockPendingParts(pend) or nil
+        local pending = (pp and pp.total) or 0
         local toBuy = target - stk - pending
         if toBuy < 0 then toBuy = 0 end
         rows[#rows + 1] = {
@@ -460,8 +615,11 @@ function GBL:_RestockBuildItemUniverse(opts)
             stock = stk,
             toBuy = toBuy,
             pending = pending,
-            pendingAt = pend and pend.at or nil,
-            pendingUnconfirmed = pend and pend.unconfirmed or nil,
+            pendingAt = pp and pp.at or nil,
+            pendingUnconfirmed = (pp and pp.isUnconfirmed) or nil,
+            pendingConfirmed = pp and pp.confirmed or nil,
+            pendingUnconfirmedQty = pp and pp.unconfirmed or nil,
+            pendingUnconfirmedAt = pp and pp.unconfirmedAt or nil,
             scanned = scanned,
         }
     end
@@ -533,6 +691,21 @@ function GBL:_RestockBuildItemUniverse(opts)
     table.sort(reserveIDs)
     for _, id in ipairs(reserveIDs) do
         decorate(id, "Reserves (not in a display tab)", nil)
+    end
+
+    -- 3. Items with a purchase in the mail that the layout does not name
+    -- (#215). Only a row can clear an entry, so an entry with no row could
+    -- never be cleared and re-applied the moment the item came back; with
+    -- the layout emptied it sat behind the "no items in your layout"
+    -- message with no route to it at all. Nothing here is buyable: no
+    -- demand and no reserve means target 0, so toBuy clamps to 0.
+    local pendingIDs = {}
+    for itemID in pairs(pendingByID) do
+        if not seen[itemID] then pendingIDs[#pendingIDs + 1] = itemID end
+    end
+    table.sort(pendingIDs)
+    for _, id in ipairs(pendingIDs) do
+        decorate(id, "In the mail (not in a display tab)", nil)
     end
 
     return rows
@@ -965,8 +1138,14 @@ end
 local function parkUnanswered(self, st)
     local u = st.unanswered
     if u then
-        st.unanswered = nil
-        self:_RestockAddPending(u.itemID, u.qty, { unconfirmed = true })
+        -- Parked at the moment it was created (#215), so this is only the
+        -- retry for a park the store refused. The record is kept when the
+        -- retry is refused too: it used to be nilled before the add and the
+        -- boolean ignored, so a cold guild name forgot the purchase with no
+        -- line anywhere.
+        if u.parked or self:_RestockAddPending(u.itemID, u.qty, { unconfirmed = true }) then
+            st.unanswered = nil
+        end
     end
     if st.state == "CONFIRMING" and st.confirmIssued and st.pendingItemID then
         self:_RestockAddPending(st.pendingItemID, st.pendingQty, { unconfirmed = true })
@@ -1154,7 +1333,9 @@ function GBL:_RestockSearchTeardown(logWhat)
     st.resultRows = {}
     st.foundCount = 0
     clearPending(st)
-    st.unanswered = nil
+    -- st.unanswered is parkUnanswered's to clear, above: it keeps the record
+    -- when the store refused the park, and clearing it here unconditionally
+    -- was the third way a purchase was forgotten with no line (#215).
     clearRunProgress(st)
 end
 
@@ -1302,7 +1483,11 @@ end
 -- Mark a row bought, add what it cost to the lag-free spend estimate (the
 -- priced total when the price event carried one, else the lowest-price lower
 -- bound), and remember the purchase past this search (#209).
-local function creditPurchase(self, st, index, itemID, total, qty)
+-- opts.settle marks the late credit for a purchase the step timer already
+-- parked (#215): the quantity is already standing in the store, so it moves
+-- to the confirmed part instead of being added a second time. A park that
+-- was refused leaves nothing to settle, and the add is the fallback.
+local function creditPurchase(self, st, index, itemID, total, qty, opts)
     if not index then return end
     st.bought = st.bought or {}
     st.bought[index] = true
@@ -1312,7 +1497,9 @@ local function creditPurchase(self, st, index, itemID, total, qty)
     st.boughtTotal = st.boughtTotal or {}
     st.boughtTotal[index] = cost
     st.spentEstimate = (st.spentEstimate or 0) + cost
-    self:_RestockAddPending(itemID, qty)
+    if not (opts and opts.settle and self:_RestockSettlePending(itemID, qty)) then
+        self:_RestockAddPending(itemID, qty)
+    end
 end
 
 -- Settle a sweep, or a deferred single buy, back to READY.
@@ -1536,6 +1723,13 @@ function GBL:_RestockOnStepTimeout()
             index = st.pendingIndex, itemID = st.pendingItemID,
             qty = st.pendingQty, total = st.pendingTotal,
         }
+        -- Park it now (#215). This record used to live only on _restock and
+        -- reach the store through a teardown the player may never run, so a
+        -- reload forgot it and the next search offered the row again. The
+        -- marker stays for the late result, which settles the parked
+        -- quantity rather than adding a second one.
+        st.unanswered.parked = self:_RestockAddPending(
+            st.pendingItemID, st.pendingQty, { unconfirmed = true })
         local note = ""
         if st.errorNote then
             note = format(" The auction house reported: %s.", st.errorNote)
@@ -1655,6 +1849,10 @@ function GBL:CancelRestockPurchase()
             index = st.pendingIndex, itemID = st.pendingItemID,
             qty = st.pendingQty, total = st.pendingTotal,
         }
+        -- Parked at the click, like the step timeout (#215): the gold may
+        -- have moved and a reload before the next teardown would forget it.
+        st.unanswered.parked = self:_RestockAddPending(
+            st.pendingItemID, st.pendingQty, { unconfirmed = true })
         ahLog(self, "cancelled", format("state=%s confirm already issued, kept as unanswered", wasState))
         self:Print(format("The confirm for %s is already out; waiting for its result. "
             .. "Check your mail before buying it again.", itemName(self, st.pendingItemID)))
@@ -1873,7 +2071,7 @@ function GBL:COMMODITY_PURCHASE_SUCCEEDED()
         local u = st.unanswered
         st.unanswered = nil
         ahLog(self, "COMMODITY_PURCHASE_SUCCEEDED", format("handled (late, it:%d x%d)", u.itemID or 0, u.qty or 0))
-        creditPurchase(self, st, u.index, u.itemID, u.total, u.qty)
+        creditPurchase(self, st, u.index, u.itemID, u.total, u.qty, { settle = u.parked })
         self:Print(format("Bought %dx %s (the result arrived late).", u.qty or 0, itemName(self, u.itemID)))
         self:RefreshRestockTab()
         return
@@ -1901,6 +2099,9 @@ function GBL:COMMODITY_PURCHASE_FAILED()
         local u = st.unanswered
         st.unanswered = nil
         ahLog(self, "COMMODITY_PURCHASE_FAILED", format("handled (late, it:%d x%d)", u.itemID or 0, u.qty or 0))
+        -- The purchase was parked when the timer gave up, and it turns out
+        -- nothing was bought, so the parked quantity comes back out (#215).
+        if u.parked then self:_RestockReversePending(u.itemID, u.qty) end
         self:Print(format("The purchase of %s failed after all; nothing was spent on it.",
             itemName(self, u.itemID)))
         self:RefreshRestockTab()

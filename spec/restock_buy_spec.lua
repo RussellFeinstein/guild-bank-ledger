@@ -1416,6 +1416,9 @@ describe("Restock buy", function()
         local function pending(itemID)
             return GBL:GetRestockData().pending[itemID]
         end
+        local function parts(itemID)
+            return GBL:_RestockPendingParts(pending(itemID))
+        end
 
         it("defaults on, and the setting round-trips", function()
             GBL.db.profile.restock = nil
@@ -1538,6 +1541,11 @@ describe("Restock buy", function()
             -- Confirm out: nothing to cancel, and the result is still coming,
             -- so the purchase is kept as unanswered (the timeout's record):
             -- no new start until it lands, and the late result credits it.
+            -- It is also parked now (#215). PR A's review declined to park
+            -- here because parking INSTEAD of the unanswered record left the
+            -- row buyable and the late result landed on the next purchase.
+            -- Both are set now, so the record still blocks every start and
+            -- the parked quantity is what a reload cannot lose.
             twoItems()
             GBL:StartRestockBuy(1)
             MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 4200, 21000)
@@ -1547,7 +1555,7 @@ describe("Restock buy", function()
             GBL:CancelRestockPurchase()
             assert.equals(1, #MockWoW.commodityPurchases.cancel)   -- unchanged
             assert.equals("READY", GBL._restock.state)
-            assert.is_nil(pending(100))                             -- not parked: the result is still due
+            assert.equals(5, parts(100).unconfirmed)                 -- parked, and still blocked
             assert.equals(100, GBL._restock.unanswered.itemID)
             assert.equals(5, GBL._restock.unanswered.qty)
             assert.is_not_nil(findLine("confirm already issued, kept as unanswered"))

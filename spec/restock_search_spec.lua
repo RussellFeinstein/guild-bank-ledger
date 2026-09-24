@@ -351,8 +351,12 @@ describe("Restock search", function()
             assert.is_nil(GBL._restock.unanswered)
             local entry = GBL:GetRestockData().pending[100]
             assert.is_not_nil(entry)
-            assert.equals(5, entry.qty)
-            assert.is_true(entry.unconfirmed)
+            -- #215 split the entry in two and made the flag a derived
+            -- read, so the quantity is the unconfirmed part now.
+            local parts = GBL:_RestockPendingParts(entry)
+            assert.equals(5, parts.unconfirmed)
+            assert.equals(0, parts.confirmed)
+            assert.is_true(parts.isUnconfirmed)
             assert.is_not_nil(GBL:GetRestockData().pending[200])
         end)
 
@@ -384,7 +388,7 @@ describe("Restock search", function()
             GBL:StartRestockSearch()
             assert.equals("IDLE", GBL._restock.state)
             assert.is_true(Helpers.printContains("Nothing to buy"))
-            assert.is_true(GBL:GetRestockData().pending[100].unconfirmed)
+            assert.is_true(GBL:_RestockPendingParts(GBL:GetRestockData().pending[100]).isUnconfirmed)
         end)
 
         it("refuses from CONFIRMING and PRICED", function()
