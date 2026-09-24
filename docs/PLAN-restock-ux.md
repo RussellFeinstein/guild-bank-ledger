@@ -281,6 +281,18 @@ it writes to SavedVariables on every purchase and doubles the `Restock pending:`
 system capture bounded at 300 entries, which is the readability constraint #199 was built
 around.
 
+**The park is durable and the correction is not, which is deliberate.** `_RestockReversePending`
+is reachable only through `st.unanswered`, so in the case this section exists for (a confirm
+with no result, then a reload) the reversal never runs: the buy events are not registered, the
+late `COMMODITY_PURCHASE_FAILED` is never received, and the quantity stays in
+`unconfirmedQty`. That suppresses the shortfall for goods that were never bought, and with the
+whole target covered the `nothing` blocker greys Search. **Clear is the answer and is what it
+was built for**: the row says the result is unknown and carries the button, which is exactly
+the case the manual clear was specified for. Making the correction durable would mean
+persisting enough of the purchase to recognise its result across a reload, and a result cannot
+arrive across one, so there is nothing to recognise. Stated here so the asymmetry is a
+decision rather than an oversight.
+
 **Read.** The universe row carries `pending`, the shortfall is `max(0, target - stock - pending)`,
 the buy list uses that shortfall, and the row shows the modifier with its age.
 

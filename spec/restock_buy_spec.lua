@@ -1398,14 +1398,12 @@ describe("Restock buy", function()
         end)
 
         -- parkUnanswered nilled st.unanswered before the add and ignored the
-        -- boolean, so a refused write forgot the purchase with no line.
-        it("keeps an unanswered record the store refuses rather than forgetting it", function()
-            oneItem()
-            GBL._restock.unanswered = { index = 1, itemID = 100, qty = nil, total = 21000 }
-            GBL:_RestockSearchTeardown("reset")
-            assert.is_not_nil(GBL._restock.unanswered)
-            assert.is_nil(pending(100))
-        end)
+        -- boolean, so a refused write forgot the purchase with no line. What
+        -- happens instead now depends on WHY the store refused, and the two
+        -- reasons are covered by reason in "the review's findings on the
+        -- park" below: a store that cannot take it yet keeps the record and
+        -- retries, and a record there is nothing to write is dropped with a
+        -- line rather than blocking every buy for the session.
     end)
 
     -- The code review of this PR reproduced both of these.
@@ -1443,22 +1441,40 @@ describe("Restock buy", function()
         -- the teardown has already dropped the buy events, so no result can
         -- arrive to clear it. It says so once and retries when the tab is next
         -- shown, which is the first moment the store is reachable again.
-        it("names a refused park and retries it when the tab is next shown", function()
+        local function warnedWith(needle)
+            for _, e in ipairs(GBL:GetLog("system")) do
+                if e.message:find(needle, 1, true) then return true end
+            end
+            return false
+        end
+
+        -- GetGuildName caches _cachedGuildName, so the store only refuses
+        -- before any guild name has been read this session. That is the
+        -- retryable case, and it is narrower than the review reported.
+        it("keeps a park the store cannot take yet, and retries it on tab show", function()
             oneItem()
             GBL._restock.unanswered = { index = 1, itemID = 100, qty = 5, total = 21000 }
             MockWoW.guild.name = nil
+            GBL._cachedGuildName = nil
             GBL:_RestockSearchTeardown("reset")
             assert.is_not_nil(GBL._restock.unanswered)
-            local warned = false
-            for _, e in ipairs(GBL:GetLog("system")) do
-                if e.message:find("could not be recorded", 1, true) then warned = true end
-            end
-            assert.is_true(warned)
+            assert.is_true(warnedWith("not recorded (no-store)"))
 
             MockWoW.guild.name = "Test Guild"
             GBL:_RestockOnTabShown()
             assert.is_nil(GBL._restock.unanswered)
             assert.equals(5, GBL:_RestockPendingParts(pending(100)).unconfirmed)
+        end)
+
+        -- A record the store can never describe is dropped instead: keeping
+        -- it blocks every buy for the session and no retry can help.
+        it("drops a record there is nothing to write, and says so", function()
+            oneItem()
+            GBL._restock.unanswered = { index = 1, itemID = 100, qty = nil, total = 21000 }
+            GBL:_RestockSearchTeardown("reset")
+            assert.is_nil(GBL._restock.unanswered)
+            assert.is_true(warnedWith("not recorded (nothing-to-record)"))
+            assert.is_nil(pending(100))
         end)
     end)
 

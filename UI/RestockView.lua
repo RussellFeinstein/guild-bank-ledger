@@ -82,7 +82,9 @@ GBL._restockStatusText = RESTOCK_STATUS_TEXT
 -- search readings are skipped rather than every searched row reading "not
 -- found". Priced needs a usable price: Auctionator's placeholder for a miss
 -- carries minPrice 0, which Lua reads as true.
--- @param row table|nil universe row { itemID, target, stock, toBuy, pending, scanned }
+-- @param row table|nil universe row { itemID, target, stock, toBuy, pending,
+--   pendingAt, pendingUnconfirmed, pendingConfirmed, pendingUnconfirmedQty,
+--   pendingConfirmedAt, pendingUnconfirmedAt, scanned }
 -- @param st table|nil the session state (self._restock)
 -- @return table { status, index?, needed?, minPrice?, total?, reason? }
 function GBL:_RestockRowStatus(row, st)
@@ -127,7 +129,15 @@ function GBL:_RestockRowStatus(row, st)
         out.status = "unknown"
     elseif (row.toBuy or 0) > 0 then
         out.status = "short"
-    elseif (row.pending or 0) > 0 and (row.stock or 0) < (row.target or 0) then
+    elseif (row.pending or 0) > 0
+            and ((row.stock or 0) < (row.target or 0)
+                 or (row.target or 0) <= 0
+                 or row.pendingUnconfirmed) then
+        -- The shortfall test alone could not see a row the layout does not
+        -- name (#215): target 0 makes it false, so every encoding read "in
+        -- stock" beside the row's own "in the mail N", which is the one
+        -- reason that row exists. An unconfirmed part reads the same way
+        -- whatever the bank holds, since it is what needs a decision.
         out.status = "inmail"
     end
     return out
@@ -636,7 +646,8 @@ function GBL:_RestockView_RenderItems(content, focus)
                 local unconfirmed = row.pendingUnconfirmedQty or 0
                 if confirmed > 0 then
                     figures = figures .. format(" || in the mail %d (%s)", confirmed,
-                        self:_RestockFormatAge(now - (row.pendingAt or 0)))
+                        self:_RestockFormatAge(now -
+                            (row.pendingConfirmedAt or row.pendingAt or 0)))
                 end
                 if unconfirmed > 0 then
                     figures = figures .. format(" || %d bought, result unknown (%s), check your mail",
