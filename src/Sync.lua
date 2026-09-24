@@ -3542,8 +3542,6 @@ function GBL:HandleAck(sender, data)
     end)
 end
 
---- Clean up receiving state and persist sync metadata.
--- @param sender string The peer we synced from
 --- The redundancy prose both sides print, so the receiver's Redundancy line
 -- and the sender's Receipt line cannot drift into describing one session two
 -- ways. Returns nil when nothing was received, which is what suppresses both.
@@ -3602,7 +3600,8 @@ function GBL:HandleReceipt(sender, data)
     self:SyncInfo("%s", line)
 end
 
---- Tear down a receive session, whether it finished or was aborted.
+--- Clean up receiving state and persist sync metadata: the teardown for a
+-- receive that finished AND for every one that was aborted.
 -- @param sender string The peer that was serving us
 -- @param completed boolean|nil true ONLY from the branch that runs when the
 --   last chunk has arrived. Every abort path leaves it nil, and a receipt goes
