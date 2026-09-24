@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- After a sync finishes, the receiving client tells the client that sent the data how much of it was already held. That figure was only ever written into the receiver's own log, so the member whose client decides what to send next could not see it. Both sides now record the same numbers, and `/gbl synclog` on either one reads the same session. Nothing about what gets sent changes yet: the measurement comes first, and what to do about it is decided from real runs rather than guessed at.
+
 ## [0.41.5] - 2026-09-24
 
 ### Fixed
