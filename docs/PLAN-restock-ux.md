@@ -249,14 +249,37 @@ lives for one search, and nothing carries a purchase forward: an auction-house p
 mail and is not in the bank until the officer collects it and deposits it. Any search in that window
 offers the row again.
 
-**Store.** `guild.restock.pending[itemID] = { qty, buyer, buyers, at, unconfirmed }`: per guild,
-persisted in the same `restock` table as `budget` (`src/Core.lua`, `restock = { items = {}, budget =
-0, pending = {} }`), local to the account and not synced, because the mail is the buyer's. `qty` is
-added on `COMMODITY_PURCHASE_SUCCEEDED` and on the late credit, `buyer` is the buying character as
-`ResolvePlayerName` writes it on ledger records, `buyers` is the set of characters on the account
-that bought into the entry (the store is per account, so an alt's purchase joins the main's and
-either one's deposit settles it), `at` is `GetServerTime()` of the first purchase, `unconfirmed` is
-set by the two parking sites in section 3 and stays set until the entry clears.
+**Store.** `guild.restock.pending[itemID] = { qty, unconfirmedQty, buyer, buyers, at,
+unconfirmedAt }`: per guild, persisted in the same `restock` table as `budget` (`src/Core.lua`,
+`restock = { items = {}, budget = 0, pending = {} }`), local to the account and not synced,
+because the mail is the buyer's. `qty` is added on `COMMODITY_PURCHASE_SUCCEEDED` and on the late
+credit, `buyer` is the buying character as `ResolvePlayerName` writes it on ledger records,
+`buyers` is the set of characters on the account that bought into the entry (the store is per
+account, so an alt's purchase joins the main's and either one's deposit settles it), and `at` is
+`GetServerTime()` of the first purchase.
+
+**The two quantities are apart, from #215.** `unconfirmedQty` is a confirm whose result the
+client never saw, stamped with its own `unconfirmedAt` because `at` stays at the earliest
+purchase. Keeping it apart is what lets a late `COMMODITY_PURCHASE_SUCCEEDED` settle that
+quantity into `qty` rather than add a second copy of it, and a late `COMMODITY_PURCHASE_FAILED`
+take it back out; one summed quantity under one boolean could express neither, and rendered 10
+confirmed beside 5 unconfirmed as "15 bought, result unknown". The boolean is no longer stored:
+`GBL:_RestockPendingParts` is the one place either number becomes a reading and derives the flag
+there, and it reads an entry written before the split (`qty` plus the boolean) as wholly
+unconfirmed, so nothing migrates. A deposit drains `qty` first and `unconfirmedQty` after.
+
+**Parked at the moment the record is created, not at the teardown (#215).** `st.unanswered` is
+session state, and it reached the store only through `_RestockSearchTeardown`, so a `/reload`,
+logout or disconnect before a reset or a new search forgot the purchase and the next search
+offered the row again: the symptom this section exists to stop, in the one case the entry covers.
+The step timeout and a Cancel after the confirm write the entry themselves now and mark the
+record `parked`; `st.unanswered` stays as the session marker that blocks a new start and carries
+the late credit, and the teardown is the retry for a park the store refused rather than the
+first attempt. What is left is a reload inside the roughly five seconds between a confirm going
+out and the step timer firing. Parking at confirm-issue would close that too, and is declined:
+it writes to SavedVariables on every purchase and doubles the `Restock pending:` lines in a
+system capture bounded at 300 entries, which is the readability constraint #199 was built
+around.
 
 **Read.** The universe row carries `pending`, the shortfall is `max(0, target - stock - pending)`,
 the buy list uses that shortfall, and the row shows the modifier with its age.

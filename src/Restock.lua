@@ -136,9 +136,13 @@ end
 -- cannot see it until the buyer collects and deposits it, and a search in
 -- that window offered the row again. pending[itemID] = { qty, unconfirmedQty,
 -- buyer, buyers, at, unconfirmedAt } is per guild and persisted beside the
--- budget (the mail
--- outlives a session), local to the account and not synced (the mail is the
--- buyer's). Cleared by the ledger's deposit records for the buyer
+-- budget (the mail outlives a session), local to the account and not synced
+-- (the mail is the buyer's). The two quantities are apart since #215: qty
+-- is confirmed and unconfirmedQty is a confirm whose result never arrived,
+-- so a late result can settle or reverse the second without touching the
+-- first. Read them through _RestockPendingParts, which is also where the
+-- unconfirmed flag is derived and where the pre-split shape is understood.
+-- Cleared by the ledger's deposit records for the buyer
 -- (_RestockOnRecordStored), never by the bank scan, which cannot tell the
 -- buyer's deposit from another member's.
 ------------------------------------------------------------------------
