@@ -29,6 +29,20 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.41.5
+    {"0.41.5", "2026-09-24", {
+        Fixed = {
+            "A purchase the auction house never answered is no longer forgotten when you reload. The addon kept that record only for the rest of the session, so a reload, a logout or a disconnect before you searched again lost it, the next search offered the row as though nothing had been bought, and the gold went out twice. It is written down the moment the purchase stops answering now, and the row says the result is unknown until you clear it or the items turn up in the bank.",
+            "The Restock row says what is on its way and what is in doubt separately, each with its own age. A row holding both read 15 bought, result unknown over the whole figure, which put a purchase that had already succeeded in doubt along with the one that had not, and the age shown was the oldest purchase on that item, so something bought seconds ago could say it was bought hours ago and send you to an empty mailbox.",
+            "An item you have taken out of your bank layout with a purchase still in the mail keeps a row, under In the mail (not in a display tab), so you can clear it. It had no row at all before, which meant no Clear button either, and the entry came back the moment you added the item again. With the layout emptied the tab showed only the message about having no items in it, and there was no way to reach the entry at all.",
+            "A row for an item that is not in your bank layout no longer reads as in stock. Its icon, its colour and its words all said there was nothing to do, right beside its own line saying how much of it is in the mail, which is the only reason that row is there at all.",
+            "A deposit that arrives from another member with a broken timestamp no longer clears a purchase of yours that is still in the mail.",
+            "A late result from the auction house no longer undoes a Clear you pressed, and no longer counts items as still in the mail after you have deposited them.",
+            "A Clear button on a pending row works in the rare case something else wrote the entry under a different key. It did nothing at all there, and the purchase could never be settled by a deposit either.",
+            "A pending entry that carries no buyer name no longer raises an error partway through recording a purchase, which left the buy flow stuck.",
+            "If the addon cannot record a purchase at all, it now says so in the log instead of leaving every Buy button disabled for the rest of the session with nothing explaining why.",
+        },
+    }},
     -- v0.41.4
     {"0.41.4", "2026-09-24", {
         Fixed = {

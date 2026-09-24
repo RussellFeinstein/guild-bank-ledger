@@ -1547,6 +1547,11 @@ end
 -- @param sender string Name of the peer who sent this record
 -- @return boolean accepted
 -- @return string|nil field The field that failed validation, when rejected
+-- The third return says the timestamp was replaced with the receipt time,
+-- which is the only place that happens on the sync path: StoreTx runs the
+-- same check downstream of here and so can never see an invalid one
+-- (#215). GBL:_RestockOnRecordStored needs it, because it compares the
+-- timestamp against a purchase time and a receipt time always passes.
 local function reconstructSyncRecord(record, sender)
     -- 0. Repair, then validate, before anything below reads a field.
     GBL:RepairSyncRecordItemFields(record)
@@ -1561,12 +1566,15 @@ local function reconstructSyncRecord(record, sender)
             record.timestamp = tonumber(timeSlot) * 3600
         end
     end
+    local timestampRewritten = false
     if not record.timestamp then
         record.timestamp = GetServerTime()
+        timestampRewritten = true
     end
     -- Guard against epoch-0 from ID recovery (timeSlot 0 * 3600 = 0)
     if not GBL:IsValidTimestamp(record.timestamp) then
         record.timestamp = GetServerTime()
+        timestampRewritten = true
     end
 
     -- 2. Ensure id exists (needed for dedup)
@@ -1590,7 +1598,7 @@ local function reconstructSyncRecord(record, sender)
 
     -- 6. Ensure player name is realm-qualified
     record.player = GBL:ResolvePlayerName(record.player)
-    return true
+    return true, nil, timestampRewritten
 end
 
 ------------------------------------------------------------------------
@@ -3299,7 +3307,7 @@ function GBL:HandleSyncData(sender, data)
     local rejectFields = syncState.receiveRejectFields
 
     for _, tx in ipairs(data.transactions or {}) do
-        local accepted, badField = reconstructSyncRecord(tx, sender)
+        local accepted, badField, tsRewritten = reconstructSyncRecord(tx, sender)
         if not accepted then
             -- Counted apart from duplicates on purpose. Folding rejects into
             -- the dupe count made total rejection look like perfect
@@ -3325,7 +3333,8 @@ function GBL:HandleSyncData(sender, data)
                 end
                 itemDuped = itemDuped + 1
             else
-                if self:StoreTx(tx, guildData) then
+                if self:StoreTx(tx, guildData,
+                        tsRewritten and { timestampRewritten = true } or nil) then
                     itemStored = itemStored + 1
                     idIndex[tx.id] = tx
                 end

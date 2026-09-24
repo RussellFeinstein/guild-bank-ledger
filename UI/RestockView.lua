@@ -82,7 +82,9 @@ GBL._restockStatusText = RESTOCK_STATUS_TEXT
 -- search readings are skipped rather than every searched row reading "not
 -- found". Priced needs a usable price: Auctionator's placeholder for a miss
 -- carries minPrice 0, which Lua reads as true.
--- @param row table|nil universe row { itemID, target, stock, toBuy, pending, scanned }
+-- @param row table|nil universe row { itemID, target, stock, toBuy, pending,
+--   pendingAt, pendingUnconfirmed, pendingConfirmed, pendingUnconfirmedQty,
+--   pendingConfirmedAt, pendingUnconfirmedAt, scanned }
 -- @param st table|nil the session state (self._restock)
 -- @return table { status, index?, needed?, minPrice?, total?, reason? }
 function GBL:_RestockRowStatus(row, st)
@@ -127,7 +129,15 @@ function GBL:_RestockRowStatus(row, st)
         out.status = "unknown"
     elseif (row.toBuy or 0) > 0 then
         out.status = "short"
-    elseif (row.pending or 0) > 0 and (row.stock or 0) < (row.target or 0) then
+    elseif (row.pending or 0) > 0
+            and ((row.stock or 0) < (row.target or 0)
+                 or (row.target or 0) <= 0
+                 or row.pendingUnconfirmed) then
+        -- The shortfall test alone could not see a row the layout does not
+        -- name (#215): target 0 makes it false, so every encoding read "in
+        -- stock" beside the row's own "in the mail N", which is the one
+        -- reason that row exists. An unconfirmed part reads the same way
+        -- whatever the bank holds, since it is what needs a decision.
         out.status = "inmail"
     end
     return out
@@ -625,13 +635,24 @@ function GBL:_RestockView_RenderItems(content, focus)
             figures = format("target %d || bank %s", row.target or 0,
                 row.scanned == false and "?" or tostring(row.stock or 0))
             if pending > 0 then
-                -- What was bought and not yet seen in the bank (#209). An
-                -- unconfirmed entry is a confirm whose result never arrived.
-                local age = self:_RestockFormatAge(GetServerTime() - (row.pendingAt or 0))
-                if row.pendingUnconfirmed then
-                    figures = figures .. format(" || %d bought, result unknown (%s), check your mail", pending, age)
-                else
-                    figures = figures .. format(" || in the mail %d (%s)", pending, age)
+                -- What was bought and not yet seen in the bank (#209). The two
+                -- parts are named apart (#215): a purchase on its way is not
+                -- the same thing as a confirm whose result never arrived, and
+                -- one summed figure under the second wording said both were in
+                -- doubt. Each carries its own age, because the entry keeps the
+                -- earliest purchase time and the unconfirmed part keeps its own.
+                local now = GetServerTime()
+                local confirmed = row.pendingConfirmed or pending
+                local unconfirmed = row.pendingUnconfirmedQty or 0
+                if confirmed > 0 then
+                    figures = figures .. format(" || in the mail %d (%s)", confirmed,
+                        self:_RestockFormatAge(now -
+                            (row.pendingConfirmedAt or row.pendingAt or 0)))
+                end
+                if unconfirmed > 0 then
+                    figures = figures .. format(" || %d bought, result unknown (%s), check your mail",
+                        unconfirmed,
+                        self:_RestockFormatAge(now - (row.pendingUnconfirmedAt or row.pendingAt or 0)))
                 end
             end
             if row.scanned ~= false then

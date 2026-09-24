@@ -185,13 +185,24 @@ end
 -- @param record table Transaction record from CreateTxRecord
 -- @param guildData table Guild data from AceDB
 -- @return boolean True if stored (not duplicate)
-function GBL:StoreTx(record, guildData)
+-- @param opts table|nil { timestampRewritten = true } from the sync intake
+function GBL:StoreTx(record, guildData, opts)
     if not guildData then return false end
     if not record.type or record.type == "" then return false end
     if not record.player or record.player == "" then return false end
 
+    -- The rewrite happens in place, so a later reader cannot tell a record
+    -- that carried this time from one that was given it. The restock hook
+    -- is the one reader that has to know (#215): it compares the timestamp
+    -- against a purchase time, and a rewritten one always passes. **The
+    -- caller is where that normally comes from**: the one production
+    -- caller is the sync receive, and reconstructSyncRecord runs this same
+    -- check before us, so the branch below never fires there and a guard
+    -- resting on it alone was dead code. Kept for a direct caller.
+    local timestampRewritten = (opts and opts.timestampRewritten) or false
     if not self:IsValidTimestamp(record.timestamp) then
         record.timestamp = GetServerTime()
+        timestampRewritten = true
     end
 
     if self:IsDuplicate(record, guildData) then
@@ -202,9 +213,11 @@ function GBL:StoreTx(record, guildData)
     table.insert(guildData.transactions, record)
     self:UpdatePlayerStats(record, guildData)
     -- A first-time item deposit may settle a pending restock purchase
-    -- (#209). StoreBatchRecords has the same call for the scan path.
+    -- (#209). StoreBatchRecords has the same call for the scan path, and
+    -- needs no third argument because it does not rewrite a timestamp.
     if self._RestockOnRecordStored then
-        self:_RestockOnRecordStored(record, guildData)
+        self:_RestockOnRecordStored(record, guildData,
+            timestampRewritten and { timestampRewritten = true } or nil)
     end
     return true
 end

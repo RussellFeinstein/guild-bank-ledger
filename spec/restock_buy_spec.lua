@@ -1229,6 +1229,9 @@ describe("Restock buy", function()
         local function pending(itemID)
             return GBL:GetRestockData().pending[itemID]
         end
+        local function parts(itemID)
+            return GBL:_RestockPendingParts(pending(itemID))
+        end
 
         it("records a confirmed purchase with the buyer and the server time", function()
             MockWoW.serverTime = 3600 * 475200
@@ -1252,36 +1255,41 @@ describe("Restock buy", function()
             assert.is_nil(pending(100))
         end)
 
-        it("records a late success and nothing on a late failure", function()
+        -- #215: the timeout parks at once, so the late result settles the
+        -- quantity already standing rather than adding a second one, and a
+        -- late failure reverses it rather than leaving it standing forever.
+        it("settles a late success and reverses a late failure", function()
             twoItems()
             GBL:StartRestockBuy(1)
             priceThenReady(4200, 21000)
             fireStepTimers()
             assert.is_not_nil(GBL._restock.unanswered)
-            assert.is_nil(pending(100))
+            assert.equals(5, parts(100).unconfirmed)
             MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")     -- the late result
-            assert.equals(5, pending(100).qty)
-            assert.is_nil(pending(100).unconfirmed)
+            assert.equals(5, parts(100).confirmed)
+            assert.equals(0, parts(100).unconfirmed)
+            assert.equals(5, parts(100).total)                    -- not 10
 
             MockAce.fireEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
             GBL:StartRestockBuy(2)
             priceThenReady(900, 1800)
             fireStepTimers()
+            assert.equals(2, parts(200).unconfirmed)
             MockAce.fireEvent("COMMODITY_PURCHASE_FAILED")        -- the late answer: nothing bought
             assert.is_nil(pending(200))
         end)
 
-        it("parks an unanswered confirm as unconfirmed when the search is reset", function()
+        it("finds the confirm already parked when the search is reset", function()
             oneItem()
             GBL:StartRestockBuy(1)
             priceThenReady(4200, 21000)
             fireStepTimers()
             assert.is_not_nil(GBL._restock.unanswered)
+            assert.equals(5, parts(100).unconfirmed)
             GBL:ResetRestockSearch()
             assert.is_nil(GBL._restock.unanswered)
-            local e = pending(100)
-            assert.equals(5, e.qty)
-            assert.is_true(e.unconfirmed)
+            assert.equals(5, parts(100).total)          -- not 10: parked once
+            assert.equals(5, parts(100).unconfirmed)
             assert.equals(1, count("Restock AH: reset "))
         end)
 
@@ -1292,14 +1300,14 @@ describe("Restock buy", function()
             assert.equals(1, #MockWoW.commodityPurchases.confirm)
             GBL:ResetRestockSearch()                                -- the events are gone with it
             assert.equals(0, #MockWoW.commodityPurchases.cancel)
-            assert.is_true(pending(100).unconfirmed)
-            assert.equals(5, pending(100).qty)
+            assert.is_true(parts(100).isUnconfirmed)
+            assert.equals(5, parts(100).total)
 
             oneItem()
             GBL:StartRestockBuy(1)                                  -- no price yet, no confirm out
             GBL:ResetRestockSearch()
             assert.equals(1, #MockWoW.commodityPurchases.cancel)
-            assert.equals(5, pending(100).qty)                      -- unchanged: nothing was spent
+            assert.equals(5, parts(100).total)                      -- unchanged: nothing was spent
         end)
 
         it("does not offer a bought row to the next search from the same scan", function()
@@ -1328,6 +1336,148 @@ describe("Restock buy", function()
     -- the one throttle seam, Cancel drops the purchase, and the step timer is
     -- re-armed for the pause so nothing waits forever.
     ------------------------------------------------------------------------
+    ------------------------------------------------------------------------
+    -- #215: the record of a confirm the step timer gave up on lived only on
+    -- self._restock and reached the persisted store through a teardown the
+    -- player may never run. A reload, logout or disconnect forgot it, the
+    -- next search offered the row again, and real gold went out twice: the
+    -- symptom #209 exists to stop, surviving in the case the entry covers.
+    ------------------------------------------------------------------------
+    describe("a parked confirm survives a reload (#215)", function()
+        local function pending(itemID)
+            return GBL:GetRestockData().pending[itemID]
+        end
+        local function parts(itemID)
+            return GBL:_RestockPendingParts(pending(itemID))
+        end
+
+        it("parks the purchase the moment the step timer gives up", function()
+            MockWoW.serverTime = 3600 * 475200
+            oneItem()
+            GBL:StartRestockBuy(1)
+            priceThenReady(4200, 21000)
+            assert.is_nil(pending(100))          -- nothing yet: a result may still come
+            fireStepTimers()
+            assert.equals(5, parts(100).unconfirmed)
+            assert.equals(3600 * 475200, pending(100).unconfirmedAt)
+        end)
+
+        it("keeps the entry when the session state is thrown away", function()
+            oneItem()
+            GBL:StartRestockBuy(1)
+            priceThenReady(4200, 21000)
+            fireStepTimers()
+            GBL._restock = nil                   -- what a reload leaves behind
+            assert.equals(5, parts(100).unconfirmed)
+        end)
+
+        it("does not offer the row again after a reload", function()
+            local opts = {
+                layout = { version = 1, updatedAt = 0, tabs = {
+                    [1] = { mode = "display", name = "A", items = { [100] = { slots = 1, perSlot = 5 } } },
+                    [2] = { mode = "overflow" },
+                } },
+                reserves = {},
+                scanResults = {},
+            }
+            assert.equals(1, #GBL:_RestockBuildBuyList(opts))
+            oneItem()
+            GBL:StartRestockBuy(1)
+            priceThenReady(4200, 21000)
+            fireStepTimers()
+            GBL._restock = nil
+            assert.equals(0, #GBL:_RestockBuildBuyList(opts))
+        end)
+
+        it("parks a confirm that Cancel abandons, at the click", function()
+            oneItem()
+            GBL:StartRestockBuy(1)
+            priceThenReady(4200, 21000)
+            GBL:CancelRestockPurchase()
+            assert.equals(5, parts(100).unconfirmed)
+        end)
+
+        -- parkUnanswered nilled st.unanswered before the add and ignored the
+        -- boolean, so a refused write forgot the purchase with no line. What
+        -- happens instead now depends on WHY the store refused, and the two
+        -- reasons are covered by reason in "the review's findings on the
+        -- park" below: a store that cannot take it yet keeps the record and
+        -- retries, and a record there is nothing to write is dropped with a
+        -- line rather than blocking every buy for the session.
+    end)
+
+    -- The code review of this PR reproduced both of these.
+    describe("the review's findings on the park (#215)", function()
+        local function pending(itemID)
+            return GBL:GetRestockData().pending[itemID]
+        end
+
+        it("does not re-add a parked quantity the player cleared by hand", function()
+            oneItem()
+            GBL:StartRestockBuy(1)
+            priceThenReady(4200, 21000)
+            fireStepTimers()
+            assert.is_not_nil(pending(100))
+            assert.is_true(GBL:ClearRestockPending(100))      -- the Clear this PR added
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED") -- the late result
+            assert.is_nil(pending(100))                       -- the Clear stands
+        end)
+
+        it("does not re-add a parked quantity a deposit already settled", function()
+            oneItem()
+            GBL:StartRestockBuy(1)
+            priceThenReady(4200, 21000)
+            fireStepTimers()
+            local gd = GBL:GetGuildData()
+            assert.is_true(GBL:_RestockOnRecordStored({
+                type = "deposit", player = GBL:ResolvePlayerName(MockWoW.player.name),
+                itemID = 100, count = 5, timestamp = GetServerTime() }, gd))
+            assert.is_nil(pending(100))
+            MockAce.fireEvent("COMMODITY_PURCHASE_SUCCEEDED")
+            assert.is_nil(pending(100))   -- already in the bank, not in the mail
+        end)
+
+        -- Keeping the record (finding 6) blocks every buy while it stands, and
+        -- the teardown has already dropped the buy events, so no result can
+        -- arrive to clear it. It says so once and retries when the tab is next
+        -- shown, which is the first moment the store is reachable again.
+        local function warnedWith(needle)
+            for _, e in ipairs(GBL:GetLog("system")) do
+                if e.message:find(needle, 1, true) then return true end
+            end
+            return false
+        end
+
+        -- GetGuildName caches _cachedGuildName, so the store only refuses
+        -- before any guild name has been read this session. That is the
+        -- retryable case, and it is narrower than the review reported.
+        it("keeps a park the store cannot take yet, and retries it on tab show", function()
+            oneItem()
+            GBL._restock.unanswered = { index = 1, itemID = 100, qty = 5, total = 21000 }
+            MockWoW.guild.name = nil
+            GBL._cachedGuildName = nil
+            GBL:_RestockSearchTeardown("reset")
+            assert.is_not_nil(GBL._restock.unanswered)
+            assert.is_true(warnedWith("not recorded (no-store)"))
+
+            MockWoW.guild.name = "Test Guild"
+            GBL:_RestockOnTabShown()
+            assert.is_nil(GBL._restock.unanswered)
+            assert.equals(5, GBL:_RestockPendingParts(pending(100)).unconfirmed)
+        end)
+
+        -- A record the store can never describe is dropped instead: keeping
+        -- it blocks every buy for the session and no retry can help.
+        it("drops a record there is nothing to write, and says so", function()
+            oneItem()
+            GBL._restock.unanswered = { index = 1, itemID = 100, qty = nil, total = 21000 }
+            GBL:_RestockSearchTeardown("reset")
+            assert.is_nil(GBL._restock.unanswered)
+            assert.is_true(warnedWith("not recorded (nothing-to-record)"))
+            assert.is_nil(pending(100))
+        end)
+    end)
+
     describe("confirm at price (#211)", function()
         before_each(function()
             GBL:SetRestockConfirmAtPrice(true)
@@ -1335,6 +1485,9 @@ describe("Restock buy", function()
 
         local function pending(itemID)
             return GBL:GetRestockData().pending[itemID]
+        end
+        local function parts(itemID)
+            return GBL:_RestockPendingParts(pending(itemID))
         end
 
         it("defaults on, and the setting round-trips", function()
@@ -1458,6 +1611,11 @@ describe("Restock buy", function()
             -- Confirm out: nothing to cancel, and the result is still coming,
             -- so the purchase is kept as unanswered (the timeout's record):
             -- no new start until it lands, and the late result credits it.
+            -- It is also parked now (#215). PR A's review declined to park
+            -- here because parking INSTEAD of the unanswered record left the
+            -- row buyable and the late result landed on the next purchase.
+            -- Both are set now, so the record still blocks every start and
+            -- the parked quantity is what a reload cannot lose.
             twoItems()
             GBL:StartRestockBuy(1)
             MockAce.fireEvent("COMMODITY_PRICE_UPDATED", 4200, 21000)
@@ -1467,7 +1625,7 @@ describe("Restock buy", function()
             GBL:CancelRestockPurchase()
             assert.equals(1, #MockWoW.commodityPurchases.cancel)   -- unchanged
             assert.equals("READY", GBL._restock.state)
-            assert.is_nil(pending(100))                             -- not parked: the result is still due
+            assert.equals(5, parts(100).unconfirmed)                 -- parked, and still blocked
             assert.equals(100, GBL._restock.unanswered.itemID)
             assert.equals(5, GBL._restock.unanswered.qty)
             assert.is_not_nil(findLine("confirm already issued, kept as unanswered"))
