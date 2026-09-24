@@ -138,8 +138,17 @@ end
 -- making their record.id unique for dedup.
 -- Counts per baseHash (prefix + timeSlot) so records in different hour slots
 -- have independent counters.
--- NOTE: Only used for sync records and migrations. Local batch storage uses
--- count-based dedup (StoreBatchRecords) which is immune to index shift.
+-- NOTE: Dead code in production — no caller in src/, UI/ or scripts/. This
+-- note used to read "only used for sync records and migrations", which was a
+-- false claim about record identity, the one subject where a wrong belief is
+-- expensive: since v0.37.0 peers on different versions exchange records, so two
+-- buildPrefix implementations that disagree duplicate a guild's dataset instead
+-- of refusing each other (#262). Retained for test coverage of the occurrence
+-- suffix, like CountStoredAtSlot below. Sync intake and the migrations assign
+-- ids through ComputeTxHash and NormalizeRecordId; local batch storage uses
+-- count-based dedup (StoreBatchRecords), which is immune to index shift.
+-- NOT idempotent: a second run reads an already-suffixed id as a base hash and
+-- yields hash:0:0, which nothing can reach while nothing calls it.
 -- @param records table Array of records (each must have .id from ComputeTxHash)
 function GBL:AssignOccurrenceIndices(records)
     local counts = {}
