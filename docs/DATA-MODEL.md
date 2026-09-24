@@ -374,9 +374,10 @@ asserts that order as a sequence rather than as an endpoint, because a guild tha
 in this document that must not be resolved by making the two sides agree. Until #76 nothing in the
 suite failed if someone raised the default in good faith. `spec/savedvariables_spec.lua` now asserts
 the value and its round trip against a real AceDB, and `spec/schema_version_spec.lua` asserts the
-gates behaviourally: the ladder walked one rung at a time, each strict gate refused from above and
-from the rung below, and every write of the version outside the ladder. Neither is a change to the
-value or to the gates, which stay as they are.
+gates behaviourally: the ladder walked one rung at a time, each strict gate refused from above, and
+every write of the version outside the ladder. The low side of both gates was already covered in
+`spec/core_spec.lua` (each "refuses to bump from schema 8", plus a "from schema 9" on the 10 to 11
+migration). Neither file changes the value or the gates, which stay as they are.
 
 Two more places write the version, both outside the ladder.
 
