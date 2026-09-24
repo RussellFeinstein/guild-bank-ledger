@@ -364,59 +364,66 @@ run first, permanently skipping the intermediate work. Strict equality forces th
 in order, and 8 is its entry point. `GUILD_ROSTER_UPDATE` retriggers `MigrateAllGuilds` once per
 session so a cold-roster short-circuit gets a warm retry without waiting for the next login.
 
-The 8 to 9 migration is **not** one of the strict pair. `MigrateNormalizePeerNames` gates on
-`>= 9` (`src/Core.lua:1360`), the loose form every migration below it uses, and called on its
-own it will advance a guild at 3 straight to 9. (One of those loose gates is not quite the same
-shape: `MigrateOccurrenceScheme` reads `guildData.schemaVersion >= 2` at `:287` with no `or 0`,
-where the other seven read `(guildData.schemaVersion or 0) >= N`. A nil version raises there,
-inside a `MigrateAllGuilds` loop that is not `pcall`-protected, so it aborts the ladder for that
-guild and every guild after it in the `pairs` walk. Recorded on #263 beside the other nil raise.) What stops that is the call order in
-`MigrateAllGuilds` (`:1607`), which reaches it only once the rungs below have run, so the
-protection for the low half of the ladder is the order and not the gates. `spec/schema_version_spec.lua`
-asserts that order as a sequence rather than as an endpoint, because a guild that jumped straight to
-11 also arrives at 11.
+**The 8 to 9 migration joined the strict pair in #263**, and the reason is worth keeping.
+`MigrateNormalizePeerNames` gated on `>= 9`, the loose form every rung below it uses, so called on
+its own it would advance a guild at 3 straight to 9. Nothing did call it that way, because
+`MigrateAllGuilds` reaches it only at 8, but that left the **call order** as the only thing
+protecting the low half of the ladder, and the call order is not what a reader checks when they
+change a gate. It is `~= 8` now, and `spec/schema_version_spec.lua` asserts the order as a sequence
+as well, because a guild that jumped straight to 11 also arrives at 11.
+
+`MigrateOccurrenceScheme` was also the one loose gate reading `guildData.schemaVersion >= 2` with
+no `or 0`, where the other seven read `(guildData.schemaVersion or 0) >= N`. Because it is rung 1,
+a nil version raised there and took the whole walk with it. Closed in #263.
 
 **Verdict: correct as it stands, and pinned by tests as of 2026-09-24.** This is the one
 disagreement in this document that must not be resolved by making the two sides agree. Two files
 carry it and it is worth knowing which does what, because they fail on different mutations.
 `spec/savedvariables_spec.lua` (#77, PR #261) asserts the value and its round trip against a real
-AceDB, so it is what reds if the default is raised. `spec/schema_version_spec.lua` (#76) asserts
+AceDB, so it is what reds if the default is raised. `spec/schema_version_spec.lua` (#76, extended by #263) asserts
 the ladder the default is the entry point to: walked one rung at a time in order, each rung
-bumping by exactly one, and every write of the version that is not a rung. Its sequence assertion
-is also what reds if either strict gate is loosened to `>=`, since a guild above a gate is refused
-by both forms and only the ladder sees the rung that then gets skipped. The below-the-rung side of
-both gates was already covered in `spec/core_spec.lua` (each "refuses to bump from schema 8", plus
-a "from schema 9" on the 10 to 11 migration). Neither file changes the value or the gates, which
-stay as they are.
+bumping by exactly one, every write of the version that is not a rung, and that one guild's
+failure does not strand the rest of the walk. Its sequence assertion is also what reds if a strict
+gate is loosened to `>=`, since a guild above a gate is refused by both forms and only the ladder
+sees the rung that then gets skipped. The below-the-rung side of the gates is covered in
+`spec/core_spec.lua` (each "refuses to bump from schema 8", plus a "from schema 9" on the 10 to 11
+migration). Neither file changes the default, which stays as it is.
 
-Two writes are not rungs. One of them sits inside a rung, so "outside the ladder" is the wrong
-axis; what they share is that neither advances the progression.
+One write is not a rung. It sits inside one, so "outside the ladder" is the wrong axis: what
+matters is whether a write advances the progression. There were two until #263.
 
 `MigrateCrossSlotDedup` **is** rung 5, and on entry it drops the version to 4
 (`src/Core.lua:1081`) so its pass 1 can re-run the same-slot dedup, whose own gate is `>= 5`, then
 leaves at 6. That write is deliberate and load-bearing: without it the nested call is entered at 5,
 returns 0, and pass 1 silently does nothing.
 
-`GBL:DeduplicateRecords` sets it to 5 to force that same legacy pass and is written to restore it
-afterwards (`src/Core.lua:2851-2857`). **It cannot.** The branch is entered only when the version is
-below 6, and the restore is guarded by `if savedSchema > 6`, so it is false on every path into it,
-and `MigrateCrossSlotDedup` leaves the guild at 6 wherever it started. The harm window is 1 to 3,
-measured: from 4 or 5 the forced write loses nothing, because the nested 4 to 5 pass still runs and
-6 is where the ladder would have left the guild anyway, while from 3 the forced 5 satisfies
-`MigrateOccurrenceToPerSlot`'s `>= 4` gate before it ever runs and no later pass revisits it. The
-same line also raises on a guild whose `schemaVersion` is nil, because the gate reads `(x or 0)` and
-the compare reads the raw value.
+**`GBL:DeduplicateRecords` was the second, and #263 removed it.** It set the version to 5 to
+force that same legacy pass and was written to restore it afterwards, guarded by
+`if savedSchema > 6` inside a branch entered only below 6, so the restore could never fire and
+`MigrateCrossSlotDedup` left the guild at 6 wherever it started. The harm window was 1 to 3,
+measured: from 4 or 5 the forced write lost nothing, because the nested 4 to 5 pass still ran and 6
+is where the ladder would have left the guild anyway, while from 3 the forced 5 satisfied
+`MigrateOccurrenceToPerSlot`'s `>= 4` gate before it ever ran and no later pass revisited it. The
+same line raised on a nil version, because the gate read `(x or 0)` and the compare read the raw
+value.
 
-**Neither is reachable in production, and the reason is not the call order.** `DeduplicateRecords`
-has three call sites and only one of them is ordered after the ladder (`GBL:OnEnable` runs
-`MigrateAllGuilds` at `:197` and then loops it at `:204`; the other two are `GBL:OnBankOpened` at
-`:1885` and `GBL:RunCleanup`, which `/gbl cleanup` invokes, at `:3045`). What covers all three is
-that no migration below 6 has a non-bumping early return, so once the ladder has run no guild is
-left under 6: measured at every starting version from 0 to 8, and with a cold realm and a cold
-roster, the walk never ends below 6. The nil case is covered by AceDB restoring the default for any
-guild whose key was stripped, and by nothing else; the ladder is no protection there, because
-`MigrateOccurrenceScheme` raises on the same nil at `:287` before `DeduplicateRecords` is reached.
-Filed as #263; both are pinned as characterization in `spec/schema_version_spec.lua` meanwhile.
+**The reachability argument is the part worth carrying, because the first version of it was
+wrong.** It was written as "unreachable in production" on the strength of a measurement that no
+migration below 6 has a non-bumping early return, so once `MigrateAllGuilds` has run no guild is
+left under 6 (every start from 0 to 8, cold realm, cold roster). That measurement holds. The claim
+built on it did not, because it assumed the ladder completes. `MigrateAllGuilds` walked
+`pairs(guilds)` unprotected, AceAddon runs `OnEnable` under `safecall`, and the bank-open events
+are registered before the ladder runs while the slash commands are registered earlier still. So a
+raise in one guild left every later guild unmigrated and silent, and `GBL:OnBankOpened` or
+`GBL:RunCleanup` could then hand one of them to `DeduplicateRecords`. **A branch is only
+unreachable given everything upstream of it succeeds**, which is not a property a walk over
+player data has for free.
+
+#263 fixed the cause rather than the consumer: each guild migrates under `pcall` now, a failure is
+named once per guild per session on the system channel (grep `Migration failed`) and in chat, the
+hash cache is reset because a raise can leave it warm over ids a half-run rung rewrote, and the
+walk carries on. `DeduplicateRecords` is the nil guard plus `CleanupWithEventCounts`, which is what
+its own doc comment always claimed.
 
 ## 8. What validation guarantees, and what it does not
 
@@ -668,7 +675,8 @@ All under the **Data model integrity** milestone.
 | 5 | `NormalizeRecordId` can rewrite a money record from an item record | closed in v0.37.0 (#68) |
 | 5 | Sync intake does not normalize the money `type` | #68 |
 | 7 | Nothing stops the `schemaVersion` default being raised | closed in #76 |
-| 7 | `DeduplicateRecords` cannot restore the version it borrows, and raises on a nil | #263 |
+| 7 | `DeduplicateRecords` cannot restore the version it borrows, and raises on a nil | closed in #263 |
+| 7 | One guild's failed migration strands every guild after it in the walk | closed in #263 |
 | 8 | Intake accepts corrupted records | closed in v0.37.0 (#68) |
 | 8 | 223 corrupted records already stored | #75 |
 | 8 | Rejections counted as duplicates | closed in v0.37.0 (#68) |
@@ -687,5 +695,5 @@ identity-affecting idea in this document as costing a forced guild-wide update f
 What that leaves open, in rough order of how much it still hurts: #75 (the 223 damaged records
 already on disk, which #68 stops growing but does not repair, and which can now reuse
 `GBL:RepairSyncRecordItemFields`), #69 (the same itemID-less shape produced by local scans rather
-than by sync, still unscheduled), #71, #72, #263 and #64. None of those touch record
+than by sync, still unscheduled), #71, #72 and #64. None of those touch record
 identity, so none of them cost a floor raise.
