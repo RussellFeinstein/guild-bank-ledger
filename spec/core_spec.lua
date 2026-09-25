@@ -231,6 +231,18 @@ describe("Core", function()
             guildData = GBL:GetGuildData()
         end)
 
+        it("treats a nil schemaVersion as unmigrated rather than raising", function()
+            -- This is the one loose gate that read the version without `or 0`,
+            -- where the other seven read `(guildData.schemaVersion or 0) >= N`.
+            -- Because it is rung 1, the raise landed inside MigrateAllGuilds
+            -- and took the whole walk down with it (#263).
+            guildData.schemaVersion = nil
+
+            GBL:MigrateOccurrenceScheme(guildData)
+
+            assert.equals(2, guildData.schemaVersion)
+        end)
+
         it("reassigns occurrences by prefix across hour slots", function()
             -- Two records with same prefix, different hours — old scheme both :0
             guildData.schemaVersion = 1
