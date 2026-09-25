@@ -2812,6 +2812,17 @@ function GBL:PrepareChunks(transactions, moneyTransactions, eventCounts)
     -- slot could not be read. Both keep the #92 behaviour, topping up whatever
     -- room the packed chunks have left and then opening carriers. The cursor
     -- only moves forward, so this stays linear in the number of entries.
+    --
+    -- Neither case can arrive on a bucket-filtered session, which is every
+    -- normal one (#270). Stage 6 admits an entry only when its slot reads and
+    -- only when its bucket is in sentBuckets, and a bucket is in sentBuckets
+    -- only because it has records, so every arriving entry is emitted by the
+    -- walk above. This pass is live only on the sinceTimestamp fallback, which
+    -- needs GetGuildData() itself to be nil. It stays because it is what makes
+    -- the packer total and because the fallback is still a real path, but do
+    -- not read it as evidence that the serve path can hand over an unreadable
+    -- key: #270 is that it cannot, and this pass being dead is how that was
+    -- found.
     local leftover = {}
     if entriesByBucket then
         for _, group in pairs(entriesByBucket) do
