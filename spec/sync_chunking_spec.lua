@@ -569,6 +569,49 @@ describe("Sync chunking", function()
             assert.is_true(seen["nodigits"], "an unreadable key must still ride")
         end)
 
+        -- The invariant is over bucket KEYS, and the two sides reach a key by
+        -- different readings: a count key always yields its trailing slot,
+        -- while a record whose id the "|slot:occ" pattern cannot read falls
+        -- back to floor(timestamp / BUCKET_SECONDS). Where those disagree the
+        -- record's own count is filed under a different bucket and rides with
+        -- that one. What still holds, and what this pins, is the structural
+        -- half: a group reaches the leftover pass exactly when no record
+        -- produced its key, so a leftover entry has no first-record chunk to be
+        -- late for, every entry still rides exactly once, and no completed
+        -- bucket is reported as owing counts that were never filed under it.
+        it("still delivers the count of a record whose id carries no slot", function()
+            local unparseable = {
+                type = "deposit", player = "Alice-Stormrage", itemID = 191301,
+                count = 20, tab = 3, classID = 0, subclassID = 3,
+                timestamp = 1,
+                id = "deposit|Alice-Stormrage|191301|20|3|noslot",
+            }
+            local counts = bucketCounts(82202, 1, 191300)
+            local onlyKey = next(counts)
+
+            -- If these ever agree the case has stopped exercising what it is
+            -- here for, and the test would pass for the wrong reason.
+            assert.are_not.equals(
+                GBL:BucketKeyForRecord(unparseable),
+                GBL:BucketKeyForEventCount(onlyKey),
+                "fixture no longer exercises the two readings disagreeing")
+
+            local chunks = GBL:PrepareChunks({ unparseable }, {}, counts)
+
+            local seen, total = {}, 0
+            for _, chunk in ipairs(chunks) do
+                for key in pairs(chunk.eventCounts or {}) do
+                    assert.is_nil(seen[key], "entry packed twice: " .. key)
+                    seen[key] = true
+                    total = total + 1
+                end
+            end
+            assert.equals(1, total, "the count must still ride exactly once")
+            assert.is_true(seen[onlyKey], "the count must be the one that rode")
+
+            assertAbortSafe(chunks, { { unparseable } }, counts)
+        end)
+
         it("keeps every chunk inside the target across many buckets", function()
             local records, counts = {}, {}
             for b = 82200, 82211 do

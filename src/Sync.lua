@@ -2656,12 +2656,31 @@ end
 -- chunk that exceeds one fragment in the FinishSending summary.
 --
 -- A bucket's event counts are emitted when the walk reaches the FIRST record of
--- that bucket, so per bucket
+-- that bucket, so per bucket key
 --
 --     max(entry chunk) <= first-record chunk <= last-record chunk
 --
 -- and therefore any prefix of the returned list that completes a bucket's
--- records also carries all of that bucket's counts (#114). That is the whole
+-- records also carries all of that bucket's counts (#114). That holds by
+-- construction rather than by luck: emitBucketEntries runs for EVERY record in
+-- both lists, so a group reaches the leftover pass below exactly when no record
+-- produced its key, and a leftover entry therefore has no first-record chunk it
+-- could be late for.
+--
+-- The invariant is over bucket KEYS, and the two sides reach a key by different
+-- readings, which is the one limit worth knowing. A count key always yields its
+-- trailing slot, while bucketKeyForRecord reads the slot out of the record id
+-- and falls back to floor(timestamp / BUCKET_SECONDS) for an id it cannot
+-- parse. Those agree for every record the current builders produce, and they
+-- agree on the fallback too while the timestamp matches the slot, since a slot
+-- is hours and the divisor is the same. They cannot agree when tx.timestamp is
+-- absent, where the fallback keys off GetServerTime() at packing time. Where
+-- they disagree the per-bucket promise above still holds, but what it buys does
+-- not: that record's own count is filed under a different bucket and travels
+-- with that one instead. On the bucket path it then rides only if that other
+-- bucket is also in the send, which is a selection question in
+-- EventCountRidesWithBuckets rather than a packing one, and no capture has
+-- shown a record reaching here with an id the pattern cannot read. That is the whole
 -- point of the ordering: counts contribute nothing to the fingerprint, so a
 -- session that delivered a bucket's records and then aborted before its counts
 -- left both sides' hashes for that bucket matching, the diff never selected it
@@ -2761,6 +2780,12 @@ function GBL:PrepareChunks(transactions, moneyTransactions, eventCounts)
     -- later record of it.
     local function emitBucketEntries(bucket)
         if not entriesByBucket then return end
+        -- Unreachable today, because bucketKeyForRecord always returns a number:
+        -- its timestamp fallback is what makes it total. Kept because the line
+        -- below is a nil-KEY assignment if this is ever nil, and Lua 5.1 raises
+        -- on that rather than no-opping, which would take the packer down for
+        -- the whole session.
+        if not bucket then return end
         local group = entriesByBucket[bucket]
         if not group then return end
         entriesByBucket[bucket] = nil
