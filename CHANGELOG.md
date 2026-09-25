@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.41.7] - 2026-09-24
 
 ### Fixed
 - A guild whose saved data made one of the startup steps fail used to stop everything after it from running, with nothing said about it. The other guilds were never upgraded, the duplicate cleanup never ran, and sync never started, for the rest of the session. Both startup passes now take each guild on its own, so one bad guild costs only itself, and the failure is written to the system log and to chat instead of passing in silence.
