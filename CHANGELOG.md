@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- A sync that stopped part way through could permanently lose the event counts the duplicate cleanup depends on. Once a set of records had arrived without its counts, both sides agreed they were in step, so nothing offered those counts again and no other guild member did either. The receiver kept the duplicates for good, and because the extra records changed its own fingerprint it drifted out of step with every correct member and could stop being offered the very data that would have fixed it. Counts now travel with the records they describe rather than all together at the end, so a sync that stops early leaves behind only work the next sync picks up again.
+
 ## [0.41.7] - 2026-09-24
 
 ### Fixed
