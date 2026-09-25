@@ -349,12 +349,13 @@ the default being raised**, and it shipped in PR #261 under #77. #76 shipped the
 `spec/schema_version_spec.lua`, which pins the ladder the default is the entry point to. Raising
 the default reds the first file and leaves the second green, which is the split to expect.
 
-The migration chain is the second half of the story. The 9 to 10 and 10 to 11 migrations gate on
-**strict equality**, not `>=`:
+The migration chain is the second half of the story. The 8 to 9, 9 to 10 and 10 to 11 migrations
+gate on **strict equality**, not `>=`:
 
 ```lua
-if not guildData or (guildData.schemaVersion or 0) ~= 9  then return 0 end   -- src/Core.lua:1422
-if not guildData or (guildData.schemaVersion or 0) ~= 10 then return 0 end   -- src/Core.lua:1530
+if not guildData or (guildData.schemaVersion or 0) ~= 8  then return 0 end   -- MigrateNormalizePeerNames
+if not guildData or (guildData.schemaVersion or 0) ~= 9  then return 0 end   -- MigrateNormalizeStoredRealms
+if not guildData or (guildData.schemaVersion or 0) ~= 10 then return 0 end   -- MigrateRecoverPeerRealms
 ```
 
 Both sites carry comments explaining it. Several migrations short-circuit when the realm APIs are
@@ -424,6 +425,27 @@ named once per guild per session on the system channel (grep `Migration failed`)
 hash cache is reset because a raise can leave it warm over ids a half-run rung rewrote, and the
 walk carries on. `DeduplicateRecords` is the nil guard plus `CleanupWithEventCounts`, which is what
 its own doc comment always claimed.
+
+**`OnEnable` walks every guild twice, and isolating one walk is not isolating the startup.** The
+dedup pass four lines below the ladder is the second walk, and the corruption class that makes a
+rung raise reaches it too: `BuildTxPrefix` concatenates `record.player` and `ComputeTxHash` divides
+`record.timestamp`, so a record holding a table or a nil where either belongs raises there as well.
+With only the ladder isolated, the guild whose migration had just been caught re-raised one
+statement later, the error left `OnEnable` through `safecall` exactly as before, and `InitSync` plus
+every registration below it never ran. `GBL:DeduplicateAllGuilds` is that walk under the same
+isolation (grep `Dedup pass failed`). The rule the pair leaves: **nothing in either loop may read
+the guild table outside the protection**, or the isolation has a hole at its own first statement,
+which is how the entry-version read was found.
+
+Two limits the isolation left, both filed with their measurements. **#265**: rungs 7 and 10 rewrite
+`record.id` and never call `ResetHashCache`, and `GetDataHash` keys on record count alone, so an id
+rewrite is invisible to it and the guild can advertise a fingerprint of a dataset that no longer
+exists. **#266**: a guild whose migration raises partway through either of those two rungs is left
+with `seenTxHashes` keyed on the pre-rewrite ids, and since the isolation it reaches sync in that
+state, where before the raise took `OnEnable` with it and the guild never synced at all. That one is
+a new exposure created by the fix, not a pre-existing defect, and it is filed rather than fixed
+because both candidate repairs (extract the index rebuild the two rungs and
+`CleanupWithEventCounts` each inline, or quarantine a failed guild from sync) are larger than #263.
 
 ## 8. What validation guarantees, and what it does not
 

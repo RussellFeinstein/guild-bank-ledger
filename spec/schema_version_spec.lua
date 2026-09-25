@@ -15,49 +15,51 @@
 -- pins is the other half of the property: nothing advances the version except
 -- the migration that earned it.
 --
--- The version is written by the ladder's ten rungs, plus exactly two writes
--- that are not rungs. One of those two sits INSIDE a rung (rung 5 drops the
--- version before calling rung 4's function again) and the other is outside
--- MigrateAllGuilds entirely, so "outside the ladder" is the wrong axis: what
--- they have in common is that neither advances the progression.
+-- The version is written by the ladder's ten rungs, plus exactly one write
+-- that is not a rung, and that one sits INSIDE a rung. There were two until
+-- #263; the second was GBL:DeduplicateRecords forcing the version to 5, and it
+-- is deleted rather than repaired (see section 5 below).
 --
---   The ladder. MigrateAllGuilds (src/Core.lua:1607) makes twelve calls per
---   guild and ten of them bump one rung: RepairCorruptedPlayerRealms runs
---   first and writes no version, and MigrateSortAccessShape sits between
---   rungs 8 and 9 and writes none either. Every gate below 9 is the loose
---   `>= N` form and the 9 to 10 and 10 to 11 gates are strict (`~= 9` at
---   :1422, `~= 10` at :1530), because MigrateNormalizePeerNames
---   short-circuits on cold realm APIs and leaves the guild at 8; a loose gate
---   there would let 10 or 11 be reached from 8 and strand the 8 to 9 work for
---   good. So what protects the low half of the ladder is the CALL ORDER and
---   what protects the top is those two gates, and `assert.same(LADDER, ...)`
---   below is the assertion that covers both: it is what reds when either
---   strict gate is loosened to `>=`, and it is the only thing in this file
---   that catches a rung being dropped.
+--   The ladder. GBL:MigrateAllGuilds makes twelve calls per guild through
+--   GBL:MigrateGuild, and ten of them bump one rung: RepairCorruptedPlayerRealms
+--   runs first and writes no version, and MigrateSortAccessShape sits between
+--   rungs 8 and 9 and writes none either. Three gates are strict: `~= 8` in
+--   MigrateNormalizePeerNames, `~= 9` in MigrateNormalizeStoredRealms and
+--   `~= 10` in MigrateRecoverPeerRealms. The first of those three was the loose
+--   `>= 9` until #263. All three are strict for one reason:
+--   MigrateNormalizePeerNames short-circuits on cold realm APIs and leaves the
+--   guild at 8, so a loose gate above it lets 9, 10 or 11 be reached from 8 and
+--   strands the 8 to 9 work for good. Below them the gates are the loose
+--   `(schemaVersion or 0) >= N` form and what protects those rungs is the CALL
+--   ORDER, since each one bumps on every path it returns from.
 --
---   The two writes that are not rungs. MigrateCrossSlotDedup, which IS rung 5,
---   drops the version to 4 on entry (:1081) so its own pass 1 re-runs the
---   same-slot dedup, whose gate is `>= 5`; that write is deliberate and
---   load-bearing, and it is why the recorder below counts only top-level
---   calls. And GBL:DeduplicateRecords sets it to 5 to force that same pass
---   (:2854) and cannot put it back, which is a defect filed as #263. Its two
---   cases here are characterization and say so in their names.
+--   `assert.same(LADDER, ...)` below is the assertion that covers the strict
+--   half: it is what reds when any of the three is loosened to `>=`, and it is
+--   the only thing in this file that catches a rung being dropped. It reds on a
+--   loosening where the per-gate cases cannot, because a guild ABOVE a gate is
+--   refused by `>= N` and `~= N` alike, and those cases sit above their gate.
 --
--- One gate is not the shape the rest are: MigrateOccurrenceScheme (:287)
--- reads `guildData.schemaVersion >= 2` with no `or 0`, where the other seven
--- loose gates read `(guildData.schemaVersion or 0) >= N`. A nil version
--- therefore raises inside MigrateAllGuilds, which is not pcall-protected, so
--- it aborts the ladder for that guild and every guild after it in the pairs
--- walk. Recorded on #263 beside the DeduplicateRecords raise, since the two
--- are the same shape and the same decision.
+--   The one write that is not a rung. MigrateCrossSlotDedup, which IS rung 5
+--   (entered at 5, leaves 6), drops the version to 4 on entry so its own pass 1
+--   re-runs the same-slot dedup, whose gate is `>= 5`. That write is deliberate
+--   and load-bearing, and it is why the recorder below counts only top-level
+--   calls.
 --
 -- What spec/core_spec.lua already covers, so that it is not added again here:
 -- each strict migration "refuses to bump from schema 8", MigrateRecoverPeerRealms
--- also "refuses to bump from schema 9" (:1344), and MigrateNormalizeStoredRealms
--- "skips already-migrated guilds (schemaVersion >= 10)" (:710). Those are the
--- cases that kill a gate loosened so it RUNS BELOW its rung. The two cases in
--- "the strict gates" here kill the opposite family, a gate inverted so it runs
--- ABOVE its rung (`< 10` in place of `~= 10`), which nothing else reaches.
+-- also "refuses to bump from schema 9", MigrateNormalizeStoredRealms
+-- "skips already-migrated guilds (schemaVersion >= 10)", and since #263
+-- MigrateOccurrenceScheme "treats a nil schemaVersion as unmigrated rather than
+-- raising". Those are the cases that kill a gate loosened so it RUNS BELOW its
+-- rung. The two cases in "the strict gates" here kill the opposite family, a
+-- gate inverted so it runs ABOVE its rung (`< 10` in place of `~= 10`), which
+-- nothing else reaches.
+--
+-- Sections 6 and 7 are the #263 isolation: OnEnable walks every guild twice,
+-- once for the ladder and once for the dedup pass, and each walk now takes one
+-- guild at a time under pcall. Read the comment on walk() before adding a case
+-- to either: an assertion raised inside a stubbed rung is caught by the
+-- production pcall, so a case can pass on code it was written to red.
 ------------------------------------------------------------------------
 
 local Helpers = require("spec.helpers")
@@ -298,7 +300,8 @@ describe("schemaVersion", function()
     describe("MigrateNormalizePeerNames", function()
         it("refuses a guild below 8 rather than advancing it", function()
             -- Its gate is `~= 8`, the strict form its two successors carry one
-            -- rung up each (`~= 9` at src/Core.lua:1422, `~= 10` at :1530), and
+            -- rung up each (`~= 9` in MigrateNormalizeStoredRealms, `~= 10` in
+            -- MigrateRecoverPeerRealms), and
             -- for the same reason: a loose `>= 9` here advances any guild below
             -- 9 and the 4 to 8 work is skipped for good. Nothing in production
             -- called it that way, because MigrateAllGuilds reaches it only at 8,

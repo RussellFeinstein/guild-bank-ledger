@@ -1355,7 +1355,8 @@ end
 --
 -- Idempotent: bare keys and cross-realm keys pass through untouched.
 function GBL:MigrateNormalizePeerNames(guildData)
-    -- Strict prerequisite, like the two rungs above it (:1422, :1530) and for
+    -- Strict prerequisite, like the two rungs above it (MigrateNormalizeStoredRealms
+    -- and MigrateRecoverPeerRealms) and for
     -- the same reason. A loose `>= 9` advances any guild below 9, skipping the
     -- 4 to 8 work for good. Nothing called it that way, because MigrateAllGuilds
     -- reaches it only at 8, but that left the call order as the only thing
@@ -1647,7 +1648,13 @@ end
 -- unmigrated for the rest of the session while the bank-open and
 -- /gbl cleanup paths, both reachable without OnEnable finishing, went on
 -- using them.
--- @return number Number of guilds whose migration raised
+--
+-- The Print beside the log line is not redundant with Logger's own chat mirror:
+-- system.chatLog defaults false, so the ERROR alone reaches the log and the
+-- audit capture and never the player. With chatLog on the player sees both,
+-- which is the accepted cost of the failure being visible by default.
+-- @return number Number of guilds whose migration raised. No production reader:
+-- both call sites discard it and spec/schema_version_spec.lua is what reads it.
 function GBL:MigrateAllGuilds()
     if not self.db or not self.db.global or not self.db.global.guilds then return 0 end
     self._migrationFailed = self._migrationFailed or {}
@@ -2938,7 +2945,8 @@ end
 -- Unprotected it took the rest of OnEnable with it through AceAddon's safecall,
 -- so InitSync and every registration below it never ran, silently, every login.
 -- Isolating only the migration walk moved that failure four lines down.
--- @return number Number of guilds whose dedup pass raised
+-- @return number Number of guilds whose dedup pass raised. No production reader,
+-- like MigrateAllGuilds' count; the cases in spec/schema_version_spec.lua read it.
 function GBL:DeduplicateAllGuilds()
     if not self.db or not self.db.global or not self.db.global.guilds then return 0 end
     self._dedupFailed = self._dedupFailed or {}
