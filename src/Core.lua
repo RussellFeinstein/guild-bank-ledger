@@ -198,12 +198,10 @@ function GBL:OnEnable()
 
     -- Early dedup pass: uses eventCounts from previous session. May miss
     -- duplicates whose prefix+slot lacks ground truth. Definitive cleanup
-    -- runs after bank scan refreshes eventCounts (see OnBankOpened).
-    if self.db and self.db.global and self.db.global.guilds then
-        for _, guildData in pairs(self.db.global.guilds) do
-            self:DeduplicateRecords(guildData)
-        end
-    end
+    -- runs after bank scan refreshes eventCounts (see OnBankOpened). Per guild
+    -- under pcall, like the ladder above it: everything from here down to
+    -- InitSync used to be lost to one guild's bad records (#263).
+    self:DeduplicateAllGuilds()
 
     -- Rebuild UI tabs when access control settings change via sync
     self:RegisterMessage("GBL_ACCESS_CONTROL_CHANGED", "OnAccessControlChanged")
@@ -1614,6 +1612,11 @@ end
 -- so a spec can observe or stub an individual one.
 -- @param guildData table Guild data from AceDB
 function GBL:MigrateGuild(guildData)
+    -- Every rung below opens with this same guard, and this is advertised as the
+    -- per-guild entry point, so it answers a nil the way the layer under it does
+    -- rather than raising on its first statement.
+    if not guildData then return end
+
     -- Repair playerRealms corruption FIRST so any migration that consults
     -- the cache (and InitSync's seed loop downstream) sees clean data.
     -- BuildRosterCache also calls this on every GUILD_ROSTER_UPDATE, but
@@ -1651,16 +1654,29 @@ function GBL:MigrateAllGuilds()
 
     local failed = 0
     for name, guildData in pairs(self.db.global.guilds) do
-        local entered = guildData.schemaVersion
-        local ok, err = pcall(self.MigrateGuild, self, guildData)
+        -- Nothing here may index guildData outside the protection, or the
+        -- isolation has a hole at its own first statement: a non-table entry
+        -- (this machine NUL-damages SavedVariables after an unclean shutdown)
+        -- would raise before the pcall and abandon the walk, which is the
+        -- behaviour this function exists to remove.
+        local isTable = type(guildData) == "table"
+        local entered = isTable and guildData.schemaVersion or nil
+        local ok, err
+        if isTable then
+            ok, err = pcall(self.MigrateGuild, self, guildData)
+        else
+            ok, err = false, "guild data is a " .. type(guildData) .. ", not a table"
+        end
         if ok then
             self._migrationFailed[name] = nil
         else
             failed = failed + 1
-            -- Rungs rewrite record ids in place and reset the hash cache only
+            -- Rungs 1 to 5 rewrite record ids in place and reset the hash cache
             -- on their way out, so a raise between the two leaves a warm cache
             -- describing ids that no longer exist. Cold at OnEnable, warm at
             -- the roster-warm retrigger and at every bank open after it.
+            -- Rungs 7 and 10 rewrite ids and never reset it at all, which is a
+            -- separate defect filed as #265.
             self:ResetHashCache()
             if not self._migrationFailed[name] then
                 self._migrationFailed[name] = true
@@ -1668,8 +1684,9 @@ function GBL:MigrateAllGuilds()
                 -- guild is left for the next session's ladder to resume from.
                 -- They differ, and a raise inside MigrateCrossSlotDedup leaves
                 -- the 4 it drops to on entry rather than the 5 it was gated on.
+                local left = isTable and guildData.schemaVersion or nil
                 self:SystemError("Migration failed for %s at schema %s (entered at %s): %s",
-                    tostring(name), tostring(guildData.schemaVersion),
+                    tostring(name), tostring(left),
                     tostring(entered), tostring(err))
                 self:Print("Migration error for " .. tostring(name) .. ": " .. tostring(err))
             end
@@ -2887,26 +2904,68 @@ function GBL:PrintHelp()
 end
 
 --- Run the count-based dedup pass, with no schema guards and no schema writes.
--- Called after a bank scan and from /gbl cleanup. Uses API-observed ground
--- truth (eventCounts), and its safe default is to trim nothing where it has
--- none, so it is harmless on a guild the migration ladder has not reached.
+-- Three callers: OnEnable via DeduplicateAllGuilds (every guild), the post-scan
+-- timer (the current guild) and /gbl cleanup. Uses API-observed ground truth
+-- (eventCounts), and its safe default is to trim nothing where it has none, so
+-- it is harmless on a guild the migration ladder has not reached.
 --
 -- It used to run a legacy pass for a guild below schema 6 as well, by forcing
 -- the version to 5 to open MigrateCrossSlotDedup's gate. That was #263: the
 -- restore was guarded by `if savedSchema > 6` inside a branch entered only
 -- below 6, so it could never fire, and a guild at 1 to 3 was advanced to 6
 -- with the rungs it still owed skipped for good. The branch is gone rather
--- than repaired, because MigrateCrossSlotDedup IS rung 6 and the ladder runs
--- it in order for any guild below 6; reaching it out of order here could only
--- ever lose the rungs beneath it. Since the ladder migrates each guild under
--- pcall, a guild that arrives here below 6 is one whose own migration raised,
--- on the same data, and it is named once per session on the system channel.
+-- than repaired, because MigrateCrossSlotDedup IS rung 5 (entered at 5, leaves
+-- 6) and the ladder runs it in order for any guild below 6; reaching it out of
+-- order here could only ever lose the rungs beneath it. Since the ladder
+-- migrates each guild under pcall, a guild that arrives here below 6 is one
+-- whose own migration raised, on the same data, and it is named once per
+-- session on the system channel. Only the OnEnable caller walks every guild,
+-- so it is the only one that can present such a guild at all.
 -- @param guildData table Guild data from AceDB
 -- @return number Number of duplicate records removed
 function GBL:DeduplicateRecords(guildData)
     if not guildData then return 0 end
 
     return self:CleanupWithEventCounts(guildData)
+end
+
+--- Run the early dedup pass for every guild, one guild at a time.
+-- Isolated exactly like MigrateAllGuilds and for the same reason (#263). This
+-- walk sits four lines below it in OnEnable and over the same table, and the
+-- corruption class that makes a rung raise reaches this pass too: BuildTxPrefix
+-- concatenates record.player and ComputeTxHash divides record.timestamp, so a
+-- record holding a table or a nil where either belongs raises here as well.
+-- Unprotected it took the rest of OnEnable with it through AceAddon's safecall,
+-- so InitSync and every registration below it never ran, silently, every login.
+-- Isolating only the migration walk moved that failure four lines down.
+-- @return number Number of guilds whose dedup pass raised
+function GBL:DeduplicateAllGuilds()
+    if not self.db or not self.db.global or not self.db.global.guilds then return 0 end
+    self._dedupFailed = self._dedupFailed or {}
+
+    local failed = 0
+    for name, guildData in pairs(self.db.global.guilds) do
+        -- Nothing is read off guildData here, so unlike the migration walk this
+        -- needs no type test: a non-table entry is truthy, passes
+        -- DeduplicateRecords' nil guard, and raises inside the pass, where the
+        -- pcall answers it like any other bad guild.
+        local ok, err = pcall(self.DeduplicateRecords, self, guildData)
+        if ok then
+            self._dedupFailed[name] = nil
+        else
+            failed = failed + 1
+            -- CleanupWithEventCounts rewrites every surviving record's id and
+            -- resets the cache at the end, and only when it removed something,
+            -- so a raise partway through leaves a warm cache over moved ids.
+            self:ResetHashCache()
+            if not self._dedupFailed[name] then
+                self._dedupFailed[name] = true
+                self:SystemError("Dedup pass failed for %s: %s", tostring(name), tostring(err))
+                self:Print("Dedup error for " .. tostring(name) .. ": " .. tostring(err))
+            end
+        end
+    end
+    return failed
 end
 
 --- Remove excess records using persisted eventCounts as ground truth.

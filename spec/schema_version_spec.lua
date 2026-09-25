@@ -544,5 +544,163 @@ describe("schemaVersion", function()
             -- cache keyed on the old ones, so the branch must clear it.
             assert.equals(atRaise + 1, resets)
         end)
+
+        it("names a guild again after a walk in which it succeeded", function()
+            -- The other side of the once-per-session gate: the success path
+            -- clears the guild's entry, so a guild that fails, succeeds at the
+            -- roster-warm retrigger, then fails again later in the session is
+            -- named both times. Without the clear the second failure is silent
+            -- for the rest of the session, and no other case reads the flag.
+            guildData.schemaVersion = 1
+            local raising = true
+            local original = GBL.MigrateOccurrenceToPerSlot
+            GBL.MigrateOccurrenceToPerSlot = function(self, gd)
+                if raising then error(BOOM, 0) end
+                return original(self, gd)
+            end
+
+            GBL:MigrateAllGuilds()
+            raising = false
+            GBL:MigrateAllGuilds()
+            guildData.schemaVersion = 1
+            raising = true
+            GBL:MigrateAllGuilds()
+
+            GBL.MigrateOccurrenceToPerSlot = original
+            local n = 0
+            for _, e in ipairs(GBL:GetLog("system")) do
+                if e.level == "ERROR" then n = n + 1 end
+            end
+            assert.equals(2, n)
+        end)
+
+        it("skips a guild whose saved entry is not a table, and keeps walking", function()
+            -- The entry-version read used to sit outside the pcall, so a
+            -- non-table entry raised before the protection was entered and
+            -- abandoned the whole walk. This machine produces exactly that
+            -- shape: a NUL-damaged SavedVariables write after an unclean
+            -- shutdown (see the rex-desktop notes in CLAUDE.md).
+            guildData.schemaVersion = 1
+            GBL.db.global.guilds["Broken Guild"] = 7
+
+            local failures = GBL:MigrateAllGuilds()
+
+            assert.equals(1, failures)
+            assert.equals(11, guildData.schemaVersion,
+                "a non-table entry must not cost the other guilds their ladder")
+            local errors = {}
+            for _, e in ipairs(GBL:GetLog("system")) do
+                if e.level == "ERROR" then errors[#errors + 1] = e.message end
+            end
+            assert.equals(1, #errors)
+            assert.is_truthy(errors[1]:find("Broken Guild", 1, true), errors[1])
+        end)
+    end)
+
+    -----------------------------------------------------------------------
+    -- 7. The dedup walk four lines below it, same isolation (#263)
+    -----------------------------------------------------------------------
+
+    describe("DeduplicateAllGuilds survives a guild that raises", function()
+        -- OnEnable walks every guild twice: MigrateAllGuilds, then this dedup
+        -- pass. The corruption class that makes a rung raise reaches
+        -- BuildTxPrefix and ComputeTxHash too, so isolating only the first walk
+        -- moved the silent OnEnable abort four lines down rather than removing
+        -- it, and InitSync still never ran.
+        local BOOM = "dedup exploded on purpose"
+
+        -- Same reason as the migration cases above: `pairs` order is not
+        -- controllable, so the stub raises on whichever guild it reaches first.
+        local function raiseOnFirstGuild()
+            local visited, victim = {}, nil
+            local original = GBL.DeduplicateRecords
+            GBL.DeduplicateRecords = function(self, gd)
+                visited[#visited + 1] = gd
+                if not victim then
+                    victim = gd
+                    error(BOOM, 0)
+                end
+                return original(self, gd)
+            end
+            return function() return visited, victim, original end
+        end
+
+        local function twoGuilds()
+            return GBL.db.global.guilds["Early Guild"]
+        end
+
+        it("continues to the next guild when one guild's dedup pass raises", function()
+            twoGuilds()
+            local read = raiseOnFirstGuild()
+
+            local failures = GBL:DeduplicateAllGuilds()
+
+            local visited, victim, original = read()
+            GBL.DeduplicateRecords = original
+            assert.is_not_nil(victim, "the stub never fired")
+            assert.equals(1, failures)
+            assert.equals(2, #visited,
+                "the guild after the failing one was never handed to the dedup pass")
+        end)
+
+        it("logs one system ERROR naming the guild, and prints once", function()
+            twoGuilds()
+            local read = raiseOnFirstGuild()
+            Helpers.clearPrints()
+
+            GBL:DeduplicateAllGuilds()
+
+            local _, victim, original = read()
+            GBL.DeduplicateRecords = original
+            local errors = {}
+            for _, e in ipairs(GBL:GetLog("system")) do
+                if e.level == "ERROR" then errors[#errors + 1] = e.message end
+            end
+            assert.equals(1, #errors)
+            local name = (victim == guildData) and "TestGuild" or "Early Guild"
+            assert.is_truthy(errors[1]:find(name, 1, true), errors[1])
+            assert.is_truthy(errors[1]:find(BOOM, 1, true), errors[1])
+            assert.is_true(Helpers.printContains(BOOM))
+        end)
+
+        it("names a guild that keeps failing only once per session", function()
+            twoGuilds()
+            local original = GBL.DeduplicateRecords
+            GBL.DeduplicateRecords = function() error(BOOM, 0) end
+
+            local first = GBL:DeduplicateAllGuilds()
+            local second = GBL:DeduplicateAllGuilds()
+
+            GBL.DeduplicateRecords = original
+            local n = 0
+            for _, e in ipairs(GBL:GetLog("system")) do
+                if e.level == "ERROR" then n = n + 1 end
+            end
+            assert.equals(2, n)
+            assert.equals(2, first)
+            assert.equals(2, second)
+        end)
+
+        it("resets the hash cache when a dedup pass raises", function()
+            -- CleanupWithEventCounts rewrites every surviving record's id and
+            -- resets the cache at the end, and only when it removed something,
+            -- so a raise partway leaves a warm cache over ids that have moved.
+            -- Counted relative to the raise, like the migration case.
+            local resets, atRaise = 0, nil
+            local originalReset = GBL.ResetHashCache
+            GBL.ResetHashCache = function() resets = resets + 1 end
+            local original = GBL.DeduplicateRecords
+            GBL.DeduplicateRecords = function()
+                atRaise = resets
+                error(BOOM, 0)
+            end
+
+            GBL:DeduplicateAllGuilds()
+
+            GBL.DeduplicateRecords = original
+            GBL.ResetHashCache = originalReset
+            assert.is_not_nil(atRaise, "the stub never fired")
+            assert.equals(atRaise + 1, resets)
+        end)
     end)
 end)

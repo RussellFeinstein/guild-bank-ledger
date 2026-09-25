@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- A guild whose saved data made one of the startup migrations fail used to stop every other guild's migrations from running, with nothing said about it. The addon carried on for the rest of the session using data it had not finished upgrading. Each guild is now upgraded on its own, so one bad guild costs only itself, and the failure is written to the system log and to chat instead of passing in silence.
+- A guild whose saved data made one of the startup steps fail used to stop everything after it from running, with nothing said about it. The other guilds were never upgraded, the duplicate cleanup never ran, and sync never started, for the rest of the session. Both startup passes now take each guild on its own, so one bad guild costs only itself, and the failure is written to the system log and to chat instead of passing in silence.
 - The cleanup that runs after a bank scan could advance a guild past upgrade steps it had not actually run, leaving that work undone for good. It no longer touches the upgrade version at all, and the steps it used to skip are run in order by the normal upgrade path.
 
 ## [0.41.6] - 2026-09-24
