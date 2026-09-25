@@ -441,11 +441,25 @@ Two limits the isolation left, both filed with their measurements. **#265**: run
 `record.id` and never call `ResetHashCache`, and `GetDataHash` keys on record count alone, so an id
 rewrite is invisible to it and the guild can advertise a fingerprint of a dataset that no longer
 exists. **#266**: a guild whose migration raises partway through either of those two rungs is left
-with `seenTxHashes` keyed on the pre-rewrite ids, and since the isolation it reaches sync in that
-state, where before the raise took `OnEnable` with it and the guild never synced at all. That one is
-a new exposure created by the fix, not a pre-existing defect, and it is filed rather than fixed
-because both candidate repairs (extract the index rebuild the two rungs and
-`CleanupWithEventCounts` each inline, or quarantine a failed guild from sync) are larger than #263.
+with `seenTxHashes` keyed on the pre-rewrite ids, so `IsDuplicate` misses on every rewritten record
+and sync re-imports the guild's own transactions from a peer.
+
+That one reads like a defect the isolation created and it is not, which is worth keeping straight.
+`GUILD_ROSTER_UPDATE` re-runs `MigrateAllGuilds` once per session (`self._migrationsRetried`) and
+that fires long after `OnEnable` finished, so a guild the cold-realm short-circuit left at 8 runs
+rungs 9, 10 and 11 with sync already live. CallbackHandler's `Dispatch` is unprotected, so a raise
+there abandons the rest of the handler and surfaces as a client Lua error at most; it cannot undo
+`InitSync`. The stale index has therefore been reachable on that path for as long as the retrigger
+has existed. What the isolation changed is the `OnEnable` path, where the raise used to take
+`OnEnable` down with it and keep that guild out of sync entirely: a much worse failure that happened
+to mask this one. So the isolation widened the reach of a pre-existing defect rather than inventing
+one, and the guild it now exposes is one that previously never migrated and never synced on any
+login.
+
+It is filed rather than fixed because both candidate repairs are larger than #263: extract the index
+rebuild that rungs 7 and 10 and `CleanupWithEventCounts` each inline (three sites, none of them
+identical, in a PR about isolation), or quarantine a guild in `_migrationFailed` from sync, which
+needs a decision about what such a guild advertises on HELLO.
 
 ## 8. What validation guarantees, and what it does not
 
