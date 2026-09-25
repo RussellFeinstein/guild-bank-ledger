@@ -279,6 +279,419 @@ describe("Sync chunking", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- PrepareChunks: counts ride with the records they describe (#114)
+    --
+    -- Event counts contribute nothing to the fingerprint, so a session that
+    -- delivers all of a bucket's records and then aborts before the counts
+    -- leaves both sides' hashes for that bucket matching. The diff never
+    -- selects it again, no peer offers it again, and the receiver cannot
+    -- re-derive the counts locally, so the loss is permanent and network-wide.
+    -- The packer therefore emits a bucket's entries when it reaches the first
+    -- record of that bucket, which makes
+    --
+    --     max(entry chunk) <= first-record chunk <= last-record chunk
+    --
+    -- hold per bucket, and that is what makes any truncation of the chunk list
+    -- carry the counts of every bucket it completed.
+    --
+    -- Every fixture in the rider suite above sits in ONE bucket (slot 493216
+    -- for the records and for the entries alike), so that suite cannot see this
+    -- property in either direction: a single-bucket send satisfies it for free.
+    -- These fixtures span several buckets, which is what makes them able to
+    -- fail.
+    ---------------------------------------------------------------------------
+
+    describe("PrepareChunks interleaves event counts per bucket", function()
+        -- A bucket key is floor(timeSlot / 6), so slots six apart are adjacent
+        -- buckets. Deriving the slot from the bucket keeps the two fixture
+        -- builders honest about describing the same bucket.
+        local function slotOf(bucket) return bucket * 6 end
+
+        local function bucketRecords(bucket, n, firstItem, kind)
+            local list = {}
+            local slot = slotOf(bucket)
+            for i = 1, n do
+                local itemID = firstItem + i
+                list[i] = {
+                    type = kind or "deposit",
+                    player = "Alice-Stormrage",
+                    itemID = itemID,
+                    count = 20,
+                    tab = 3,
+                    classID = 0,
+                    subclassID = 3,
+                    timestamp = slot * 3600 + i,
+                    id = ("%s|Alice-Stormrage|%d|20|3|%d:0")
+                        :format(kind or "deposit", itemID, slot),
+                }
+            end
+            return list
+        end
+
+        local function bucketCounts(bucket, n, firstItem, kind)
+            local ec = {}
+            local slot = slotOf(bucket)
+            for i = 1, n do
+                ec[("%s|Alice-Stormrage|%d|20|3|%d")
+                    :format(kind or "deposit", firstItem + i, slot)] =
+                    { count = i, asOf = slot * 3600 }
+            end
+            return ec
+        end
+
+        local function concatLists(...)
+            local out = {}
+            for _, list in ipairs({ ... }) do
+                for _, v in ipairs(list) do out[#out + 1] = v end
+            end
+            return out
+        end
+
+        local function mergeMaps(...)
+            local out = {}
+            for _, map in ipairs({ ... }) do
+                for k, v in pairs(map) do out[k] = v end
+            end
+            return out
+        end
+
+        local function countPairs(t)
+            local n = 0
+            for _ in pairs(t or {}) do n = n + 1 end
+            return n
+        end
+
+        --- Per bucket: the first and last chunk holding one of its records, and
+        --- the last chunk holding one of its entries.
+        local function indexByBucket(chunks)
+            local firstRecord, lastRecord, lastEntry = {}, {}, {}
+            for i, chunk in ipairs(chunks) do
+                for _, list in ipairs({ chunk.transactions, chunk.moneyTransactions }) do
+                    for _, rec in ipairs(list) do
+                        local b = GBL:BucketKeyForRecord(rec)
+                        if not firstRecord[b] then firstRecord[b] = i end
+                        lastRecord[b] = i
+                    end
+                end
+                for key in pairs(chunk.eventCounts or {}) do
+                    local b = GBL:BucketKeyForEventCount(key)
+                    if b and i > (lastEntry[b] or 0) then lastEntry[b] = i end
+                end
+            end
+            return firstRecord, lastRecord, lastEntry
+        end
+
+        --- The property the ordering exists for. A send aborts by stopping
+        --- part-way down the chunk list, so every prefix of it has to be a
+        --- consistent delivery: any bucket whose records are all inside the
+        --- prefix must have all of its counts inside it too. A bucket only
+        --- partly delivered is fine, because its hash still differs and the
+        --- diff re-selects it next session.
+        local function assertAbortSafe(chunks, lists, counts)
+            local totalRecords, totalEntries = {}, {}
+            for _, list in ipairs(lists) do
+                for _, rec in ipairs(list) do
+                    local b = GBL:BucketKeyForRecord(rec)
+                    totalRecords[b] = (totalRecords[b] or 0) + 1
+                end
+            end
+            for key in pairs(counts) do
+                local b = GBL:BucketKeyForEventCount(key)
+                totalEntries[b] = (totalEntries[b] or 0) + 1
+            end
+
+            local seenRecords, seenEntries = {}, {}
+            for prefix = 1, #chunks do
+                local chunk = chunks[prefix]
+                for _, list in ipairs({ chunk.transactions, chunk.moneyTransactions }) do
+                    for _, rec in ipairs(list) do
+                        local b = GBL:BucketKeyForRecord(rec)
+                        seenRecords[b] = (seenRecords[b] or 0) + 1
+                    end
+                end
+                for key in pairs(chunk.eventCounts or {}) do
+                    local b = GBL:BucketKeyForEventCount(key)
+                    if b then seenEntries[b] = (seenEntries[b] or 0) + 1 end
+                end
+
+                for bucket, total in pairs(totalRecords) do
+                    if (seenRecords[bucket] or 0) == total then
+                        assert.equals(totalEntries[bucket] or 0,
+                            seenEntries[bucket] or 0,
+                            ("abort after chunk %d of %d: bucket %d has all %d "
+                             .. "records but %d of %d counts"):format(
+                                prefix, #chunks, bucket, total,
+                                seenEntries[bucket] or 0, totalEntries[bucket] or 0))
+                    end
+                end
+            end
+        end
+
+        --- Three buckets, each with more records than one chunk holds, and
+        --- counts for each. Bucket-contiguous, which is the order
+        --- SortSendListNewestFirst produces.
+        local function threeBucketSend()
+            return concatLists(
+                    bucketRecords(82202, 6, 191300),
+                    bucketRecords(82203, 6, 191400),
+                    bucketRecords(82204, 6, 191500)),
+                mergeMaps(
+                    bucketCounts(82202, 4, 191300),
+                    bucketCounts(82203, 4, 191400),
+                    bucketCounts(82204, 4, 191500))
+        end
+
+        it("puts a bucket's counts no later than its first record", function()
+            local records, counts = threeBucketSend()
+            local chunks = GBL:PrepareChunks(records, {}, counts)
+
+            local firstRecord, _, lastEntry = indexByBucket(chunks)
+            assert.is_true(countPairs(lastEntry) > 0, "no entries were packed")
+
+            for bucket, entryChunk in pairs(lastEntry) do
+                assert.is_not_nil(firstRecord[bucket],
+                    ("bucket %d packed entries but no records"):format(bucket))
+                assert.is_true(entryChunk <= firstRecord[bucket],
+                    ("bucket %d: last entry in chunk %d, first record in chunk %d")
+                        :format(bucket, entryChunk, firstRecord[bucket]))
+            end
+        end)
+
+        -- The property the invariant exists for. A send aborts by stopping
+        -- part-way down the chunk list, so every prefix of it has to be a
+        -- consistent delivery: any bucket whose records are all inside the
+        -- prefix must have all of its counts inside it too. A bucket only
+        -- partly delivered is fine, because its hash still differs and the
+        -- diff re-selects it.
+        it("carries a completed bucket's counts in every prefix that completes it",
+        function()
+            local records, counts = threeBucketSend()
+            assertAbortSafe(GBL:PrepareChunks(records, {}, counts), { records }, counts)
+        end)
+
+        -- One bucket can own records in both send lists. The emission mark is
+        -- shared across the two walks, so the entries go out at the first
+        -- record of either and never twice.
+        it("emits a bucket's counts once when its records span both lists", function()
+            local items = bucketRecords(82202, 2, 191300)
+            local money = bucketRecords(82202, 2, 191350, "repair")
+            local counts = bucketCounts(82202, 3, 191300)
+            local chunks = GBL:PrepareChunks(items, money, counts)
+
+            local seen, total = {}, 0
+            for _, chunk in ipairs(chunks) do
+                for key in pairs(chunk.eventCounts or {}) do
+                    assert.is_nil(seen[key], "entry packed twice: " .. key)
+                    seen[key] = true
+                    total = total + 1
+                end
+            end
+            assert.equals(3, total)
+
+            local firstRecord, _, lastEntry = indexByBucket(chunks)
+            assert.is_true(lastEntry[82202] <= firstRecord[82202],
+                "counts must not trail the records of a bucket spanning both lists")
+        end)
+
+        -- A bucket can own records ONLY in the money list, and the emission
+        -- mark is shared across the two walks, so the money walk has to be able
+        -- to emit a bucket the item walk never reached. Dropping that call
+        -- survived the test above, because there the bucket had records in both
+        -- lists and the item walk always got there first. Without it the counts
+        -- fall through to the leftover pass, which still delivers them but puts
+        -- them wherever room is left, and once the packed chunks are full that
+        -- is in carriers after the records they describe. Few records and many
+        -- counts is the shape that makes the difference visible.
+        it("puts a money-only bucket's counts before its records", function()
+            local items = bucketRecords(82202, 8, 191300)
+            local money = bucketRecords(82207, 1, 191500, "repair")
+            local counts = mergeMaps(
+                bucketCounts(82202, 2, 191300),
+                bucketCounts(82207, 12, 191500, "repair"))
+
+            local chunks = GBL:PrepareChunks(items, money, counts)
+            local firstRecord, _, lastEntry = indexByBucket(chunks)
+
+            assert.is_not_nil(lastEntry[82207], "the money-only bucket packed no counts")
+            assert.is_not_nil(firstRecord[82207], "the money-only bucket packed no records")
+            assert.is_true(lastEntry[82207] <= firstRecord[82207],
+                ("money-only bucket: last count in chunk %d, first record in chunk "
+                 .. "%d of %d"):format(
+                    lastEntry[82207], firstRecord[82207], #chunks))
+
+            assertAbortSafe(chunks, { items, money }, counts)
+        end)
+
+        -- A chunk holding entries and no records is legal mid-stream, so the
+        -- seal test cannot be "has it got a record in it". Without an
+        -- emptiness-based guard the oversized record joins the entry chunk and
+        -- the chunk carries both.
+        it("seals an entry-only chunk before an oversized record", function()
+            local slot = slotOf(82202)
+            local oversized = {
+                type = "deposit", player = "P", timestamp = slot * 3600,
+                id = "deposit|" .. string.rep("x", 900) .. "|" .. slot .. ":0",
+            }
+            local chunks = GBL:PrepareChunks({ oversized }, {}, bucketCounts(82202, 1, 191300))
+
+            assert.is_true(#chunks >= 2,
+                "the entry and the oversized record cannot share a chunk")
+            assert.equals(0, #chunks[1].transactions,
+                "the first chunk carries the count, not the record")
+            assert.equals(1, countPairs(chunks[1].eventCounts))
+            assert.equals(1, #chunks[2].transactions)
+            assert.is_nil(chunks[2].eventCounts)
+        end)
+
+        -- Entries whose bucket sends no records have no record to ride ahead
+        -- of, and a key with no readable slot has no bucket at all. Both keep
+        -- the forward-cursor top-up and carrier behaviour from #92, so this
+        -- guards the old path through the new code rather than a new promise.
+        it("still delivers counts for buckets that sent no records, and unreadable keys",
+        function()
+            local records = bucketRecords(82202, 2, 191300)
+            local counts = mergeMaps(
+                bucketCounts(82202, 2, 191300),
+                bucketCounts(89999, 2, 191600))
+            counts["nodigits"] = { count = 1, asOf = 1775563200 }
+
+            local chunks = GBL:PrepareChunks(records, {}, counts)
+
+            local seen, total = {}, 0
+            for _, chunk in ipairs(chunks) do
+                for key in pairs(chunk.eventCounts or {}) do
+                    assert.is_nil(seen[key], "entry packed twice: " .. key)
+                    seen[key] = true
+                    total = total + 1
+                end
+            end
+            assert.equals(5, total, "every entry must ride exactly once")
+            assert.is_true(seen["nodigits"], "an unreadable key must still ride")
+        end)
+
+        -- The invariant is over bucket KEYS, and the two sides reach a key by
+        -- different readings: a count key always yields its trailing slot,
+        -- while a record whose id the "|slot:occ" pattern cannot read falls
+        -- back to floor(timestamp / BUCKET_SECONDS). Where those disagree the
+        -- record's own count is filed under a different bucket and rides with
+        -- that one. What still holds, and what this pins, is the structural
+        -- half: a group reaches the leftover pass exactly when no record
+        -- produced its key, so a leftover entry has no first-record chunk to be
+        -- late for, every entry still rides exactly once, and no completed
+        -- bucket is reported as owing counts that were never filed under it.
+        it("still delivers the count of a record whose id carries no slot", function()
+            local unparseable = {
+                type = "deposit", player = "Alice-Stormrage", itemID = 191301,
+                count = 20, tab = 3, classID = 0, subclassID = 3,
+                timestamp = 1,
+                id = "deposit|Alice-Stormrage|191301|20|3|noslot",
+            }
+            local counts = bucketCounts(82202, 1, 191300)
+            local onlyKey = next(counts)
+
+            -- If these ever agree the case has stopped exercising what it is
+            -- here for, and the test would pass for the wrong reason.
+            assert.are_not.equals(
+                GBL:BucketKeyForRecord(unparseable),
+                GBL:BucketKeyForEventCount(onlyKey),
+                "fixture no longer exercises the two readings disagreeing")
+
+            local chunks = GBL:PrepareChunks({ unparseable }, {}, counts)
+
+            local seen, total = {}, 0
+            for _, chunk in ipairs(chunks) do
+                for key in pairs(chunk.eventCounts or {}) do
+                    assert.is_nil(seen[key], "entry packed twice: " .. key)
+                    seen[key] = true
+                    total = total + 1
+                end
+            end
+            assert.equals(1, total, "the count must still ride exactly once")
+            assert.is_true(seen[onlyKey], "the count must be the one that rode")
+
+            assertAbortSafe(chunks, { { unparseable } }, counts)
+        end)
+
+        it("keeps every chunk inside the target across many buckets", function()
+            local records, counts = {}, {}
+            for b = 82200, 82211 do
+                records = concatLists(records, bucketRecords(b, 3, 191000 + b))
+                counts = mergeMaps(counts, bucketCounts(b, 3, 191000 + b))
+            end
+            local chunks = GBL:PrepareChunks(records, {}, counts)
+
+            local envelope = GBL:_EstimateEnvelopeBytes(GBL:GetGuildName())
+            for i, chunk in ipairs(chunks) do
+                local bytes = envelope
+                for _, list in ipairs({ chunk.transactions, chunk.moneyTransactions }) do
+                    for _, rec in ipairs(list) do
+                        bytes = bytes + GBL:_EstimateRecordBytes(rec)
+                    end
+                end
+                for key, entry in pairs(chunk.eventCounts or {}) do
+                    bytes = bytes + GBL:_EstimateEventCountBytes(key, entry)
+                end
+                assert.is_true(bytes <= GBL.SYNC_CHUNK_TARGET_BYTES,
+                    ("chunk %d estimates %d bytes, over the %d target"):format(
+                        i, bytes, GBL.SYNC_CHUNK_TARGET_BYTES))
+            end
+
+            local flat, total = {}, 0
+            for _, chunk in ipairs(chunks) do
+                for _, rec in ipairs(chunk.transactions) do flat[#flat + 1] = rec.id end
+                total = total + countPairs(chunk.eventCounts)
+            end
+            assert.equals(#records, #flat, "no record may be dropped")
+            for i, rec in ipairs(records) do
+                assert.equals(rec.id, flat[i], "packing reordered the send list")
+            end
+
+            local expected = 0
+            for _ in pairs(counts) do expected = expected + 1 end
+            assert.equals(expected, total, "no entry may be dropped or duplicated")
+        end)
+
+        -- The fallback path: a request with no bucketHashes leaves the serve
+        -- with no bucket keys to filter by, so every count rides whether or not
+        -- its bucket is in the send. That makes orphan entries the norm there
+        -- rather than the exception, which is why it gets an end-to-end check.
+        it("delivers every count on the no-bucketHashes fallback path", function()
+            for _, rec in ipairs(concatLists(
+                bucketRecords(82202, 3, 191300),
+                bucketRecords(82203, 3, 191400))) do
+                rec.scanTime = rec.timestamp
+                rec.scannedBy = "Alice-Stormrage"
+                guildData.transactions[#guildData.transactions + 1] = rec
+            end
+            guildData.eventCounts = mergeMaps(
+                bucketCounts(82202, 2, 191300),
+                bucketCounts(82203, 2, 191400),
+                bucketCounts(89999, 2, 191600))
+
+            local expected = 0
+            for _ in pairs(guildData.eventCounts) do expected = expected + 1 end
+
+            Sync.serveRequest(GBL, "PeerA", request({ sinceTimestamp = 0 }))
+            Sync.drainSend(GBL, "PeerA")
+
+            local seen, total = {}, 0
+            for i = 1, #MockAce.sentCommMessages do
+                local ok, data = GBL:Deserialize(MockAce.sentCommMessages[i].text)
+                if ok and data.type == "SYNC_DATA" and data.eventCounts then
+                    for key in pairs(data.eventCounts) do
+                        if not seen[key] then
+                            seen[key] = true
+                            total = total + 1
+                        end
+                    end
+                end
+            end
+            assert.equals(expected, total,
+                "the fallback path must put every event count on the wire")
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Chunk size safety
     ---------------------------------------------------------------------------
 

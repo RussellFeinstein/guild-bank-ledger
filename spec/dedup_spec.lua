@@ -1295,4 +1295,49 @@ describe("Dedup", function()
         end)
     end)
 
+    -- The key-to-bucket reading itself, lifted out of the predicate above so
+    -- the packer can interleave counts with the records they describe (#114).
+    -- The predicate answers yes or no; PrepareChunks needs the key. One writer
+    -- of the arithmetic, two readers of it.
+    describe("BucketKeyForEventCount", function()
+        it("reads the bucket out of an event count key", function()
+            -- slot 100 -> bucket 16
+            assert.equals(16, GBL:BucketKeyForEventCount("withdraw|Thrall|12345|5|1|100"))
+        end)
+
+        it("agrees with the bucket a record at the same slot would get", function()
+            local slot = 472222
+            local record = { id = "deposit|A|100|1|1|" .. slot .. ":0" }
+            assert.equals(
+                GBL:BucketKeyForRecord(record),
+                GBL:BucketKeyForEventCount("deposit|A|100|1|1|" .. slot))
+        end)
+
+        it("returns nil for a key carrying no slot", function()
+            assert.is_nil(GBL:BucketKeyForEventCount("nodigits"))
+        end)
+
+        it("returns nil for a nil key rather than throwing", function()
+            assert.is_nil(GBL:BucketKeyForEventCount(nil))
+        end)
+
+        -- Both readers must agree, or the packer could place an entry the
+        -- collector never selected, or skip one it did.
+        it("is the reading EventCountRidesWithBuckets answers from", function()
+            local keys = {
+                "withdraw|Thrall|12345|5|1|100",
+                "deposit|Jaina|99999|5|2|200",
+                "deposit|Sylvanas|1|1|1|101",
+                "nodigits",
+            }
+            local diffBuckets = { [16] = true }
+            for _, key in ipairs(keys) do
+                local bucket = GBL:BucketKeyForEventCount(key)
+                local rides = bucket ~= nil and diffBuckets[bucket] == true
+                assert.equals(rides, GBL:EventCountRidesWithBuckets(key, diffBuckets),
+                    "helper and predicate disagreed on " .. key)
+            end
+        end)
+    end)
+
 end)

@@ -450,11 +450,27 @@ end
 -- @param baseHash string An eventCounts key (record id prefix plus time slot)
 -- @param diffBuckets table|nil Set of 6-hour bucket keys; nil = everything rides
 -- @return boolean True when the entry should ride along
+--- The 6-hour fingerprint bucket an event count entry describes.
+--
+-- The key-to-bucket reading on its own, because two callers want different
+-- answers from it. The predicate below wants yes or no; PrepareChunks wants the
+-- key itself (#114), so it can emit a bucket's entries at the first record of
+-- that bucket and keep a bucket's counts no later on the wire than the records
+-- they describe. Lifting the reading out is what keeps the arithmetic in one
+-- place rather than two that agree by inspection.
+-- @param baseHash string An eventCounts key (record id prefix plus time slot)
+-- @return number|nil Bucket key, or nil when the key carries no readable slot
+function GBL:BucketKeyForEventCount(baseHash)
+    local _, slot = self:SplitBaseHash(baseHash)
+    if not slot then return nil end
+    return self:BucketKeyForTimeSlot(slot)
+end
+
 function GBL:EventCountRidesWithBuckets(baseHash, diffBuckets)
     if not diffBuckets then return true end
-    local _, slot = self:SplitBaseHash(baseHash)
-    if not slot then return false end
-    return diffBuckets[self:BucketKeyForTimeSlot(slot)] and true or false
+    local bucket = self:BucketKeyForEventCount(baseHash)
+    if not bucket then return false end
+    return diffBuckets[bucket] and true or false
 end
 
 --- Collect eventCounts entries matching a set of fingerprint bucket keys.

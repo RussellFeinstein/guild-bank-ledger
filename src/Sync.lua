@@ -2654,11 +2654,47 @@ end
 -- on its own, which a long cross-realm id can. Without that the packer would
 -- seal empty chunks forever; with it the overshoot is visible instead, as a
 -- chunk that exceeds one fragment in the FinishSending summary.
+--
+-- A bucket's event counts are emitted when the walk reaches the FIRST record of
+-- that bucket, so per bucket key
+--
+--     max(entry chunk) <= first-record chunk <= last-record chunk
+--
+-- and therefore any prefix of the returned list that completes a bucket's
+-- records also carries all of that bucket's counts (#114). That holds by
+-- construction rather than by luck: emitBucketEntries runs for EVERY record in
+-- both lists, so a group reaches the leftover pass below exactly when no record
+-- produced its key, and a leftover entry therefore has no first-record chunk it
+-- could be late for.
+--
+-- The invariant is over bucket KEYS, and the two sides reach a key by different
+-- readings, which is the one limit worth knowing. A count key always yields its
+-- trailing slot, while bucketKeyForRecord reads the slot out of the record id
+-- and falls back to floor(timestamp / BUCKET_SECONDS) for an id it cannot
+-- parse. Those agree for every record the current builders produce, and they
+-- agree on the fallback too while the timestamp matches the slot, since a slot
+-- is hours and the divisor is the same. They cannot agree when tx.timestamp is
+-- absent, where the fallback keys off GetServerTime() at packing time. Where
+-- they disagree the per-bucket promise above still holds, but what it buys does
+-- not: that record's own count is filed under a different bucket and travels
+-- with that one instead. On the bucket path it then rides only if that other
+-- bucket is also in the send, which is a selection question in
+-- EventCountRidesWithBuckets rather than a packing one, and no capture has
+-- shown a record reaching here with an id the pattern cannot read. That is the whole
+-- point of the ordering: counts contribute nothing to the fingerprint, so a
+-- session that delivered a bucket's records and then aborted before its counts
+-- left both sides' hashes for that bucket matching, the diff never selected it
+-- again, no third peer offered it either, and the receiver cannot re-derive
+-- counts it never got. An abort now strands only partly delivered buckets,
+-- whose hashes still differ, so the next session re-sends records and counts
+-- together. Sender-local: nothing on the wire changed, and the receiver's merge
+-- is max-wins with no ordering or completeness assumption.
 -- @param transactions table Array of stripped item transaction records
 -- @param moneyTransactions table Array of stripped money transaction records
 -- @param eventCounts table|nil { [baseHash] = { count=N, asOf=T } } to spread
 -- @return table Array of chunks, each with .transactions, .moneyTransactions
---               and an optional .eventCounts
+--               and an optional .eventCounts. A chunk may carry entries and no
+--               records, which is legal mid-stream and on the wire today.
 function GBL:PrepareChunks(transactions, moneyTransactions, eventCounts)
     local budget = CHUNK_TARGET_BYTES - estimateEnvelopeBytes(self:GetGuildName())
 
@@ -2666,73 +2702,160 @@ function GBL:PrepareChunks(transactions, moneyTransactions, eventCounts)
     local chunkBytes = {}    -- running estimate per sealed chunk, same indices
     local currentTx = {}
     local currentMoney = {}
+    local currentCounts = nil
     local count = 0
     local estimatedBytes = 0
 
+    -- Group the entries by the bucket each describes, so a bucket's counts can
+    -- be found at the moment its first record comes up. A key with no readable
+    -- slot describes no bucket and is held for the leftover pass at the end.
+    local entriesByBucket, orphanEntries
+    if eventCounts then
+        entriesByBucket, orphanEntries = {}, {}
+        for baseHash, entry in pairs(eventCounts) do
+            local bucket = self:BucketKeyForEventCount(baseHash)
+            if bucket then
+                local group = entriesByBucket[bucket]
+                if not group then
+                    group = {}
+                    entriesByBucket[bucket] = group
+                end
+                group[baseHash] = entry
+            else
+                orphanEntries[#orphanEntries + 1] = { baseHash, entry }
+            end
+        end
+    end
+
+    -- Emptiness, not "has it got a record in it". An open chunk can now hold
+    -- entries and no records, and the old record-only test would seal that away
+    -- as empty and drop them. With eventCounts nil this is exactly the old
+    -- condition, which is what keeps the record-only suite byte-identical.
     local function sealChunk()
-        if #currentTx > 0 or #currentMoney > 0 then
+        if count > 0 or currentCounts then
             chunks[#chunks + 1] = {
                 transactions = currentTx,
                 moneyTransactions = currentMoney,
+                eventCounts = currentCounts,
             }
             chunkBytes[#chunks] = estimatedBytes
         end
         currentTx = {}
         currentMoney = {}
+        currentCounts = nil
         count = 0
         estimatedBytes = 0
     end
 
-    for _, tx in ipairs(transactions) do
-        local recBytes = estimateRecordBytes(tx)
-        if count > 0 and (estimatedBytes + recBytes > budget
-                          or count >= MAX_RECORDS_PER_CHUNK) then
+    -- Both helpers read the open chunk's tables AFTER any seal, because
+    -- sealChunk hands the old ones to the sealed chunk and installs fresh ones.
+    local function addEntry(baseHash, entry)
+        local entryBytes = estimateEventCountBytes(baseHash, entry)
+        if (count > 0 or currentCounts) and estimatedBytes + entryBytes > budget then
             sealChunk()
         end
-        currentTx[#currentTx + 1] = tx
+        currentCounts = currentCounts or {}
+        currentCounts[baseHash] = entry
+        estimatedBytes = estimatedBytes + entryBytes
+    end
+
+    local function addRecord(tx, isMoney)
+        local recBytes = estimateRecordBytes(tx)
+        if (count > 0 or currentCounts)
+            and (estimatedBytes + recBytes > budget
+                 or count >= MAX_RECORDS_PER_CHUNK) then
+            sealChunk()
+        end
+        local target = isMoney and currentMoney or currentTx
+        target[#target + 1] = tx
         count = count + 1
         estimatedBytes = estimatedBytes + recBytes
     end
 
-    for _, tx in ipairs(moneyTransactions) do
-        local recBytes = estimateRecordBytes(tx)
-        if count > 0 and (estimatedBytes + recBytes > budget
-                          or count >= MAX_RECORDS_PER_CHUNK) then
-            sealChunk()
+    -- Clear the group before emitting it, so the money walk cannot emit a
+    -- bucket the item walk already did: one bucket can own records in both
+    -- lists. Correctness does not rest on the send list being bucket-contiguous
+    -- the way SortSendListNewestFirst leaves it, because the entries go out at
+    -- the first record of the bucket either way, which is at or before every
+    -- later record of it.
+    local function emitBucketEntries(bucket)
+        if not entriesByBucket then return end
+        -- Unreachable today, because bucketKeyForRecord always returns a number:
+        -- its timestamp fallback is what makes it total. Kept because the line
+        -- below is a nil-KEY assignment if this is ever nil, and Lua 5.1 raises
+        -- on that rather than no-opping, which would take the packer down for
+        -- the whole session.
+        if not bucket then return end
+        local group = entriesByBucket[bucket]
+        if not group then return end
+        entriesByBucket[bucket] = nil
+        for baseHash, entry in pairs(group) do
+            addEntry(baseHash, entry)
         end
-        currentMoney[#currentMoney + 1] = tx
-        count = count + 1
-        estimatedBytes = estimatedBytes + recBytes
+    end
+
+    for _, tx in ipairs(transactions) do
+        emitBucketEntries(self:BucketKeyForRecord(tx))
+        addRecord(tx, false)
+    end
+
+    for _, tx in ipairs(moneyTransactions) do
+        emitBucketEntries(self:BucketKeyForRecord(tx))
+        addRecord(tx, true)
     end
 
     sealChunk()
 
-    -- Top each chunk up with event count entries while it stays inside the
-    -- budget, opening carrier chunks once the record chunks are full. The
-    -- cursor only moves forward: an entry never revisits a chunk it has already
-    -- passed, so packing stays linear in the number of entries.
-    if eventCounts then
-        local idx = 1
-        for baseHash, entry in pairs(eventCounts) do
-            local entryBytes = estimateEventCountBytes(baseHash, entry)
-            while true do
-                if idx > #chunks then
-                    chunks[idx] = { transactions = {}, moneyTransactions = {} }
-                    chunkBytes[idx] = 0
-                end
-                -- A carrier chunk that is still completely empty takes the entry
-                -- whatever it weighs. That is the minimum-progress guarantee: it
-                -- is the only branch that can place an oversized entry, and it
-                -- is why the cursor cannot advance forever.
-                if chunkBytes[idx] + entryBytes <= budget or chunkBytes[idx] == 0 then
-                    local chunk = chunks[idx]
-                    chunk.eventCounts = chunk.eventCounts or {}
-                    chunk.eventCounts[baseHash] = entry
-                    chunkBytes[idx] = chunkBytes[idx] + entryBytes
-                    break
-                end
-                idx = idx + 1
+    -- What is left has no record in this send to ride ahead of: a bucket the
+    -- session is not carrying at all, which is the norm on the fallback path
+    -- because that one filters by time rather than by bucket, or a key whose
+    -- slot could not be read. Both keep the #92 behaviour, topping up whatever
+    -- room the packed chunks have left and then opening carriers. The cursor
+    -- only moves forward, so this stays linear in the number of entries.
+    --
+    -- Neither case can arrive on a bucket-filtered session, which is every
+    -- normal one (#270). Stage 6 admits an entry only when its slot reads and
+    -- only when its bucket is in sentBuckets, and a bucket is in sentBuckets
+    -- only because it has records, so every arriving entry is emitted by the
+    -- walk above. This pass is live only on the sinceTimestamp fallback, which
+    -- needs GetGuildData() itself to be nil. It stays because it is what makes
+    -- the packer total and because the fallback is still a real path, but do
+    -- not read it as evidence that the serve path can hand over an unreadable
+    -- key: #270 is that it cannot, and this pass being dead is how that was
+    -- found.
+    local leftover = {}
+    if entriesByBucket then
+        for _, group in pairs(entriesByBucket) do
+            for baseHash, entry in pairs(group) do
+                leftover[#leftover + 1] = { baseHash, entry }
             end
+        end
+        for i = 1, #orphanEntries do
+            leftover[#leftover + 1] = orphanEntries[i]
+        end
+    end
+
+    local idx = 1
+    for _, held in ipairs(leftover) do
+        local baseHash, entry = held[1], held[2]
+        local entryBytes = estimateEventCountBytes(baseHash, entry)
+        while true do
+            if idx > #chunks then
+                chunks[idx] = { transactions = {}, moneyTransactions = {} }
+                chunkBytes[idx] = 0
+            end
+            -- A carrier chunk that is still completely empty takes the entry
+            -- whatever it weighs. That is the minimum-progress guarantee: it
+            -- is the only branch that can place an oversized entry, and it is
+            -- why the cursor cannot advance forever.
+            if chunkBytes[idx] + entryBytes <= budget or chunkBytes[idx] == 0 then
+                local chunk = chunks[idx]
+                chunk.eventCounts = chunk.eventCounts or {}
+                chunk.eventCounts[baseHash] = entry
+                chunkBytes[idx] = chunkBytes[idx] + entryBytes
+                break
+            end
+            idx = idx + 1
         end
     end
 
