@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.41.9
+    {"0.41.9", "2026-09-26", {
+        Fixed = {
+            "A sync that the other member interrupted left no record of itself in the sync log. The lines saying how many chunks went out, how often they had to be retried and how well they compressed were all skipped, so the one kind of interruption that can happen at any point in a sync was the one kind a log could not account for, and the running count of them always read zero however often it happened. An interrupted send now writes the same summary as one that finishes, and it no longer leaves stale figures behind for the next sync to report as its own.",
+        },
+    }},
     -- v0.41.8
     {"0.41.8", "2026-09-24", {
         Fixed = {
