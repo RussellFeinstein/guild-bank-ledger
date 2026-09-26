@@ -638,9 +638,11 @@ describe("Sync chunking", function()
         -- discards, which is what #114 emptied. Many counts and few records is
         -- the shape that makes the placement visible.
         it("puts a boundary count ahead of the lower bucket's records", function()
-            local records = bucketRecords(82202, 2, 191300)
-            -- Own bucket 82203, first hour, so it rides with 82202 as well.
-            local counts = bucketCounts(82203, 12, 191500)
+            -- The last hour of 82202 and the first hour of 82203 are ONE hour
+            -- apart, which is the distance the receiver's cleanup window spans,
+            -- so these records really can be trimmed by these counts.
+            local records = bucketRecords(82202, 2, 191300, nil, 5)
+            local counts = bucketCounts(82203, 12, 191300, nil, 0)
 
             local chunks = GBL:PrepareChunks(records, {}, counts)
             local firstRecord, lastRecord, lastEntry = indexByBucket(chunks)
@@ -665,9 +667,9 @@ describe("Sync chunking", function()
         it("emits an entry once when both of its ride buckets are in the send",
         function()
             local records = concatLists(
-                bucketRecords(82202, 3, 191300),
-                bucketRecords(82203, 3, 191400))
-            local counts = bucketCounts(82203, 4, 191500)
+                bucketRecords(82202, 3, 191300, nil, 5),
+                bucketRecords(82203, 3, 191400, nil, 0))
+            local counts = bucketCounts(82203, 4, 191300, nil, 0)
 
             local chunks = GBL:PrepareChunks(records, {}, counts)
 
@@ -746,6 +748,72 @@ describe("Sync chunking", function()
             local expected = 0
             for _ in pairs(counts) do expected = expected + 1 end
             assert.equals(expected, total, "no entry may be dropped or duplicated")
+        end)
+
+
+        -- The question #270 asked, put to the serve path rather than to the
+        -- packer: can a count one hour across a bucket boundary from its records
+        -- reach a peer at all? 46 of the 16,644 entries on the measured store
+        -- are in that shape, and the answer was no. The bucket diff walks OUR
+        -- bucket hashes, which come from our records, so a bucket holding no
+        -- record is never selected and the count's own bucket never appears in
+        -- sentBuckets: the exact filter dropped it every session while this
+        -- client's own cleanup went on using it.
+        --
+        -- This is the case the unit tests could not make. Every mutation of the
+        -- filter and the packer dies against the specs above, and all of them
+        -- would have died just the same while the serve still put nothing on the
+        -- wire, because none of them asks whether the entry is selected in the
+        -- first place.
+        it("puts a count one hour across a bucket boundary on the wire", function()
+            -- Records in the last hour of bucket 82202 only.
+            local records = bucketRecords(82202, 3, 191300, nil, 5)
+            for _, rec in ipairs(records) do
+                rec.scanTime = rec.timestamp
+                rec.scannedBy = "Alice-Stormrage"
+                guildData.transactions[#guildData.transactions + 1] = rec
+            end
+
+            -- One count an hour later, so it belongs to bucket 82203, where this
+            -- guild has no record at all, and shares its prefix with a record
+            -- above so the receiver's cleanup can genuinely use it.
+            guildData.eventCounts = bucketCounts(82203, 1, 191300, nil, 0)
+            local key = next(guildData.eventCounts)
+
+            assert.are_not.equals(
+                GBL:BucketKeyForRecord(records[1]), GBL:BucketKeyForEventCount(key),
+                "fixture must straddle a bucket boundary")
+            local recSlot = math.floor(records[1].timestamp / 3600)
+            local _, countSlot = GBL:SplitBaseHash(key)
+            assert.equals(1, countSlot - recSlot,
+                "fixture must be exactly one hour across the boundary")
+
+            -- An empty bucketHashes map takes the bucket-filtered path and reads
+            -- every one of our buckets as differing.
+            Sync.serveRequest(GBL, "PeerA", request({ bucketHashes = {} }))
+            Sync.drainSend(GBL, "PeerA")
+
+            local entryChunk, firstRecordChunk
+            for i = 1, #MockAce.sentCommMessages do
+                local ok, data = GBL:Deserialize(MockAce.sentCommMessages[i].text)
+                if ok and data.type == "SYNC_DATA" then
+                    if data.eventCounts and data.eventCounts[key]
+                        and not entryChunk then
+                        entryChunk = data.chunk
+                    end
+                    if data.transactions and #data.transactions > 0
+                        and not firstRecordChunk then
+                        firstRecordChunk = data.chunk
+                    end
+                end
+            end
+
+            assert.is_not_nil(firstRecordChunk, "the records never went out")
+            assert.is_not_nil(entryChunk,
+                "a count one hour across the boundary never reached the wire")
+            assert.is_true(entryChunk <= firstRecordChunk,
+                ("the count went out in chunk %d, behind the records in chunk %d")
+                    :format(entryChunk or -1, firstRecordChunk or -1))
         end)
 
         -- The fallback path: a request with no bucketHashes leaves the serve
