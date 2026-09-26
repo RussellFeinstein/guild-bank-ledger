@@ -447,6 +447,12 @@ end
 --
 -- A nil filter means send everything, which is the fallback path where there
 -- are no bucket keys to compare against.
+--
+-- The test is over the RIDE SET rather than the entry's own bucket (#270). A
+-- count one hour across a bucket boundary from the records that can use it
+-- belongs to neither side cleanly: CleanupWithEventCounts reaches it and the
+-- own-bucket test never offered it, so it was usable locally and unsendable
+-- forever, 46 of 16,644 entries on the measured store.
 -- @param baseHash string An eventCounts key (record id prefix plus time slot)
 -- @param diffBuckets table|nil Set of 6-hour bucket keys; nil = everything rides
 -- @return boolean True when the entry should ride along
@@ -466,11 +472,72 @@ function GBL:BucketKeyForEventCount(baseHash)
     return self:BucketKeyForTimeSlot(slot)
 end
 
+--- How many hourly slots either side of a record's own slot a count for that
+--- record's cluster may sit in.
+---
+--- One number with two readers: the cleanup loop in Core.lua's
+--- CleanupWithEventCounts, which is the behaviour this describes, and
+--- EventCountRideBuckets below, which mirrors it so the sync filter and the
+--- packer offer exactly the counts that cleanup can use. Two copies of it is
+--- how the filter and the cleanup came to disagree in the first place.
+---
+--- Read through the addon object at call time by both readers, and deliberately
+--- not copied into a file local. Core.lua loads ahead of this file, so a local
+--- there would be nil; and a local here would mean the ride set kept the shipped
+--- width while the cleanup loop followed the field, which is two windows again
+--- with only one name to show for it.
+---
+--- It does NOT govern the three other slot-drift windows in this file
+--- (CountFromRecordIndex, CountStoredForHash and FindDriftedCount). Those share
+--- the number and answer a different question, how many records or prior counts
+--- exist under a prefix, so tying them to this name would make a later change
+--- to record counting move silently what an event count rides with.
+GBL.EVENT_COUNT_SLOT_RADIUS = 1
+
+--- The 6-hour buckets whose records could use this event count entry.
+---
+--- A record at slot Y can be trimmed by a count at slot X exactly when
+--- |X - Y| <= EVENT_COUNT_SLOT_RADIUS, so this entry is worth sending to a peer
+--- receiving bucket B exactly when B holds one of the slots in that window.
+--- That is one bucket for a slot in the middle of a bucket and two for a slot
+--- on either edge of one.
+---
+--- Both the filter and the packer read this, and that is the whole point.
+--- Widening the filter alone would reintroduce the loss #114 closed:
+--- PrepareChunks files an entry under a bucket and emits it at that bucket's
+--- first record, and a boundary count's own bucket has no records in the send,
+--- so the entry would fall to the trailing carriers an abort discards.
+---
+--- Computed through BucketKeyForTimeSlot rather than by arithmetic on
+--- slot % 6, so the bucket width stays in the one place that owns it. The
+--- result is strictly ascending, because BucketKeyForTimeSlot does not
+--- decrease as the slot rises, which is what makes comparing against the last
+--- member enough to deduplicate.
+--- @param baseHash string An eventCounts key (record id prefix plus time slot)
+--- @return table|nil Ascending bucket keys, or nil when the key carries no slot
+function GBL:EventCountRideBuckets(baseHash)
+    local _, slot = self:SplitBaseHash(baseHash)
+    if not slot then return nil end
+
+    local radius = self.EVENT_COUNT_SLOT_RADIUS
+    local buckets = {}
+    for s = slot - radius, slot + radius do
+        local bucket = self:BucketKeyForTimeSlot(s)
+        if buckets[#buckets] ~= bucket then
+            buckets[#buckets + 1] = bucket
+        end
+    end
+    return buckets
+end
+
 function GBL:EventCountRidesWithBuckets(baseHash, diffBuckets)
     if not diffBuckets then return true end
-    local bucket = self:BucketKeyForEventCount(baseHash)
-    if not bucket then return false end
-    return diffBuckets[bucket] and true or false
+    local ride = self:EventCountRideBuckets(baseHash)
+    if not ride then return false end
+    for i = 1, #ride do
+        if diffBuckets[ride[i]] then return true end
+    end
+    return false
 end
 
 --- Collect eventCounts entries matching a set of fingerprint bucket keys.

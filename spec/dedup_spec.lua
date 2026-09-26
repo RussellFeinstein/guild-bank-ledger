@@ -1489,5 +1489,65 @@ describe("Dedup", function()
             end
         end)
     end)
+    -- The ride set above is only worth anything if it mirrors the window the
+    -- cleanup loop actually uses, and the loop lives in another file. One
+    -- exported constant is what holds them together, so these cases move it and
+    -- check that BOTH ends follow. Without that, the two drift the way the
+    -- filter and the cleanup already had.
+    describe("the cleanup window and the ride set are one window", function()
+        -- Slot 475103 is the last hour of its bucket, so a count at 475104 is
+        -- one hour away and in the next bucket: the #270 shape exactly.
+        local SLOT = 475103
+
+        local function boundaryCluster()
+            local records = {}
+            for i = 1, 3 do
+                records[i] = {
+                    type = "withdraw", player = "Thrall", itemID = 12345,
+                    count = 5, tab = 1,
+                    timestamp = SLOT * 3600 + i * 10,
+                }
+            end
+            local prefix = GBL:BuildTxPrefix(records[1])
+            for i, rec in ipairs(records) do
+                rec.id = prefix .. SLOT .. ":" .. (i - 1)
+            end
+            guildData.transactions = records
+            guildData.eventCounts = {
+                [prefix .. (SLOT + 1)] = { count = 1, asOf = SLOT * 3600 },
+            }
+            return prefix .. (SLOT + 1)
+        end
+
+        it("reaches a count one hour across a bucket boundary and trims on it",
+        function()
+            local key = boundaryCluster()
+            assert.are_not.equals(
+                GBL:BucketKeyForTimeSlot(SLOT), GBL:BucketKeyForEventCount(key),
+                "fixture must straddle a bucket boundary or it proves nothing")
+
+            GBL:CleanupWithEventCounts(guildData)
+            assert.equals(1, #guildData.transactions,
+                "the cleanup window has to reach a count one slot away")
+        end)
+
+        it("moves the cleanup loop and the ride set together", function()
+            local key = boundaryCluster()
+            local original = GBL.EVENT_COUNT_SLOT_RADIUS
+
+            assert.equals(2, #GBL:EventCountRideBuckets(key),
+                "a boundary key rides with two buckets at the shipped radius")
+
+            GBL.EVENT_COUNT_SLOT_RADIUS = 0
+            local narrowed = GBL:EventCountRideBuckets(key)
+            GBL:CleanupWithEventCounts(guildData)
+            GBL.EVENT_COUNT_SLOT_RADIUS = original
+
+            assert.equals(1, #narrowed,
+                "the ride set must read the constant, not a literal")
+            assert.equals(3, #guildData.transactions,
+                "the cleanup loop must read the constant, not a literal")
+        end)
+    end)
 
 end)
