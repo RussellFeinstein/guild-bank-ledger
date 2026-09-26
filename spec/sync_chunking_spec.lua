@@ -305,11 +305,18 @@ describe("Sync chunking", function()
         -- A bucket key is floor(timeSlot / 6), so slots six apart are adjacent
         -- buckets. Deriving the slot from the bucket keeps the two fixture
         -- builders honest about describing the same bucket.
-        local function slotOf(bucket) return bucket * 6 end
+        --
+        -- The offset picks the hour inside the bucket, and it matters more than
+        -- it looks (#270). Offset 0 is the FIRST hour of the bucket, so a count
+        -- there also rides with the bucket below; offset 5 is the last hour and
+        -- rides with the bucket above; 1 to 4 are interior and ride with their
+        -- own bucket alone. Every fixture here predates that distinction and
+        -- sits at offset 0, so the cases that need an interior slot say so.
+        local function slotOf(bucket, offset) return bucket * 6 + (offset or 0) end
 
-        local function bucketRecords(bucket, n, firstItem, kind)
+        local function bucketRecords(bucket, n, firstItem, kind, offset)
             local list = {}
-            local slot = slotOf(bucket)
+            local slot = slotOf(bucket, offset)
             for i = 1, n do
                 local itemID = firstItem + i
                 list[i] = {
@@ -328,9 +335,9 @@ describe("Sync chunking", function()
             return list
         end
 
-        local function bucketCounts(bucket, n, firstItem, kind)
+        local function bucketCounts(bucket, n, firstItem, kind, offset)
             local ec = {}
-            local slot = slotOf(bucket)
+            local slot = slotOf(bucket, offset)
             for i = 1, n do
                 ec[("%s|Alice-Stormrage|%d|20|3|%d")
                     :format(kind or "deposit", firstItem + i, slot)] =
@@ -384,9 +391,16 @@ describe("Sync chunking", function()
         --- The property the ordering exists for. A send aborts by stopping
         --- part-way down the chunk list, so every prefix of it has to be a
         --- consistent delivery: any bucket whose records are all inside the
-        --- prefix must have all of its counts inside it too. A bucket only
-        --- partly delivered is fine, because its hash still differs and the
-        --- diff re-selects it next session.
+        --- prefix must have every count those records could use inside it too.
+        --- A bucket only partly delivered is fine, because its hash still
+        --- differs and the diff re-selects it next session.
+        ---
+        --- "Could use" is the ride set, not the entry's own bucket (#270). The
+        --- receiver's cleanup reaches a count one hour either side of a record's
+        --- slot, so a count on a bucket edge is owed to the neighbouring bucket
+        --- as well as its own, and an entry here counts toward every bucket in
+        --- its ride set. The own-bucket version of this assertion was satisfied
+        --- by a packer that stranded exactly those entries.
         local function assertAbortSafe(chunks, lists, counts)
             local totalRecords, totalEntries = {}, {}
             for _, list in ipairs(lists) do
@@ -396,8 +410,9 @@ describe("Sync chunking", function()
                 end
             end
             for key in pairs(counts) do
-                local b = GBL:BucketKeyForEventCount(key)
-                totalEntries[b] = (totalEntries[b] or 0) + 1
+                for _, b in ipairs(GBL:EventCountRideBuckets(key) or {}) do
+                    totalEntries[b] = (totalEntries[b] or 0) + 1
+                end
             end
 
             local seenRecords, seenEntries = {}, {}
@@ -410,8 +425,9 @@ describe("Sync chunking", function()
                     end
                 end
                 for key in pairs(chunk.eventCounts or {}) do
-                    local b = GBL:BucketKeyForEventCount(key)
-                    if b then seenEntries[b] = (seenEntries[b] or 0) + 1 end
+                    for _, b in ipairs(GBL:EventCountRideBuckets(key) or {}) do
+                        seenEntries[b] = (seenEntries[b] or 0) + 1
+                    end
                 end
 
                 for bucket, total in pairs(totalRecords) do
@@ -419,7 +435,7 @@ describe("Sync chunking", function()
                         assert.equals(totalEntries[bucket] or 0,
                             seenEntries[bucket] or 0,
                             ("abort after chunk %d of %d: bucket %d has all %d "
-                             .. "records but %d of %d counts"):format(
+                             .. "records but %d of %d usable counts"):format(
                                 prefix, #chunks, bucket, total,
                                 seenEntries[bucket] or 0, totalEntries[bucket] or 0))
                     end
@@ -612,6 +628,89 @@ describe("Sync chunking", function()
             assertAbortSafe(chunks, { { unparseable } }, counts)
         end)
 
+
+        -- The #270 case. A count on the first hour of a bucket is usable by the
+        -- records in the bucket BELOW it, and when the send carries only that
+        -- lower bucket the entry's own bucket has no records at all. Filing the
+        -- entry under its own bucket alone left it for the leftover pass, which
+        -- delivers it wherever room is left and, once the packed chunks are
+        -- full, in carriers after the records it describes: the tail an abort
+        -- discards, which is what #114 emptied. Many counts and few records is
+        -- the shape that makes the placement visible.
+        it("puts a boundary count ahead of the lower bucket's records", function()
+            -- The last hour of 82202 and the first hour of 82203 are ONE hour
+            -- apart, which is the distance the receiver's cleanup window spans,
+            -- so these records really can be trimmed by these counts.
+            local records = bucketRecords(82202, 2, 191300, nil, 5)
+            local counts = bucketCounts(82203, 12, 191300, nil, 0)
+
+            local chunks = GBL:PrepareChunks(records, {}, counts)
+            local firstRecord, lastRecord, lastEntry = indexByBucket(chunks)
+
+            assert.is_nil(firstRecord[82203],
+                "fixture must send no records in the count's own bucket")
+            assert.is_not_nil(lastEntry[82203], "the counts were not packed")
+            assert.is_true(lastEntry[82203] <= firstRecord[82202],
+                ("boundary counts land in chunk %d, the records they serve start "
+                 .. "in chunk %d of %d"):format(
+                    lastEntry[82203], firstRecord[82202], #chunks))
+            assert.is_true(lastEntry[82203] <= lastRecord[82202],
+                "a boundary count must not ride in a trailing carrier")
+
+            assertAbortSafe(chunks, { records }, counts)
+        end)
+
+        -- With both of an entry's ride buckets in the send it goes out once, at
+        -- the first record of whichever the walk reaches first, so the promise
+        -- holds for both of them. A per-group clear cannot do this: the entry
+        -- sits in two groups, so clearing one leaves the other to emit it again.
+        it("emits an entry once when both of its ride buckets are in the send",
+        function()
+            local records = concatLists(
+                bucketRecords(82202, 3, 191300, nil, 5),
+                bucketRecords(82203, 3, 191400, nil, 0))
+            local counts = bucketCounts(82203, 4, 191300, nil, 0)
+
+            local chunks = GBL:PrepareChunks(records, {}, counts)
+
+            local seen, total = {}, 0
+            for _, chunk in ipairs(chunks) do
+                for key in pairs(chunk.eventCounts or {}) do
+                    assert.is_nil(seen[key], "entry packed twice: " .. key)
+                    seen[key] = true
+                    total = total + 1
+                end
+            end
+            assert.equals(4, total, "every entry must ride exactly once")
+
+            local firstRecord, _, lastEntry = indexByBucket(chunks)
+            for _, bucket in ipairs({ 82202, 82203 }) do
+                assert.is_true(lastEntry[82203] <= firstRecord[bucket],
+                    ("counts trail bucket %d, whose records can use them"):format(
+                        bucket))
+            end
+
+            assertAbortSafe(chunks, { records }, counts)
+        end)
+
+        -- The half that must not move. An interior count has no record outside
+        -- its own bucket that can reach it, so it is filed under one bucket and
+        -- a send of only the neighbour leaves it for the leftover pass exactly
+        -- as before.
+        it("keeps an interior count filed under its own bucket alone", function()
+            local key = next(bucketCounts(82203, 1, 191500, nil, 3))
+            assert.same({ 82203 }, GBL:EventCountRideBuckets(key))
+
+            local records = bucketRecords(82202, 3, 191300, nil, 3)
+            local counts = bucketCounts(82203, 3, 191500, nil, 3)
+            local chunks = GBL:PrepareChunks(records, {}, counts)
+
+            local firstRecord, _, lastEntry = indexByBucket(chunks)
+            assert.is_nil(firstRecord[82203], "fixture sends no records in 82203")
+            assert.is_true(lastEntry[82203] > 0, "the interior counts were dropped")
+            assertAbortSafe(chunks, { records }, counts)
+        end)
+
         it("keeps every chunk inside the target across many buckets", function()
             local records, counts = {}, {}
             for b = 82200, 82211 do
@@ -649,6 +748,72 @@ describe("Sync chunking", function()
             local expected = 0
             for _ in pairs(counts) do expected = expected + 1 end
             assert.equals(expected, total, "no entry may be dropped or duplicated")
+        end)
+
+
+        -- The question #270 asked, put to the serve path rather than to the
+        -- packer: can a count one hour across a bucket boundary from its records
+        -- reach a peer at all? 46 of the 16,644 entries on the measured store
+        -- are in that shape, and the answer was no. The bucket diff walks OUR
+        -- bucket hashes, which come from our records, so a bucket holding no
+        -- record is never selected and the count's own bucket never appears in
+        -- sentBuckets: the exact filter dropped it every session while this
+        -- client's own cleanup went on using it.
+        --
+        -- This is the case the unit tests could not make. Every mutation of the
+        -- filter and the packer dies against the specs above, and all of them
+        -- would have died just the same while the serve still put nothing on the
+        -- wire, because none of them asks whether the entry is selected in the
+        -- first place.
+        it("puts a count one hour across a bucket boundary on the wire", function()
+            -- Records in the last hour of bucket 82202 only.
+            local records = bucketRecords(82202, 3, 191300, nil, 5)
+            for _, rec in ipairs(records) do
+                rec.scanTime = rec.timestamp
+                rec.scannedBy = "Alice-Stormrage"
+                guildData.transactions[#guildData.transactions + 1] = rec
+            end
+
+            -- One count an hour later, so it belongs to bucket 82203, where this
+            -- guild has no record at all, and shares its prefix with a record
+            -- above so the receiver's cleanup can genuinely use it.
+            guildData.eventCounts = bucketCounts(82203, 1, 191300, nil, 0)
+            local key = next(guildData.eventCounts)
+
+            assert.are_not.equals(
+                GBL:BucketKeyForRecord(records[1]), GBL:BucketKeyForEventCount(key),
+                "fixture must straddle a bucket boundary")
+            local recSlot = math.floor(records[1].timestamp / 3600)
+            local _, countSlot = GBL:SplitBaseHash(key)
+            assert.equals(1, countSlot - recSlot,
+                "fixture must be exactly one hour across the boundary")
+
+            -- An empty bucketHashes map takes the bucket-filtered path and reads
+            -- every one of our buckets as differing.
+            Sync.serveRequest(GBL, "PeerA", request({ bucketHashes = {} }))
+            Sync.drainSend(GBL, "PeerA")
+
+            local entryChunk, firstRecordChunk
+            for i = 1, #MockAce.sentCommMessages do
+                local ok, data = GBL:Deserialize(MockAce.sentCommMessages[i].text)
+                if ok and data.type == "SYNC_DATA" then
+                    if data.eventCounts and data.eventCounts[key]
+                        and not entryChunk then
+                        entryChunk = data.chunk
+                    end
+                    if data.transactions and #data.transactions > 0
+                        and not firstRecordChunk then
+                        firstRecordChunk = data.chunk
+                    end
+                end
+            end
+
+            assert.is_not_nil(firstRecordChunk, "the records never went out")
+            assert.is_not_nil(entryChunk,
+                "a count one hour across the boundary never reached the wire")
+            assert.is_true(entryChunk <= firstRecordChunk,
+                ("the count went out in chunk %d, behind the records in chunk %d")
+                    :format(entryChunk or -1, firstRecordChunk or -1))
         end)
 
         -- The fallback path: a request with no bucketHashes leaves the serve

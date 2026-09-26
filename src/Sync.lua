@@ -2663,17 +2663,27 @@ end
 -- seal empty chunks forever; with it the overshoot is visible instead, as a
 -- chunk that exceeds one fragment in the FinishSending summary.
 --
--- A bucket's event counts are emitted when the walk reaches the FIRST record of
--- that bucket, so per bucket key
+-- An event count is emitted when the walk reaches the FIRST record of any bucket
+-- whose records could use it, so per bucket key
 --
---     max(entry chunk) <= first-record chunk <= last-record chunk
+--     max(usable entry chunk) <= first-record chunk <= last-record chunk
 --
 -- and therefore any prefix of the returned list that completes a bucket's
--- records also carries all of that bucket's counts (#114). That holds by
--- construction rather than by luck: emitBucketEntries runs for EVERY record in
--- both lists, so a group reaches the leftover pass below exactly when no record
--- produced its key, and a leftover entry therefore has no first-record chunk it
--- could be late for.
+-- records also carries every count those records can use (#114, widened by
+-- #270). That holds by construction rather than by luck: emitBucketEntries runs
+-- for EVERY record in both lists, so an entry reaches the leftover pass below
+-- exactly when no record produced any of its ride buckets, and a leftover entry
+-- therefore has no first-record chunk it could be late for.
+--
+-- "Usable" is the ride set rather than the entry's own bucket, and the
+-- difference is the whole of #270. The receiver's CleanupWithEventCounts reaches
+-- a count one hour either side of a record's slot, so a count on a bucket edge
+-- is owed to the neighbouring bucket as well as its own. Filed under its own
+-- bucket alone, such an entry had no first record to ride ahead of whenever the
+-- send carried the neighbour and not the owner, and it fell to the leftover pass
+-- and then into the trailing carriers this ordering exists to empty: 46 of
+-- 16,644 entries on the measured store are in that state. Widening the selection
+-- filter without widening this indexing would have put them back in the tail.
 --
 -- The invariant is over bucket KEYS, and the two sides reach a key by different
 -- readings, which is the one limit worth knowing. A count key always yields its
@@ -2714,23 +2724,29 @@ function GBL:PrepareChunks(transactions, moneyTransactions, eventCounts)
     local count = 0
     local estimatedBytes = 0
 
-    -- Group the entries by the bucket each describes, so a bucket's counts can
-    -- be found at the moment its first record comes up. A key with no readable
-    -- slot describes no bucket and is held for the leftover pass at the end.
-    local entriesByBucket, orphanEntries
+    -- Index the entries by the buckets whose records can use them, so a
+    -- bucket's counts can be found at the moment its first record comes up.
+    --
+    -- Every bucket in the ride set, not just the entry's own (#270). A count on
+    -- the edge of a bucket is reachable by the neighbouring bucket's records, so
+    -- filing it under its own bucket alone stranded it whenever the send carried
+    -- the neighbour and not the owner: its group had no first record to go out
+    -- at, and it fell to the leftover pass and then into a trailing carrier,
+    -- which is the tail an abort discards. One entry is therefore in one group
+    -- or two, which is why the emission mark below is per entry rather than a
+    -- clear of the group. A key with no readable slot reaches no group at all
+    -- and is picked up by the leftover pass.
+    local entriesByBucket, emitted
     if eventCounts then
-        entriesByBucket, orphanEntries = {}, {}
-        for baseHash, entry in pairs(eventCounts) do
-            local bucket = self:BucketKeyForEventCount(baseHash)
-            if bucket then
+        entriesByBucket, emitted = {}, {}
+        for baseHash in pairs(eventCounts) do
+            for _, bucket in ipairs(self:EventCountRideBuckets(baseHash) or {}) do
                 local group = entriesByBucket[bucket]
                 if not group then
                     group = {}
                     entriesByBucket[bucket] = group
                 end
-                group[baseHash] = entry
-            else
-                orphanEntries[#orphanEntries + 1] = { baseHash, entry }
+                group[#group + 1] = baseHash
             end
         end
     end
@@ -2780,12 +2796,22 @@ function GBL:PrepareChunks(transactions, moneyTransactions, eventCounts)
         estimatedBytes = estimatedBytes + recBytes
     end
 
-    -- Clear the group before emitting it, so the money walk cannot emit a
-    -- bucket the item walk already did: one bucket can own records in both
-    -- lists. Correctness does not rest on the send list being bucket-contiguous
-    -- the way SortSendListNewestFirst leaves it, because the entries go out at
-    -- the first record of the bucket either way, which is at or before every
-    -- later record of it.
+    -- The mark is what keeps an entry to one appearance, and it has to be per
+    -- entry: an entry indexed under two ride buckets sits in two groups, so
+    -- clearing the group it was reached through leaves the other group holding
+    -- it. The group clear stays as well, because once a bucket has been emitted
+    -- its whole group is spent and there is no reason to walk it again.
+    --
+    -- Between them they also cover the case the group clear was written for: one
+    -- bucket can own records in the item list and in the money list, and the
+    -- counts go out at the first of them either way.
+    --
+    -- Correctness does not rest on the send list being bucket-contiguous the way
+    -- SortSendListNewestFirst leaves it, nor on which ride bucket the walk
+    -- reaches first. An entry goes out at the first record of whichever of its
+    -- ride buckets comes up first, and that chunk is at or before the first
+    -- record of every other bucket in the set, so the promise holds for all of
+    -- them at once.
     local function emitBucketEntries(bucket)
         if not entriesByBucket then return end
         -- Unreachable today, because bucketKeyForRecord always returns a number:
@@ -2797,8 +2823,12 @@ function GBL:PrepareChunks(transactions, moneyTransactions, eventCounts)
         local group = entriesByBucket[bucket]
         if not group then return end
         entriesByBucket[bucket] = nil
-        for baseHash, entry in pairs(group) do
-            addEntry(baseHash, entry)
+        for i = 1, #group do
+            local baseHash = group[i]
+            if not emitted[baseHash] then
+                emitted[baseHash] = true
+                addEntry(baseHash, eventCounts[baseHash])
+            end
         end
     end
 
@@ -2822,24 +2852,27 @@ function GBL:PrepareChunks(transactions, moneyTransactions, eventCounts)
     -- only moves forward, so this stays linear in the number of entries.
     --
     -- Neither case can arrive on a bucket-filtered session, which is every
-    -- normal one (#270). Stage 6 admits an entry only when its slot reads and
-    -- only when its bucket is in sentBuckets, and a bucket is in sentBuckets
+    -- normal one. Stage 6 admits an entry only when its slot reads and only when
+    -- one of its ride buckets is in sentBuckets, and a bucket is in sentBuckets
     -- only because it has records, so every arriving entry is emitted by the
     -- walk above. This pass is live only on the sinceTimestamp fallback, which
     -- needs GetGuildData() itself to be nil. It stays because it is what makes
-    -- the packer total and because the fallback is still a real path, but do
-    -- not read it as evidence that the serve path can hand over an unreadable
-    -- key: #270 is that it cannot, and this pass being dead is how that was
-    -- found.
+    -- the packer total and because the fallback is still a real path, but do not
+    -- read it as evidence that the serve path can hand over an unreadable key:
+    -- #270 is that it cannot, and this pass being dead is how that was found.
+    --
+    -- Walked over the entries rather than over the leftover groups, which is
+    -- load-bearing now that one entry can be in two of them: a group walk would
+    -- hand a boundary entry to the cursor twice when neither of its buckets sent
+    -- records, and put two copies of it on the wire. The unmarked set is exactly
+    -- what the walk above did not emit, unreadable keys included, since those
+    -- reach no group to be emitted from.
     local leftover = {}
-    if entriesByBucket then
-        for _, group in pairs(entriesByBucket) do
-            for baseHash, entry in pairs(group) do
+    if eventCounts then
+        for baseHash, entry in pairs(eventCounts) do
+            if not emitted[baseHash] then
                 leftover[#leftover + 1] = { baseHash, entry }
             end
-        end
-        for i = 1, #orphanEntries do
-            leftover[#leftover + 1] = orphanEntries[i]
         end
     end
 

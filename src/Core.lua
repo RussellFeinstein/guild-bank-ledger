@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.41.9"
+local VERSION = "0.41.10"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -3039,9 +3039,17 @@ function GBL:CleanupWithEventCounts(guildData)
                             slotsChecked[slot] = true
                         end
 
+                        -- The window that makes a count reachable from a
+                        -- record whose hour two scans rounded differently. The
+                        -- radius is exported from Dedup.lua and read here at
+                        -- call time, because EventCountRideBuckets mirrors this
+                        -- loop to decide which counts a sync may offer (#270):
+                        -- two copies of the number is how the filter came to
+                        -- offer less than this loop can use.
                         local maxKnownCount = 0
+                        local radius = self.EVENT_COUNT_SLOT_RADIUS
                         for slot in pairs(slotsChecked) do
-                            for s = slot - 1, slot + 1 do
+                            for s = slot - radius, slot + radius do
                                 local baseHash = prefix .. s
                                 local entry = guildData.eventCounts[baseHash]
                                 if entry and type(entry) == "table"
