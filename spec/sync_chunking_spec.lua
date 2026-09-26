@@ -368,10 +368,20 @@ describe("Sync chunking", function()
             return n
         end
 
-        --- Per bucket: the first and last chunk holding one of its records, and
-        --- the last chunk holding one of its entries.
+        --- Per bucket: the first and last chunk holding one of its records, the
+        --- last chunk holding one of its OWN entries, and the last chunk holding
+        --- any entry its records could use.
+        ---
+        --- The last two are different questions and both are wanted (#270).
+        --- lastEntry keys by the entry's own bucket, which is where a bucket's
+        --- own counts landed; lastRideEntry keys by every bucket in the entry's
+        --- ride set, which is what the invariant is over, and is the one a case
+        --- about a boundary entry has to read. Reading lastEntry for a bucket
+        --- that only rides an entry answers nil, so a case that wants the ride
+        --- question and asks the own one either names the wrong bucket or passes
+        --- for the wrong reason.
         local function indexByBucket(chunks)
-            local firstRecord, lastRecord, lastEntry = {}, {}, {}
+            local firstRecord, lastRecord, lastEntry, lastRideEntry = {}, {}, {}, {}
             for i, chunk in ipairs(chunks) do
                 for _, list in ipairs({ chunk.transactions, chunk.moneyTransactions }) do
                     for _, rec in ipairs(list) do
@@ -383,9 +393,12 @@ describe("Sync chunking", function()
                 for key in pairs(chunk.eventCounts or {}) do
                     local b = GBL:BucketKeyForEventCount(key)
                     if b and i > (lastEntry[b] or 0) then lastEntry[b] = i end
+                    for _, ride in ipairs(GBL:EventCountRideBuckets(key) or {}) do
+                        if i > (lastRideEntry[ride] or 0) then lastRideEntry[ride] = i end
+                    end
                 end
             end
-            return firstRecord, lastRecord, lastEntry
+            return firstRecord, lastRecord, lastEntry, lastRideEntry
         end
 
         --- The property the ordering exists for. A send aborts by stopping
@@ -683,9 +696,12 @@ describe("Sync chunking", function()
             end
             assert.equals(4, total, "every entry must ride exactly once")
 
-            local firstRecord, _, lastEntry = indexByBucket(chunks)
+            local firstRecord, _, _, lastRideEntry = indexByBucket(chunks)
             for _, bucket in ipairs({ 82202, 82203 }) do
-                assert.is_true(lastEntry[82203] <= firstRecord[bucket],
+                assert.is_not_nil(lastRideEntry[bucket],
+                    ("bucket %d carries none of the entries that ride with it")
+                        :format(bucket))
+                assert.is_true(lastRideEntry[bucket] <= firstRecord[bucket],
                     ("counts trail bucket %d, whose records can use them"):format(
                         bucket))
             end
@@ -707,7 +723,7 @@ describe("Sync chunking", function()
 
             local firstRecord, _, lastEntry = indexByBucket(chunks)
             assert.is_nil(firstRecord[82203], "fixture sends no records in 82203")
-            assert.is_true(lastEntry[82203] > 0, "the interior counts were dropped")
+            assert.is_not_nil(lastEntry[82203], "the interior counts were dropped")
             assertAbortSafe(chunks, { records }, counts)
         end)
 

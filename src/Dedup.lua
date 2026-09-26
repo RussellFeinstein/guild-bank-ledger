@@ -436,34 +436,19 @@ end
 -- Maintenance
 ------------------------------------------------------------------------
 
---- Does this eventCounts entry belong with the buckets a session is sending?
---
--- The per-entry rule, on its own so that more than one walk can apply it. The
--- sliced serving pipeline (#115) crosses this table a few hundred entries at a
--- time across frames and cannot reuse the loop below, so without this it would
--- carry its own copy of the rule. Two implementations of one filter is exactly
--- the shape that let a labeler config and its backfill disagree in #112: both
--- were internally consistent, and only comparing them directly found it.
---
--- A nil filter means send everything, which is the fallback path where there
--- are no bucket keys to compare against.
---
--- The test is over the RIDE SET rather than the entry's own bucket (#270). A
--- count one hour across a bucket boundary from the records that can use it
--- belongs to neither side cleanly: CleanupWithEventCounts reaches it and the
--- own-bucket test never offered it, so it was usable locally and unsendable
--- forever, 46 of 16,644 entries on the measured store.
--- @param baseHash string An eventCounts key (record id prefix plus time slot)
--- @param diffBuckets table|nil Set of 6-hour bucket keys; nil = everything rides
--- @return boolean True when the entry should ride along
 --- The 6-hour fingerprint bucket an event count entry describes.
 --
--- The key-to-bucket reading on its own, because two callers want different
--- answers from it. The predicate below wants yes or no; PrepareChunks wants the
--- key itself (#114), so it can emit a bucket's entries at the first record of
--- that bucket and keep a bucket's counts no later on the wire than the records
--- they describe. Lifting the reading out is what keeps the arithmetic in one
--- place rather than two that agree by inspection.
+-- The entry's OWN bucket, which is one member of its ride set and no longer the
+-- basis of any decision. It was lifted out for two production callers, the ride
+-- predicate and PrepareChunks, and #270 moved both of them to
+-- EventCountRideBuckets, because a count on a bucket edge is owed to the
+-- neighbouring bucket as well as its own.
+--
+-- NOTE: no production callers since #270. Retained because the specs, and the
+-- chunking spec's indexByBucket helper, read it to say where a bucket's OWN
+-- entries landed, which is a different question from which buckets may carry
+-- them. Do not reintroduce it as a filter or as a packing key: that is the
+-- defect #270 fixed.
 -- @param baseHash string An eventCounts key (record id prefix plus time slot)
 -- @return number|nil Bucket key, or nil when the key carries no readable slot
 function GBL:BucketKeyForEventCount(baseHash)
@@ -471,28 +456,6 @@ function GBL:BucketKeyForEventCount(baseHash)
     if not slot then return nil end
     return self:BucketKeyForTimeSlot(slot)
 end
-
---- How many hourly slots either side of a record's own slot a count for that
---- record's cluster may sit in.
----
---- One number with two readers: the cleanup loop in Core.lua's
---- CleanupWithEventCounts, which is the behaviour this describes, and
---- EventCountRideBuckets below, which mirrors it so the sync filter and the
---- packer offer exactly the counts that cleanup can use. Two copies of it is
---- how the filter and the cleanup came to disagree in the first place.
----
---- Read through the addon object at call time by both readers, and deliberately
---- not copied into a file local. Core.lua loads ahead of this file, so a local
---- there would be nil; and a local here would mean the ride set kept the shipped
---- width while the cleanup loop followed the field, which is two windows again
---- with only one name to show for it.
----
---- It does NOT govern the three other slot-drift windows in this file
---- (CountFromRecordIndex, CountStoredForHash and FindDriftedCount). Those share
---- the number and answer a different question, how many records or prior counts
---- exist under a prefix, so tying them to this name would make a later change
---- to record counting move silently what an event count rides with.
-GBL.EVENT_COUNT_SLOT_RADIUS = 1
 
 --- The 6-hour buckets whose records could use this event count entry.
 ---
@@ -530,6 +493,26 @@ function GBL:EventCountRideBuckets(baseHash)
     return buckets
 end
 
+--- Does this eventCounts entry belong with the buckets a session is sending?
+--
+-- The per-entry rule, on its own so that more than one walk can apply it. The
+-- sliced serving pipeline (#115) crosses this table a few hundred entries at a
+-- time across frames and cannot reuse the loop below, so without this it would
+-- carry its own copy of the rule. Two implementations of one filter is exactly
+-- the shape that let a labeler config and its backfill disagree in #112: both
+-- were internally consistent, and only comparing them directly found it.
+--
+-- A nil filter means send everything, which is the fallback path where there
+-- are no bucket keys to compare against.
+--
+-- The test is over the RIDE SET rather than the entry's own bucket (#270). A
+-- count one hour across a bucket boundary from the records that can use it
+-- belongs to neither side cleanly: CleanupWithEventCounts reaches it and the
+-- own-bucket test never offered it, so it was usable locally and unsendable
+-- forever, 46 of 16,644 entries on the measured store.
+-- @param baseHash string An eventCounts key (record id prefix plus time slot)
+-- @param diffBuckets table|nil Set of 6-hour bucket keys; nil = everything rides
+-- @return boolean True when the entry should ride along
 function GBL:EventCountRidesWithBuckets(baseHash, diffBuckets)
     if not diffBuckets then return true end
     local ride = self:EventCountRideBuckets(baseHash)
