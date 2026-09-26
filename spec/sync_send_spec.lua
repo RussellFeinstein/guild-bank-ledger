@@ -1630,6 +1630,186 @@ describe("Sync send path", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- #202: a BUSY-aborted send reports itself
+    --
+    -- The send-target branch of HandleBusy tagged the in-flight chunk
+    -- busyAbort, cleared the send fields inline and returned, so a
+    -- BUSY-killed send had no summary block at all and the only renderer of
+    -- that tag was the line it skipped. Every `+ N busy +` figure this repo
+    -- has ever captured read 0 by construction. OnCombatStart is the working
+    -- pattern: tag, then hand the teardown to FinishSending.
+    --
+    -- GetAuditTrail is newest-first (Logger's record() does
+    -- table.insert(buf, 1, entry)), so a line emitted EARLIER sits at a
+    -- HIGHER index. The ordering assertion below reads that way round.
+    ---------------------------------------------------------------------------
+
+    describe("BUSY abort on a live send", function()
+        --- Reach a genuinely live send, past the preparation, with a chunk on
+        --- the wire and its ACK outstanding.
+        local function startSend(target)
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            for i = 1, 4 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000, id = "busy_abort_" .. i .. ":0",
+                })
+            end
+            Sync.serveRequest(GBL, target, request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending,
+                "fixture must reach a live send before the BUSY")
+            assert.is_false(GBL:GetSyncStatus().preparing,
+                "fixture must be past the preparation, which reports nothing")
+        end
+
+        local function messages()
+            local out = {}
+            for i, entry in ipairs(GBL:GetAuditTrail()) do out[i] = entry.message end
+            return out
+        end
+
+        --- Index in the newest-first trail, or nil.
+        local function indexOf(list, needle)
+            for i, msg in ipairs(list) do
+                if msg and msg:find(needle, 1, true) then return i end
+            end
+            return nil
+        end
+
+        it("writes the summary block a send that ends any other way writes",
+        function()
+            startSend("OfficerB")
+
+            GBL:HandleBusy("OfficerB", { reason = "combat" })
+
+            local msgs = messages()
+            for _, needle in ipairs({
+                "Send complete to OfficerB",
+                "Sync stats: ",
+                "Sync outcomes for OfficerB",
+                "Retry causes for OfficerB",
+                "Compression for OfficerB",
+                "Wire-to-ACK for OfficerB",
+            }) do
+                assert.is_not_nil(indexOf(msgs, needle),
+                    "a BUSY-aborted send must still write: " .. needle)
+            end
+        end)
+
+        it("counts the in-flight chunk as the busy abort it tagged", function()
+            startSend("OfficerB")
+
+            GBL:HandleBusy("OfficerB", { reason = "combat" })
+
+            local outcomes
+            for _, msg in ipairs(messages()) do
+                if msg:find("Sync outcomes for OfficerB", 1, true) then
+                    outcomes = msg
+                    break
+                end
+            end
+            assert.is_not_nil(outcomes, "no Sync outcomes line to read")
+            -- The whole point of the issue: this figure has read 0 in every
+            -- capture this repo holds, because the tag's only renderer was on
+            -- the path the abort skipped.
+            assert.is_not_nil(outcomes:find("+ 1 busy +", 1, true),
+                "the busy abort should be counted, got: " .. outcomes)
+        end)
+
+        it("names the abort before the block that explains it", function()
+            startSend("OfficerB")
+
+            GBL:HandleBusy("OfficerB", { reason = "combat" })
+
+            local msgs = messages()
+            local abortAt = indexOf(msgs, "busy - aborting send")
+            local blockAt = indexOf(msgs, "Send complete to OfficerB")
+            assert.is_not_nil(abortAt, "the abort line must survive the change")
+            assert.is_not_nil(blockAt, "no summary block to order against")
+            -- Newest-first, so earlier-emitted is the larger index.
+            assert.is_true(abortAt > blockAt,
+                "the abort line must be emitted before its block, as"
+                    .. " 'Combat started - aborting sync' is")
+        end)
+
+        it("clears every send field FinishSending clears, not the eight it"
+            .. " used to clear by hand", function()
+            startSend("OfficerB")
+            local state = GBL:GetSyncStateForTests()
+
+            -- The six the inline teardown left behind, so they leaked into
+            -- whatever send came next. Read live rather than held: the trap in
+            -- project_sync_test_patterns is that chunkOutcomes is replaced
+            -- with a fresh table rather than emptied.
+            assert.is_true((state.lastChunkBytes or 0) > 0,
+                "fixture must put a chunk on the wire for this to mean anything")
+            assert.is_true((state.sendChunkSentAt or 0) > 0)
+            assert.is_true(next(state.chunkOutcomes) ~= nil)
+
+            GBL:HandleBusy("OfficerB", { reason = "combat" })
+
+            local after = GBL:GetSyncStateForTests()
+            assert.equals(0, after.lastChunkBytes)
+            assert.equals(0, after.sendChunkSentAt)
+            assert.equals(0, after.lastSendIssuedAt)
+            assert.equals(0, after.sendChunkTransmittedAt)
+            assert.equals(0, after.nacksForCurrentChunk)
+            assert.is_nil(next(after.chunkOutcomes),
+                "chunkOutcomes must not carry this session into the next send")
+            -- And the eight it did clear stay cleared.
+            assert.is_false(after.sending)
+            assert.is_nil(after.sendTarget)
+            assert.same({}, after.sendChunks)
+            assert.equals(0, after.sendChunkIndex)
+        end)
+
+        it("lets the cooldown stop the bidirectional check it now schedules",
+        function()
+            startSend("OfficerB")
+            -- Hashes differ and the peer holds more, so the check reaches its
+            -- request branch on every ground except the cooldown.
+            GBL:UpdatePeer("OfficerB", {
+                version = GBL.version, txCount = 9999, dataHash = 999,
+            })
+            GBL:ClearLog("sync")
+
+            GBL:HandleBusy("OfficerB", { reason = "combat" })
+
+            local fired = false
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if t.delay == 0.5 and not t.cancelled then
+                    t.callback()
+                    fired = true
+                    break
+                end
+            end
+            assert.is_true(fired,
+                "FinishSending must schedule the bidirectional check")
+
+            -- peerBusyUntil is stamped synchronously in HandleBusy, below the
+            -- branch, so it is always set before this timer runs.
+            assert.is_false(GBL:GetSyncStatus().receiving,
+                "we must not pull from a peer that just said it is busy")
+            assert.is_not_nil(indexOf(messages(), "busy cooldown"),
+                "the check should name the cooldown as the reason it skipped")
+        end)
+
+        it("writes no block for a BUSY from a peer we are not sending to",
+        function()
+            startSend("OfficerB")
+            GBL:ClearLog("sync")
+
+            GBL:HandleBusy("PeerZ", { reason = "combat" })
+
+            assert.is_true(GBL:GetSyncStatus().sending,
+                "an unrelated peer's BUSY must not end our send")
+            assert.is_nil(indexOf(messages(), "Send complete to"),
+                "nor report a send that is still running")
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- v0.28.7 diagnostics bundle: per-retry cause tags and per-chunk compression
     ---------------------------------------------------------------------------
 

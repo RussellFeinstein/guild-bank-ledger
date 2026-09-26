@@ -1383,6 +1383,14 @@ describe("Sync request and serve", function()
                 "an abandoned preparation must not go on to serve")
             assert.is_false(auditHas("Sending "),
                 "nor announce a send it will never make")
+            -- #202 routed the BUSY teardown of a LIVE send through
+            -- FinishSending. Every mid-prep teardown has to stay on the other
+            -- side of that line: FinishSending reports on a send, and here
+            -- there is none, so it would write a full "Send complete 0/0
+            -- chunks" block plus four statistics lines for a session that
+            -- never put a byte on the wire.
+            assert.is_false(auditHas("Send complete to"),
+                "nor report a send it never made")
         end
 
         before_each(function()
