@@ -4544,25 +4544,35 @@ function GBL:HandleBusy(sender, data)
             and syncState.chunkOutcomes[busyIdx].outcome == "pending" then
             syncState.chunkOutcomes[busyIdx].outcome = "busyAbort"
         end
-        if syncState.sendTimer then
-            syncState.sendTimer:Cancel()
-            syncState.sendTimer = nil
-        end
-        if syncState.sendHardTimer then
-            syncState.sendHardTimer:Cancel()
-            syncState.sendHardTimer = nil
-        end
-        syncState.sending = false
-        syncState.sendTarget = nil
-        syncState.sendChunks = {}
-        syncState.sendChunkIndex = 0
-        syncState.sendRetryCount = 0
-        syncState.sendStartTime = 0
-        syncState.sendTotalRecords = 0
-        syncState.sendRemainingBuckets = 0
-        self:StopFpsMonitor()
-
+        -- The abort is named before the block that explains it, the way
+        -- OnCombatStart orders "Combat started - aborting sync" ahead of its
+        -- own, so a capture reads the numbers as the consequence of the abort
+        -- rather than as an ordinary finish.
         self:AddAuditEntry(cleanSender .. " busy - aborting send")
+
+        -- FinishSending is the teardown, not a hand-copied subset of it
+        -- (#202). This branch used to clear eight fields inline and return,
+        -- so a BUSY-killed send wrote no summary block at all: no "Send
+        -- complete", no Sync stats, and no outcomes histogram, which is the
+        -- only renderer of the busyAbort tag set just above. That is why every
+        -- "+ N busy +" figure in every capture this repo holds reads 0: the
+        -- counter exists, the tag is applied, and the number was zero by
+        -- construction. The inline version also left six fields the real
+        -- teardown clears (sendChunkSentAt, lastChunkBytes, lastSendIssuedAt,
+        -- sendChunkTransmittedAt, nacksForCurrentChunk and chunkOutcomes) for
+        -- the next send to inherit. FinishSending cancels both send timers and
+        -- stops the FPS monitor itself, so nothing here does either any more.
+        --
+        -- It also schedules the bidirectional check 0.5s out, at a peer that
+        -- has just declined, and that is safe rather than accidental: the
+        -- cooldown below is stamped synchronously, so it is always set before
+        -- any timer fires, and the check reads IsPeerBusy in its behind
+        -- branch. The superset branch does not read it, but all it sends is a
+        -- HELLO reply on a 60s throttle. Spec-pinned, not left to inspection.
+        --
+        -- The mid-prep branch above must stay on the other side of this line.
+        -- FinishSending reports on a send, and a preparation has not made one.
+        self:FinishSending()
     end
 
     -- Leave them alone for a while, regardless of whether we cleared state.

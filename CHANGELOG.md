@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- A sync that the other member interrupted left no record of itself in the sync log. The lines saying how many chunks went out, how often they had to be retried and how well they compressed were all skipped, so the one kind of interruption that can happen at any point in a sync was the one kind a log could not account for, and the running count of them always read zero however often it happened. An interrupted send now writes the same summary as one that finishes, and it no longer leaves stale figures behind for the next sync to report as its own.
+
 ## [0.41.8] - 2026-09-24
 
 ### Fixed
