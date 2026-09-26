@@ -1696,24 +1696,83 @@ describe("Sync send path", function()
             end
         end)
 
-        it("counts the in-flight chunk as the busy abort it tagged", function()
+        local function outcomesLine()
+            for _, msg in ipairs(messages()) do
+                if msg:find("Sync outcomes for OfficerB", 1, true) then return msg end
+            end
+            return nil
+        end
+
+        -- The per-chunk tag cannot answer "how did this session end", and the
+        -- first cut of this fix assumed it could. sendChunkIndex advances at
+        -- ISSUE time and HandleAck marks the acked chunk "ok" without
+        -- advancing, so between an ACK and the next issue (at least the 1.0s
+        -- INTER_CHUNK_GAP_FLOOR, against a measured 0.2 to 0.5s wire-to-ACK)
+        -- the indexed chunk is already "ok" and no chunk is on the wire at
+        -- all. Tagging nothing is honest there; claiming the session ended
+        -- cleanly is not. So the session verdict is its own clause, and the
+        -- chunk histogram stays a count of chunks.
+        it("names how the session ended, whatever the in-flight chunk was",
+        function()
             startSend("OfficerB")
 
             GBL:HandleBusy("OfficerB", { reason = "combat" })
 
-            local outcomes
-            for _, msg in ipairs(messages()) do
-                if msg:find("Sync outcomes for OfficerB", 1, true) then
-                    outcomes = msg
-                    break
-                end
-            end
+            local outcomes = outcomesLine()
             assert.is_not_nil(outcomes, "no Sync outcomes line to read")
-            -- The whole point of the issue: this figure has read 0 in every
-            -- capture this repo holds, because the tag's only renderer was on
-            -- the path the abort skipped.
+            assert.is_not_nil(outcomes:find("session ended by busy", 1, true),
+                "the session verdict should name BUSY, got: " .. outcomes)
+        end)
+
+        it("names the ending even when the last chunk was already acked",
+        function()
+            startSend("OfficerB")
+            -- ACK the chunk in flight, so nothing is on the wire and
+            -- sendChunkIndex points at a chunk already marked "ok". This is
+            -- the majority of a real chunk cycle, and the state in which the
+            -- first cut of this fix reported an all-zero abort histogram under
+            -- a "Send complete" heading.
+            local idx = GBL:GetSyncStateForTests().sendChunkIndex
+            GBL:HandleAck("OfficerB", { chunk = idx })
+            assert.equals("ok",
+                GBL:GetSyncStateForTests().chunkOutcomes[idx].outcome,
+                "fixture must leave the indexed chunk settled")
+
+            GBL:HandleBusy("OfficerB", { reason = "combat" })
+
+            local outcomes = outcomesLine()
+            assert.is_not_nil(outcomes, "no Sync outcomes line to read")
+            assert.is_not_nil(outcomes:find("session ended by busy", 1, true),
+                "an abort with no chunk in flight is still a busy abort, got: "
+                    .. outcomes)
+        end)
+
+        it("still tags the chunk when one really was in flight", function()
+            startSend("OfficerB")
+            local idx = GBL:GetSyncStateForTests().sendChunkIndex
+            assert.equals("pending",
+                GBL:GetSyncStateForTests().chunkOutcomes[idx].outcome)
+
+            GBL:HandleBusy("OfficerB", { reason = "combat" })
+
+            -- The per-chunk histogram keeps counting chunks, so this figure is
+            -- a reading about the wire rather than about the session.
+            local outcomes = outcomesLine()
             assert.is_not_nil(outcomes:find("+ 1 busy +", 1, true),
-                "the busy abort should be counted, got: " .. outcomes)
+                "a chunk genuinely in flight should be tagged, got: " .. outcomes)
+        end)
+
+        it("says a clean finish is one, rather than leaving it unsaid",
+        function()
+            startSend("OfficerB")
+
+            Sync.drainSend(GBL, "OfficerB")
+
+            local outcomes = outcomesLine()
+            assert.is_not_nil(outcomes, "no Sync outcomes line to read")
+            assert.is_not_nil(outcomes:find("session complete", 1, true),
+                "a finished send should say so, got: " .. outcomes)
+            assert.is_nil(outcomes:find("session ended by", 1, true))
         end)
 
         it("names the abort before the block that explains it", function()
@@ -1763,32 +1822,67 @@ describe("Sync send path", function()
             assert.equals(0, after.sendChunkIndex)
         end)
 
-        it("lets the cooldown stop the bidirectional check it now schedules",
+        --- Fire the bidirectional check FinishSending schedules.
+        local function fireBidirectionalCheck()
+            for i = #MockWoW.pendingTimers, 1, -1 do
+                local t = MockWoW.pendingTimers[i]
+                if t.delay == 0.5 and not t.cancelled then
+                    t.callback()
+                    return true
+                end
+            end
+            return false
+        end
+
+        -- This is the branch a real BUSY abort takes and the first cut of this
+        -- fix left it untested. We were serving the peer because it was
+        -- behind, so `localCount > remoteTxCount` is the expected state 0.5s
+        -- later and the IsPeerBusy arm below it is never reached. Unguarded,
+        -- the check whispers a HELLO reply at a peer that has just declined
+        -- and stamps lastSupersetNudge, and SUPERSET_NUDGE_THROTTLE (60s)
+        -- outlives BUSY_COOLDOWN (30s), so the peer becomes eligible again
+        -- while the nudge that would reach it stays suppressed for another 30.
+        it("sends the superset nudge nowhere while the peer is on cooldown",
         function()
             startSend("OfficerB")
-            -- Hashes differ and the peer holds more, so the check reaches its
-            -- request branch on every ground except the cooldown.
+            -- We hold more than the peer, which is why we were serving it.
+            GBL:UpdatePeer("OfficerB", {
+                version = GBL.version, txCount = 0, dataHash = 999,
+            })
+            GBL:ClearLog("sync")
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleBusy("OfficerB", { reason = "combat" })
+            assert.is_true(fireBidirectionalCheck(),
+                "FinishSending must schedule the bidirectional check")
+
+            local hellos = 0
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "HELLO" then hellos = hellos + 1 end
+            end
+            assert.equals(0, hellos,
+                "no HELLO may be whispered at a peer that just said BUSY")
+            assert.is_nil(
+                GBL:GetSyncStateForTests().lastSupersetNudge["OfficerB"],
+                "and the shared 60s nudge window must stay free, or the peer"
+                    .. " goes eligible at 30s with the nudge still suppressed")
+        end)
+
+        it("does not pull from a peer that just declined, either", function()
+            startSend("OfficerB")
+            -- The other arm: hashes differ and the peer holds more, so every
+            -- ground for requesting is present except the cooldown.
             GBL:UpdatePeer("OfficerB", {
                 version = GBL.version, txCount = 9999, dataHash = 999,
             })
             GBL:ClearLog("sync")
 
             GBL:HandleBusy("OfficerB", { reason = "combat" })
+            assert.is_true(fireBidirectionalCheck())
 
-            local fired = false
-            for i = #MockWoW.pendingTimers, 1, -1 do
-                local t = MockWoW.pendingTimers[i]
-                if t.delay == 0.5 and not t.cancelled then
-                    t.callback()
-                    fired = true
-                    break
-                end
-            end
-            assert.is_true(fired,
-                "FinishSending must schedule the bidirectional check")
-
-            -- peerBusyUntil is stamped synchronously in HandleBusy, below the
-            -- branch, so it is always set before this timer runs.
+            -- peerBusyUntil is stamped synchronously in HandleBusy, so it is
+            -- always set before this timer runs.
             assert.is_false(GBL:GetSyncStatus().receiving,
                 "we must not pull from a peer that just said it is busy")
             assert.is_not_nil(indexOf(messages(), "busy cooldown"),

@@ -8,7 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.41.9] - 2026-09-26
 
 ### Fixed
-- A sync that the other member interrupted left no record of itself in the sync log. The lines saying how many chunks went out, how often they had to be retried and how well they compressed were all skipped, so the one kind of interruption that can happen at any point in a sync was the one kind a log could not account for, and the running count of them always read zero however often it happened. An interrupted send now writes the same summary as one that finishes, and it no longer leaves stale figures behind for the next sync to report as its own.
+- A sync that the other member interrupted left no record of itself in the sync log. The lines saying how many chunks went out, how often they had to be retried and how well they compressed were all skipped, so the one kind of interruption that can happen at any point in a sync was the one kind a log could not account for. An interrupted send now writes the same summary as one that finishes.
+- Every sync now says in its own summary how it ended, and names the reason when it ended early. The count of interruptions the log already tried to keep only ever counted the ones that landed while a piece of data was in the air, which is a minority of them, so a sync stopped a moment after the previous piece was confirmed was recorded as though it had finished normally.
 
 ## [0.41.8] - 2026-09-24
 
