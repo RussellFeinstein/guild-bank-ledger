@@ -1247,6 +1247,36 @@ describe("Dedup", function()
                 "deposit|Jaina|99999|5|2|200", { [16] = true }))
         end)
 
+        -- The #270 widening. A count one hour across a bucket boundary from the
+        -- records that can use it was dropped by the exact test above, so this
+        -- client's cleanup found it and no session could ever offer it: 46 of
+        -- 16,644 on the measured store. CleanupWithEventCounts reaches a count
+        -- at slot -1 .. slot +1 of a record's own slot, so a record in the
+        -- neighbouring bucket can use this entry and the entry has to ride.
+        it("keeps a boundary entry when only the neighbouring bucket is listed",
+        function()
+            -- slot 102 is the first hour of bucket 17, so slot 101 in bucket 16
+            -- can use it.
+            assert.is_true(GBL:EventCountRidesWithBuckets(
+                "withdraw|Thrall|12345|5|1|102", { [16] = true }))
+            -- slot 101 is the last hour of bucket 16, so slot 102 in bucket 17
+            -- can use it.
+            assert.is_true(GBL:EventCountRidesWithBuckets(
+                "withdraw|Thrall|12345|5|1|101", { [17] = true }))
+        end)
+
+        -- The other half of the same widening, and the reason it is a window
+        -- rather than "also send the neighbours". An interior slot has no
+        -- record outside its own bucket that can reach it, so nothing about it
+        -- changes, which is what keeps the drop case above meaning what it says.
+        it("still drops an interior entry for a neighbouring bucket", function()
+            -- slot 100 sits inside bucket 16, three hours clear of bucket 17.
+            assert.is_false(GBL:EventCountRidesWithBuckets(
+                "withdraw|Thrall|12345|5|1|100", { [17] = true }))
+            assert.is_false(GBL:EventCountRidesWithBuckets(
+                "withdraw|Thrall|12345|5|1|100", { [15] = true }))
+        end)
+
         it("drops an entry whose base hash carries no slot", function()
             assert.is_false(GBL:EventCountRidesWithBuckets("nodigits", { [16] = true }))
         end)
@@ -1321,21 +1351,141 @@ describe("Dedup", function()
             assert.is_nil(GBL:BucketKeyForEventCount(nil))
         end)
 
-        -- Both readers must agree, or the packer could place an entry the
-        -- collector never selected, or skip one it did.
-        it("is the reading EventCountRidesWithBuckets answers from", function()
+        -- Both readers must agree about the own bucket, or the packer could
+        -- file an entry under a bucket the collector never selected.
+        --
+        -- What this no longer claims, and the claim is why it was rewritten
+        -- rather than extended (#270): the predicate does NOT answer from this
+        -- reading alone any more, it answers from the ride set below, of which
+        -- this is one member. The old version of this case derived its expected
+        -- answer from this function and passed either way, because its one
+        -- boundary key had its own bucket in the filter. A case that keeps
+        -- passing while the sentence above it stops being true is worth less
+        -- than no case at all.
+        it("is one member of the ride set the predicate answers from", function()
             local keys = {
-                "withdraw|Thrall|12345|5|1|100",
-                "deposit|Jaina|99999|5|2|200",
-                "deposit|Sylvanas|1|1|1|101",
+                "withdraw|Thrall|12345|5|1|100",   -- interior of bucket 16
+                "deposit|Jaina|99999|5|2|200",     -- interior of bucket 33
+                "deposit|Sylvanas|1|1|1|101",      -- last hour of bucket 16
+                "withdraw|Thrall|12345|5|1|102",   -- first hour of bucket 17
                 "nodigits",
             }
-            local diffBuckets = { [16] = true }
             for _, key in ipairs(keys) do
-                local bucket = GBL:BucketKeyForEventCount(key)
-                local rides = bucket ~= nil and diffBuckets[bucket] == true
-                assert.equals(rides, GBL:EventCountRidesWithBuckets(key, diffBuckets),
-                    "helper and predicate disagreed on " .. key)
+                local own = GBL:BucketKeyForEventCount(key)
+                local ride = GBL:EventCountRideBuckets(key)
+                if own == nil then
+                    assert.is_nil(ride, "a key with no bucket has no ride set: " .. key)
+                else
+                    local found = false
+                    for _, bucket in ipairs(ride) do
+                        if bucket == own then found = true end
+                    end
+                    assert.is_true(found,
+                        "the own bucket must be in the ride set: " .. key)
+                end
+
+                -- The predicate is membership of the ride set, for every
+                -- candidate bucket, not just the ones a fixture happens to pick.
+                for candidate = 14, 35 do
+                    local expected = false
+                    for _, bucket in ipairs(ride or {}) do
+                        if bucket == candidate then expected = true end
+                    end
+                    assert.equals(expected,
+                        GBL:EventCountRidesWithBuckets(key, { [candidate] = true }),
+                        ("predicate disagreed with the ride set on %s at bucket %d")
+                            :format(key, candidate))
+                end
+            end
+        end)
+
+        -- The discriminator the rewritten case above exists for: a key whose
+        -- own bucket is absent from the filter and whose neighbour is present
+        -- rides anyway. This is the assertion the old own-bucket basis could
+        -- not make.
+        it("rides on a bucket that is not its own", function()
+            local key = "withdraw|Thrall|12345|5|1|102"
+            assert.equals(17, GBL:BucketKeyForEventCount(key))
+            assert.is_true(GBL:EventCountRidesWithBuckets(key, { [16] = true }),
+                "a boundary entry must ride with the neighbour that can use it")
+        end)
+    end)
+    -- One shared reading of which buckets a count can be used by (#270). The
+    -- filter and the packer both read it, because widening only the filter
+    -- would put a boundary count back in the trailing carriers #114 emptied:
+    -- PrepareChunks files an entry under a bucket and emits it at that bucket's
+    -- first record, and a boundary count's own bucket has no records in the
+    -- send.
+    describe("EventCountRideBuckets", function()
+        it("gives one bucket for a slot in the middle of a bucket", function()
+            -- slot 100 -> bucket 16, and 99 and 101 are in 16 too
+            local ride = GBL:EventCountRideBuckets("withdraw|Thrall|12345|5|1|100")
+            assert.same({ 16 }, ride)
+        end)
+
+        it("gives the bucket below as well on the first hour of a bucket",
+        function()
+            -- slot 102 -> bucket 17, and slot 101 is in 16
+            assert.same({ 16, 17 },
+                GBL:EventCountRideBuckets("withdraw|Thrall|12345|5|1|102"))
+        end)
+
+        it("gives the bucket above as well on the last hour of a bucket",
+        function()
+            -- slot 101 -> bucket 16, and slot 102 is in 17
+            assert.same({ 16, 17 },
+                GBL:EventCountRideBuckets("withdraw|Thrall|12345|5|1|101"))
+        end)
+
+        it("gives nil for a key carrying no slot", function()
+            assert.is_nil(GBL:EventCountRideBuckets("nodigits"))
+        end)
+
+        it("gives nil for a nil key rather than throwing", function()
+            assert.is_nil(GBL:EventCountRideBuckets(nil))
+        end)
+
+        -- Every member has to be reachable from the window, and the window has
+        -- to be the one CleanupWithEventCounts uses. Computed through
+        -- BucketKeyForTimeSlot rather than by arithmetic on slot % 6, so the
+        -- bucket width stays in one place.
+        it("returns only buckets inside the cleanup window, from the same constant",
+        function()
+            local radius = GBL.EVENT_COUNT_SLOT_RADIUS
+            assert.is_true(type(radius) == "number" and radius >= 1,
+                "the window radius must be an exported number")
+
+            for slot = 96, 108 do
+                local ride = GBL:EventCountRideBuckets(
+                    "withdraw|Thrall|12345|5|1|" .. slot)
+                local allowed = {}
+                for s = slot - radius, slot + radius do
+                    allowed[GBL:BucketKeyForTimeSlot(s)] = true
+                end
+                for _, bucket in ipairs(ride) do
+                    assert.is_true(allowed[bucket] == true,
+                        ("slot %d: bucket %d is outside the window")
+                            :format(slot, bucket))
+                end
+                -- and every bucket the window reaches is in the set
+                local got = {}
+                for _, bucket in ipairs(ride) do got[bucket] = true end
+                for bucket in pairs(allowed) do
+                    assert.is_true(got[bucket] == true,
+                        ("slot %d: bucket %d missing from the ride set")
+                            :format(slot, bucket))
+                end
+            end
+        end)
+
+        it("is ascending and free of duplicates", function()
+            for slot = 96, 108 do
+                local ride = GBL:EventCountRideBuckets(
+                    "withdraw|Thrall|12345|5|1|" .. slot)
+                for i = 2, #ride do
+                    assert.is_true(ride[i] > ride[i - 1],
+                        ("slot %d: ride set is not strictly ascending"):format(slot))
+                end
             end
         end)
     end)
