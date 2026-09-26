@@ -773,6 +773,32 @@ describe("Sync session lifecycle", function()
             assert.is_true(busyFound, "BUSY should be sent to send target")
         end)
 
+        -- The combat abort has always written a full summary block, so unlike
+        -- the BUSY path its numbers were never missing. What it shared with
+        -- that path is the per-chunk `outcome == "pending"` guard, which tags
+        -- nothing whenever the last ACK has landed and the next chunk has not
+        -- issued, so `+ N combat +` has the same blind spot and the block read
+        -- as a clean finish. The session verdict is passed in for this reason
+        -- (#202), and a mutation dropping the cause here survived the suite
+        -- until this case existed.
+        it("OnCombatStart says the session was ended by combat", function()
+            enterSendingState()
+            GBL:ClearLog("sync")
+
+            GBL:OnCombatStart()
+
+            local outcomes
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message and entry.message:find("Sync outcomes for", 1, true) then
+                    outcomes = entry.message
+                    break
+                end
+            end
+            assert.is_not_nil(outcomes, "a combat abort still writes its block")
+            assert.is_not_nil(outcomes:find("session ended by combat", 1, true),
+                "the verdict should name combat, got: " .. outcomes)
+        end)
+
         it("OnCombatStart aborts active receive and sends BUSY to partner", function()
             enterReceivingState()
             MockAce.sentCommMessages = {}

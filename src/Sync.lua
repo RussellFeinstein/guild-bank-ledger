@@ -585,7 +585,7 @@ function GBL:InitSync()
                 and GBL:StripRealm(syncState.sendTarget) == bare then
                 GBL:AddAuditEntry("Target " .. syncState.sendTarget
                     .. " confirmed offline (system error) - aborting send")
-                GBL:FinishSending()
+                GBL:FinishSending("peer offline")
             end
             return true  -- suppress the system message
         end)
@@ -1862,10 +1862,18 @@ end
 -- there are no timer handles to cancel, because C_Timer.After returns nothing
 -- in the real client. The token bump is belt and braces on top of that.
 --
--- It clears the whole send field set rather than just the slot, because the
--- paths calling it are replacing hand-written clears that did, and leaving a
--- field behind here would be a difference nobody went looking for. Mid-prep
--- most of them are already zero; the send has not started.
+-- It clears the whole send field set rather than just the slot, because leaving
+-- a field behind here would be a difference nobody went looking for. Mid-prep
+-- most of them are already zero; the send has not started. **It cannot become
+-- FinishSending, which is the one thing to know about it**: that function reports
+-- on a send, and a preparation has not made one, so calling it here would write
+-- a full `Send complete 0/0 chunks` block plus four statistics lines for a
+-- session that never put a byte on the wire. That is why this list stays a
+-- separate list rather than being folded into the teardown #202 sent the BUSY
+-- abort to, and why the eight fields here are eight and not fourteen: the other
+-- six are per-chunk figures the first chunk has not written yet. Its original
+-- justification named the hand-written clear in HandleBusy that #202 deleted, so
+-- it now stands on the mid-prep boundary alone.
 -- @param reason string Short description for the log line
 function GBL:_AbortSyncPrep(reason)
     local prep = syncState.prep
@@ -3086,7 +3094,7 @@ function GBL:SendNextChunk()
     syncState.sendHardTimer = C_Timer.NewTicker(120, function()
         if syncState.sending then
             self:SyncError("Send hard timeout (120s), AceComm never finished, aborting")
-            self:FinishSending()
+            self:FinishSending("send stalled")
         end
     end, 1)
 
@@ -3145,7 +3153,7 @@ function GBL:SendNextChunk()
                     self:SyncError("ACK timeout from "
                         .. (syncState.sendTarget or "unknown")
                         .. " after " .. (MAX_RETRIES + 1) .. " attempts, aborting")
-                    self:FinishSending()
+                    self:FinishSending("ack timeout")
                 end
             end, 1)
         end) then
@@ -3156,13 +3164,27 @@ function GBL:SendNextChunk()
             and syncState.chunkOutcomes[idx].outcome == "pending" then
             syncState.chunkOutcomes[idx].outcome = "sendFailed"
         end
-        self:FinishSending()
+        self:FinishSending("peer offline")
         return
     end
 end
 
 --- Clean up sending state after sync completes or aborts.
-function GBL:FinishSending()
+--
+-- `abortCause` names how the session ended, for the one question the per-chunk
+-- histogram cannot answer (#202). `sendChunkIndex` advances at ISSUE time and
+-- `HandleAck` marks the acked chunk "ok" without advancing it, so between an
+-- ACK and the next issue (at least `INTER_CHUNK_GAP_FLOOR`, against a measured
+-- 0.2 to 0.5s wire-to-ACK) the indexed chunk is already settled and no chunk is
+-- on the wire at all. Every abort path tags `chunkOutcomes[sendChunkIndex]`
+-- under an `outcome == "pending"` guard, so in that window it tags nothing,
+-- which is honest about the wire and says nothing about the session. Reading
+-- the histogram as the session's verdict is what made a BUSY-killed send
+-- indistinguishable from a clean one even after the block started being
+-- written. The cause is therefore carried in, not inferred: the histogram stays
+-- a count of chunks and the verdict clause is a statement about the session.
+-- @param abortCause string|nil Why the send ended early; nil means it completed
+function GBL:FinishSending(abortCause)
     local target = syncState.sendTarget or "?"
     local sent = syncState.sendChunkIndex
     local total = #syncState.sendChunks
@@ -3285,11 +3307,19 @@ function GBL:FinishSending()
             minR * 100, medR * 100, maxR * 100)
     end
 
+    -- The session verdict, outside the chunk histogram because it is not a
+    -- count of chunks. Present on every session so a capture never has to read
+    -- an absence, and greppable as "session ended by" for the aborts alone.
+    local verdict = abortCause
+        and (", session ended by " .. tostring(abortCause)
+            .. " at chunk " .. sent .. "/" .. total)
+        or ", session complete"
     self:AddAuditEntry("Sync outcomes for " .. target .. ": "
         .. on1 .. " on 1st, " .. on2 .. " on 2nd, " .. on3plus .. " on 3rd+, "
         .. "aborted: " .. outcomes.aborted .. " ackTimeout + "
         .. outcomes.combatAbort .. " combat + " .. outcomes.zoneAbort .. " zone + "
-        .. outcomes.busyAbort .. " busy + " .. outcomes.sendFailed .. " offline")
+        .. outcomes.busyAbort .. " busy + " .. outcomes.sendFailed .. " offline"
+        .. verdict)
     self:AddAuditEntry("Retry causes for " .. target .. ": "
         .. "ackTimeout=" .. causes.ackTimeout .. ", nack=" .. causes.nack
         .. ", chunkFail=" .. chunkFail .. ", p_frag=" .. pFragStr)
@@ -3370,8 +3400,24 @@ function GBL:FinishSending()
                     -- sites cannot double-nudge within one window. SendHelloReply is
                     -- an isReply HELLO, which drives the peer's shouldSync path, so it
                     -- is a real pull trigger rather than mere discovery.
+                    -- The cooldown gates the nudge as well as the pull (#202).
+                    -- Until a BUSY abort reached this code the arm below could
+                    -- not be the one a declining peer hit, because the branch
+                    -- was only reached after a send that ran to the end. Now
+                    -- it is the EXPECTED arm for a BUSY abort: we were serving
+                    -- this peer because it was behind, so we still hold more
+                    -- 0.5s later and the IsPeerBusy arm further down is never
+                    -- reached. Nudging there is worse than wasted, because
+                    -- SUPERSET_NUDGE_THROTTLE (60s) outlives BUSY_COOLDOWN
+                    -- (30s): the peer becomes eligible again at 30s with the
+                    -- HandleHello re-nudge suppressed for another 30, so a
+                    -- peer past the hash-gate reply suppression starves longer
+                    -- than if we had said nothing.
                     local nudgeNow = GetServerTime()
-                    if nudgeNow - (syncState.lastSupersetNudge[cleanTarget] or 0)
+                    if self:IsPeerBusy(cleanTarget) then
+                        self:AddAuditEntry("Held the superset nudge for "
+                            .. cleanTarget .. " - busy cooldown")
+                    elseif nudgeNow - (syncState.lastSupersetNudge[cleanTarget] or 0)
                             >= SUPERSET_NUDGE_THROTTLE then
                         self:SendHelloReply(cleanTarget)
                         syncState.lastSupersetNudge[cleanTarget] = nudgeNow
@@ -4507,7 +4553,7 @@ function GBL:HandleBusy(sender, data)
     -- Clear receiving state if we're waiting for this peer (even with partial data).
     -- Already-stored records are safe; next sync uses bucket hashes to avoid re-sending.
     if syncState.receiving
-        and self:CanonicalPeerKey(sender) == self:CanonicalPeerKey(syncState.receiveSource) then
+        and cleanSender == self:CanonicalPeerKey(syncState.receiveSource) then
         if syncState.receiveTimer then
             syncState.receiveTimer:Cancel()
             syncState.receiveTimer = nil
@@ -4524,8 +4570,9 @@ function GBL:HandleBusy(sender, data)
 
     -- Also abort sending if BUSY came from our send target
     -- (partner entered combat or became busy while we were sending to them)
-    if syncState.sending
-        and self:CanonicalPeerKey(sender) == self:CanonicalPeerKey(syncState.sendTarget) then
+    -- sendTarget was canonicalised when the slot was claimed, so comparing the
+    -- locals is the same test at a third of the work.
+    if syncState.sending and cleanSender == syncState.sendTarget then
         -- The slot is claimed before the preparation starts, so this branch is
         -- reached mid-prep too, and there the send it would tear down does not
         -- exist yet. Abandoning the chain is the whole job: nothing is in
@@ -4534,35 +4581,34 @@ function GBL:HandleBusy(sender, data)
         if syncState.prep then
             self:_AbortSyncPrep("BUSY from " .. cleanSender)
             self:AddAuditEntry(cleanSender .. " busy - abandoned serve preparation")
-            syncState.peerBusyUntil[cleanSender] = GetServerTime() + BUSY_COOLDOWN
-            return
-        end
+        else
+            -- v0.28.7: tag the chunk that was in flight when BUSY arrived.
+            -- Absent whenever the last ACK has landed and the next chunk has
+            -- not issued yet, which is most of a chunk cycle, so the session's
+            -- own verdict goes to FinishSending rather than being read back
+            -- out of the tag here.
+            local busyIdx = syncState.sendChunkIndex
+            if busyIdx and syncState.chunkOutcomes
+                and syncState.chunkOutcomes[busyIdx]
+                and syncState.chunkOutcomes[busyIdx].outcome == "pending" then
+                syncState.chunkOutcomes[busyIdx].outcome = "busyAbort"
+            end
 
-        -- v0.28.7: tag outcome on the chunk that was in flight when BUSY arrived
-        local busyIdx = syncState.sendChunkIndex
-        if busyIdx and syncState.chunkOutcomes and syncState.chunkOutcomes[busyIdx]
-            and syncState.chunkOutcomes[busyIdx].outcome == "pending" then
-            syncState.chunkOutcomes[busyIdx].outcome = "busyAbort"
-        end
-        if syncState.sendTimer then
-            syncState.sendTimer:Cancel()
-            syncState.sendTimer = nil
-        end
-        if syncState.sendHardTimer then
-            syncState.sendHardTimer:Cancel()
-            syncState.sendHardTimer = nil
-        end
-        syncState.sending = false
-        syncState.sendTarget = nil
-        syncState.sendChunks = {}
-        syncState.sendChunkIndex = 0
-        syncState.sendRetryCount = 0
-        syncState.sendStartTime = 0
-        syncState.sendTotalRecords = 0
-        syncState.sendRemainingBuckets = 0
-        self:StopFpsMonitor()
+            -- The abort is named before the block that explains it, the way
+            -- OnCombatStart orders "Combat started - aborting sync" ahead of
+            -- its own, so a capture reads the numbers as the consequence of
+            -- the abort rather than as an ordinary finish.
+            self:AddAuditEntry(cleanSender .. " busy - aborting send")
 
-        self:AddAuditEntry(cleanSender .. " busy - aborting send")
+            -- FinishSending is the teardown, not a hand-copied subset of it
+            -- (#202); the history is in CLAUDE.md. Three things must not move.
+            -- The abort line goes out first, as above. The cause is passed in
+            -- rather than inferred from the tag, for the reason above it. And
+            -- the mid-prep arm stays on the other side of this call, because
+            -- FinishSending reports on a send and a preparation has not made
+            -- one.
+            self:FinishSending("busy")
+        end
     end
 
     -- Leave them alone for a while, regardless of whether we cleared state.
@@ -4628,7 +4674,7 @@ function GBL:OnCombatStart()
     if syncState.prep then
         self:_AbortSyncPrep("combat")
     elseif syncState.sending then
-        self:FinishSending()
+        self:FinishSending("combat")
     end
     if syncState.receiving then
         self:FinishReceiving(receiveSource or "?")
