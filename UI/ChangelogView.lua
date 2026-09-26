@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.41.10
+    {"0.41.10", "2026-09-26", {
+        Fixed = {
+            "A guild member could keep duplicate transaction rows for good, because the figure the cleanup needs in order to remove them was never sent to them. It affected transactions recorded either side of a six-hour boundary: the sending client could use the figure itself, so nothing looked wrong there, and no sync would ever offer it. Those figures now go out with whichever records can use them rather than only with the records recorded in the same six hours.",
+        },
+    }},
     -- v0.41.9
     {"0.41.9", "2026-09-26", {
         Fixed = {

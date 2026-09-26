@@ -436,6 +436,63 @@ end
 -- Maintenance
 ------------------------------------------------------------------------
 
+--- The 6-hour fingerprint bucket an event count entry describes.
+--
+-- The entry's OWN bucket, which is one member of its ride set and no longer the
+-- basis of any decision. It was lifted out for two production callers, the ride
+-- predicate and PrepareChunks, and #270 moved both of them to
+-- EventCountRideBuckets, because a count on a bucket edge is owed to the
+-- neighbouring bucket as well as its own.
+--
+-- NOTE: no production callers since #270. Retained because the specs, and the
+-- chunking spec's indexByBucket helper, read it to say where a bucket's OWN
+-- entries landed, which is a different question from which buckets may carry
+-- them. Do not reintroduce it as a filter or as a packing key: that is the
+-- defect #270 fixed.
+-- @param baseHash string An eventCounts key (record id prefix plus time slot)
+-- @return number|nil Bucket key, or nil when the key carries no readable slot
+function GBL:BucketKeyForEventCount(baseHash)
+    local _, slot = self:SplitBaseHash(baseHash)
+    if not slot then return nil end
+    return self:BucketKeyForTimeSlot(slot)
+end
+
+--- The 6-hour buckets whose records could use this event count entry.
+---
+--- A record at slot Y can be trimmed by a count at slot X exactly when
+--- |X - Y| <= EVENT_COUNT_SLOT_RADIUS, so this entry is worth sending to a peer
+--- receiving bucket B exactly when B holds one of the slots in that window.
+--- That is one bucket for a slot in the middle of a bucket and two for a slot
+--- on either edge of one.
+---
+--- Both the filter and the packer read this, and that is the whole point.
+--- Widening the filter alone would reintroduce the loss #114 closed:
+--- PrepareChunks files an entry under a bucket and emits it at that bucket's
+--- first record, and a boundary count's own bucket has no records in the send,
+--- so the entry would fall to the trailing carriers an abort discards.
+---
+--- Computed through BucketKeyForTimeSlot rather than by arithmetic on
+--- slot % 6, so the bucket width stays in the one place that owns it. The
+--- result is strictly ascending, because BucketKeyForTimeSlot does not
+--- decrease as the slot rises, which is what makes comparing against the last
+--- member enough to deduplicate.
+--- @param baseHash string An eventCounts key (record id prefix plus time slot)
+--- @return table|nil Ascending bucket keys, or nil when the key carries no slot
+function GBL:EventCountRideBuckets(baseHash)
+    local _, slot = self:SplitBaseHash(baseHash)
+    if not slot then return nil end
+
+    local radius = self.EVENT_COUNT_SLOT_RADIUS
+    local buckets = {}
+    for s = slot - radius, slot + radius do
+        local bucket = self:BucketKeyForTimeSlot(s)
+        if buckets[#buckets] ~= bucket then
+            buckets[#buckets + 1] = bucket
+        end
+    end
+    return buckets
+end
+
 --- Does this eventCounts entry belong with the buckets a session is sending?
 --
 -- The per-entry rule, on its own so that more than one walk can apply it. The
@@ -447,30 +504,23 @@ end
 --
 -- A nil filter means send everything, which is the fallback path where there
 -- are no bucket keys to compare against.
+--
+-- The test is over the RIDE SET rather than the entry's own bucket (#270). A
+-- count one hour across a bucket boundary from the records that can use it
+-- belongs to neither side cleanly: CleanupWithEventCounts reaches it and the
+-- own-bucket test never offered it, so it was usable locally and unsendable
+-- forever, 46 of 16,644 entries on the measured store.
 -- @param baseHash string An eventCounts key (record id prefix plus time slot)
 -- @param diffBuckets table|nil Set of 6-hour bucket keys; nil = everything rides
 -- @return boolean True when the entry should ride along
---- The 6-hour fingerprint bucket an event count entry describes.
---
--- The key-to-bucket reading on its own, because two callers want different
--- answers from it. The predicate below wants yes or no; PrepareChunks wants the
--- key itself (#114), so it can emit a bucket's entries at the first record of
--- that bucket and keep a bucket's counts no later on the wire than the records
--- they describe. Lifting the reading out is what keeps the arithmetic in one
--- place rather than two that agree by inspection.
--- @param baseHash string An eventCounts key (record id prefix plus time slot)
--- @return number|nil Bucket key, or nil when the key carries no readable slot
-function GBL:BucketKeyForEventCount(baseHash)
-    local _, slot = self:SplitBaseHash(baseHash)
-    if not slot then return nil end
-    return self:BucketKeyForTimeSlot(slot)
-end
-
 function GBL:EventCountRidesWithBuckets(baseHash, diffBuckets)
     if not diffBuckets then return true end
-    local bucket = self:BucketKeyForEventCount(baseHash)
-    if not bucket then return false end
-    return diffBuckets[bucket] and true or false
+    local ride = self:EventCountRideBuckets(baseHash)
+    if not ride then return false end
+    for i = 1, #ride do
+        if diffBuckets[ride[i]] then return true end
+    end
+    return false
 end
 
 --- Collect eventCounts entries matching a set of fingerprint bucket keys.

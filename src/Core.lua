@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.41.9"
+local VERSION = "0.41.10"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -2976,9 +2976,34 @@ function GBL:DeduplicateAllGuilds()
     return failed
 end
 
+--- How many hourly slots either side of a record's own slot a count for that
+--- record's cluster may sit in.
+---
+--- One number with two readers, both reading this field at call time: the
+--- cleanup loop below, which is the behaviour it describes, and
+--- GBL:EventCountRideBuckets in src/Dedup.lua, which mirrors that loop so the
+--- sync filter and the packer offer exactly the counts cleanup can use. Two
+--- copies of the number is how the filter came to offer less than this loop uses
+--- (#270), so neither reader may keep a local: a local here would leave the ride
+--- set following the field while this loop kept the shipped width, and a local
+--- there the reverse.
+---
+--- It lives in this file rather than beside the ride set because Core.lua is the
+--- first of the two the .toc loads. That ordering is what makes the field
+--- unconditionally present for both readers, so neither needs a fallback, and a
+--- fallback is exactly what would put the number back in two places.
+---
+--- It does NOT govern the three other slot-drift windows in src/Dedup.lua
+--- (CountFromRecordIndex, CountStoredForHash and FindDriftedCount). Those share
+--- the number and answer a different question, how many records or prior counts
+--- exist under a prefix, so tying them to this name would make a later change to
+--- record counting move silently what an event count rides with.
+GBL.EVENT_COUNT_SLOT_RADIUS = 1
+
 --- Remove excess records using persisted eventCounts as ground truth.
--- Groups records by prefix, clusters by timestamp proximity, then trims
--- each cluster to the max known eventCount for its baseHash (±1 slot).
+-- Groups records by prefix, clusters by timestamp proximity, then trims each
+-- cluster to the max known eventCount for its baseHash, across the window
+-- EVENT_COUNT_SLOT_RADIUS above sets.
 -- Safe default: clusters with no eventCount data are never trimmed.
 -- @param guildData table Guild data from AceDB
 -- @return number Total records removed
@@ -2989,6 +3014,10 @@ function GBL:CleanupWithEventCounts(guildData)
     end
 
     local totalRemoved = 0
+    -- Read once for the whole pass rather than per cluster. The field is set
+    -- when this file loads, just above this function, so it is present however
+    -- this function is reached.
+    local radius = self.EVENT_COUNT_SLOT_RADIUS
 
     for _, storageKey in ipairs({ "transactions", "moneyTransactions" }) do
         local records = guildData[storageKey]
@@ -3032,7 +3061,9 @@ function GBL:CleanupWithEventCounts(guildData)
                     clusters[#clusters + 1] = currentCluster
 
                     for _, cluster in ipairs(clusters) do
-                        -- Find max eventCount across all relevant baseHashes (±1 slot)
+                        -- Find max eventCount across every baseHash the
+                        -- window reaches, because two scans of one transaction
+                        -- can round its hour differently.
                         local slotsChecked = {}
                         for _, rec in ipairs(cluster) do
                             local slot = math.floor((rec.timestamp or GetServerTime()) / 3600)
@@ -3041,7 +3072,7 @@ function GBL:CleanupWithEventCounts(guildData)
 
                         local maxKnownCount = 0
                         for slot in pairs(slotsChecked) do
-                            for s = slot - 1, slot + 1 do
+                            for s = slot - radius, slot + radius do
                                 local baseHash = prefix .. s
                                 local entry = guildData.eventCounts[baseHash]
                                 if entry and type(entry) == "table"

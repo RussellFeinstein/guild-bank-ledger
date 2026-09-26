@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.41.10] - 2026-09-26
+
+### Fixed
+- A guild member could keep duplicate transaction rows for good, because the figure the cleanup needs in order to remove them was never sent to them. It affected transactions recorded either side of a six-hour boundary: the sending client could use the figure itself, so nothing looked wrong there, and no sync would ever offer it. Those figures now go out with whichever records can use them rather than only with the records recorded in the same six hours.
+
 ## [0.41.9] - 2026-09-26
 
 ### Fixed
