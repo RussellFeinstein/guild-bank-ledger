@@ -675,13 +675,47 @@ end
 --- Disable sync at runtime (from UI toggle).
 function GBL:DisableSync()
     self.db.profile.sync.enabled = false
-    -- Ahead of the field clears below: a preparation in flight has to be told
-    -- to stop, or it finishes on its own timer and serves a peer the user has
-    -- just switched sync off for.
-    self:_AbortSyncPrep("sync disabled")
-    syncState.sending = false
-    syncState.sendTarget = nil
-    syncState.receiving = false
+
+    -- A preparation in flight has to be told to stop, or it finishes on its
+    -- own timer and serves a peer the user has just switched sync off for. It
+    -- is checked FIRST because it implies sending: the slot is claimed before
+    -- the chain starts, so testing `sending` first would make this arm
+    -- unreachable and every live-send case would still pass. Same ordering and
+    -- same reason as OnCombatStart.
+    --
+    -- A live send goes through FinishSending rather than a hand-copied subset
+    -- of it (#272, following #202 on the BUSY branch). Without it the whole
+    -- retry histogram is discarded unrendered at the next accept, and this is
+    -- the session most likely to have one worth reading: someone turning sync
+    -- off is usually doing it because a sync is behaving badly. It stays on the
+    -- other side of the prep arm because it reports on a send and a preparation
+    -- has not made one; reached mid-prep it writes a full "Send complete 0/0
+    -- chunks" block plus four statistics lines for a session that never put a
+    -- byte on the wire.
+    if syncState.prep then
+        self:_AbortSyncPrep("sync disabled")
+    elseif syncState.sending then
+        -- Tag the chunk that was in flight, before FinishSending reads the
+        -- table. Absent whenever the last ACK has landed and the next chunk
+        -- has not issued yet, which is most of a chunk cycle, so the session's
+        -- own verdict is passed in below rather than read back out of here.
+        -- Inside this arm rather than above the branch, which is where the
+        -- first cut of #272 had it: during a preparation the accept has already
+        -- set chunkOutcomes empty and sendChunkIndex to 0, so there is nothing
+        -- to tag and an outer `sending` test only repeated this one.
+        local disabledIdx = syncState.sendChunkIndex
+        if syncState.chunkOutcomes and syncState.chunkOutcomes[disabledIdx]
+            and syncState.chunkOutcomes[disabledIdx].outcome == "pending" then
+            syncState.chunkOutcomes[disabledIdx].outcome = "disabledAbort"
+        end
+        self:FinishSending("sync disabled")
+    end
+
+    -- Both of these are cancelled by FinishSending on the live-send path above.
+    -- They stay unconditional because AceComm's send-completion callback cannot
+    -- be cancelled (#273), so one firing after an earlier teardown can leave a
+    -- fresh ACK ticker in sendTimer with `sending` already false, and this is
+    -- what collects it.
     if syncState.sendTimer then
         syncState.sendTimer:Cancel()
         syncState.sendTimer = nil
@@ -690,10 +724,19 @@ function GBL:DisableSync()
         syncState.sendHardTimer:Cancel()
         syncState.sendHardTimer = nil
     end
-    if syncState.receiveTimer then
-        syncState.receiveTimer:Cancel()
-        syncState.receiveTimer = nil
+    -- One line for the receive half, taken before the clear because the clear
+    -- drops the peer name. It cannot be FinishReceiving (see
+    -- _ClearReceiveSession), but what that rules out is the rebuild rather than
+    -- the reporting, and every other receive ending says something: without
+    -- this a capture shows chunks arriving up to the disable and then nothing,
+    -- which reads exactly like the client going quiet.
+    if syncState.receiving then
+        self:AddAuditEntry("Receive from "
+            .. tostring(syncState.receiveSource or "?")
+            .. " aborted - sync disabled at chunk " .. syncState.receiveGot
+            .. "/" .. syncState.receiveExpected)
     end
+    self:_ClearReceiveSession()
     syncState.zonePaused = false
     if syncState.zoneCooldownTimer then
         syncState.zoneCooldownTimer:Cancel()
@@ -1765,6 +1808,36 @@ local function clearReceiveCounters()
     syncState.receiveRemaining = nil
     syncState.receiveNormalized = 0
     syncState.receiveRequested = false
+end
+
+--- Drop the receive session's state.
+--
+-- One writer, so no teardown can half-clear it, across FOUR call sites.
+-- FinishReceiving's own teardown and HandleBusy's receive branch held
+-- byte-identical copies; the sync disable cleared `receiving` alone and left
+-- the counters, the source and the start time answering for a session that had
+-- ended; and ResetSyncState held a divergent copy, clearing five counters and
+-- leaving the six per-type and reject ones standing, which is #237's shape at
+-- a site that fix did not reach. That is #122's receive half.
+--
+-- It deliberately is NOT FinishReceiving. That function reports on the session
+-- and then calls RefreshUI, which for the Sync tab is a ReleaseChildren
+-- rebuild, and DisableSync is reached from the Enable Sync checkbox callback,
+-- which goes on to render a container it captured before the toggle. Routing
+-- the disable through it would release the widgets the running callback still
+-- holds. The cost of not doing so is that a user-aborted receive writes no
+-- redundancy figures.
+function GBL:_ClearReceiveSession()
+    if syncState.receiveTimer then
+        syncState.receiveTimer:Cancel()
+        syncState.receiveTimer = nil
+    end
+    syncState.receiving = false
+    syncState.receiveSource = nil
+    clearReceiveCounters()
+    syncState.receiveStartTime = 0
+    syncState.receiveNackCount = 0
+    syncState.receiveSinceTimestamp = 0
 end
 
 --- Send a SYNC_REQUEST to a specific peer.
@@ -3271,7 +3344,8 @@ function GBL:FinishSending(abortCause)
     -- A/B data across versions is comparable even when chunk size differs.
     local on1, on2, on3plus = 0, 0, 0
     local outcomes = { ok = 0, aborted = 0, combatAbort = 0,
-                       zoneAbort = 0, busyAbort = 0, sendFailed = 0 }
+                       zoneAbort = 0, busyAbort = 0, sendFailed = 0,
+                       disabledAbort = 0 }
     local causes = { ackTimeout = 0, nack = 0 }
     local chunksSeen, totalAttempts, wireLossRetries = 0, 0, 0
     local sumFrags = 0
@@ -3351,7 +3425,8 @@ function GBL:FinishSending(abortCause)
         .. on1 .. " on 1st, " .. on2 .. " on 2nd, " .. on3plus .. " on 3rd+, "
         .. "aborted: " .. outcomes.aborted .. " ackTimeout + "
         .. outcomes.combatAbort .. " combat + " .. outcomes.zoneAbort .. " zone + "
-        .. outcomes.busyAbort .. " busy + " .. outcomes.sendFailed .. " offline"
+        .. outcomes.busyAbort .. " busy + " .. outcomes.sendFailed .. " offline + "
+        .. outcomes.disabledAbort .. " disabled"
         .. verdict)
     self:AddAuditEntry("Retry causes for " .. target .. ": "
         .. "ackTimeout=" .. causes.ackTimeout .. ", nack=" .. causes.nack
@@ -3399,7 +3474,14 @@ function GBL:FinishSending(abortCause)
     -- Bidirectional check: after sending, do we need data from this peer?
     -- Brief delay to let the peer process our data (their FinishReceiving).
     local cleanTarget = self:CanonicalPeerKey(target)
-    if self.db.profile.sync.autoSync then
+    -- `enabled` is read here as well as inside the callback. The callback's own
+    -- check is what makes the ordinary disable safe, but on that path this
+    -- timer is dead weight by construction, and it is not merely wasteful: a
+    -- player who unticks and re-ticks inside the 500ms passes the callback's
+    -- check and runs the check for the session they just cancelled, which can
+    -- stamp lastSupersetNudge and burn the 60s throttle on a peer nobody
+    -- nudged. Both go away by not arming it.
+    if self.db.profile.sync.autoSync and self.db.profile.sync.enabled then
         C_Timer.After(0.5, function()
             if syncState.receiving then return end
             if isSyncPaused() then return end
@@ -3998,17 +4080,7 @@ function GBL:FinishReceiving(sender, completed)
         })
     end
 
-    if syncState.receiveTimer then
-        syncState.receiveTimer:Cancel()
-        syncState.receiveTimer = nil
-    end
-
-    syncState.receiving = false
-    syncState.receiveSource = nil
-    clearReceiveCounters()
-    syncState.receiveStartTime = 0
-    syncState.receiveNackCount = 0
-    syncState.receiveSinceTimestamp = 0
+    self:_ClearReceiveSession()
 
     if receipt then
         local receiptTo = self:CanonicalPeerKey(sender)
@@ -4343,24 +4415,28 @@ function GBL:ResetSyncState()
     syncState.sendTarget = nil
     syncState.sendChunks = {}
     syncState.sendChunkIndex = 0
-    syncState.sendTimer = nil
-    syncState.sendHardTimer = nil
+    -- Cancelled rather than nilled, which is the same defect the receive timer
+    -- had three lines down: nilling our handle leaves a live ticker running
+    -- with nothing able to stop it.
+    if syncState.sendTimer then
+        syncState.sendTimer:Cancel()
+        syncState.sendTimer = nil
+    end
+    if syncState.sendHardTimer then
+        syncState.sendHardTimer:Cancel()
+        syncState.sendHardTimer = nil
+    end
     syncState.sendRetryCount = 0
     syncState.sendStartTime = 0
     syncState.sendTotalRecords = 0
     syncState.sendRemainingBuckets = 0
     syncState.sendChunkSentAt = 0
-    syncState.receiving = false
-    syncState.receiveSource = nil
-    syncState.receiveExpected = 0
-    syncState.receiveGot = 0
-    syncState.receiveStored = 0
-    syncState.receiveRemaining = nil
-    syncState.receiveDuped = 0
-    syncState.receiveTimer = nil
-    syncState.receiveStartTime = 0
-    syncState.receiveNackCount = 0
-    syncState.receiveSinceTimestamp = 0
+    -- The fourth copy of the receive teardown, and it was a divergent one: it
+    -- cleared five counters and left the six per-type and reject ones standing,
+    -- which is the #237 shape at a site that fix did not reach. It also nilled
+    -- the receive timer without cancelling it, so a live ticker outlived the
+    -- reset with nothing holding its handle.
+    self:_ClearReceiveSession()
     syncState.peers = {}
     syncState.auditTrail = {}    -- legacy field, unused; kept zero for any direct readers
     self:ClearLog("sync")        -- clear the real sync buffer in Logger.lua
@@ -4587,16 +4663,7 @@ function GBL:HandleBusy(sender, data)
     -- Already-stored records are safe; next sync uses bucket hashes to avoid re-sending.
     if syncState.receiving
         and cleanSender == self:CanonicalPeerKey(syncState.receiveSource) then
-        if syncState.receiveTimer then
-            syncState.receiveTimer:Cancel()
-            syncState.receiveTimer = nil
-        end
-        syncState.receiving = false
-        syncState.receiveSource = nil
-        clearReceiveCounters()
-        syncState.receiveStartTime = 0
-        syncState.receiveNackCount = 0
-        syncState.receiveSinceTimestamp = 0
+        self:_ClearReceiveSession()
 
         self:AddAuditEntry(cleanSender .. " busy - cleared receive state, will retry later")
     end

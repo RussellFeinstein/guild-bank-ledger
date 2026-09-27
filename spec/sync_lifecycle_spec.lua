@@ -666,6 +666,307 @@ describe("Sync session lifecycle", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Disabling sync mid-session (#272)
+    ---------------------------------------------------------------------------
+
+    describe("DisableSync mid-session", function()
+        -- Two older cases up in "Edge cases" cover the state clears. These
+        -- cover what the teardown reports, which is what #272 was filed about:
+        -- the whole chunkOutcomes table, a retryReasons tag for every ACK
+        -- timeout and NACK, was discarded unrendered at the next accept.
+
+        --- A live send, past the preparation, with a chunk still behind the
+        -- first. Four records rather than one because the acked-chunk case
+        -- below needs the send to survive its own ACK, and a one-chunk session
+        -- finishes on it.
+        local function startSend(target)
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            for i = 1, 4 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000, id = "disable_abort_" .. i .. ":0",
+                })
+            end
+            Sync.serveRequest(GBL, target, request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending,
+                "fixture must reach a live send before the disable")
+            assert.is_false(GBL:GetSyncStatus().preparing,
+                "fixture must be past the preparation, which reports nothing")
+        end
+
+        local function messages()
+            local out = {}
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                out[#out + 1] = entry.message
+            end
+            return out
+        end
+
+        local function hasLine(needle)
+            for _, msg in ipairs(messages()) do
+                if msg and msg:find(needle, 1, true) then return true end
+            end
+            return false
+        end
+
+        local function outcomesLine()
+            for _, msg in ipairs(messages()) do
+                if msg and msg:find("Sync outcomes for", 1, true) then return msg end
+            end
+            return nil
+        end
+
+        --- One incoming record, whichever chunk of three is being played.
+        -- Delivering it twice is what moves the per-type dupe counters, which
+        -- is the half of the receive state a state reset used to leave behind.
+        local function deliverChunk(from, n)
+            GBL:HandleSyncData(from, {
+                chunk = n, totalChunks = 3,
+                transactions = {
+                    {
+                        type = "deposit", player = "Thrall", itemID = 100,
+                        count = 1, tab = 1, timestamp = 475103 * 3600,
+                        scanTime = 475103 * 3600, scannedBy = from,
+                        id = "deposit|Thrall|100|1|1|0",
+                    },
+                },
+                moneyTransactions = {},
+            })
+        end
+
+        --- Put the peer on record with a hash, which the bidirectional check
+        -- needs before it can act on anything. Without it the callback returns
+        -- at `not peerInfo.dataHash`, one guard past the one these two cases
+        -- are about, so both passed whatever the code did: the mutation pass
+        -- caught it as a survivor rather than the suite catching it as a red.
+        local function knowPeer(target)
+            GBL:HandleHello(target, {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 0, dataHash = 99999, guild = "Test Guild",
+            })
+        end
+
+        it("writes the summary block a send that ends any other way writes",
+        function()
+            startSend("PeerA")
+
+            GBL:DisableSync()
+
+            for _, needle in ipairs({
+                "Send complete to PeerA",
+                "Sync stats: ",
+                "Sync outcomes for PeerA",
+                "Retry causes for PeerA",
+                "Compression for PeerA",
+                "Wire-to-ACK for PeerA",
+            }) do
+                assert.is_true(hasLine(needle),
+                    "a disabled send must still write: " .. needle)
+            end
+        end)
+
+        it("names the session as ended by the disable", function()
+            startSend("PeerA")
+
+            GBL:DisableSync()
+
+            local outcomes = outcomesLine()
+            assert.is_not_nil(outcomes, "no Sync outcomes line to read")
+            assert.is_not_nil(
+                outcomes:find("session ended by sync disabled", 1, true),
+                "the verdict should name the disable, got: " .. outcomes)
+        end)
+
+        it("tags the chunk that was in flight", function()
+            startSend("PeerA")
+            local idx = GBL:GetSyncStateForTests().sendChunkIndex
+            assert.equals("pending",
+                GBL:GetSyncStateForTests().chunkOutcomes[idx].outcome,
+                "fixture must leave a chunk genuinely in flight")
+
+            GBL:DisableSync()
+
+            local outcomes = outcomesLine()
+            assert.is_not_nil(outcomes, "no Sync outcomes line to read")
+            assert.is_not_nil(outcomes:find("+ 1 disabled", 1, true),
+                "a chunk in flight should be tagged, got: " .. outcomes)
+        end)
+
+        -- Written from the issue rather than from the code, which is the whole
+        -- reason it exists. sendChunkIndex advances when a chunk is ISSUED and
+        -- HandleAck settles one to "ok" without advancing it, so for the
+        -- majority of a chunk cycle nothing is on the wire and the per-chunk
+        -- tag lands nowhere. A teardown that read that tag as the session's own
+        -- verdict would report an all-zero abort histogram under a "Send
+        -- complete" heading here, which is exactly the by-construction zero
+        -- #202 was filed about, so the cause is passed in rather than inferred.
+        it("names the ending even when the last chunk was already acked",
+        function()
+            startSend("PeerA")
+            local idx = GBL:GetSyncStateForTests().sendChunkIndex
+            GBL:HandleAck("PeerA", { chunk = idx })
+            assert.equals("ok",
+                GBL:GetSyncStateForTests().chunkOutcomes[idx].outcome,
+                "fixture must leave the indexed chunk settled")
+            assert.is_true(GBL:GetSyncStatus().sending,
+                "fixture must outlive its own ACK, or there is no send to end")
+
+            GBL:DisableSync()
+
+            local outcomes = outcomesLine()
+            assert.is_not_nil(outcomes, "no Sync outcomes line to read")
+            assert.is_not_nil(
+                outcomes:find("session ended by sync disabled", 1, true),
+                "an abort with nothing in flight is still a disabled session, "
+                    .. "got: " .. outcomes)
+            assert.is_not_nil(outcomes:find("+ 0 disabled", 1, true),
+                "nothing was in flight, so nothing should be tagged, got: "
+                    .. outcomes)
+            assert.is_not_nil(outcomes:find("1 on 1st", 1, true),
+                "the acked chunk stays a success in the histogram, got: "
+                    .. outcomes)
+        end)
+
+        it("leaves no send progress behind for a session that has ended",
+        function()
+            startSend("PeerA")
+
+            GBL:DisableSync()
+
+            assert.equals("0/0", GBL:GetSyncStatus().sendProgress,
+                "sendProgress indexes a chunk list the session no longer has")
+        end)
+
+        -- FinishSending schedules the bidirectional check on sync.autoSync,
+        -- while the callback it schedules checks sync.enabled, which this path
+        -- has already cleared. So the thing stopping a disabled client from
+        -- pulling from the peer it just stopped serving is an ordering rather
+        -- than a guard, and an ordering wants a case rather than an inspection.
+        it("pulls nothing from the peer it just stopped serving", function()
+            knowPeer("PeerA")
+            startSend("PeerA")
+            GBL:ClearLog("sync")
+
+            GBL:DisableSync()
+
+            -- autoSync is on by default, so the teardown really does schedule
+            -- the check here. Asserted rather than assumed, or this case passes
+            -- vacuously on a build that never reached the teardown at all.
+            assert.is_true(hasLine("Send complete to PeerA"),
+                "fixture must reach the teardown that schedules the check")
+            Helpers.drainAllTimers()
+
+            assert.is_false(hasLine("Bidirectional check"),
+                "a disabled client must not run the post-send check")
+        end)
+
+        -- Found by the code review of this PR. The rebuild hazard rules out
+        -- calling FinishReceiving here, but what it rules out is the rebuild
+        -- rather than the reporting, and a capture that shows chunks arriving
+        -- and then nothing cannot be told from the client going quiet. Every
+        -- other receive ending names itself.
+        it("says in the log that a receive was interrupted, and by whom",
+        function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:RequestSync("OfficerB", 0)
+            deliverChunk("OfficerB", 1)
+            GBL:ClearLog("sync")
+
+            GBL:DisableSync()
+
+            assert.is_true(
+                hasLine("Receive from OfficerB aborted - sync disabled"
+                    .. " at chunk 1/3"),
+                "the interrupted receive has to name its peer and its progress")
+        end)
+
+        -- Also from the review. FinishSending arms the check on autoSync alone,
+        -- so the disable armed a timer guaranteed to refuse, and a player who
+        -- unticks and re-ticks inside the 500ms passes the callback's own
+        -- enabled test and runs the check for the session they just cancelled.
+        it("runs no check for a session cancelled before the check could fire",
+        function()
+            knowPeer("PeerA")
+            startSend("PeerA")
+            GBL:ClearLog("sync")
+
+            GBL:DisableSync()
+            GBL:EnableSync()
+            Helpers.drainAllTimers()
+
+            assert.is_false(hasLine("Bidirectional check"),
+                "the check belonged to a session that no longer exists")
+        end)
+
+        -- The arm-time gate cannot reach this one, which is why the callback
+        -- keeps its own guard as well: a send that ended by itself armed the
+        -- check while sync was still on, and the player switches off inside the
+        -- 500ms. Nothing exercised that guard until a mutation removed it and
+        -- the whole suite stayed green.
+        it("drops a check already in flight when sync goes off under it",
+        function()
+            knowPeer("PeerA")
+            startSend("PeerA")
+            Sync.drainSend(GBL, "PeerA")
+            assert.is_false(GBL:GetSyncStatus().sending,
+                "fixture must let the send end on its own, arming the check")
+            GBL:ClearLog("sync")
+
+            GBL:DisableSync()
+            Helpers.drainAllTimers()
+
+            assert.is_false(hasLine("Bidirectional check"),
+                "the check has to read the switch, not the state it was armed in")
+        end)
+
+        -- The receive-side twin of the sendProgress finding. There is no leak
+        -- past this point (RequestSync and the HandleSyncData bootstrap both
+        -- call clearReceiveCounters on the way in), so what this fixes is the
+        -- status table answering for a session that has ended.
+        it("clears the receive session a disable interrupts", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:RequestSync("OfficerB", 0)
+            deliverChunk("OfficerB", 1)
+            assert.equals("1/3", GBL:GetSyncStatus().receiveProgress,
+                "fixture must leave counters standing for the disable to clear")
+
+            GBL:DisableSync()
+
+            local status = GBL:GetSyncStatus()
+            assert.is_false(status.receiving)
+            assert.equals("0/0", status.receiveProgress,
+                "receiveProgress counts chunks of a session that has ended")
+            assert.is_nil(status.receiveSource,
+                "nor should the status name a peer we are no longer hearing")
+        end)
+
+        -- ResetSyncState was a fourth copy of the same list and a divergent
+        -- one: it cleared five counters and left the six per-type and reject
+        -- ones standing, which is #237's shape at a site that fix did not
+        -- reach, and it nilled the receive timer without cancelling it. The
+        -- dupe counter is the one to assert on, because it is in the half the
+        -- reset used to miss and it is on the status table.
+        it("clears the per-type counters a state reset used to leave standing",
+        function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:RequestSync("OfficerB", 0)
+            deliverChunk("OfficerB", 1)
+            deliverChunk("OfficerB", 2)
+            assert.is_true(GBL:GetSyncStatus().receiveItemDuped > 0,
+                "fixture must count a duplicate for the reset to clear")
+
+            GBL:ResetSyncState()
+
+            local status = GBL:GetSyncStatus()
+            assert.equals(0, status.receiveItemDuped,
+                "a reset that leaves this standing hands it to the next session")
+            assert.equals("0/0", status.receiveProgress)
+            assert.is_nil(status.receiveSource)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Combat guard
     ---------------------------------------------------------------------------
 
