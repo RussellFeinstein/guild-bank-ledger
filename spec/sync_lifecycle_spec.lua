@@ -847,6 +847,43 @@ describe("Sync session lifecycle", function()
                 "a disabled client must not run the post-send check")
         end)
 
+        -- Found by the code review of this PR. The rebuild hazard rules out
+        -- calling FinishReceiving here, but what it rules out is the rebuild
+        -- rather than the reporting, and a capture that shows chunks arriving
+        -- and then nothing cannot be told from the client going quiet. Every
+        -- other receive ending names itself.
+        it("says in the log that a receive was interrupted, and by whom",
+        function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:RequestSync("OfficerB", 0)
+            deliverChunk("OfficerB", 1)
+            GBL:ClearLog("sync")
+
+            GBL:DisableSync()
+
+            assert.is_true(
+                hasLine("Receive from OfficerB aborted - sync disabled"
+                    .. " at chunk 1/3"),
+                "the interrupted receive has to name its peer and its progress")
+        end)
+
+        -- Also from the review. FinishSending arms the check on autoSync alone,
+        -- so the disable armed a timer guaranteed to refuse, and a player who
+        -- unticks and re-ticks inside the 500ms passes the callback's own
+        -- enabled test and runs the check for the session they just cancelled.
+        it("runs no check for a session cancelled before the check could fire",
+        function()
+            startSend("PeerA")
+            GBL:ClearLog("sync")
+
+            GBL:DisableSync()
+            GBL:EnableSync()
+            Helpers.drainAllTimers()
+
+            assert.is_false(hasLine("Bidirectional check"),
+                "the check belonged to a session that no longer exists")
+        end)
+
         -- The receive-side twin of the sendProgress finding. There is no leak
         -- past this point (RequestSync and the HandleSyncData bootstrap both
         -- call clearReceiveCounters on the way in), so what this fixes is the
