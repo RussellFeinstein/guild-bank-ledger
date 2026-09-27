@@ -710,7 +710,6 @@ function GBL:DisableSync()
         self:FinishSending("sync disabled")
     end
 
-    syncState.receiving = false
     -- Both of these are cancelled by FinishSending on the live-send path above.
     -- They stay unconditional because AceComm's send-completion callback cannot
     -- be cancelled (#273), so one firing after an earlier teardown can leave a
@@ -724,10 +723,7 @@ function GBL:DisableSync()
         syncState.sendHardTimer:Cancel()
         syncState.sendHardTimer = nil
     end
-    if syncState.receiveTimer then
-        syncState.receiveTimer:Cancel()
-        syncState.receiveTimer = nil
-    end
+    self:_ClearReceiveSession()
     syncState.zonePaused = false
     if syncState.zoneCooldownTimer then
         syncState.zoneCooldownTimer:Cancel()
@@ -1799,6 +1795,35 @@ local function clearReceiveCounters()
     syncState.receiveRemaining = nil
     syncState.receiveNormalized = 0
     syncState.receiveRequested = false
+end
+
+--- Drop the receive session's state.
+--
+-- One writer, so no teardown can half-clear it. Three sites carried
+-- byte-identical copies of this list: FinishReceiving's own teardown,
+-- HandleBusy's receive branch, and, since #272, the sync disable, which
+-- cleared `receiving` alone and left the counters, the source and the start
+-- time answering for a session that had ended. That is #122's receive half,
+-- and it is why a fourth copy was not written.
+--
+-- It deliberately is NOT FinishReceiving. That function reports on the session
+-- and then calls RefreshUI, which for the Sync tab is a ReleaseChildren
+-- rebuild, and DisableSync is reached from the Enable Sync checkbox callback,
+-- which goes on to render a container it captured before the toggle. Routing
+-- the disable through it would release the widgets the running callback still
+-- holds. The cost of not doing so is that a user-aborted receive writes no
+-- redundancy figures.
+function GBL:_ClearReceiveSession()
+    if syncState.receiveTimer then
+        syncState.receiveTimer:Cancel()
+        syncState.receiveTimer = nil
+    end
+    syncState.receiving = false
+    syncState.receiveSource = nil
+    clearReceiveCounters()
+    syncState.receiveStartTime = 0
+    syncState.receiveNackCount = 0
+    syncState.receiveSinceTimestamp = 0
 end
 
 --- Send a SYNC_REQUEST to a specific peer.
@@ -4034,17 +4059,7 @@ function GBL:FinishReceiving(sender, completed)
         })
     end
 
-    if syncState.receiveTimer then
-        syncState.receiveTimer:Cancel()
-        syncState.receiveTimer = nil
-    end
-
-    syncState.receiving = false
-    syncState.receiveSource = nil
-    clearReceiveCounters()
-    syncState.receiveStartTime = 0
-    syncState.receiveNackCount = 0
-    syncState.receiveSinceTimestamp = 0
+    self:_ClearReceiveSession()
 
     if receipt then
         local receiptTo = self:CanonicalPeerKey(sender)
@@ -4623,16 +4638,7 @@ function GBL:HandleBusy(sender, data)
     -- Already-stored records are safe; next sync uses bucket hashes to avoid re-sending.
     if syncState.receiving
         and cleanSender == self:CanonicalPeerKey(syncState.receiveSource) then
-        if syncState.receiveTimer then
-            syncState.receiveTimer:Cancel()
-            syncState.receiveTimer = nil
-        end
-        syncState.receiving = false
-        syncState.receiveSource = nil
-        clearReceiveCounters()
-        syncState.receiveStartTime = 0
-        syncState.receiveNackCount = 0
-        syncState.receiveSinceTimestamp = 0
+        self:_ClearReceiveSession()
 
         self:AddAuditEntry(cleanSender .. " busy - cleared receive state, will retry later")
     end
