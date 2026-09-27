@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.41.12
+    {"0.41.12", "2026-09-27", {
+        Fixed = {
+            "Turning sync off while a sync was running left nothing in the sync log about the session it had just ended. Everything that session had recorded about its own retries and timeouts was thrown away, which matters because the usual reason for turning sync off is that a sync is behaving badly, so that is exactly the session someone would want to read afterwards. It now writes the same summary any other ending writes, saying that the session ended because sync was turned off and which chunk it had reached. Interrupting an incoming sync the same way now says so in the log too, naming the member it was coming from and how far it had got.",
+        },
+    }},
     -- v0.41.11
     {"0.41.11", "2026-09-27", {
         Fixed = {

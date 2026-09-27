@@ -284,4 +284,4 @@ Helpers:
 
 ## Version
 
-Current: 0.41.11 (see `VERSION` file)
+Current: 0.41.12 (see `VERSION` file)
