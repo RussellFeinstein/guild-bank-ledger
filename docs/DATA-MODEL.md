@@ -437,10 +437,16 @@ isolation (grep `Dedup pass failed`). The rule the pair leaves: **nothing in eit
 the guild table outside the protection**, or the isolation has a hole at its own first statement,
 which is how the entry-version read was found.
 
-Two limits the isolation left, both filed with their measurements. **#265**: rungs 7 and 10 rewrite
-`record.id` and never call `ResetHashCache`, and `GetDataHash` keys on record count alone, so an id
-rewrite is invisible to it and the guild can advertise a fingerprint of a dataset that no longer
-exists. **#266**: a guild whose migration raises partway through either of those two rungs is left
+Two limits the isolation left, both filed with their measurements, and one of them is now closed.
+**#265, fixed in v0.41.11**: rungs 7 and 10 rewrote `record.id` and never called
+`ResetHashCache`, and both caches in `src/Fingerprint.lua` key on the record count, which a
+rewrite in place does not move, so an id rewrite was invisible to them and the guild advertised a
+fingerprint of a dataset that no longer existed. Each rung resets at its exit now, conditional on
+the same flag that gates its `seenTxHashes` rebuild. Beside the two behavioural pins,
+`spec/schema_version_spec.lua` section 8 carries a structural case that reads which ladder rungs
+write `record.id` out of `src/Core.lua` and holds each of them to the contract, so a rung added
+later cannot repeat this, and a refactor that routes the rewrites through a shared helper reds it
+rather than passing having checked nothing. **#266**: a guild whose migration raises partway through either of those two rungs is left
 with `seenTxHashes` keyed on the pre-rewrite ids, so `IsDuplicate` misses on every rewritten record
 and sync re-imports the guild's own transactions from a peer.
 

@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- A guild whose saved data needed one of two particular upgrade steps could spend the rest of that session advertising the wrong summary of its own records to the guild. Both steps rewrite an internal identifier on every affected transaction, and the summary sync compares against other members is worked out once and then kept until the number of records changes, which a rewrite does not change. Sync could then skip records it should have exchanged. The two steps now discard that summary whenever they rewrite anything.
+
 ## [0.41.10] - 2026-09-26
 
 ### Fixed
