@@ -1331,6 +1331,14 @@ function GBL:MigrateRepairEpochTimestamps(guildData)
         for k, v in pairs(newHashes) do
             guildData.seenTxHashes[k] = v
         end
+
+        -- Every id rebuilt above changed a bucket hash and the dataHash,
+        -- and neither cache can see it: both key on the record count,
+        -- which a rewrite in place does not move (#265). Conditional like
+        -- the rebuild, because clearing a warm bucket map costs a full
+        -- walk over the history (#115) and a guild this rung did not
+        -- touch should not pay for it.
+        self:ResetHashCache()
     end
 
     guildData.schemaVersion = 8
@@ -1501,6 +1509,14 @@ function GBL:MigrateNormalizeStoredRealms(guildData)
         for k, v in pairs(newHashes) do
             guildData.seenTxHashes[k] = v
         end
+    end
+
+    -- The same contract as rung 7 (#265), gated on recordsRewritten
+    -- alone rather than on the condition above: a guild whose
+    -- seenTxHashes is not a table still had its ids rewritten, and the
+    -- stranded map is what the next HELLO advertises.
+    if recordsRewritten then
+        self:ResetHashCache()
     end
 
     guildData.schemaVersion = 10
