@@ -4401,17 +4401,12 @@ function GBL:ResetSyncState()
     syncState.sendTotalRecords = 0
     syncState.sendRemainingBuckets = 0
     syncState.sendChunkSentAt = 0
-    syncState.receiving = false
-    syncState.receiveSource = nil
-    syncState.receiveExpected = 0
-    syncState.receiveGot = 0
-    syncState.receiveStored = 0
-    syncState.receiveRemaining = nil
-    syncState.receiveDuped = 0
-    syncState.receiveTimer = nil
-    syncState.receiveStartTime = 0
-    syncState.receiveNackCount = 0
-    syncState.receiveSinceTimestamp = 0
+    -- The fourth copy of the receive teardown, and it was a divergent one: it
+    -- cleared five counters and left the six per-type and reject ones standing,
+    -- which is the #237 shape at a site that fix did not reach. It also nilled
+    -- the receive timer without cancelling it, so a live ticker outlived the
+    -- reset with nothing holding its handle.
+    self:_ClearReceiveSession()
     syncState.peers = {}
     syncState.auditTrail = {}    -- legacy field, unused; kept zero for any direct readers
     self:ClearLog("sync")        -- clear the real sync buffer in Logger.lua

@@ -716,6 +716,24 @@ describe("Sync session lifecycle", function()
             return nil
         end
 
+        --- One incoming record, whichever chunk of three is being played.
+        -- Delivering it twice is what moves the per-type dupe counters, which
+        -- is the half of the receive state a state reset used to leave behind.
+        local function deliverChunk(from, n)
+            GBL:HandleSyncData(from, {
+                chunk = n, totalChunks = 3,
+                transactions = {
+                    {
+                        type = "deposit", player = "Thrall", itemID = 100,
+                        count = 1, tab = 1, timestamp = 475103 * 3600,
+                        scanTime = 475103 * 3600, scannedBy = from,
+                        id = "deposit|Thrall|100|1|1|0",
+                    },
+                },
+                moneyTransactions = {},
+            })
+        end
+
         it("writes the summary block a send that ends any other way writes",
         function()
             startSend("PeerA")
@@ -836,18 +854,7 @@ describe("Sync session lifecycle", function()
         it("clears the receive session a disable interrupts", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
             GBL:RequestSync("OfficerB", 0)
-            GBL:HandleSyncData("OfficerB", {
-                chunk = 1, totalChunks = 3,
-                transactions = {
-                    {
-                        type = "deposit", player = "Thrall", itemID = 100,
-                        count = 1, tab = 1, timestamp = 475103 * 3600,
-                        scanTime = 475103 * 3600, scannedBy = "OfficerB",
-                        id = "deposit|Thrall|100|1|1|0",
-                    },
-                },
-                moneyTransactions = {},
-            })
+            deliverChunk("OfficerB", 1)
             assert.equals("1/3", GBL:GetSyncStatus().receiveProgress,
                 "fixture must leave counters standing for the disable to clear")
 
@@ -859,6 +866,30 @@ describe("Sync session lifecycle", function()
                 "receiveProgress counts chunks of a session that has ended")
             assert.is_nil(status.receiveSource,
                 "nor should the status name a peer we are no longer hearing")
+        end)
+
+        -- ResetSyncState was a fourth copy of the same list and a divergent
+        -- one: it cleared five counters and left the six per-type and reject
+        -- ones standing, which is #237's shape at a site that fix did not
+        -- reach, and it nilled the receive timer without cancelling it. The
+        -- dupe counter is the one to assert on, because it is in the half the
+        -- reset used to miss and it is on the status table.
+        it("clears the per-type counters a state reset used to leave standing",
+        function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:RequestSync("OfficerB", 0)
+            deliverChunk("OfficerB", 1)
+            deliverChunk("OfficerB", 2)
+            assert.is_true(GBL:GetSyncStatus().receiveItemDuped > 0,
+                "fixture must count a duplicate for the reset to clear")
+
+            GBL:ResetSyncState()
+
+            local status = GBL:GetSyncStatus()
+            assert.equals(0, status.receiveItemDuped,
+                "a reset that leaves this standing hands it to the next session")
+            assert.equals("0/0", status.receiveProgress)
+            assert.is_nil(status.receiveSource)
         end)
     end)
 
