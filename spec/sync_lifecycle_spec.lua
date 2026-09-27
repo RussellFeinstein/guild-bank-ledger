@@ -734,6 +734,19 @@ describe("Sync session lifecycle", function()
             })
         end
 
+        --- Put the peer on record with a hash, which the bidirectional check
+        -- needs before it can act on anything. Without it the callback returns
+        -- at `not peerInfo.dataHash`, one guard past the one these two cases
+        -- are about, so both passed whatever the code did: the mutation pass
+        -- caught it as a survivor rather than the suite catching it as a red.
+        local function knowPeer(target)
+            GBL:HandleHello(target, {
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                txCount = 0, dataHash = 99999, guild = "Test Guild",
+            })
+        end
+
         it("writes the summary block a send that ends any other way writes",
         function()
             startSend("PeerA")
@@ -831,6 +844,7 @@ describe("Sync session lifecycle", function()
         -- pulling from the peer it just stopped serving is an ordering rather
         -- than a guard, and an ordering wants a case rather than an inspection.
         it("pulls nothing from the peer it just stopped serving", function()
+            knowPeer("PeerA")
             startSend("PeerA")
             GBL:ClearLog("sync")
 
@@ -873,6 +887,7 @@ describe("Sync session lifecycle", function()
         -- enabled test and runs the check for the session they just cancelled.
         it("runs no check for a session cancelled before the check could fire",
         function()
+            knowPeer("PeerA")
             startSend("PeerA")
             GBL:ClearLog("sync")
 
