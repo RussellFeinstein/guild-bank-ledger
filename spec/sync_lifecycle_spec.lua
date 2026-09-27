@@ -899,6 +899,27 @@ describe("Sync session lifecycle", function()
                 "the check belonged to a session that no longer exists")
         end)
 
+        -- The arm-time gate cannot reach this one, which is why the callback
+        -- keeps its own guard as well: a send that ended by itself armed the
+        -- check while sync was still on, and the player switches off inside the
+        -- 500ms. Nothing exercised that guard until a mutation removed it and
+        -- the whole suite stayed green.
+        it("drops a check already in flight when sync goes off under it",
+        function()
+            knowPeer("PeerA")
+            startSend("PeerA")
+            Sync.drainSend(GBL, "PeerA")
+            assert.is_false(GBL:GetSyncStatus().sending,
+                "fixture must let the send end on its own, arming the check")
+            GBL:ClearLog("sync")
+
+            GBL:DisableSync()
+            Helpers.drainAllTimers()
+
+            assert.is_false(hasLine("Bidirectional check"),
+                "the check has to read the switch, not the state it was armed in")
+        end)
+
         -- The receive-side twin of the sendProgress finding. There is no leak
         -- past this point (RequestSync and the HandleSyncData bootstrap both
         -- call clearReceiveCounters on the way in), so what this fixes is the
