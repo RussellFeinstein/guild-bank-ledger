@@ -907,9 +907,23 @@ describe("schemaVersion", function()
             local writesId, resets, current = {}, {}, nil
             for line in source:gmatch("[^\r\n]+") do
                 local fn = line:match("^function GBL:([%w_]+)")
-                if fn then current = fn end
+                if fn then
+                    current = fn
+                elseif line:match("^function ") or line:match("^local function ") then
+                    -- A file-scope function that is not a GBL method ends the
+                    -- previous one, so a rewrite inside it is not credited to
+                    -- the rung above it. Both forms matter: src/Core.lua holds
+                    -- six file-scope local functions today. Anchored at column
+                    -- zero on purpose, because a local function NESTED in a rung
+                    -- is indented and has to keep its enclosing rung, which is
+                    -- where both of the rewrites this case is about live.
+                    current = nil
+                end
                 if current and not line:match("^%s*%-%-") then
-                    if line:match("record%.id%s*=") then writesId[current] = true end
+                    -- Any field named id rather than the record.id spelling, so
+                    -- a rewrite written as records[i].id or tx.id is caught too.
+                    -- Every such assignment in the file is a record.id today.
+                    if line:match("%.id%s*=") then writesId[current] = true end
                     if line:match("ResetHashCache%s*%(") then resets[current] = true end
                 end
             end
