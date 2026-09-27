@@ -675,13 +675,47 @@ end
 --- Disable sync at runtime (from UI toggle).
 function GBL:DisableSync()
     self.db.profile.sync.enabled = false
-    -- Ahead of the field clears below: a preparation in flight has to be told
-    -- to stop, or it finishes on its own timer and serves a peer the user has
-    -- just switched sync off for.
-    self:_AbortSyncPrep("sync disabled")
-    syncState.sending = false
-    syncState.sendTarget = nil
+
+    -- Tag the chunk that was in flight, before the teardown below reads the
+    -- table. Absent whenever the last ACK has landed and the next chunk has
+    -- not issued yet, which is most of a chunk cycle, so the session's own
+    -- verdict is passed to FinishSending rather than read back out of here.
+    if syncState.sending and syncState.chunkOutcomes then
+        local disabledIdx = syncState.sendChunkIndex
+        if disabledIdx and syncState.chunkOutcomes[disabledIdx]
+            and syncState.chunkOutcomes[disabledIdx].outcome == "pending" then
+            syncState.chunkOutcomes[disabledIdx].outcome = "disabledAbort"
+        end
+    end
+
+    -- A preparation in flight has to be told to stop, or it finishes on its
+    -- own timer and serves a peer the user has just switched sync off for. It
+    -- is checked FIRST because it implies sending: the slot is claimed before
+    -- the chain starts, so testing `sending` first would make this arm
+    -- unreachable and every live-send case would still pass. Same ordering and
+    -- same reason as OnCombatStart.
+    --
+    -- A live send goes through FinishSending rather than a hand-copied subset
+    -- of it (#272, following #202 on the BUSY branch). Without it the whole
+    -- retry histogram is discarded unrendered at the next accept, and this is
+    -- the session most likely to have one worth reading: someone turning sync
+    -- off is usually doing it because a sync is behaving badly. It stays on the
+    -- other side of the prep arm because it reports on a send and a preparation
+    -- has not made one; reached mid-prep it writes a full "Send complete 0/0
+    -- chunks" block plus four statistics lines for a session that never put a
+    -- byte on the wire.
+    if syncState.prep then
+        self:_AbortSyncPrep("sync disabled")
+    elseif syncState.sending then
+        self:FinishSending("sync disabled")
+    end
+
     syncState.receiving = false
+    -- Both of these are cancelled by FinishSending on the live-send path above.
+    -- They stay unconditional because AceComm's send-completion callback cannot
+    -- be cancelled (#273), so one firing after an earlier teardown can leave a
+    -- fresh ACK ticker in sendTimer with `sending` already false, and this is
+    -- what collects it.
     if syncState.sendTimer then
         syncState.sendTimer:Cancel()
         syncState.sendTimer = nil
@@ -3271,7 +3305,8 @@ function GBL:FinishSending(abortCause)
     -- A/B data across versions is comparable even when chunk size differs.
     local on1, on2, on3plus = 0, 0, 0
     local outcomes = { ok = 0, aborted = 0, combatAbort = 0,
-                       zoneAbort = 0, busyAbort = 0, sendFailed = 0 }
+                       zoneAbort = 0, busyAbort = 0, sendFailed = 0,
+                       disabledAbort = 0 }
     local causes = { ackTimeout = 0, nack = 0 }
     local chunksSeen, totalAttempts, wireLossRetries = 0, 0, 0
     local sumFrags = 0
@@ -3351,7 +3386,8 @@ function GBL:FinishSending(abortCause)
         .. on1 .. " on 1st, " .. on2 .. " on 2nd, " .. on3plus .. " on 3rd+, "
         .. "aborted: " .. outcomes.aborted .. " ackTimeout + "
         .. outcomes.combatAbort .. " combat + " .. outcomes.zoneAbort .. " zone + "
-        .. outcomes.busyAbort .. " busy + " .. outcomes.sendFailed .. " offline"
+        .. outcomes.busyAbort .. " busy + " .. outcomes.sendFailed .. " offline + "
+        .. outcomes.disabledAbort .. " disabled"
         .. verdict)
     self:AddAuditEntry("Retry causes for " .. target .. ": "
         .. "ackTimeout=" .. causes.ackTimeout .. ", nack=" .. causes.nack

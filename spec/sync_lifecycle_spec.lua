@@ -758,7 +758,7 @@ describe("Sync session lifecycle", function()
 
             local outcomes = outcomesLine()
             assert.is_not_nil(outcomes, "no Sync outcomes line to read")
-            assert.is_not_nil(outcomes:find("+ 1 disabled +", 1, true),
+            assert.is_not_nil(outcomes:find("+ 1 disabled", 1, true),
                 "a chunk in flight should be tagged, got: " .. outcomes)
         end)
 
@@ -789,7 +789,7 @@ describe("Sync session lifecycle", function()
                 outcomes:find("session ended by sync disabled", 1, true),
                 "an abort with nothing in flight is still a disabled session, "
                     .. "got: " .. outcomes)
-            assert.is_not_nil(outcomes:find("+ 0 disabled +", 1, true),
+            assert.is_not_nil(outcomes:find("+ 0 disabled", 1, true),
                 "nothing was in flight, so nothing should be tagged, got: "
                     .. outcomes)
             assert.is_not_nil(outcomes:find("1 on 1st", 1, true),
