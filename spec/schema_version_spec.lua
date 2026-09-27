@@ -706,4 +706,237 @@ describe("schemaVersion", function()
             assert.equals(atRaise + 1, resets)
         end)
     end)
+
+    ---------------------------------------------------------------------------
+    -- 8. The id-rewriting rungs and the fingerprint cache (#265)
+    --
+    -- Both caches in src/Fingerprint.lua key on the record count, and the
+    -- contract stated beside GetBucketHashes is that a caller which rewrites an
+    -- id in place calls ResetHashCache, because the count does not move and
+    -- nothing else can tell either cache its answer is now wrong. Five rungs
+    -- honoured it and two did not, so a guild migrated at the roster-warm
+    -- retrigger advertised a dataHash and a bucket map describing ids no record
+    -- carried. The third case is the one that makes rung 12 red instead of
+    -- silent.
+    --
+    -- The behavioural pair asserts the OUTCOME, that both cached answers move,
+    -- rather than counting ResetHashCache calls. The harm is a HELLO carrying a
+    -- fingerprint for ids that are gone; the reset is only what prevents it
+    -- today, and a case written against the mechanism would pass a future
+    -- invalidation that worked some other way.
+    ---------------------------------------------------------------------------
+
+    describe("the id-rewriting rungs and the fingerprint cache", function()
+        -- GetBucketHashes hands back the cache's own table, so a stale read and
+        -- a fresh one taken after it would be the same object and any
+        -- comparison between them would hold by aliasing. Copied at the read.
+        local function snapshotBuckets()
+            local copy = {}
+            for k, v in pairs(GBL:GetBucketHashes(guildData)) do copy[k] = v end
+            return copy
+        end
+
+        -- Derived rather than spelled: 6 is BUCKET_HOURS in src/Fingerprint.lua
+        -- and only BUCKET_SECONDS is exported (#120).
+        local function bucketOf(slot)
+            return math.floor(slot / (GBL.BUCKET_SECONDS / 3600))
+        end
+
+        it("MigrateRepairEpochTimestamps invalidates the map it stranded", function()
+            -- The epoch-0 shape #93 tracks: an invalid timestamp whose id
+            -- carries slot 0 as well, so nothing is recoverable from the id and
+            -- the rung stamps GetServerTime() and rebuilds the id at the
+            -- current slot. The record count never moves, which is the defect.
+            guildData.schemaVersion = 7
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall",
+                itemID = 12345, count = 5, tab = 1,
+                timestamp = 0, id = "withdraw|Thrall|12345|5|1|0:0",
+                _occurrence = 0,
+            })
+
+            local staleHash = GBL:GetDataHash(guildData)
+            local staleBuckets = snapshotBuckets()
+            assert.is_number(staleBuckets[0], "the fixture's id must land in bucket 0")
+
+            GBL:MigrateRepairEpochTimestamps(guildData)
+
+            -- Non-degenerate: the rung really rewrote the id. Without this the
+            -- two assertions below could pass over a fixture the rung left
+            -- alone, on a cache cleared for some unrelated reason.
+            assert.are_not.equals("withdraw|Thrall|12345|5|1|0:0",
+                guildData.transactions[1].id)
+
+            assert.are_not.equals(staleHash, GBL:GetDataHash(guildData))
+            assert.are_not.same(staleBuckets, GBL:GetBucketHashes(guildData))
+        end)
+
+        it("leaves a warm cache alone for a guild it had nothing to repair", function()
+            -- Why both resets are conditional rather than unconditional.
+            -- ComputeBucketHashes walks every record and hashes each id, which
+            -- is the cost #115 was about, and the ladder runs again at the
+            -- roster-warm retrigger. A rung that repaired nothing stranded
+            -- nothing and must not throw the map away. GetBucketHashes hands
+            -- back its own table, so the same object returning is the cache
+            -- having survived.
+            guildData.schemaVersion = 7
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall",
+                itemID = 12345, count = 5, tab = 1,
+                timestamp = 475100 * 3600,
+                id = "withdraw|Thrall|12345|5|1|475100:0",
+                _occurrence = 0,
+            })
+
+            local warm = GBL:GetBucketHashes(guildData)
+
+            GBL:MigrateRepairEpochTimestamps(guildData)
+
+            assert.equals(8, guildData.schemaVersion)
+            assert.is_true(warm == GBL:GetBucketHashes(guildData),
+                "the cache was cleared for a guild with nothing to repair")
+        end)
+
+        it("MigrateNormalizeStoredRealms invalidates the map it stranded", function()
+            -- A realm with a space in it, which is what this rung exists for.
+            -- The id moves because ComputeTxHash hashes the player field, while
+            -- the time slot inside the id does not, so the bucket KEY is the
+            -- same on both sides and only that bucket's HASH moves. A
+            -- comparison of key sets would miss this one entirely.
+            guildData.schemaVersion = 9
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall-Aerie Peak",
+                itemID = 12345, count = 5, tab = 1,
+                timestamp = 475100 * 3600,
+                id = "withdraw|Thrall-Aerie Peak|12345|5|1|475100:0",
+                _occurrence = 0,
+            })
+
+            local staleHash = GBL:GetDataHash(guildData)
+            local staleBuckets = snapshotBuckets()
+            local key = bucketOf(475100)
+            assert.is_number(staleBuckets[key])
+
+            GBL:MigrateNormalizeStoredRealms(guildData)
+
+            assert.equals("Thrall-AeriePeak", guildData.transactions[1].player)
+            assert.are_not.equals("withdraw|Thrall-Aerie Peak|12345|5|1|475100:0",
+                guildData.transactions[1].id)
+
+            local fresh = GBL:GetBucketHashes(guildData)
+            assert.are_not.equals(staleHash, GBL:GetDataHash(guildData))
+            assert.is_number(fresh[key])
+            assert.are_not.equals(staleBuckets[key], fresh[key])
+        end)
+
+        it("invalidates for a guild whose seenTxHashes is not a table", function()
+            -- The rebuild above the reset is gated on seenTxHashes being a
+            -- table as well as on the rewrite, and the reset must not be: the
+            -- ids moved either way, and the stale map is what a HELLO
+            -- advertises. Folding the reset into that condition passes every
+            -- other case in this file.
+            guildData.schemaVersion = 9
+            guildData.seenTxHashes = nil
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall-Aerie Peak",
+                itemID = 12345, count = 5, tab = 1,
+                timestamp = 475100 * 3600,
+                id = "withdraw|Thrall-Aerie Peak|12345|5|1|475100:0",
+                _occurrence = 0,
+            })
+
+            local staleHash = GBL:GetDataHash(guildData)
+
+            GBL:MigrateNormalizeStoredRealms(guildData)
+
+            assert.are_not.equals("withdraw|Thrall-Aerie Peak|12345|5|1|475100:0",
+                guildData.transactions[1].id)
+            assert.are_not.equals(staleHash, GBL:GetDataHash(guildData))
+        end)
+
+        it("leaves a warm cache alone when the rung rewrote no record id", function()
+            -- The rung 10 twin of the case above, and the reason its reset reads
+            -- recordsRewritten rather than the `rewrites` counter beside it:
+            -- that counter also moves for a playerRealms entry and for a
+            -- scannedBy field, neither of which touches an id. Keying the reset
+            -- on it discards a warm map for a guild whose records never moved,
+            -- and the whole suite stayed green when that was tried.
+            guildData.schemaVersion = 9
+            guildData.playerRealms = { Thrall = "Aerie Peak" }
+            table.insert(guildData.transactions, {
+                type = "withdraw", player = "Thrall-Stormrage",
+                itemID = 12345, count = 5, tab = 1,
+                timestamp = 475100 * 3600,
+                id = "withdraw|Thrall-Stormrage|12345|5|1|475100:0",
+                _occurrence = 0,
+            })
+
+            local warm = GBL:GetBucketHashes(guildData)
+
+            local rewrites = GBL:MigrateNormalizeStoredRealms(guildData)
+
+            -- Non-degenerate in both directions: the rung really did work, and
+            -- it really did leave every id alone.
+            assert.is_true(rewrites > 0, "the fixture gave the rung nothing to do")
+            assert.equals("AeriePeak", guildData.playerRealms.Thrall)
+            assert.equals("withdraw|Thrall-Stormrage|12345|5|1|475100:0",
+                guildData.transactions[1].id)
+
+            assert.is_true(warm == GBL:GetBucketHashes(guildData),
+                "the cache was cleared for a guild whose record ids never moved")
+        end)
+
+        it("holds every id-rewriting rung in the ladder to the same contract", function()
+            -- Structural on purpose: it reads which rungs rewrite an id out of
+            -- src/Core.lua rather than from a list kept by hand, so a rung added
+            -- later joins this case without anyone remembering to. What it
+            -- cannot see is whether a reset is reachable, which is what the
+            -- behavioural cases above are for. It also reds for a refactor
+            -- that moves the reset into a shared helper, and that is wanted:
+            -- such a refactor changes the shape of the contract, so it should
+            -- be read rather than assumed to be equivalent.
+            local fh = io.open("src/Core.lua", "rb")
+            assert.is_not_nil(fh, "could not read src/Core.lua, so this proves nothing")
+            local source = fh:read("*a")
+            fh:close()
+
+            -- One pass, tracking which GBL function each line sits in. Comment
+            -- lines are skipped so the prose above a rung cannot answer for its
+            -- body, and both patterns are anchored on the statement rather than
+            -- the name so a mention in a sentence does not count.
+            local writesId, resets, current = {}, {}, nil
+            for line in source:gmatch("[^\r\n]+") do
+                local fn = line:match("^function GBL:([%w_]+)")
+                if fn then current = fn end
+                if current and not line:match("^%s*%-%-") then
+                    if line:match("record%.id%s*=") then writesId[current] = true end
+                    if line:match("ResetHashCache%s*%(") then resets[current] = true end
+                end
+            end
+
+            local rewriters = {}
+            for _, rung in ipairs(LADDER) do
+                if writesId[rung.name] then rewriters[#rewriters + 1] = rung.name end
+            end
+
+            -- Pinned as a list rather than a count, and this half guards the
+            -- dangerous direction: if a refactor routes the id rewrites through
+            -- a shared helper, the scan finds nothing, the loop below runs zero
+            -- times and the case passes having checked nothing at all.
+            assert.same({
+                "MigrateOccurrenceScheme",
+                "MigrateSchemaV2ToV3",
+                "MigrateOccurrenceToPerSlot",
+                "MigrateDeduplicateRecords",
+                "MigrateCrossSlotDedup",
+                "MigrateRepairEpochTimestamps",
+                "MigrateNormalizeStoredRealms",
+            }, rewriters)
+
+            for _, name in ipairs(rewriters) do
+                assert.is_true(resets[name] or false,
+                    name .. " rewrites record.id and never calls ResetHashCache (#265)")
+            end
+        end)
+    end)
 end)
