@@ -547,7 +547,7 @@ before relying on it.
 `HandleSyncData` increments `itemDuped` when `reconstructSyncRecord` returns false (`src/Sync.lua:2143`,
 money at `:2169`). No log, no counter, no warning. So total rejection is indistinguishable from perfect
 convergence: the `Redundancy from <peer>` line would read 100% duped, which the decision rule in
-`CLAUDE.md` reads as "the bucket filter is doing most of the work, skip." Every redundancy reading
+`.claude/rules/sync.md` reads as "the bucket filter is doing most of the work, skip." Every redundancy reading
 taken so far has been inflated by the rejection rate.
 
 **Verdict: split across two issues.** #68 hardens intake going forward: repair before rejection

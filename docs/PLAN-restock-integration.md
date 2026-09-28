@@ -173,7 +173,7 @@ authoritative and its version column as historical.
     purchase per click. No unattended sweep is possible),
   - `ResetRestockSearch`.
   Register the auction-house events lazily in Start and unregister them in Reset; the handlers
-  guard on state (the live set and their guards are in `src/Restock.lua` and the CLAUDE.md bullet).
+  guard on state (the live set and their guards are in `src/Restock.lua` and its bullet in `.claude/rules/restock.md`).
 - Tests `spec/restock_search_spec.lua` (pure): reset wipes the right fields; next-item skip logic
   (bought, skipped, missing row); result-row pairing by itemID; a stale `searchGen` callback is
   dropped; budget copper math. The Auctionator and AH calls stay fire-and-forget (guarded, not
