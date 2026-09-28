@@ -42,9 +42,12 @@
 # spec/ui/changelog_spec.lua stays mapped under area: ui, because the stamp
 # never edits it: it still catches real changelog-tab work.
 #
-# The path-scoped notes under .claude/rules/ are mapped to their areas, unlike
-# CLAUDE.md: the stamp never writes them, and a PR that edits one is almost
-# always a PR about that subsystem.
+# The path-scoped notes under .claude/rules/ are unmapped too, for a different
+# reason. Each rule file is organised by subject while the areas here are
+# defined by file: sort.md holds the Scanner note (a storage file), and
+# testing.md holds notes on sort and sync specs. Mapping one to a single area
+# fires on PRs outside it, the #128 shape again, so a PR that edits a rule file
+# takes its area from the code it touches.
 #
 # sync-labels is left off in the workflow, so this only ever adds labels and
 # never removes one applied by hand.
@@ -80,7 +83,6 @@
           - 'docs/sync-logs/**'
           - 'docs/sync-bucket-analysis.md'
           - 'docs/PLAN-audit-log-upload.md'
-          - '.claude/rules/sync.md'
 
 "area: storage":
   - changed-files:
@@ -112,7 +114,6 @@
           - 'docs/sort-logs/**'
           - 'docs/PLAN-phase-b-sort-hardening.md'
           - 'docs/PLAN-overflow-stack-merge.md'
-          - '.claude/rules/sort.md'
 
 "area: restock":
   - changed-files:
@@ -125,7 +126,6 @@
           - 'spec/ui/restockview_spec.lua'
           - 'docs/PLAN-restock-integration.md'
           - 'docs/PLAN-restock-ux.md'
-          - '.claude/rules/restock.md'
 
 "area: layout":
   - changed-files:
@@ -158,7 +158,6 @@
           - 'spec/ui/tab_visibility_spec.lua'
           - 'docs/PLAN-visual-overhaul.md'
           - 'docs/PLAN-views-and-access.md'
-          - '.claude/rules/ui.md'
 
 "area: accessibility":
   - changed-files:
@@ -179,7 +178,6 @@
           - 'spec/version_spec.lua'
           - 'spec/devbuild_spec.lua'
           - 'spec/claude_md_size_spec.lua'
-          - '.claude/rules/testing.md'
           - '.busted'
           - '.luacheckrc'
           - '.pkgmeta'
