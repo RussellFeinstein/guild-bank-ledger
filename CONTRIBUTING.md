@@ -134,7 +134,7 @@ If you're touching a module that has no existing spec, adding coverage as part o
 - **Dates / times**: always `GetServerTime()`, never `time()` or `os.time()`.
 - **Item identification**: numeric `classID` / `subclassID` via `C_Item.GetItemInfoInstant()`, never localized strings.
 
-For AI-assisted development (Claude Code, Copilot, etc.), see `CLAUDE.md`. It has more detailed project-specific conventions than this contributor guide.
+For AI-assisted development (Claude Code, Copilot, etc.), see `CLAUDE.md` and the path-scoped notes under `.claude/rules/`. They have more detailed project-specific conventions than this contributor guide.
 
 ## Data model
 

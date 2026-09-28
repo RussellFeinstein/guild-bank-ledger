@@ -3,3 +3,8 @@
 # by Git for Windows' bundled bash which also handles LF correctly.
 *.sh        text eol=lf
 scripts/hooks/*  text eol=lf
+
+# Claude Code rule files open with a YAML frontmatter block that decides
+# when each one loads. Only the LF form of that block has been seen to
+# work, so a Windows checkout must not turn it into CRLF.
+.claude/rules/** text eol=lf

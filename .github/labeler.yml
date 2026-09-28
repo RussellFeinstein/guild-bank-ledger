@@ -42,6 +42,13 @@
 # spec/ui/changelog_spec.lua stays mapped under area: ui, because the stamp
 # never edits it: it still catches real changelog-tab work.
 #
+# The path-scoped notes under .claude/rules/ are unmapped too, for a different
+# reason. Each rule file is organised by subject while the areas here are
+# defined by file: sort.md holds the Scanner note (a storage file), and
+# testing.md holds notes on sort and sync specs. Mapping one to a single area
+# fires on PRs outside it, the #128 shape again, so a PR that edits a rule file
+# takes its area from the code it touches.
+#
 # sync-labels is left off in the workflow, so this only ever adds labels and
 # never removes one applied by hand.
 
@@ -170,6 +177,7 @@
           - 'spec/vendor/**'
           - 'spec/version_spec.lua'
           - 'spec/devbuild_spec.lua'
+          - 'spec/claude_md_size_spec.lua'
           - '.busted'
           - '.luacheckrc'
           - '.pkgmeta'

@@ -1224,7 +1224,7 @@ describe("Sync receive and intake", function()
                 -- Before this, a rejected record incremented the dupe counter,
                 -- so total rejection was indistinguishable from perfect
                 -- convergence: the redundancy line read 100% duped, which the
-                -- decision rule in CLAUDE.md reads as "the bucket filter is
+                -- decision rule in .claude/rules/sync.md reads as "the bucket filter is
                 -- doing the work, skip". Asserted through the emitted summary
                 -- rather than the counters, because FinishReceiving clears
                 -- those before anything outside the sync can read them.

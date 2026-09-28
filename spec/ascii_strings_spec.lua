@@ -201,7 +201,7 @@ local PIPE_CODES = {
 
 -- Literals whose pipes are data rather than display, matched on exact
 -- content so a near-miss is not silently waved through. Record ids are
--- BUILT from pipes (see the wire notes in CLAUDE.md), the record-id
+-- BUILT from pipes (see the wire notes in .claude/rules/testing.md), the record-id
 -- pattern parses that separator back out, and the hyperlink pattern is a
 -- Lua pattern rather than a display string.
 local PIPE_EXEMPT_LITERALS = {
