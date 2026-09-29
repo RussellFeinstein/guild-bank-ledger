@@ -620,6 +620,48 @@ describe("Fingerprint", function()
 
             assert.are_not.equals(hash1, hash2)
         end)
+
+        -- The dataset hash's half of the bucket case below (#276). A player
+        -- who joins another guild without relogging reads a different table,
+        -- and when the two histories hold the same number of records a
+        -- count-only key hands back the first guild's hash.
+        it("does not serve one guild's hash for another with the same count", function()
+            table.insert(guildData.transactions, {
+                id = "deposit|A|100|1|1|472222:0", timestamp = 1700000000,
+            })
+            GBL:GetDataHash(guildData)
+
+            local other = {
+                transactions = { { id = "deposit|Z|900|9|9|888888:0", timestamp = 1700200000 } },
+                moneyTransactions = {},
+            }
+            -- Non-degenerate: the two datasets really do hash differently.
+            assert.are_not.equals(GBL:ComputeDataHash(guildData), GBL:ComputeDataHash(other))
+
+            assert.equals(GBL:ComputeDataHash(other), GBL:GetDataHash(other))
+        end)
+
+        -- Keying on the table must not cost the cache itself: a fix that
+        -- compared the table without storing it would miss on every read, and
+        -- every other case here would still pass.
+        it("serves a repeat read of the same guild from the cache", function()
+            table.insert(guildData.transactions, {
+                id = "deposit|A|100|1|1|472222:0", timestamp = 1700000000,
+            })
+            GBL:GetDataHash(guildData)
+
+            local calls = 0
+            local orig = GBL.ComputeDataHash
+            GBL.ComputeDataHash = function(...)
+                calls = calls + 1
+                return orig(...)
+            end
+            local ok, err = pcall(GBL.GetDataHash, GBL, guildData)
+            GBL.ComputeDataHash = orig
+            if not ok then error(err, 0) end
+
+            assert.equals(0, calls)
+        end)
     end)
 
     ---------------------------------------------------------------------------
