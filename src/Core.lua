@@ -2995,18 +2995,20 @@ end
 --- How many hourly slots either side of a record's own slot a count for that
 --- record's cluster may sit in.
 ---
---- One number with two readers, both reading this field at call time: the
---- cleanup loop below, which is the behaviour it describes, and
+--- One number with three readers, all reading this field at call time: the
+--- cleanup loop below, which is the behaviour it describes;
 --- GBL:EventCountRideBuckets in src/Dedup.lua, which mirrors that loop so the
---- sync filter and the packer offer exactly the counts cleanup can use. Two
---- copies of the number is how the filter came to offer less than this loop uses
---- (#270), so neither reader may keep a local: a local here would leave the ride
---- set following the field while this loop kept the shipped width, and a local
---- there the reverse.
+--- packer files a count under every bucket whose records it can trim; and
+--- GBL:EventCountRidesWithBuckets beside it, which since #275 admits a count
+--- through a neighbouring bucket only when a record of its prefix inside this
+--- window is going out. Two copies of the number is how the filter came to
+--- offer less than this loop uses (#270), so no reader may keep a local: a local
+--- in any one of them leaves it at the shipped width while the others follow the
+--- field.
 ---
 --- It lives in this file rather than beside the ride set because Core.lua is the
 --- first of the two the .toc loads. That ordering is what makes the field
---- unconditionally present for both readers, so neither needs a fallback, and a
+--- unconditionally present for every reader, so none needs a fallback, and a
 --- fallback is exactly what would put the number back in two places.
 ---
 --- It does NOT govern the three other slot-drift windows in src/Dedup.lua
