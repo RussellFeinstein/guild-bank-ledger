@@ -338,6 +338,10 @@ describe("Sync send path", function()
                 assert.is_false(GBL:GetSyncStatus().sending,
                     "fixture: the teardown should end the send")
 
+                -- Queued for three seconds past its session. The teardown
+                -- zeroed the live issue time, so the figure has to come from
+                -- the value captured when the chunk was issued.
+                MockWoW.serverTime = MockWoW.serverTime + 3
                 complete(held[1])
 
                 local state = GBL:GetSyncStateForTests()
@@ -347,9 +351,40 @@ describe("Sync send path", function()
                 assert.equals(0, state.sendChunkTransmittedAt)
                 assert.equals(0, #logLines("Chunk 1 transmitted ("),
                     "the live-session line would read as part of the next session")
-                assert.equals(1, #logLines(LATE))
+                local lines = logLines(LATE)
+                assert.equals(1, #lines)
+                assert.truthy(lines[1]:find("(3.00s queue-to-wire)", 1, true), lines[1])
             end)
         end
+
+        -- The likeliest real shape: the same peer asks again after the session
+        -- ends, and since both sessions' chunks share ChatThrottleLib's queue
+        -- for that peer, the old chunk completes first. Every other case here
+        -- serves two different peers, where "same session" and "same peer"
+        -- cannot be told apart.
+        it("tells a new session with the same peer from the one that ended",
+        function()
+            seedOne()
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+            assert.equals(1, #held, "fixture: the first chunk should be queued")
+            GBL:HandleBusy("OfficerB", { reason = "combat" })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending,
+                "fixture: OfficerB's second request should be accepted")
+            assert.equals(2, #held, "fixture: the new session's chunk should be queued")
+
+            complete(held[1])
+            assert.equals(0, liveAckTimers(),
+                "the ended session's callback must not install a ticker")
+
+            fireAckTimers()
+
+            local state = GBL:GetSyncStateForTests()
+            assert.equals(0, state.sendRetryCount)
+            assert.same({}, state.chunkOutcomes[1].retryReasons)
+            assert.equals(2, sentTo("OfficerB"), "one chunk per session, no resend")
+            assert.equals(1, #logLines(LATE))
+        end)
 
         it("starts no ACK timer, retry or resend inside the next session",
         function()
