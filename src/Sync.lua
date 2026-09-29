@@ -3214,10 +3214,9 @@ function GBL:SendNextChunk()
             -- someone else now. Logged rather than dropped, because it is the
             -- only trace that a queued chunk outlived its session.
             if not syncState.sending or syncState.prepToken ~= session then
-                self:AddAuditEntry(string.format(
-                    "Chunk %d to %s transmitted after its session ended"
+                self:SyncInfo("Chunk %d to %s transmitted after its session ended"
                         .. " (%.2fs queue-to-wire)",
-                    idx, tostring(issuedTo), GetTime() - issuedAt))
+                    idx, tostring(issuedTo), GetTime() - issuedAt)
                 return
             end
             -- v0.28.4: record wire-completion time — anchor for wire-to-ACK latency
