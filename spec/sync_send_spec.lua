@@ -427,7 +427,9 @@ describe("Sync send path", function()
             assert.falsy(lines[1]:find("OfficerC", 1, true), lines[1])
         end)
 
-        it("leaves the next session's preparation to finish and send", function()
+        -- More records than one preparation tick covers, so a second session's
+        -- preparation is still running when the test acts on it.
+        local function seedPastOneTick()
             local BASE_SLOT = 475000
             for i = 1, GBL.SYNC_PREP_RECORDS_PER_TICK + 50 do
                 local slot = BASE_SLOT + i
@@ -438,6 +440,10 @@ describe("Sync send path", function()
                 })
             end
             GBL:ResetHashCache()
+        end
+
+        it("leaves the next session's preparation to finish and send", function()
+            seedPastOneTick()
             Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
             assert.equals(1, #held, "fixture: OfficerB's first chunk should be queued")
             GBL:HandleBusy("OfficerB", { reason = "combat" })
@@ -451,6 +457,39 @@ describe("Sync send path", function()
 
             assert.is_true(GBL:GetSyncStatus().sending,
                 "a dead session's ticker must not free the slot under a preparation")
+            local ended = logLines("Send complete to OfficerC")
+            assert.equals(0, #ended, ended[1])
+
+            Helpers.drainZeroDelayTimers()
+            assert.equals(2, #held, "OfficerC's first chunk should go out")
+            assert.equals("OfficerC", held[2].target)
+        end)
+
+        -- The callback is not the only thing a dead session leaves scheduled.
+        -- The inter-chunk delay an ACK sets, a NACK's resend, the gap floor
+        -- and the CTL backoff all call SendNextChunk later with no session of
+        -- their own. During the next session's preparation that call finds
+        -- the empty chunk list the accept installed.
+        it("keeps a dead session's scheduled next chunk out of the next"
+            .. " preparation", function()
+            seedPastOneTick()
+            Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
+            assert.equals(1, #held, "fixture: OfficerB's first chunk should be queued")
+            complete(held[1])
+            local before = #MockWoW.pendingTimers
+            GBL:HandleAck("OfficerB", { chunk = 1 })
+            assert.equals(before + 1, #MockWoW.pendingTimers,
+                "fixture: the ACK should schedule the next chunk")
+            local stale = MockWoW.pendingTimers[#MockWoW.pendingTimers]
+            GBL:HandleBusy("OfficerB", { reason = "combat" })
+            GBL:HandleSyncRequest("OfficerC", request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "fixture: OfficerC's preparation should still be running")
+
+            stale.callback()
+
+            assert.is_true(GBL:GetSyncStatus().sending,
+                "a dead session's next chunk must not free the slot under a preparation")
             local ended = logLines("Send complete to OfficerC")
             assert.equals(0, #ended, ended[1])
 
