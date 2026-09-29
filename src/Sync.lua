@@ -4044,8 +4044,9 @@ function GBL:FinishReceiving(sender, completed)
     local chunksGot = syncState.receiveGot
 
     -- CRITICAL: If any IDs were normalized in-place, the hash cache is stale
-    -- (keyed by txCount which didn't change). Must reset before GetDataHash
-    -- or the next HELLO sends a stale hash → infinite sync loop.
+    -- (its key, the guild table and the record count, did not move). Must
+    -- reset before GetDataHash or the next HELLO sends a stale hash →
+    -- infinite sync loop.
     if totalNormalized > 0 then
         self:ResetHashCache()
     end

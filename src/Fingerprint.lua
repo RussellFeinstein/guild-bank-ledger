@@ -53,11 +53,23 @@ end
 -- Dataset fingerprints
 ------------------------------------------------------------------------
 
--- Session cache for ComputeDataHash (invalidated when txCount changes)
+-- Session cache for ComputeDataHash, keyed like bucketCache below: the
+-- guildData table as well as the record count. A player who joins another
+-- guild without relogging reads a different table, and a count-only key
+-- answered for it with the previous guild's hash whenever the two histories
+-- held the same number of records (#276).
 local hashCache = {
-    dataHash = 0,
+    source = nil,
     txCount = -1,
+    dataHash = 0,
 }
+
+--- True when a session cache holds this guild's table at this record count.
+-- The one reading of the key both caches in this file share. An id rewritten
+-- in place keeps the count, so it cannot see that; those callers reset.
+local function cacheHolds(cache, guildData, count)
+    return cache.source == guildData and cache.txCount == count
+end
 
 --- Compute the global dataHash for a guild's entire dataset.
 -- XORs the djb2 hash of every record.id across both transaction arrays.
@@ -76,14 +88,16 @@ function GBL:ComputeDataHash(guildData)
     return h
 end
 
---- Get the cached dataHash, recomputing only when txCount changes.
+--- Get the cached dataHash, recomputing when the guild or its record count
+-- changes.
 -- @param guildData table Guild data from AceDB
 -- @return number Cached or freshly computed dataHash
 function GBL:GetDataHash(guildData)
     if not guildData then return 0 end
     local count = #guildData.transactions + #guildData.moneyTransactions
-    if count ~= hashCache.txCount then
+    if not cacheHolds(hashCache, guildData, count) then
         hashCache.dataHash = self:ComputeDataHash(guildData)
+        hashCache.source = guildData
         hashCache.txCount = count
     end
     return hashCache.dataHash
@@ -156,13 +170,11 @@ function GBL:BucketKeyForTimeSlot(slot)
     return math.floor(slot / BUCKET_HOURS)
 end
 
--- Session cache for ComputeBucketHashes.
---
--- Keyed by the guildData table itself as well as the record count. GetDataHash
--- keys on the count alone, which is survivable for a whole-dataset hash, but
--- this map decides which buckets a sync offers: handing one guild's map to
--- another whose record count happened to match would offer the wrong records.
--- Comparing the table identity costs nothing and removes the question.
+-- Session cache for ComputeBucketHashes, on the same key as hashCache: the
+-- guildData table itself as well as the record count. This map decides which
+-- buckets a sync offers, so handing one guild's map to another whose record
+-- count happened to match would offer the wrong records. Comparing the table
+-- identity costs nothing and removes the question.
 local bucketCache = {
     source = nil,
     txCount = -1,
@@ -216,7 +228,7 @@ end
 function GBL:GetBucketHashes(guildData)
     if not guildData then return {} end
     local count = #guildData.transactions + #guildData.moneyTransactions
-    if bucketCache.source ~= guildData or bucketCache.txCount ~= count then
+    if not cacheHolds(bucketCache, guildData, count) then
         bucketCache.buckets = self:ComputeBucketHashes(guildData)
         bucketCache.source = guildData
         bucketCache.txCount = count
@@ -261,7 +273,7 @@ end
 function GBL:_FreshBucketHashes(guildData)
     if not guildData then return nil end
     local count = #guildData.transactions + #guildData.moneyTransactions
-    if bucketCache.source == guildData and bucketCache.txCount == count then
+    if cacheHolds(bucketCache, guildData, count) then
         return bucketCache.buckets
     end
     return nil
@@ -445,7 +457,10 @@ end
 -- Both the dataset hash and the bucket map are invalidated together: they are
 -- computed from the same record ids, so anything that strands one strands the
 -- other, and every existing caller already fires at exactly those moments.
+-- The count of -1 is what forces the next read to recompute; the source is
+-- cleared as well so neither cache holds a guild table past a reset.
 function GBL:ResetHashCache()
+    hashCache.source = nil
     hashCache.dataHash = 0
     hashCache.txCount = -1
     bucketCache.source = nil

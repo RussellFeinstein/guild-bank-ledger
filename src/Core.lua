@@ -1333,11 +1333,11 @@ function GBL:MigrateRepairEpochTimestamps(guildData)
         end
 
         -- Every id rebuilt above changed a bucket hash and the dataHash,
-        -- and neither cache can see it: both key on the record count,
-        -- which a rewrite in place does not move (#265). Conditional like
-        -- the rebuild, because clearing a warm bucket map costs a full
-        -- walk over the history (#115) and a guild this rung did not
-        -- touch should not pay for it.
+        -- and neither cache can see it: both key on the guild table and
+        -- the record count, and a rewrite in place moves neither (#265).
+        -- Conditional like the rebuild, because clearing a warm bucket map
+        -- costs a full walk over the history (#115) and a guild this rung
+        -- did not touch should not pay for it.
         self:ResetHashCache()
     end
 

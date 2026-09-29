@@ -439,9 +439,10 @@ which is how the entry-version read was found.
 
 Two limits the isolation left, both filed with their measurements, and one of them is now closed.
 **#265, fixed in v0.41.11**: rungs 7 and 10 rewrote `record.id` and never called
-`ResetHashCache`, and both caches in `src/Fingerprint.lua` key on the record count, which a
-rewrite in place does not move, so an id rewrite was invisible to them and the guild advertised a
-fingerprint of a dataset that no longer existed. Each rung resets at its exit now, conditional on
+`ResetHashCache`, and both caches in `src/Fingerprint.lua` key on the guild table and the record
+count (the dataset hash has keyed on the table as well only since #276), and a rewrite in place
+moves neither, so an id rewrite was invisible to them and the guild advertised a fingerprint of a
+dataset that no longer existed. Each rung resets at its exit now, conditional on
 the same flag that gates its `seenTxHashes` rebuild. Beside the two behavioural pins,
 `spec/schema_version_spec.lua` section 8 carries a structural case that reads which ladder rungs
 write `record.id` out of `src/Core.lua` and holds each of them to the contract, so a rung added

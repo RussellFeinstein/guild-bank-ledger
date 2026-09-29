@@ -710,10 +710,10 @@ describe("schemaVersion", function()
     ---------------------------------------------------------------------------
     -- 8. The id-rewriting rungs and the fingerprint cache (#265)
     --
-    -- Both caches in src/Fingerprint.lua key on the record count, and the
-    -- contract stated beside GetBucketHashes is that a caller which rewrites an
-    -- id in place calls ResetHashCache, because the count does not move and
-    -- nothing else can tell either cache its answer is now wrong. Five rungs
+    -- Both caches in src/Fingerprint.lua key on the guild table and the record
+    -- count, and the contract stated beside GetBucketHashes is that a caller
+    -- which rewrites an id in place calls ResetHashCache, because neither moves
+    -- and nothing else can tell either cache its answer is now wrong. Five rungs
     -- honoured it and two did not, so a guild migrated at the roster-warm
     -- retrigger advertised a dataHash and a bucket map describing ids no record
     -- carried. The third case is the one that makes rung 12 red instead of
