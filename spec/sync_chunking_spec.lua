@@ -346,6 +346,36 @@ describe("Sync chunking", function()
             return ec
         end
 
+        -- Real money records: no itemID, so the id takes buildPrefix's money
+        -- form, type|player|amount|. bucketRecords with a money kind still
+        -- builds item-shaped records, which says which list a record sits in
+        -- and nothing about the money key a count has to match (#275).
+        local function bucketMoney(bucket, n, firstAmount, offset)
+            local list = {}
+            local slot = slotOf(bucket, offset)
+            for i = 1, n do
+                local amount = firstAmount + i
+                list[i] = {
+                    type = "withdrawal",
+                    player = "Alice-Stormrage",
+                    amount = amount,
+                    timestamp = slot * 3600 + i,
+                    id = ("withdrawal|Alice-Stormrage|%d|%d:0"):format(amount, slot),
+                }
+            end
+            return list
+        end
+
+        local function moneyCounts(bucket, n, firstAmount, offset)
+            local ec = {}
+            local slot = slotOf(bucket, offset)
+            for i = 1, n do
+                ec[("withdrawal|Alice-Stormrage|%d|%d"):format(firstAmount + i, slot)] =
+                    { count = i, asOf = slot * 3600 }
+            end
+            return ec
+        end
+
         local function concatLists(...)
             local out = {}
             for _, list in ipairs({ ... }) do
@@ -830,6 +860,159 @@ describe("Sync chunking", function()
             assert.is_true(entryChunk <= firstRecordChunk,
                 ("the count went out in chunk %d, behind the records in chunk %d")
                     :format(entryChunk or -1, firstRecordChunk or -1))
+        end)
+
+        -----------------------------------------------------------------------
+        -- #275, put to the serve path. #270 offered a boundary count to every
+        -- session carrying its neighbouring bucket, and on the measured store
+        -- most of those carried nothing the receiver's cleanup could apply it
+        -- to. A neighbour now admits a count only when a record of its prefix
+        -- within one hour of its slot is going out. These enter through
+        -- HandleSyncRequest because the record index is built by stage 5, and
+        -- a direct call to the predicate would assert around the one thing
+        -- being claimed: that the serve hands the filter what it sent.
+        -----------------------------------------------------------------------
+
+        local function seed(list, records)
+            for _, rec in ipairs(records) do
+                rec.scanTime = rec.timestamp
+                rec.scannedBy = "Alice-Stormrage"
+                list[#list + 1] = rec
+            end
+        end
+
+        --- Serve a bucket-filtered request and read the wire: the first chunk
+        --- carrying `key`, and the first chunk carrying an item or a money
+        --- record.
+        local function serveAndRead(key)
+            -- An empty bucketHashes map takes the bucket-filtered path and
+            -- reads every one of our buckets as differing.
+            Sync.serveRequest(GBL, "PeerA", request({ bucketHashes = {} }))
+            Sync.drainSend(GBL, "PeerA")
+
+            local entryChunk, firstTx, firstMoney
+            for i = 1, #MockAce.sentCommMessages do
+                local ok, data = GBL:Deserialize(MockAce.sentCommMessages[i].text)
+                if ok and data.type == "SYNC_DATA" then
+                    if data.eventCounts and data.eventCounts[key]
+                        and not entryChunk then
+                        entryChunk = data.chunk
+                    end
+                    if data.transactions and #data.transactions > 0
+                        and not firstTx then
+                        firstTx = data.chunk
+                    end
+                    if data.moneyTransactions and #data.moneyTransactions > 0
+                        and not firstMoney then
+                        firstMoney = data.chunk
+                    end
+                end
+            end
+            return entryChunk, firstTx, firstMoney
+        end
+
+        -- The 5 of the 22 that the slot-only reading #275 was filed with would
+        -- have kept: the neighbour's hour holds a record, of another item.
+        it("keeps a neighbour's count off the wire when its hour holds only another prefix",
+        function()
+            -- Records of items 191401..191403 in the last hour of 82202.
+            seed(guildData.transactions, bucketRecords(82202, 3, 191400, nil, 5))
+            -- A count for item 191301 in the first hour of 82203, where this
+            -- guild holds no record at all, and no record of 191301 anywhere.
+            guildData.eventCounts = bucketCounts(82203, 1, 191300, nil, 0)
+            local key = next(guildData.eventCounts)
+
+            local prefix, countSlot = GBL:SplitBaseHash(key)
+            local recPrefix, recSlot = GBL:SplitBaseHash(
+                GBL:BuildTxPrefix(guildData.transactions[1])
+                    .. math.floor(guildData.transactions[1].timestamp / 3600))
+            assert.are_not.equals(prefix, recPrefix, "fixture must hold another prefix")
+            assert.equals(1, countSlot - recSlot,
+                "fixture must put the other prefix inside the count's window")
+
+            local entryChunk, firstTx = serveAndRead(key)
+            assert.is_not_nil(firstTx, "the records never went out")
+            assert.is_nil(entryChunk,
+                "a count with nothing to trim in this send went out through the neighbour")
+        end)
+
+        -- One hour either side of the count, and not two.
+        it("keeps a neighbour's count off the wire when its prefix is two hours away",
+        function()
+            -- Records of items 191301..191303 in hour 4 of 82202.
+            seed(guildData.transactions, bucketRecords(82202, 3, 191300, nil, 4))
+            -- A count for 191301 in hour 0 of 82203, two hours on.
+            guildData.eventCounts = bucketCounts(82203, 1, 191300, nil, 0)
+            local key = next(guildData.eventCounts)
+
+            local prefix, countSlot = GBL:SplitBaseHash(key)
+            assert.equals(prefix, GBL:BuildTxPrefix(guildData.transactions[1]),
+                "fixture must hold the count's own prefix")
+            assert.equals(2,
+                countSlot - math.floor(guildData.transactions[1].timestamp / 3600),
+                "fixture must sit exactly one hour outside the window")
+            assert.are_not.equals(
+                GBL:BucketKeyForRecord(guildData.transactions[1]),
+                GBL:BucketKeyForEventCount(key),
+                "fixture must straddle a bucket boundary")
+
+            local entryChunk, firstTx = serveAndRead(key)
+            assert.is_not_nil(firstTx, "the records never went out")
+            assert.is_nil(entryChunk,
+                "a count two hours from its prefix went out through the neighbour")
+        end)
+
+        -- The record index has to cover the money list as well, and a money
+        -- key has its own shape.
+        it("puts a money count one hour across a bucket boundary on the wire",
+        function()
+            -- Withdrawals of 5001..5003 in the last hour of 82202.
+            seed(guildData.moneyTransactions, bucketMoney(82202, 3, 5000, 5))
+            -- A count for the 5001 withdrawal an hour later, in 82203.
+            guildData.eventCounts = moneyCounts(82203, 1, 5000, 0)
+            local key = next(guildData.eventCounts)
+
+            local rec = guildData.moneyTransactions[1]
+            assert.equals(rec.id,
+                GBL:BuildTxPrefix(rec) .. math.floor(rec.timestamp / 3600) .. ":0",
+                "fixture id must be the one the ledger would build")
+            local prefix, countSlot = GBL:SplitBaseHash(key)
+            assert.equals(prefix, GBL:BuildTxPrefix(rec),
+                "fixture must hold the count's own prefix")
+            assert.equals(1, countSlot - math.floor(rec.timestamp / 3600),
+                "fixture must be exactly one hour across the boundary")
+
+            local entryChunk, _, firstMoney = serveAndRead(key)
+            assert.is_not_nil(firstMoney, "the money records never went out")
+            assert.is_not_nil(entryChunk,
+                "a money count one hour across the boundary never reached the wire")
+            assert.is_true(entryChunk <= firstMoney,
+                ("the count went out in chunk %d, behind the records in chunk %d")
+                    :format(entryChunk or -1, firstMoney or -1))
+        end)
+
+        -- The own bucket is unaffected: an interior count rides with its own
+        -- bucket whether or not a record of its hour is going out, as it did
+        -- before #270.
+        it("still sends an interior count with its own bucket when nothing is in its hour",
+        function()
+            -- Records of items 191401..191403 in hour 1 of 82202.
+            seed(guildData.transactions, bucketRecords(82202, 3, 191400, nil, 1))
+            -- A count for item 191301, which has no record, in hour 3 of 82202.
+            guildData.eventCounts = bucketCounts(82202, 1, 191300, nil, 3)
+            local key = next(guildData.eventCounts)
+            assert.equals(GBL:BucketKeyForRecord(guildData.transactions[1]),
+                GBL:BucketKeyForEventCount(key), "fixture must share the bucket")
+            assert.equals(1, #GBL:EventCountRideBuckets(key),
+                "fixture must be an interior count")
+
+            local entryChunk, firstTx = serveAndRead(key)
+            assert.is_not_nil(firstTx, "the records never went out")
+            assert.is_not_nil(entryChunk,
+                "an interior count stopped riding with its own bucket")
+            assert.is_true(entryChunk <= firstTx,
+                ("the count went out in chunk %d, behind the records in chunk %d")
+                    :format(entryChunk or -1, firstTx or -1))
         end)
 
         -- The fallback path: a request with no bucketHashes leaves the serve

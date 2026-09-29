@@ -543,6 +543,51 @@ describe("Dedup", function()
         end)
     end)
 
+    -- The key a count for a record's own hour carries, read off the record id
+    -- (#275). The serve builds a set of these for the records going out, and
+    -- the count filter looks a boundary count up in it across its window.
+    describe("BaseHashForRecord", function()
+        it("drops the occurrence from an item record id", function()
+            assert.equals("withdraw|Thrall|12345|5|1|100",
+                GBL:BaseHashForRecord({ id = "withdraw|Thrall|12345|5|1|100:3" }))
+        end)
+
+        it("drops the occurrence from a money record id", function()
+            assert.equals("withdrawal|Thrall|50000|100",
+                GBL:BaseHashForRecord({ id = "withdrawal|Thrall|50000|100:0" }))
+        end)
+
+        -- It has to read the same slot the packer files the record under, or a
+        -- count admitted through this record could be filed under a bucket the
+        -- send never reaches and fall back into the trailing carriers.
+        it("reads the slot BucketKeyForRecord files the record under", function()
+            for _, id in ipairs({
+                "deposit|Alice-Stormrage|191301|20|3|493217:0",
+                "repair|Alice-Stormrage|3500|493218:2",
+            }) do
+                local rec = { id = id, timestamp = 1 }
+                local _, slot = GBL:SplitBaseHash(GBL:BaseHashForRecord(rec))
+                assert.equals(GBL:BucketKeyForRecord(rec),
+                    GBL:BucketKeyForTimeSlot(slot), id)
+            end
+        end)
+
+        -- Nil where BucketKeyForRecord would fall back to the timestamp: such a
+        -- record has no slot in its id to match a count key against. The
+        -- migrations' own gsub keeps an unparseable id whole, which is a
+        -- different contract, and they do not call this.
+        it("returns nil for an id with no slot and occurrence", function()
+            assert.is_nil(GBL:BaseHashForRecord({ id = "legacy-hash" }))
+            assert.is_nil(GBL:BaseHashForRecord({ id = "withdraw|Thrall|100" }))
+            assert.is_nil(GBL:BaseHashForRecord({ id = "100:0" }))
+        end)
+
+        it("returns nil for a record with no id, or no record", function()
+            assert.is_nil(GBL:BaseHashForRecord({ timestamp = 1 }))
+            assert.is_nil(GBL:BaseHashForRecord(nil))
+        end)
+    end)
+
     describe("CountStoredAtSlot", function()
         it("counts sequential occurrences", function()
             guildData.seenTxHashes["BH:0"] = 100
@@ -1205,22 +1250,78 @@ describe("Dedup", function()
                 "deposit|Jaina|99999|5|2|200", { [16] = true }))
         end)
 
-        -- The #270 widening. A count one hour across a bucket boundary from the
-        -- records that can use it was dropped by the exact test above, so this
-        -- client's cleanup found it and no session could ever offer it: 46 of
-        -- 16,644 on the measured store. CleanupWithEventCounts reaches a count
-        -- at slot -1 .. slot +1 of a record's own slot, so a record in the
-        -- neighbouring bucket can use this entry and the entry has to ride.
-        it("keeps a boundary entry when only the neighbouring bucket is listed",
+        -- The #270 widening, narrowed by #275. A count one hour across a bucket
+        -- boundary from the records that can use it was dropped by the exact
+        -- test above, so this client's cleanup found it and no session could
+        -- ever offer it: 46 of 16,644 on the measured store. CleanupWithEventCounts
+        -- reaches a count at slot -1 .. slot +1 of a record's own slot, so a
+        -- record in the neighbouring bucket can use this entry. Since #275 the
+        -- neighbour admits it only when a record the count can trim is in the
+        -- send, which is what the third argument says: the base hashes of the
+        -- records going out, keyed prefix .. slot like the count itself.
+        local PREFIX = "withdraw|Thrall|12345|5|1|"
+
+        it("keeps a boundary entry when the neighbour sends a record it can trim",
         function()
-            -- slot 102 is the first hour of bucket 17, so slot 101 in bucket 16
-            -- can use it.
+            -- slot 102 is the first hour of bucket 17, and a record of its
+            -- prefix at slot 101 in bucket 16 is in the send.
             assert.is_true(GBL:EventCountRidesWithBuckets(
-                "withdraw|Thrall|12345|5|1|102", { [16] = true }))
-            -- slot 101 is the last hour of bucket 16, so slot 102 in bucket 17
-            -- can use it.
+                PREFIX .. 102, { [16] = true }, { [PREFIX .. 101] = true }))
+            -- slot 101 is the last hour of bucket 16, and a record of its
+            -- prefix at slot 102 in bucket 17 is in the send.
             assert.is_true(GBL:EventCountRidesWithBuckets(
-                "withdraw|Thrall|12345|5|1|101", { [17] = true }))
+                PREFIX .. 101, { [17] = true }, { [PREFIX .. 102] = true }))
+        end)
+
+        -- The slot-only reading #275 was filed with, and why it was not built:
+        -- a record of some other transaction in the same hour says nothing
+        -- about whether the count can be used. On the live store that reading
+        -- kept 3,870 of #270's 4,328 neighbour admissions, because most hours
+        -- on a bucket edge hold some record.
+        it("drops a boundary entry when the neighbour's record in its window is another prefix",
+        function()
+            assert.is_false(GBL:EventCountRidesWithBuckets(
+                PREFIX .. 102, { [16] = true },
+                { ["deposit|Jaina|99999|5|2|101"] = true }))
+        end)
+
+        -- One hour either side, and not two: the window is the cleanup's.
+        it("drops a boundary entry when its prefix is in the neighbour two hours away",
+        function()
+            -- slot 100 is two hours below 102 and in bucket 16 like 101.
+            assert.is_false(GBL:EventCountRidesWithBuckets(
+                PREFIX .. 102, { [16] = true }, { [PREFIX .. 100] = true }))
+            -- and 103 is two hours above 101, in bucket 17 like 102.
+            assert.is_false(GBL:EventCountRidesWithBuckets(
+                PREFIX .. 101, { [17] = true }, { [PREFIX .. 103] = true }))
+        end)
+
+        -- With no record index the predicate cannot know that anything the
+        -- count can trim is going out, so a neighbour admits nothing. Stage 6
+        -- always passes one on the bucket path; this is the answer for a
+        -- caller that does not.
+        it("drops a boundary entry for a neighbour when no record index is given",
+        function()
+            assert.is_false(GBL:EventCountRidesWithBuckets(
+                PREFIX .. 102, { [16] = true }))
+            assert.is_false(GBL:EventCountRidesWithBuckets(
+                PREFIX .. 101, { [17] = true }))
+        end)
+
+        -- The own bucket is unaffected in both directions: an entry rides with
+        -- its own bucket whether or not a record of its hour is going out,
+        -- which is the rule that held before #270.
+        it("keeps an entry whose own bucket is listed, with nothing in its window",
+        function()
+            -- interior of bucket 16
+            assert.is_true(GBL:EventCountRidesWithBuckets(
+                PREFIX .. 100, { [16] = true }, {}))
+            -- first hour of bucket 17, own bucket listed
+            assert.is_true(GBL:EventCountRidesWithBuckets(
+                PREFIX .. 102, { [17] = true }, {}))
+            -- last hour of bucket 16, own bucket listed
+            assert.is_true(GBL:EventCountRidesWithBuckets(
+                PREFIX .. 101, { [16] = true }, {}))
         end)
 
         -- The other half of the same widening, and the reason it is a window
@@ -1290,17 +1391,20 @@ describe("Dedup", function()
         end)
 
         -- Both readers must agree about the own bucket, or the packer could
-        -- file an entry under a bucket the collector never selected.
+        -- file an entry under a bucket the filter never selected.
         --
-        -- What this no longer claims, and the claim is why it was rewritten
-        -- rather than extended (#270): the predicate does NOT answer from this
-        -- reading alone any more, it answers from the ride set below, of which
-        -- this is one member. The old version of this case derived its expected
-        -- answer from this function and passed either way, because its one
-        -- boundary key had its own bucket in the filter. A case that keeps
-        -- passing while the sentence above it stops being true is worth less
-        -- than no case at all.
-        it("is one member of the ride set the predicate answers from", function()
+        -- The predicate answers from neither this reading alone (the defect
+        -- #270 fixed) nor the ride set alone (the over-inclusion #275 fixed):
+        -- an entry rides with its own bucket, and with a neighbour only when a
+        -- record it can trim is going out there. What this pins is the bound
+        -- that keeps #114's ordering: whatever the record index holds, the
+        -- predicate never admits an entry for a bucket outside its ride set,
+        -- because PrepareChunks files the entry under that set and has nowhere
+        -- else to emit it ahead of the records. With a record of its prefix in
+        -- every window hour of the candidate it reaches the whole set, and
+        -- with none it is back to its own bucket.
+        it("admits within the ride set only, and all of it when the send can use it",
+        function()
             local keys = {
                 "withdraw|Thrall|12345|5|1|100",   -- interior of bucket 16
                 "deposit|Jaina|99999|5|2|200",     -- interior of bucket 33
@@ -1322,38 +1426,59 @@ describe("Dedup", function()
                         "the own bucket must be in the ride set: " .. key)
                 end
 
-                -- The predicate is membership of the ride set, for every
-                -- candidate bucket, not just the ones a fixture happens to pick.
+                -- For every candidate bucket, not just the ones a fixture
+                -- happens to pick.
+                local prefix, slot = GBL:SplitBaseHash(key)
+                local radius = GBL.EVENT_COUNT_SLOT_RADIUS
                 for candidate = 14, 35 do
-                    local expected = false
+                    local inRide = false
                     for _, bucket in ipairs(ride or {}) do
-                        if bucket == candidate then expected = true end
+                        if bucket == candidate then inRide = true end
                     end
-                    assert.equals(expected,
-                        GBL:EventCountRidesWithBuckets(key, { [candidate] = true }),
-                        ("predicate disagreed with the ride set on %s at bucket %d")
+
+                    local everyHour = {}
+                    if slot then
+                        for s = slot - radius, slot + radius do
+                            if GBL:BucketKeyForTimeSlot(s) == candidate then
+                                everyHour[prefix .. s] = true
+                            end
+                        end
+                    end
+
+                    assert.equals(inRide,
+                        GBL:EventCountRidesWithBuckets(
+                            key, { [candidate] = true }, everyHour),
+                        ("with a record of its prefix in every window hour, %s at"
+                            .. " bucket %d should follow the ride set")
+                            :format(key, candidate))
+                    assert.equals(own ~= nil and candidate == own,
+                        GBL:EventCountRidesWithBuckets(
+                            key, { [candidate] = true }, {}),
+                        ("with nothing in its window, %s at bucket %d should"
+                            .. " ride with its own bucket only")
                             :format(key, candidate))
                 end
             end
         end)
 
         -- The discriminator the rewritten case above exists for: a key whose
-        -- own bucket is absent from the filter and whose neighbour is present
-        -- rides anyway. This is the assertion the old own-bucket basis could
-        -- not make.
+        -- own bucket is absent from the filter rides with the neighbour when a
+        -- record it can trim is going out there. This is the assertion the
+        -- own-bucket basis before #270 could not make.
         it("rides on a bucket that is not its own", function()
             local key = "withdraw|Thrall|12345|5|1|102"
             assert.equals(17, GBL:BucketKeyForEventCount(key))
-            assert.is_true(GBL:EventCountRidesWithBuckets(key, { [16] = true }),
-                "a boundary entry must ride with the neighbour that can use it")
+            assert.is_true(GBL:EventCountRidesWithBuckets(key, { [16] = true },
+                { ["withdraw|Thrall|12345|5|1|101"] = true }),
+                "a boundary entry must ride with a neighbour sending a record it can trim")
         end)
     end)
     -- One shared reading of which buckets a count can be used by (#270). The
-    -- filter and the packer both read it, because widening only the filter
-    -- would put a boundary count back in the trailing carriers #114 emptied:
-    -- PrepareChunks files an entry under a bucket and emits it at that bucket's
-    -- first record, and a boundary count's own bucket has no records in the
-    -- send.
+    -- packer indexes every entry under it, and the filter admits a subset of
+    -- it (#275), because an entry admitted outside it would land back in the
+    -- trailing carriers #114 emptied: PrepareChunks files an entry under a
+    -- bucket and emits it at that bucket's first record, and a boundary
+    -- count's own bucket has no records in the send.
     describe("EventCountRideBuckets", function()
         it("gives one bucket for a slot in the middle of a bucket", function()
             -- slot 100 -> bucket 16, and 99 and 101 are in 16 too
@@ -1469,20 +1594,32 @@ describe("Dedup", function()
                 "the cleanup window has to reach a count one slot away")
         end)
 
-        it("moves the cleanup loop and the ride set together", function()
+        -- Three readers since #275: the serve's filter looks for a record of
+        -- the count's prefix across the same window, from the count's side.
+        it("moves the cleanup loop, the ride set and the filter together", function()
             local key = boundaryCluster()
+            local prefix = GBL:SplitBaseHash(key)
+            local recordsBucket = { [GBL:BucketKeyForTimeSlot(SLOT)] = true }
+            local recordsSent = { [prefix .. SLOT] = true }
             local original = GBL.EVENT_COUNT_SLOT_RADIUS
 
             assert.equals(2, #GBL:EventCountRideBuckets(key),
                 "a boundary key rides with two buckets at the shipped radius")
+            assert.is_true(
+                GBL:EventCountRidesWithBuckets(key, recordsBucket, recordsSent),
+                "the filter admits the count one hour from a record it can trim")
 
             GBL.EVENT_COUNT_SLOT_RADIUS = 0
             local narrowed = GBL:EventCountRideBuckets(key)
+            local admitted =
+                GBL:EventCountRidesWithBuckets(key, recordsBucket, recordsSent)
             GBL:CleanupWithEventCounts(guildData)
             GBL.EVENT_COUNT_SLOT_RADIUS = original
 
             assert.equals(1, #narrowed,
                 "the ride set must read the constant, not a literal")
+            assert.is_false(admitted,
+                "the filter must read the constant, not a literal")
             assert.equals(3, #guildData.transactions,
                 "the cleanup loop must read the constant, not a literal")
         end)
