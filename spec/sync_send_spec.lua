@@ -232,30 +232,15 @@ describe("Sync send path", function()
         end
 
         local function liveAckTimers()
-            local n = 0
-            for _, t in ipairs(MockWoW.pendingTimers) do
-                if t.delay == GBL.SYNC_ACK_TIMEOUT and not t.cancelled
-                    and not t.fired then
-                    n = n + 1
-                end
-            end
-            return n
+            return Helpers.timersAt(GBL.SYNC_ACK_TIMEOUT)
         end
 
-        -- Unlike Sync.fireAckTimeout this tolerates none, because none is
-        -- exactly what the fixed code leaves behind.
+        -- Tolerates none, unlike Sync.fireAckTimeout and Helpers.fireTimersAt,
+        -- because none is exactly what the fixed code leaves behind.
         local function fireAckTimers()
             MockWoW.serverTime = MockWoW.serverTime + GBL.SYNC_ACK_TIMEOUT + 1
-            local due = {}
-            for _, t in ipairs(MockWoW.pendingTimers) do
-                if t.delay == GBL.SYNC_ACK_TIMEOUT and not t.cancelled
-                    and not t.fired then
-                    due[#due + 1] = t
-                end
-            end
-            for _, t in ipairs(due) do
-                t.fired = true
-                t.callback()
+            if liveAckTimers() > 0 then
+                Helpers.fireTimersAt(GBL.SYNC_ACK_TIMEOUT)
             end
         end
 
@@ -310,14 +295,12 @@ describe("Sync send path", function()
             { name = "sync being switched off", run = function()
                 GBL:DisableSync()
             end },
-            { name = "the 120s hard timeout", run = function()
-                for _, t in ipairs(MockWoW.pendingTimers) do
-                    if t.delay == 120 and not t.cancelled then
-                        t.callback()
-                        return
-                    end
-                end
-                error("no hard timeout timer to fire", 2)
+            -- Fired through its own handle: 120s is also the HELLO heartbeat's
+            -- interval, so matching on the delay can fire the wrong timer.
+            { name = "the send hard timeout", run = function()
+                local hard = GBL:GetSyncStateForTests().sendHardTimer
+                assert.is_not_nil(hard, "fixture: the chunk should arm the hard timeout")
+                hard.callback()
             end },
             { name = "the server saying the peer is offline",
               init = function() GBL:InitSync() end,
