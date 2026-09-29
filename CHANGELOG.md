@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.41.15] - 2026-09-29
 
 ### Fixed
 - After leaving one guild and joining another without logging out, the addon could keep telling the new guild the summary of the old guild's data, when both saved histories held exactly the same number of transactions. Guildmates whose data already matched then looked out of date, and the two sides kept starting syncs that carried nothing, about every two minutes, until the next transaction was recorded.
