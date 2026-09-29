@@ -3199,7 +3199,8 @@ function GBL:SendNextChunk()
 
     -- The callback below cannot be cancelled, so a chunk still queued when its
     -- session ends completes after the teardown, possibly inside the next
-    -- session (#273). It keeps the session it was issued under to check.
+    -- session (#273). It keeps the session it was issued under to check, and
+    -- its own issue time.
     local session = syncState.prepToken
     local issuedTo = syncState.sendTarget
     local issuedAt = syncState.sendChunkSentAt
@@ -3221,9 +3222,9 @@ function GBL:SendNextChunk()
             end
             -- v0.28.4: record wire-completion time — anchor for wire-to-ACK latency
             syncState.sendChunkTransmittedAt = GetTime()
-            -- Diagnostic: log transmit completion timing
-            local queueDuration = string.format("%.2f",
-                GetTime() - (syncState.sendChunkSentAt or GetTime()))
+            -- Diagnostic: log transmit completion timing. From this attempt's
+            -- own issue: a resend queued behind it rewrites sendChunkSentAt.
+            local queueDuration = string.format("%.2f", GetTime() - issuedAt)
             local postAvail = _G.ChatThrottleLib and _G.ChatThrottleLib.avail
                 and string.format("%.0f", _G.ChatThrottleLib.avail) or "?"
             self:AddAuditEntry("Chunk " .. idx .. " transmitted ("
