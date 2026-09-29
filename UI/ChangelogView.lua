@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.41.14
+    {"0.41.14", "2026-09-29", {
+        Changed = {
+            "Syncs send less of the bookkeeping that lets the receiving player's copy trim duplicate transactions. Each six-hour period a sync carried used to bring along the entries from the hour just outside it on either side, whether or not anything in the sync matched them. Those entries now go only when the sync carries a transaction they apply to. A sync that catches someone up finishes a few seconds sooner, and preparing one to send creates far less temporary memory for the game to clean up.",
+        },
+    }},
     -- v0.41.13
     {"0.41.13", "2026-09-28", {
         Fixed = {

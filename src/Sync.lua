@@ -2257,10 +2257,15 @@ end
 -- 5. Strip the selected records for the wire. This is the pass that used to run
 --    over every record the diff matched, up to the whole history on a first
 --    backfill; it now runs over one session's worth.
+--
+--    It also notes each record's base hash (#275), read off the stripped copy
+--    so the set describes exactly what stage 7 packs, for stage 6 to look
+--    boundary counts up in.
 prepStages[5] = function(self, prep, budget)
     if not prep.txToSend then
         prep.txToSend = {}
         prep.moneyToSend = {}
+        prep.sentBaseHashes = {}
         prep.stripCursor = 0
     end
 
@@ -2270,13 +2275,16 @@ prepStages[5] = function(self, prep, budget)
 
     while spent < budget and prep.stripCursor < total do
         prep.stripCursor = prep.stripCursor + 1
+        local copy
         if prep.stripCursor <= nTx then
-            prep.txToSend[#prep.txToSend + 1] =
-                stripForSync(prep.txSelected[prep.stripCursor])
+            copy = stripForSync(prep.txSelected[prep.stripCursor])
+            prep.txToSend[#prep.txToSend + 1] = copy
         else
-            prep.moneyToSend[#prep.moneyToSend + 1] =
-                stripForSync(prep.moneySelected[prep.stripCursor - nTx])
+            copy = stripForSync(prep.moneySelected[prep.stripCursor - nTx])
+            prep.moneyToSend[#prep.moneyToSend + 1] = copy
         end
+        local baseHash = self:BaseHashForRecord(copy)
+        if baseHash then prep.sentBaseHashes[baseHash] = true end
         spent = spent + 1
     end
 
@@ -2284,9 +2292,11 @@ prepStages[5] = function(self, prep, budget)
 end
 
 -- 6. Event counts for the buckets being sent. On the bucket path that is the
---    capped set, so counts ride only with the records they describe. On the
---    fallback path there are no bucket keys to filter by, so everything rides,
---    which is what the carrier-chunk path from #92 already expects.
+--    capped set: a count rides with its own bucket, or with a neighbouring one
+--    when a record it can trim is going out there (#275), so counts ride only
+--    with records they can be used on. On the fallback path there are no bucket
+--    keys to filter by, so everything rides, which is what the carrier-chunk
+--    path from #92 already expects.
 prepStages[6] = function(self, prep, budget)
     local counts = prep.guildData.eventCounts
     if not counts then
@@ -2317,7 +2327,8 @@ prepStages[6] = function(self, prep, budget)
         local baseHash = prep.countKeys[prep.countCursor]
         local entry = counts[baseHash]
         -- A key that vanished since the snapshot is simply skipped.
-        if entry ~= nil and self:EventCountRidesWithBuckets(baseHash, filter) then
+        if entry ~= nil and self:EventCountRidesWithBuckets(
+                baseHash, filter, prep.sentBaseHashes) then
             prep.sendEventCounts[baseHash] = entry
         end
         spent = spent + 1
@@ -2914,11 +2925,21 @@ function GBL:PrepareChunks(transactions, moneyTransactions, eventCounts)
     -- room the packed chunks have left and then opening carriers. The cursor
     -- only moves forward, so this stays linear in the number of entries.
     --
-    -- Neither case can arrive on a bucket-filtered session, which is every
-    -- normal one. Stage 6 admits an entry only when its slot reads and only when
-    -- one of its ride buckets is in sentBuckets, and a bucket is in sentBuckets
-    -- only because it has records, so every arriving entry is emitted by the
-    -- walk above. This pass is live only on the sinceTimestamp fallback, which
+    -- On a bucket-filtered session, which is every normal one, only one narrow
+    -- window reaches here. Stage 6 admits an entry only when its slot reads,
+    -- and only when its own bucket is in sentBuckets or a record of its prefix
+    -- inside its window is in the send (#275). A bucket is in sentBuckets only
+    -- because stage 3 grouped records into it, and a record in the window sits in
+    -- a ride bucket by construction, so one of the entry's ride buckets normally
+    -- has a record here and the walk above emits it. The exception: stage 3
+    -- groups by the id a record had then, while this walk reads the id stage 5
+    -- copied, and a sync chunk arriving between the two can rewrite a selected
+    -- record's id across a bucket edge (NormalizeRecordId, sender wins). If that
+    -- moves every record out of a count's own bucket, the count is admitted on
+    -- its own bucket with nothing left to ride ahead of, and lands here, in a
+    -- trailing carrier for that one session. That predates #275; the narrower
+    -- neighbour route cannot produce it, since the index is read off the copies.
+    -- Otherwise this pass is live only on the sinceTimestamp fallback, which
     -- needs GetGuildData() itself to be nil. It stays because it is what makes
     -- the packer total and because the fallback is still a real path, but do not
     -- read it as evidence that the serve path can hand over an unreadable key:

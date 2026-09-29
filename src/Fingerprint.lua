@@ -97,6 +97,14 @@ local BUCKET_SECONDS = 21600  -- 6 hours
 local BUCKET_HOURS = 6        -- hours per bucket (21600 / 3600)
 GBL.BUCKET_SECONDS = BUCKET_SECONDS
 
+-- The one reading of a record id's time slot: "type|player|...|timeSlot:occ".
+-- Two readers share it and must go on sharing it: bucketKeyForRecord files a
+-- record under a bucket by it, and BaseHashForRecord keys the record for the
+-- serve's event count filter by it (#275). The filter admits a boundary count
+-- through a record only because the packer files that record under a bucket in
+-- the count's ride set, which holds while both read the same slot.
+local RECORD_ID_SLOT = "|(%d+):%d+$"
+
 --- Extract the 6-hour bucket key from a record's ID.
 -- Uses the timeSlot embedded in the ID (format: prefix|timeSlot:occ) so
 -- that bucket placement is consistent across peers after ID normalization.
@@ -105,8 +113,7 @@ GBL.BUCKET_SECONDS = BUCKET_SECONDS
 -- @return number Bucket key
 local function bucketKeyForRecord(tx)
     if tx.id then
-        -- ID format: "type|player|...|timeSlot:occurrence"
-        local timeSlot = tx.id:match("|(%d+):%d+$")
+        local timeSlot = tx.id:match(RECORD_ID_SLOT)
         if timeSlot then
             return math.floor(tonumber(timeSlot) / BUCKET_HOURS)
         end
@@ -118,6 +125,23 @@ end
 --- Exposed for use by Sync.lua bucket filtering.
 function GBL:BucketKeyForRecord(tx)
     return bucketKeyForRecord(tx)
+end
+
+--- The eventCounts key a count for this record's own hour would carry: the
+-- record id without its occurrence (#275).
+--
+-- Nil exactly where bucketKeyForRecord falls back to the timestamp, since both
+-- read RECORD_ID_SLOT: such a record has no slot in its id for a count key to
+-- match. The migrations' `id:gsub(":%d+$", "")` in Core.lua keeps an id like
+-- that whole instead, which is a different contract; they do not call this.
+-- @param record table|nil A transaction record
+-- @return string|nil The base hash, or nil when the id carries no slot
+function GBL:BaseHashForRecord(record)
+    local id = record and record.id
+    if type(id) ~= "string" then return nil end
+    local at, _, timeSlot = id:find(RECORD_ID_SLOT)
+    if not at then return nil end
+    return id:sub(1, at + #timeSlot)
 end
 
 --- Convert an hourly time slot to the 6-hour bucket that contains it.

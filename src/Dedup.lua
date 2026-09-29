@@ -438,17 +438,18 @@ end
 
 --- The 6-hour fingerprint bucket an event count entry describes.
 --
--- The entry's OWN bucket, which is one member of its ride set and no longer the
--- basis of any decision. It was lifted out for two production callers, the ride
--- predicate and PrepareChunks, and #270 moved both of them to
--- EventCountRideBuckets, because a count on a bucket edge is owed to the
--- neighbouring bucket as well as its own.
+-- The entry's OWN bucket, which is one member of its ride set. It was lifted
+-- out for two production callers, the ride predicate and PrepareChunks, and
+-- #270 moved both of them to EventCountRideBuckets, because a count on a bucket
+-- edge is owed to the neighbouring bucket as well as its own. #275 then gave
+-- the predicate its own reading of the own bucket, beside the records in the
+-- send, since it needs the prefix from the same split.
 --
 -- NOTE: no production callers since #270. Retained because the specs, and the
 -- chunking spec's indexByBucket helper, read it to say where a bucket's OWN
 -- entries landed, which is a different question from which buckets may carry
--- them. Do not reintroduce it as a filter or as a packing key: that is the
--- defect #270 fixed.
+-- them. Do not reintroduce it as the whole filter or as a packing key: that is
+-- the defect #270 fixed.
 -- @param baseHash string An eventCounts key (record id prefix plus time slot)
 -- @return number|nil Bucket key, or nil when the key carries no readable slot
 function GBL:BucketKeyForEventCount(baseHash)
@@ -459,14 +460,15 @@ end
 
 --- The 6-hour buckets whose records could use this event count entry.
 ---
---- A record at slot Y can be trimmed by a count at slot X exactly when
---- |X - Y| <= EVENT_COUNT_SLOT_RADIUS, so this entry is worth sending to a peer
+--- A record at slot Y can be trimmed by a count at slot X exactly when Y is in
+--- the count's side of EventCountWindow, so this entry is worth sending to a peer
 --- receiving bucket B exactly when B holds one of the slots in that window.
 --- That is one bucket for a slot in the middle of a bucket and two for a slot
 --- on either edge of one.
 ---
---- Both the filter and the packer read this, and that is the whole point.
---- Widening the filter alone would reintroduce the loss #114 closed:
+--- The packer indexes every entry under this set, and the serve's filter may
+--- only ever admit an entry for a bucket inside it (#275 narrowed the filter to
+--- a subset). Admitting one outside it would reintroduce the loss #114 closed:
 --- PrepareChunks files an entry under a bucket and emits it at that bucket's
 --- first record, and a boundary count's own bucket has no records in the send,
 --- so the entry would fall to the trailing carriers an abort discards.
@@ -482,9 +484,11 @@ function GBL:EventCountRideBuckets(baseHash)
     local _, slot = self:SplitBaseHash(baseHash)
     if not slot then return nil end
 
-    local radius = self.EVENT_COUNT_SLOT_RADIUS
+    -- The span of record slots this count can trim, reflected from the
+    -- record-side window (see EventCountWindow in Core.lua).
+    local first, last = self:EventCountWindow()
     local buckets = {}
-    for s = slot - radius, slot + radius do
+    for s = slot - last, slot - first do
         local bucket = self:BucketKeyForTimeSlot(s)
         if buckets[#buckets] ~= bucket then
             buckets[#buckets + 1] = bucket
@@ -495,46 +499,73 @@ end
 
 --- Does this eventCounts entry belong with the buckets a session is sending?
 --
--- The per-entry rule, on its own so that more than one walk can apply it. The
--- sliced serving pipeline (#115) crosses this table a few hundred entries at a
--- time across frames and cannot reuse the loop below, so without this it would
--- carry its own copy of the rule. Two implementations of one filter is exactly
--- the shape that let a labeler config and its backfill disagree in #112: both
--- were internally consistent, and only comparing them directly found it.
+-- The per-entry rule, on its own because its one caller, stage 6 of the sliced
+-- serve (#115), crosses the table a few hundred entries at a time across
+-- frames. It used to have a second caller, a synchronous walk that collected
+-- the whole table in one pass; that walk lost its last production caller when
+-- the serve was sliced (v0.37.17) and was deleted rather than kept agreeing
+-- with a rule nothing ran.
 --
 -- A nil filter means send everything, which is the fallback path where there
 -- are no bucket keys to compare against.
 --
--- The test is over the RIDE SET rather than the entry's own bucket (#270). A
--- count one hour across a bucket boundary from the records that can use it
--- belongs to neither side cleanly: CleanupWithEventCounts reaches it and the
--- own-bucket test never offered it, so it was usable locally and unsendable
--- forever, 46 of 16,644 entries on the measured store.
+-- An entry rides with its own bucket, which is the rule from before #270, and
+-- with a neighbouring bucket only when the send carries a record it can trim:
+-- one of its prefix whose slot is inside EventCountWindow of its own. That is
+-- CleanupWithEventCounts' lookup (prefix .. s across the window) run from the
+-- count's side, so a count admitted through a neighbour has a record in this
+-- very send that the receiver's cleanup can apply it to.
+--
+-- The record is read by its id, prefix and slot both, where the receiver's
+-- cleanup groups by BuildTxPrefix over its fields and takes the slot from its
+-- timestamp. The two agree for every record the builders produce. Where they do
+-- not (the roughly 17 records with a corrupt type in docs/DATA-MODEL.md, and 0
+-- records whose id slot and timestamp slot differ on the measured store), a
+-- count can go out that the receiver cannot apply, or not go out through the
+-- neighbour. The id is the reading on purpose, because #114's guarantee below is
+-- over the packer's reading of a record, and the packer reads the id.
+--
+-- Both halves exist for a measured reason. #270 found 46 of 16,644 counts one
+-- hour across a boundary from their records, usable locally and unsendable
+-- under the own-bucket test. #270's answer, any bucket in the ride set, also
+-- admitted every count on a bucket edge whose neighbour happened to be going
+-- out, +25.8% entries per bucket, and #275 measured that 3,330 of those 4,328
+-- admissions had no record of their prefix in the window. A slot match alone
+-- (any prefix in the window) was the reading #275 was filed with and kept
+-- 3,870 of them, because most hours on a bucket edge hold some record.
+--
+-- Everything admitted stays inside the ride set the packer files the entry
+-- under: the own bucket is in it, and a record at slot s in the window sits in
+-- BucketKeyForTimeSlot(s), which is in it by construction. That is what keeps
+-- #114's ordering, since an entry is emitted at the first record of whichever
+-- ride bucket comes up first. It holds only while sentBaseHashes is read off the
+-- same id slot the packer buckets by, which is why it is built through
+-- BaseHashForRecord.
 -- @param baseHash string An eventCounts key (record id prefix plus time slot)
 -- @param diffBuckets table|nil Set of 6-hour bucket keys; nil = everything rides
+-- @param sentBaseHashes table|nil Set of BaseHashForRecord keys for the records
+--   going out. Nil admits nothing through a neighbour, since nothing is known
+--   to be in the send for the count to trim.
 -- @return boolean True when the entry should ride along
-function GBL:EventCountRidesWithBuckets(baseHash, diffBuckets)
+function GBL:EventCountRidesWithBuckets(baseHash, diffBuckets, sentBaseHashes)
     if not diffBuckets then return true end
-    local ride = self:EventCountRideBuckets(baseHash)
-    if not ride then return false end
-    for i = 1, #ride do
-        if diffBuckets[ride[i]] then return true end
-    end
-    return false
-end
+    local prefix, slot = self:SplitBaseHash(baseHash)
+    if not slot then return false end
+    if diffBuckets[self:BucketKeyForTimeSlot(slot)] then return true end
+    if not sentBaseHashes then return false end
 
---- Collect eventCounts entries matching a set of fingerprint bucket keys.
--- Used by sync to include only relevant counts in the payload.
--- @param guildData table Guild data from AceDB
--- @param diffBuckets table|nil Set of 6-hour bucket keys that differ; nil = send all
--- @return table Filtered eventCounts subset
-function GBL:CollectEventCountsForBuckets(guildData, diffBuckets)
-    if not guildData or not guildData.eventCounts then return {} end
-    local result = {}
-    for baseHash, entry in pairs(guildData.eventCounts) do
-        if self:EventCountRidesWithBuckets(baseHash, diffBuckets) then
-            result[baseHash] = entry
+    local first, last = self:EventCountWindow()
+    for s = slot - last, slot - first do
+        -- The bucket test first, so the key is only built for a neighbour the
+        -- session carries. It is a cost guard: the index holds records of
+        -- carried buckets, so it changes no answer, except when a sync chunk
+        -- arriving mid-preparation has rewritten a selected record's id across
+        -- a bucket edge. There it withholds the count, which is as safe as
+        -- admitting it, since the moved record's bucket is in the ride set.
+        if diffBuckets[self:BucketKeyForTimeSlot(s)]
+            and sentBaseHashes[prefix .. s] then
+            return true
         end
     end
-    return result
+    return false
 end
