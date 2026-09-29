@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- When a sync ended early (combat, a busy guildmate, sync switched off, a send that stalled, or the other player going offline), a message still waiting in the game's outgoing queue could go out afterwards and restart the timeout of whatever sync came next. That sync could then resend a message it did not need to and log a failure that never happened, which inflated the retry and loss figures in the sync log. If the next sync was still getting ready, it could stop before sending anything, leaving the guildmate who asked to wait and ask again. A message that goes out after its sync has ended is now named as late in the sync log and changes nothing else.
+
 ## [0.41.12] - 2026-09-27
 
 ### Fixed

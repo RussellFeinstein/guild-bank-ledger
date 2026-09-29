@@ -711,19 +711,6 @@ function GBL:DisableSync()
         self:FinishSending("sync disabled")
     end
 
-    -- Both of these are cancelled by FinishSending on the live-send path above.
-    -- They stay unconditional because AceComm's send-completion callback cannot
-    -- be cancelled (#273), so one firing after an earlier teardown can leave a
-    -- fresh ACK ticker in sendTimer with `sending` already false, and this is
-    -- what collects it.
-    if syncState.sendTimer then
-        syncState.sendTimer:Cancel()
-        syncState.sendTimer = nil
-    end
-    if syncState.sendHardTimer then
-        syncState.sendHardTimer:Cancel()
-        syncState.sendHardTimer = nil
-    end
     -- One line for the receive half, taken before the clear because the clear
     -- drops the peer name. It cannot be FinishReceiving (see
     -- _ClearReceiveSession), but what that rules out is the rebuild rather than
@@ -2565,6 +2552,9 @@ function GBL:HandleSyncRequest(sender, data)
     syncState.sendRemainingBuckets = 0
     syncState.chunkOutcomes = {}
 
+    -- Also the send session's identity: SendNextChunk's completion callback
+    -- compares it to the value it was issued under (#273). Only this accept
+    -- moves it while a send is live.
     syncState.prepToken = (syncState.prepToken or 0) + 1
     local token = syncState.prepToken
     local prep = {
@@ -3207,11 +3197,29 @@ function GBL:SendNextChunk()
     -- Record send time for RTT measurement
     syncState.sendChunkSentAt = GetTime()
 
+    -- The callback below cannot be cancelled, so a chunk still queued when its
+    -- session ends completes after the teardown, possibly inside the next
+    -- session (#273). It keeps the session it was issued under to check.
+    local session = syncState.prepToken
+    local issuedTo = syncState.sendTarget
+    local issuedAt = syncState.sendChunkSentAt
+
     -- ACK timer deferred until message fully transmitted via AceComm callback.
     -- AceComm calls callbackFn(callbackArg, bytesSent, totalLen) per CTL piece.
     if not self:SendSyncWhisper(PREFIX, msg, syncState.sendTarget, "NORMAL",
         function(_cbArg, sent, totalBytes)
             if sent < totalBytes then return end
+            -- Torn down with nothing new started, or another session accepted
+            -- since. Either way the fields and the ACK timer below belong to
+            -- someone else now. Logged rather than dropped, because it is the
+            -- only trace that a queued chunk outlived its session.
+            if not syncState.sending or syncState.prepToken ~= session then
+                self:AddAuditEntry(string.format(
+                    "Chunk %d to %s transmitted after its session ended"
+                        .. " (%.2fs queue-to-wire)",
+                    idx, tostring(issuedTo), GetTime() - issuedAt))
+                return
+            end
             -- v0.28.4: record wire-completion time — anchor for wire-to-ACK latency
             syncState.sendChunkTransmittedAt = GetTime()
             -- Diagnostic: log transmit completion timing
