@@ -1328,12 +1328,22 @@ describe("Dedup", function()
         -- rather than "also send the neighbours". An interior slot has no
         -- record outside its own bucket that can reach it, so nothing about it
         -- changes, which is what keeps the drop case above meaning what it says.
+        -- The neighbour is sending a record of the count's prefix in every
+        -- one of its hours, so the predicate has to reach the window and find
+        -- none of them inside it (an index-free call would return before the
+        -- window was ever read).
         it("still drops an interior entry for a neighbouring bucket", function()
-            -- slot 100 sits inside bucket 16, three hours clear of bucket 17.
+            local function everyHourOf(bucket)
+                local sent = {}
+                for s = bucket * 6, bucket * 6 + 5 do sent[PREFIX .. s] = true end
+                return sent
+            end
+            -- slot 100 sits inside bucket 16, two hours clear of bucket 17
+            -- (102) and five clear of bucket 15 (95).
             assert.is_false(GBL:EventCountRidesWithBuckets(
-                "withdraw|Thrall|12345|5|1|100", { [17] = true }))
+                PREFIX .. 100, { [17] = true }, everyHourOf(17)))
             assert.is_false(GBL:EventCountRidesWithBuckets(
-                "withdraw|Thrall|12345|5|1|100", { [15] = true }))
+                PREFIX .. 100, { [15] = true }, everyHourOf(15)))
         end)
 
         it("drops an entry whose base hash carries no slot", function()
@@ -1397,12 +1407,23 @@ describe("Dedup", function()
         -- #270 fixed) nor the ride set alone (the over-inclusion #275 fixed):
         -- an entry rides with its own bucket, and with a neighbour only when a
         -- record it can trim is going out there. What this pins is the bound
-        -- that keeps #114's ordering: whatever the record index holds, the
-        -- predicate never admits an entry for a bucket outside its ride set,
-        -- because PrepareChunks files the entry under that set and has nowhere
-        -- else to emit it ahead of the records. With a record of its prefix in
-        -- every window hour of the candidate it reaches the whole set, and
-        -- with none it is back to its own bucket.
+        -- that keeps #114's ordering, for the fullest index a send can build:
+        -- a send carrying only the candidate bucket holds at most a record of
+        -- the count's prefix in each of its six hours, and with every one of
+        -- them present the predicate admits exactly when the candidate is in
+        -- the ride set, never a bucket outside it, because PrepareChunks files
+        -- the entry under that set and has nowhere else to emit it ahead of
+        -- the records. With nothing in the send it is back to its own bucket.
+        -- The index holds whole hours of the candidate rather than the count's
+        -- window, so this does not restate the window it is checking.
+        --
+        -- What it cannot see, by construction: an index holding a record from
+        -- a bucket the session does not carry. A send never builds one, except
+        -- in the window where a sync chunk arriving mid-preparation rewrites a
+        -- selected record's id across a bucket edge, and there the bucket test
+        -- ahead of each lookup withholds the count, which is as safe as
+        -- admitting it (the moved record's bucket is in the ride set either
+        -- way). That test is a cost guard, and is left unpinned on purpose.
         it("admits within the ride set only, and all of it when the send can use it",
         function()
             local keys = {
@@ -1428,8 +1449,7 @@ describe("Dedup", function()
 
                 -- For every candidate bucket, not just the ones a fixture
                 -- happens to pick.
-                local prefix, slot = GBL:SplitBaseHash(key)
-                local radius = GBL.EVENT_COUNT_SLOT_RADIUS
+                local prefix = GBL:SplitBaseHash(key)
                 for candidate = 14, 35 do
                     local inRide = false
                     for _, bucket in ipairs(ride or {}) do
@@ -1437,20 +1457,18 @@ describe("Dedup", function()
                     end
 
                     local everyHour = {}
-                    if slot then
-                        for s = slot - radius, slot + radius do
-                            if GBL:BucketKeyForTimeSlot(s) == candidate then
-                                everyHour[prefix .. s] = true
-                            end
+                    if prefix then
+                        for s = candidate * 6, candidate * 6 + 5 do
+                            everyHour[prefix .. s] = true
                         end
                     end
 
                     assert.equals(inRide,
                         GBL:EventCountRidesWithBuckets(
                             key, { [candidate] = true }, everyHour),
-                        ("with a record of its prefix in every window hour, %s at"
-                            .. " bucket %d should follow the ride set")
-                            :format(key, candidate))
+                        ("with a record of its prefix in every hour of the"
+                            .. " candidate, %s at bucket %d should follow the"
+                            .. " ride set"):format(key, candidate))
                     assert.equals(own ~= nil and candidate == own,
                         GBL:EventCountRidesWithBuckets(
                             key, { [candidate] = true }, {}),
