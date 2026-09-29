@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.41.13
+    {"0.41.13", "2026-09-28", {
+        Fixed = {
+            "When a sync ended early (combat, a busy guildmate, sync switched off, a send that stalled, or the other player going offline), a message still waiting in the game's outgoing queue could go out afterwards and restart the timeout of whatever sync came next. That sync could then resend a message it did not need to and log a failure that never happened, which inflated the retry and loss figures in the sync log. If the next sync was still getting ready, that message, or a step the ended sync had already scheduled, could stop it before it sent anything, leaving the guildmate who asked to wait and ask again. A message that goes out after its sync has ended is now named as late in the sync log and changes nothing else, and nothing left over from an ended sync can stop the next one while it is getting ready.",
+            "When a sync message was sent again while the first copy was still waiting to go out, the sync log reported the first copy's waiting time as if it had been sent at the same moment as the second, understating how long the game held it. Each copy's waiting time is now measured from when that copy was sent.",
+        },
+    }},
     -- v0.41.12
     {"0.41.12", "2026-09-27", {
         Fixed = {
