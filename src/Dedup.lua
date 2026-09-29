@@ -495,12 +495,12 @@ end
 
 --- Does this eventCounts entry belong with the buckets a session is sending?
 --
--- The per-entry rule, on its own so that more than one walk can apply it. The
--- sliced serving pipeline (#115) crosses this table a few hundred entries at a
--- time across frames and cannot reuse the loop below, so without this it would
--- carry its own copy of the rule. Two implementations of one filter is exactly
--- the shape that let a labeler config and its backfill disagree in #112: both
--- were internally consistent, and only comparing them directly found it.
+-- The per-entry rule, on its own because its one caller, stage 6 of the sliced
+-- serve (#115), crosses the table a few hundred entries at a time across
+-- frames. It used to have a second caller, a synchronous walk that collected
+-- the whole table in one pass; that walk lost its last production caller when
+-- the serve was sliced (v0.37.17) and was deleted rather than kept agreeing
+-- with a rule nothing ran.
 --
 -- A nil filter means send everything, which is the fallback path where there
 -- are no bucket keys to compare against.
@@ -521,20 +521,4 @@ function GBL:EventCountRidesWithBuckets(baseHash, diffBuckets)
         if diffBuckets[ride[i]] then return true end
     end
     return false
-end
-
---- Collect eventCounts entries matching a set of fingerprint bucket keys.
--- Used by sync to include only relevant counts in the payload.
--- @param guildData table Guild data from AceDB
--- @param diffBuckets table|nil Set of 6-hour bucket keys that differ; nil = send all
--- @return table Filtered eventCounts subset
-function GBL:CollectEventCountsForBuckets(guildData, diffBuckets)
-    if not guildData or not guildData.eventCounts then return {} end
-    local result = {}
-    for baseHash, entry in pairs(guildData.eventCounts) do
-        if self:EventCountRidesWithBuckets(baseHash, diffBuckets) then
-            result[baseHash] = entry
-        end
-    end
-    return result
 end

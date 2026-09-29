@@ -1183,52 +1183,10 @@ describe("Dedup", function()
         end)
     end)
 
-    describe("CollectEventCountsForBuckets", function()
-        it("returns all when no filter provided", function()
-            guildData.eventCounts = {
-                ["withdraw|Thrall|12345|5|1|100"] = { count = 2, asOf = 1000 },
-                ["deposit|Jaina|99999|5|2|200"] = { count = 1, asOf = 2000 },
-            }
-            local result = GBL:CollectEventCountsForBuckets(guildData, nil)
-            local count = 0
-            for _ in pairs(result) do count = count + 1 end
-            assert.equals(2, count)
-        end)
-
-        it("filters by 6-hour bucket keys", function()
-            -- slot 100 → bucket 16, slot 200 → bucket 33
-            guildData.eventCounts = {
-                ["withdraw|Thrall|12345|5|1|100"] = { count = 2, asOf = 1000 },
-                ["deposit|Jaina|99999|5|2|200"] = { count = 1, asOf = 2000 },
-            }
-            local diffBuckets = { [16] = true }  -- only bucket 16
-            local result = GBL:CollectEventCountsForBuckets(guildData, diffBuckets)
-
-            assert.is_not_nil(result["withdraw|Thrall|12345|5|1|100"])
-            assert.is_nil(result["deposit|Jaina|99999|5|2|200"])
-        end)
-
-        it("returns empty table when no eventCounts", function()
-            local result = GBL:CollectEventCountsForBuckets(guildData, nil)
-            local count = 0
-            for _ in pairs(result) do count = count + 1 end
-            assert.equals(0, count)
-        end)
-
-        it("handles nil guildData gracefully", function()
-            local result = GBL:CollectEventCountsForBuckets(nil, nil)
-            local count = 0
-            for _ in pairs(result) do count = count + 1 end
-            assert.equals(0, count)
-        end)
-    end)
-
-    -- The per-entry decision, pulled out of CollectEventCountsForBuckets so the
-    -- sliced serving pipeline (#115) can walk the same table across frames and
-    -- still apply exactly this rule. Two implementations of one filter is how
-    -- the labeler config and its backfill drifted apart in #112: each was
-    -- internally consistent and only a direct comparison found the
-    -- disagreement. One function, two callers, no comparison needed.
+    -- The per-entry decision stage 6 of the sliced serve (#115) applies to each
+    -- eventCounts key as it walks the table across frames. It had a second
+    -- caller, a synchronous collector, until that lost its last production
+    -- caller with the slicing and was deleted.
     describe("EventCountRidesWithBuckets", function()
         it("keeps every entry when there is no bucket filter", function()
             assert.is_true(GBL:EventCountRidesWithBuckets(
@@ -1283,26 +1241,6 @@ describe("Dedup", function()
 
         it("drops a nil base hash rather than throwing", function()
             assert.is_false(GBL:EventCountRidesWithBuckets(nil, { [16] = true }))
-        end)
-
-        -- The filtering function must be this predicate and nothing else, or
-        -- the sliced walk and the synchronous one can disagree while both look
-        -- right on their own.
-        it("agrees with CollectEventCountsForBuckets entry for entry", function()
-            guildData.eventCounts = {
-                ["withdraw|Thrall|12345|5|1|100"] = { count = 2, asOf = 1000 },
-                ["deposit|Jaina|99999|5|2|200"] = { count = 1, asOf = 2000 },
-                ["deposit|Sylvanas|1|1|1|101"] = { count = 3, asOf = 3000 },
-            }
-            local diffBuckets = { [16] = true }
-            local collected = GBL:CollectEventCountsForBuckets(guildData, diffBuckets)
-
-            for baseHash in pairs(guildData.eventCounts) do
-                assert.equals(
-                    GBL:EventCountRidesWithBuckets(baseHash, diffBuckets),
-                    collected[baseHash] ~= nil,
-                    "predicate and collector disagreed on " .. baseHash)
-            end
         end)
     end)
 
