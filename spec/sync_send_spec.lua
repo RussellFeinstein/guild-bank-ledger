@@ -202,6 +202,233 @@ describe("Sync send path", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- A send-completion callback that outlives its session (#273)
+    ---------------------------------------------------------------------------
+
+    describe("late send-completion callback (#273)", function()
+        -- AceComm calls back once per ChatThrottleLib piece and nothing can
+        -- cancel it, so a chunk still queued when its session is torn down
+        -- completes after the teardown. SendCommMessage holds every callback
+        -- here instead of firing it, which is what lets a test fire one late.
+        local LATE = "transmitted after its session ended"
+        local held
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            held = {}
+            GBL.SendCommMessage = function(_self, prefix, text, dist, target,
+                    _prio, cbFn, cbArg)
+                table.insert(MockAce.sentCommMessages, {
+                    prefix = prefix, text = text, distribution = dist, target = target,
+                })
+                if cbFn then
+                    table.insert(held, { target = target, fn = cbFn, arg = cbArg })
+                end
+            end
+        end)
+
+        local function complete(entry)
+            entry.fn(entry.arg, 100, 100)
+        end
+
+        local function liveAckTimers()
+            local n = 0
+            for _, t in ipairs(MockWoW.pendingTimers) do
+                if t.delay == GBL.SYNC_ACK_TIMEOUT and not t.cancelled
+                    and not t.fired then
+                    n = n + 1
+                end
+            end
+            return n
+        end
+
+        -- Unlike Sync.fireAckTimeout this tolerates none, because none is
+        -- exactly what the fixed code leaves behind.
+        local function fireAckTimers()
+            MockWoW.serverTime = MockWoW.serverTime + GBL.SYNC_ACK_TIMEOUT + 1
+            local due = {}
+            for _, t in ipairs(MockWoW.pendingTimers) do
+                if t.delay == GBL.SYNC_ACK_TIMEOUT and not t.cancelled
+                    and not t.fired then
+                    due[#due + 1] = t
+                end
+            end
+            for _, t in ipairs(due) do
+                t.fired = true
+                t.callback()
+            end
+        end
+
+        local function logLines(fragment)
+            local found = {}
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message and entry.message:find(fragment, 1, true) then
+                    found[#found + 1] = entry.message
+                end
+            end
+            return found
+        end
+
+        local function sentTo(name)
+            local n = 0
+            for _, m in ipairs(MockAce.sentCommMessages) do
+                if m.target == name then n = n + 1 end
+            end
+            return n
+        end
+
+        local function seedOne()
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "late_cb:0",
+            })
+        end
+
+        -- Serve OfficerB, end that session with a BUSY, then accept OfficerC,
+        -- so a late callback from the first can land in the second.
+        local function twoSessions()
+            seedOne()
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+            assert.equals(1, #held, "fixture: OfficerB's first chunk should be queued")
+            GBL:HandleBusy("OfficerB", { reason = "combat" })
+            assert.is_false(GBL:GetSyncStatus().sending,
+                "fixture: the BUSY should end OfficerB's session")
+            GBL:HandleSyncRequest("OfficerC", request{ sinceTimestamp = 0 })
+            assert.equals("OfficerC", GBL:GetSyncStatus().sendTarget)
+            assert.equals(2, #held, "fixture: OfficerC's first chunk should be queued")
+            return held[1], held[2]
+        end
+
+        -- Every teardown that can end a send with a chunk still queued.
+        local teardowns = {
+            { name = "a BUSY from the peer being served", run = function()
+                GBL:HandleBusy("OfficerB", { reason = "combat" })
+            end },
+            { name = "combat", run = function()
+                GBL:OnCombatStart()
+            end },
+            { name = "sync being switched off", run = function()
+                GBL:DisableSync()
+            end },
+            { name = "the 120s hard timeout", run = function()
+                for _, t in ipairs(MockWoW.pendingTimers) do
+                    if t.delay == 120 and not t.cancelled then
+                        t.callback()
+                        return
+                    end
+                end
+                error("no hard timeout timer to fire", 2)
+            end },
+            { name = "the server saying the peer is offline",
+              init = function() GBL:InitSync() end,
+              run = function()
+                local filters = MockWoW.chatMessageFilters["CHAT_MSG_SYSTEM"]
+                filters[#filters](nil, "CHAT_MSG_SYSTEM",
+                    "No player named 'OfficerB' is currently playing.")
+            end },
+        }
+
+        for _, case in ipairs(teardowns) do
+            it("drops a callback that completes after " .. case.name, function()
+                if case.init then case.init() end
+                seedOne()
+                GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+                assert.equals(1, #held, "fixture: the first chunk should be queued")
+                case.run()
+                assert.is_false(GBL:GetSyncStatus().sending,
+                    "fixture: the teardown should end the send")
+
+                complete(held[1])
+
+                local state = GBL:GetSyncStateForTests()
+                assert.is_nil(state.sendTimer,
+                    "no ACK ticker for a session that has ended")
+                assert.equals(0, liveAckTimers())
+                assert.equals(0, state.sendChunkTransmittedAt)
+                assert.equals(0, #logLines("Chunk 1 transmitted ("),
+                    "the live-session line would read as part of the next session")
+                assert.equals(1, #logLines(LATE))
+            end)
+        end
+
+        it("starts no ACK timer, retry or resend inside the next session",
+        function()
+            local late = twoSessions()
+
+            complete(late)
+            assert.equals(0, liveAckTimers(),
+                "OfficerB's callback must not install a ticker in OfficerC's session")
+
+            fireAckTimers()
+
+            local state = GBL:GetSyncStateForTests()
+            assert.is_true(state.sending)
+            assert.equals("OfficerC", state.sendTarget)
+            assert.equals(1, state.sendChunkIndex)
+            assert.equals(0, state.sendRetryCount)
+            assert.same({}, state.chunkOutcomes[1].retryReasons,
+                "a phantom ackTimeout here lands in chunkFail and p_frag")
+            assert.equals(1, sentTo("OfficerC"), "no resend of OfficerC's chunk")
+            local lines = logLines(LATE)
+            assert.equals(1, #lines)
+            assert.truthy(lines[1]:find("OfficerB", 1, true), lines[1])
+            assert.falsy(lines[1]:find("OfficerC", 1, true), lines[1])
+        end)
+
+        it("leaves the next session's preparation to finish and send", function()
+            local BASE_SLOT = 475000
+            for i = 1, GBL.SYNC_PREP_RECORDS_PER_TICK + 50 do
+                local slot = BASE_SLOT + i
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "P" .. i, itemID = 1000, count = 1,
+                    tab = 1, timestamp = slot * 3600, scanTime = slot * 3600,
+                    scannedBy = "OfficerA", id = "d|" .. slot .. ":0",
+                })
+            end
+            GBL:ResetHashCache()
+            Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
+            assert.equals(1, #held, "fixture: OfficerB's first chunk should be queued")
+            GBL:HandleBusy("OfficerB", { reason = "combat" })
+            GBL:HandleSyncRequest("OfficerC", request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "fixture: OfficerC's preparation should still be running")
+
+            complete(held[1])
+            assert.equals(0, liveAckTimers())
+            fireAckTimers()
+
+            assert.is_true(GBL:GetSyncStatus().sending,
+                "a dead session's ticker must not free the slot under a preparation")
+            local ended = logLines("Send complete to OfficerC")
+            assert.equals(0, #ended, ended[1])
+
+            Helpers.drainZeroDelayTimers()
+            assert.equals(2, #held, "OfficerC's first chunk should go out")
+            assert.equals("OfficerC", held[2].target)
+        end)
+
+        it("leaves the next session's ACK timer and wire anchor in place",
+        function()
+            local late, current = twoSessions()
+            MockWoW.serverTime = MockWoW.serverTime + 1
+            complete(current)
+            local state = GBL:GetSyncStateForTests()
+            local ticker = state.sendTimer
+            local stamp = state.sendChunkTransmittedAt
+            assert.is_not_nil(ticker,
+                "fixture: OfficerC's callback should start its ACK timer")
+
+            MockWoW.serverTime = MockWoW.serverTime + 1
+            complete(late)
+
+            assert.equals(ticker, state.sendTimer)
+            assert.is_falsy(ticker.cancelled)
+            assert.equals(stamp, state.sendChunkTransmittedAt)
+            assert.equals(1, liveAckTimers())
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Retry logic
     ---------------------------------------------------------------------------
 
