@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.41.14] - 2026-09-29
 
 ### Changed
 - Syncs send less of the bookkeeping that lets the receiving player's copy trim duplicate transactions. Each six-hour period a sync carried used to bring along the entries from the hour just outside it on either side, whether or not anything in the sync matched them. Those entries now go only when the sync carries a transaction they apply to. A sync that catches someone up finishes a few seconds sooner, and preparing one to send creates far less temporary memory for the game to clean up.
