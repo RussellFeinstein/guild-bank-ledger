@@ -369,6 +369,40 @@ describe("Sync send path", function()
             assert.equals(1, #logLines(LATE))
         end)
 
+        -- Inside one live session a NACK can queue a second attempt of a chunk
+        -- behind the first, and the resend rewrites the live issue time. Each
+        -- attempt's line has to measure from its own issue.
+        it("measures each attempt's queue time from that attempt's own issue",
+        function()
+            seedOne()
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+            assert.equals(1, #held, "fixture: the first attempt should be queued")
+
+            MockWoW.serverTime = MockWoW.serverTime + 1
+            local before = #MockWoW.pendingTimers
+            GBL:HandleNack("OfficerB", { chunk = 1 })
+            assert.equals(before + 1, #MockWoW.pendingTimers,
+                "fixture: the NACK should schedule its resend")
+            local resend = MockWoW.pendingTimers[#MockWoW.pendingTimers]
+            MockWoW.serverTime = MockWoW.serverTime + 0.5
+            resend.callback()
+            assert.equals(2, #held, "fixture: the resend should be queued too")
+
+            MockWoW.serverTime = MockWoW.serverTime + 0.5
+            complete(held[1])
+            complete(held[2])
+
+            local lines = logLines("Chunk 1 transmitted (")
+            assert.equals(2, #lines)
+            local first, second = 0, 0
+            for _, line in ipairs(lines) do
+                if line:find("(2.00s queue-to-wire", 1, true) then first = first + 1 end
+                if line:find("(0.50s queue-to-wire", 1, true) then second = second + 1 end
+            end
+            assert.equals(1, first, "the first attempt was queued 2s: " .. table.concat(lines, " | "))
+            assert.equals(1, second, "the resend was queued 0.5s: " .. table.concat(lines, " | "))
+        end)
+
         it("starts no ACK timer, retry or resend inside the next session",
         function()
             local late = twoSessions()
