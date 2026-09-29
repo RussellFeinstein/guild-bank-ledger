@@ -2969,6 +2969,13 @@ end
 --- Send the next chunk in the queue. Aborts if no more chunks remain.
 function GBL:SendNextChunk()
     if not syncState.sending then return end
+    -- Nothing issues a chunk while a preparation runs: the accept installed an
+    -- empty list, and stage 7 calls here itself once the real one is packed.
+    -- A call now was scheduled by a session that has since ended (an ACK's
+    -- inter-chunk delay, a NACK's resend, the gap floor, the CTL backoff), and
+    -- answering the empty list with FinishSending frees the slot under the
+    -- preparation (#273).
+    if syncState.prep then return end
 
     -- Zone/combat protection — defer until safe
     if isSyncPaused() then
@@ -4860,11 +4867,11 @@ function GBL:OnLoadingScreenStart()
 
     -- Pausing is worth it for a live send, where the cooldown resumes the same
     -- session and a 20s loading screen does not cost a minutes-long backfill.
-    -- A preparation has nothing to come back to: the resume calls
-    -- SendNextChunk against the empty chunk list the accept installed, and an
-    -- absent chunk is answered with FinishSending, which reports a completed
-    -- send of zero chunks. So a preparation is abandoned instead, and the
-    -- requester's own resend recovers the sub-second of work.
+    -- A preparation has nothing prepared to come back to, so it is abandoned
+    -- instead, and the requester's own resend recovers the sub-second of work.
+    -- (The resume used to reach SendNextChunk against the empty chunk list the
+    -- accept installed and report a completed send of zero chunks; since #273
+    -- SendNextChunk returns while a preparation is live.)
     if syncState.prep then
         self:_AbortSyncPrep("loading screen")
     end
