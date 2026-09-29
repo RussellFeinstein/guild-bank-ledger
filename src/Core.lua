@@ -2993,23 +2993,7 @@ function GBL:DeduplicateAllGuilds()
 end
 
 --- How many hourly slots either side of a record's own slot a count for that
---- record's cluster may sit in.
----
---- One number with three readers, all reading this field at call time: the
---- cleanup loop below, which is the behaviour it describes;
---- GBL:EventCountRideBuckets in src/Dedup.lua, which mirrors that loop so the
---- packer files a count under every bucket whose records it can trim; and
---- GBL:EventCountRidesWithBuckets beside it, which since #275 admits a count
---- through a neighbouring bucket only when a record of its prefix inside this
---- window is going out. Two copies of the number is how the filter came to
---- offer less than this loop uses (#270), so no reader may keep a local: a local
---- in any one of them leaves it at the shipped width while the others follow the
---- field.
----
---- It lives in this file rather than beside the ride set because Core.lua is the
---- first of the two the .toc loads. That ordering is what makes the field
---- unconditionally present for every reader, so none needs a fallback, and a
---- fallback is exactly what would put the number back in two places.
+--- record's cluster may sit in. Read only through GBL:EventCountWindow below.
 ---
 --- It does NOT govern the three other slot-drift windows in src/Dedup.lua
 --- (CountFromRecordIndex, CountStoredForHash and FindDriftedCount). Those share
@@ -3018,10 +3002,36 @@ end
 --- record counting move silently what an event count rides with.
 GBL.EVENT_COUNT_SLOT_RADIUS = 1
 
+--- The window an event count and a record must share for the count to trim
+--- the record, as offsets from a record's slot: a record at slot Y can use a
+--- count at Y + first .. Y + last. A count at X can therefore trim a record at
+--- X - last .. X - first, the same span reflected.
+---
+--- The one writer of the window's shape, with three consumers that have to move
+--- together: the cleanup loop below, which is the behaviour it describes;
+--- GBL:EventCountRideBuckets in src/Dedup.lua, which files a count under every
+--- bucket whose records it can trim; and GBL:EventCountRidesWithBuckets beside
+--- it, which since #275 admits a count through a neighbouring bucket only when a
+--- record of its prefix inside the window is going out. Two copies of the number
+--- is how the filter came to offer less than the cleanup uses (#270), and three
+--- inline copies of the loop bounds were what the #275 review found, so every
+--- consumer asks here and none keeps a local. It reads the field at call time,
+--- which is what lets a spec move the field and watch all three follow.
+---
+--- It lives in this file rather than beside the ride set because Core.lua is the
+--- first of the two the .toc loads, so it is unconditionally present for every
+--- consumer and none needs a fallback, which is exactly what would put the
+--- number back in two places.
+--- @return number first, number last Offsets from a record's slot
+function GBL:EventCountWindow()
+    local radius = self.EVENT_COUNT_SLOT_RADIUS
+    return -radius, radius
+end
+
 --- Remove excess records using persisted eventCounts as ground truth.
 -- Groups records by prefix, clusters by timestamp proximity, then trims each
 -- cluster to the max known eventCount for its baseHash, across the window
--- EVENT_COUNT_SLOT_RADIUS above sets.
+-- EventCountWindow above sets.
 -- Safe default: clusters with no eventCount data are never trimmed.
 -- @param guildData table Guild data from AceDB
 -- @return number Total records removed
@@ -3032,10 +3042,10 @@ function GBL:CleanupWithEventCounts(guildData)
     end
 
     local totalRemoved = 0
-    -- Read once for the whole pass rather than per cluster. The field is set
-    -- when this file loads, just above this function, so it is present however
-    -- this function is reached.
-    local radius = self.EVENT_COUNT_SLOT_RADIUS
+    -- Read once for the whole pass rather than per cluster. The window is
+    -- defined when this file loads, just above this function, so it is present
+    -- however this function is reached.
+    local first, last = self:EventCountWindow()
 
     for _, storageKey in ipairs({ "transactions", "moneyTransactions" }) do
         local records = guildData[storageKey]
@@ -3090,7 +3100,7 @@ function GBL:CleanupWithEventCounts(guildData)
 
                         local maxKnownCount = 0
                         for slot in pairs(slotsChecked) do
-                            for s = slot - radius, slot + radius do
+                            for s = slot + first, slot + last do
                                 local baseHash = prefix .. s
                                 local entry = guildData.eventCounts[baseHash]
                                 if entry and type(entry) == "table"

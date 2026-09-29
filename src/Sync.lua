@@ -2925,13 +2925,21 @@ function GBL:PrepareChunks(transactions, moneyTransactions, eventCounts)
     -- room the packed chunks have left and then opening carriers. The cursor
     -- only moves forward, so this stays linear in the number of entries.
     --
-    -- Neither case can arrive on a bucket-filtered session, which is every
-    -- normal one. Stage 6 admits an entry only when its slot reads, and only
-    -- when its own bucket is in sentBuckets or a record of its prefix inside its
-    -- window is in the send (#275). A bucket is in sentBuckets only because it
-    -- has records, and that record sits in a ride bucket by construction, so
-    -- either way one of the entry's ride buckets has a record here and the walk
-    -- above emits it. This pass is live only on the sinceTimestamp fallback, which
+    -- On a bucket-filtered session, which is every normal one, only one narrow
+    -- window reaches here. Stage 6 admits an entry only when its slot reads,
+    -- and only when its own bucket is in sentBuckets or a record of its prefix
+    -- inside its window is in the send (#275). A bucket is in sentBuckets only
+    -- because stage 3 grouped records into it, and a record in the window sits in
+    -- a ride bucket by construction, so one of the entry's ride buckets normally
+    -- has a record here and the walk above emits it. The exception: stage 3
+    -- groups by the id a record had then, while this walk reads the id stage 5
+    -- copied, and a sync chunk arriving between the two can rewrite a selected
+    -- record's id across a bucket edge (NormalizeRecordId, sender wins). If that
+    -- moves every record out of a count's own bucket, the count is admitted on
+    -- its own bucket with nothing left to ride ahead of, and lands here, in a
+    -- trailing carrier for that one session. That predates #275; the narrower
+    -- neighbour route cannot produce it, since the index is read off the copies.
+    -- Otherwise this pass is live only on the sinceTimestamp fallback, which
     -- needs GetGuildData() itself to be nil. It stays because it is what makes
     -- the packer total and because the fallback is still a real path, but do not
     -- read it as evidence that the serve path can hand over an unreadable key:

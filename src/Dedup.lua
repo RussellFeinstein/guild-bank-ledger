@@ -176,25 +176,6 @@ function GBL:SplitBaseHash(baseHash)
     return prefix, tonumber(slotStr)
 end
 
---- The eventCounts key a count for this record's own hour would carry: the
--- record id without its occurrence (#275).
---
--- Accepts exactly the ids bucketKeyForRecord reads a slot from, by testing them
--- with its pattern, and that is load-bearing: the serve admits a boundary count
--- through a record in this set, and the packer must file that record under a
--- bucket in the count's ride set, which only holds while both read one slot.
--- An id the pattern refuses gives nil, where bucketKeyForRecord would fall back
--- to the timestamp. The migrations' `id:gsub(":%d+$", "")` in Core.lua keeps
--- such an id whole instead, which is a different contract; they do not call
--- this.
--- @param record table|nil A transaction record
--- @return string|nil The base hash, or nil when the id carries no slot
-function GBL:BaseHashForRecord(record)
-    local id = record and record.id
-    if type(id) ~= "string" or not id:match("|(%d+):%d+$") then return nil end
-    return (id:gsub(":%d+$", ""))
-end
-
 --- Count sequential occurrence entries at an exact slot in seenTxHashes.
 -- Scans :0, :1, :2, ... and stops at the first gap.
 -- NOTE: Dead code in production after v0.14.3 refactor — only called by
@@ -479,8 +460,8 @@ end
 
 --- The 6-hour buckets whose records could use this event count entry.
 ---
---- A record at slot Y can be trimmed by a count at slot X exactly when
---- |X - Y| <= EVENT_COUNT_SLOT_RADIUS, so this entry is worth sending to a peer
+--- A record at slot Y can be trimmed by a count at slot X exactly when Y is in
+--- the count's side of EventCountWindow, so this entry is worth sending to a peer
 --- receiving bucket B exactly when B holds one of the slots in that window.
 --- That is one bucket for a slot in the middle of a bucket and two for a slot
 --- on either edge of one.
@@ -503,9 +484,11 @@ function GBL:EventCountRideBuckets(baseHash)
     local _, slot = self:SplitBaseHash(baseHash)
     if not slot then return nil end
 
-    local radius = self.EVENT_COUNT_SLOT_RADIUS
+    -- The span of record slots this count can trim, reflected from the
+    -- record-side window (see EventCountWindow in Core.lua).
+    local first, last = self:EventCountWindow()
     local buckets = {}
-    for s = slot - radius, slot + radius do
+    for s = slot - last, slot - first do
         local bucket = self:BucketKeyForTimeSlot(s)
         if buckets[#buckets] ~= bucket then
             buckets[#buckets + 1] = bucket
@@ -528,10 +511,19 @@ end
 --
 -- An entry rides with its own bucket, which is the rule from before #270, and
 -- with a neighbouring bucket only when the send carries a record it can trim:
--- one of its prefix whose slot is within EVENT_COUNT_SLOT_RADIUS of its own.
--- That is CleanupWithEventCounts' lookup (prefix .. s across the window) run
--- from the count's side, so a count admitted through a neighbour has a record
--- in this very send that the receiver's cleanup can apply it to.
+-- one of its prefix whose slot is inside EventCountWindow of its own. That is
+-- CleanupWithEventCounts' lookup (prefix .. s across the window) run from the
+-- count's side, so a count admitted through a neighbour has a record in this
+-- very send that the receiver's cleanup can apply it to.
+--
+-- The record is read by its id, prefix and slot both, where the receiver's
+-- cleanup groups by BuildTxPrefix over its fields and takes the slot from its
+-- timestamp. The two agree for every record the builders produce. Where they do
+-- not (the roughly 17 records with a corrupt type in docs/DATA-MODEL.md, and 0
+-- records whose id slot and timestamp slot differ on the measured store), a
+-- count can go out that the receiver cannot apply, or not go out through the
+-- neighbour. The id is the reading on purpose, because #114's guarantee below is
+-- over the packer's reading of a record, and the packer reads the id.
 --
 -- Both halves exist for a measured reason. #270 found 46 of 16,644 counts one
 -- hour across a boundary from their records, usable locally and unsendable
@@ -562,10 +554,14 @@ function GBL:EventCountRidesWithBuckets(baseHash, diffBuckets, sentBaseHashes)
     if diffBuckets[self:BucketKeyForTimeSlot(slot)] then return true end
     if not sentBaseHashes then return false end
 
-    local radius = self.EVENT_COUNT_SLOT_RADIUS
-    for s = slot - radius, slot + radius do
+    local first, last = self:EventCountWindow()
+    for s = slot - last, slot - first do
         -- The bucket test first, so the key is only built for a neighbour the
-        -- session carries.
+        -- session carries. It is a cost guard: the index holds records of
+        -- carried buckets, so it changes no answer, except when a sync chunk
+        -- arriving mid-preparation has rewritten a selected record's id across
+        -- a bucket edge. There it withholds the count, which is as safe as
+        -- admitting it, since the moved record's bucket is in the ride set.
         if diffBuckets[self:BucketKeyForTimeSlot(s)]
             and sentBaseHashes[prefix .. s] then
             return true

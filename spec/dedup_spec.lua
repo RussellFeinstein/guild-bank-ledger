@@ -559,16 +559,41 @@ describe("Dedup", function()
 
         -- It has to read the same slot the packer files the record under, or a
         -- count admitted through this record could be filed under a bucket the
-        -- send never reaches and fall back into the trailing carriers.
+        -- send never reaches and fall back into the trailing carriers. Both now
+        -- read one pattern in src/Fingerprint.lua; this holds them to the
+        -- reading bucketKeyForRecord has always made, written out here as the
+        -- oracle, over ids shaped to sit either side of it. The timestamp lands
+        -- in bucket 999, so a fallback cannot pass for an id read.
         it("reads the slot BucketKeyForRecord files the record under", function()
+            local FALLBACK = 999
             for _, id in ipairs({
                 "deposit|Alice-Stormrage|191301|20|3|493217:0",
                 "repair|Alice-Stormrage|3500|493218:2",
+                "withdraw|Thrall|12345|5|1|100:10",
+                "a|b|12:3",
+                "|12:3",
+                "a||12:3",
+                "a|12:3|4:5",
+                "a|12:3:4",
+                "a|x12:3",
+                "a|12",
+                "a|12:",
+                "12:3",
+                "",
             }) do
-                local rec = { id = id, timestamp = 1 }
-                local _, slot = GBL:SplitBaseHash(GBL:BaseHashForRecord(rec))
-                assert.equals(GBL:BucketKeyForRecord(rec),
-                    GBL:BucketKeyForTimeSlot(slot), id)
+                local rec = { id = id, timestamp = FALLBACK * 21600 }
+                local oracle = id:match("|(%d+):%d+$")
+                local base = GBL:BaseHashForRecord(rec)
+                if oracle then
+                    assert.equals((id:gsub(":%d+$", "")), base, id)
+                    local _, slot = GBL:SplitBaseHash(base)
+                    assert.equals(tonumber(oracle), slot, id)
+                    assert.equals(GBL:BucketKeyForTimeSlot(tonumber(oracle)),
+                        GBL:BucketKeyForRecord(rec), id)
+                else
+                    assert.is_nil(base, id)
+                    assert.equals(FALLBACK, GBL:BucketKeyForRecord(rec), id)
+                end
             end
         end)
 
@@ -1640,6 +1665,44 @@ describe("Dedup", function()
                 "the filter must read the constant, not a literal")
             assert.equals(3, #guildData.transactions,
                 "the cleanup loop must read the constant, not a literal")
+        end)
+
+        -- The window's shape has one writer, EventCountWindow, and the two
+        -- count-side consumers walk it reflected. A symmetric window reads the
+        -- same either way round, so these tip it to one side and check that
+        -- the cleanup, the ride set and the filter still agree about one record
+        -- and one count an hour later.
+        it("keeps all three agreeing on a window that reaches one way only",
+        function()
+            local original = GBL.EventCountWindow
+            for _, case in ipairs({
+                -- a record can use a count up to an hour later
+                { first = 0, last = 1, reaches = true },
+                -- a record can use a count up to an hour earlier only
+                { first = -1, last = 0, reaches = false },
+            }) do
+                local key = boundaryCluster()
+                local prefix = GBL:SplitBaseHash(key)
+                local recordsBucket = GBL:BucketKeyForTimeSlot(SLOT)
+
+                GBL.EventCountWindow = function() return case.first, case.last end
+                local rideReachesRecords = false
+                for _, bucket in ipairs(GBL:EventCountRideBuckets(key)) do
+                    if bucket == recordsBucket then rideReachesRecords = true end
+                end
+                local admitted = GBL:EventCountRidesWithBuckets(key,
+                    { [recordsBucket] = true }, { [prefix .. SLOT] = true })
+                GBL:CleanupWithEventCounts(guildData)
+                GBL.EventCountWindow = original
+
+                local label = ("window %d..%d"):format(case.first, case.last)
+                assert.equals(case.reaches, rideReachesRecords,
+                    label .. ": the ride set disagreed with the cleanup")
+                assert.equals(case.reaches, admitted,
+                    label .. ": the filter disagreed with the cleanup")
+                assert.equals(case.reaches and 1 or 3, #guildData.transactions,
+                    label .. ": the cleanup did not reach as the window says")
+            end
         end)
     end)
 
