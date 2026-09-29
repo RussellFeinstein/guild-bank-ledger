@@ -635,7 +635,10 @@ describe("Fingerprint", function()
                 transactions = { { id = "deposit|Z|900|9|9|888888:0", timestamp = 1700200000 } },
                 moneyTransactions = {},
             }
-            -- Non-degenerate: the two datasets really do hash differently.
+            -- Non-degenerate twice over: the counts tie, which is the only case
+            -- a count-only key gets wrong, and the datasets hash differently.
+            assert.equals(#guildData.transactions + #guildData.moneyTransactions,
+                #other.transactions + #other.moneyTransactions)
             assert.are_not.equals(GBL:ComputeDataHash(guildData), GBL:ComputeDataHash(other))
 
             assert.equals(GBL:ComputeDataHash(other), GBL:GetDataHash(other))

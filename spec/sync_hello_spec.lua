@@ -113,6 +113,9 @@ describe("Sync HELLO", function()
             GBL:BroadcastHello(true)
             local ok1, first = GBL:Deserialize(MockAce.sentCommMessages[1].text)
             assert.is_true(ok1)
+            -- The tie is the precondition: the second HELLO's count is pinned
+            -- below, and a count-only cache recomputes on any change.
+            assert.equals(1, first.txCount)
             assert.equals(GBL:ComputeDataHash(guildData), first.dataHash)
 
             MockWoW.guild.name = "Other Guild"
