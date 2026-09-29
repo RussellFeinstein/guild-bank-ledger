@@ -1313,15 +1313,16 @@ describe("Sync request and serve", function()
     -- torn-down session: it stamps the peer's tranche (telling the NEXT session
     -- these buckets were handed over when nothing was sent), logs a
     -- "Sending N tx" line for a send that never happens, and holds the packed
-    -- chunks. The loading-screen path is worse than the others, because its
-    -- resume fires SendNextChunk against the empty chunk list the accept block
-    -- installed, and SendNextChunk answers an absent chunk with FinishSending:
+    -- chunks. The loading-screen path was worse than the others, because its
+    -- resume fired SendNextChunk against the empty chunk list the accept block
+    -- installed, and SendNextChunk answered an absent chunk with FinishSending:
     -- a full "Send complete 0/0" statistics block for a session that never
-    -- sent a byte. That is the specific reason a mid-prep loading screen
-    -- aborts rather than pausing. Pause-and-resume earns its keep for a live
-    -- send, where there are prepared chunks to come back to; mid-preparation
-    -- there are none, and the sub-second of work lost is recovered by the
-    -- requester's own resend.
+    -- sent a byte. Since #273 SendNextChunk returns while a preparation is
+    -- live, so that route is closed twice; a mid-prep loading screen still
+    -- aborts rather than pausing, because pause-and-resume earns its keep for
+    -- a live send, where there are prepared chunks to come back to, and
+    -- mid-preparation there are none: the sub-second of work lost is recovered
+    -- by the requester's own resend.
     ---------------------------------------------------------------------------
 
     describe("serve prep teardown", function()
