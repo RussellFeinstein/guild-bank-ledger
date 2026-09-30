@@ -141,6 +141,7 @@ GBL.SYNC_PREP_RECORDS_PER_TICK = SYNC_PREP_RECORDS_PER_TICK
 GBL.SYNC_PREP_TIMEOUT = SYNC_PREP_TIMEOUT
 GBL.SYNC_LAYOUT_REQUEST_THROTTLE = LAYOUT_REQUEST_THROTTLE
 GBL.SYNC_COMBAT_COOLDOWN = COMBAT_COOLDOWN
+GBL.SYNC_ZONE_COOLDOWN = ZONE_COOLDOWN
 GBL.SYNC_INTER_CHUNK_GAP_FLOOR = INTER_CHUNK_GAP_FLOOR
 
 ------------------------------------------------------------------------
@@ -608,6 +609,8 @@ function GBL:InitSync()
                 and GBL:StripRealm(syncState.sendTarget) == bare then
                 GBL:AddAuditEntry("Target " .. syncState.sendTarget
                     .. " confirmed offline (system error) - aborting send")
+                -- The same cause as a refused whisper, so the same tag (#281).
+                GBL:_TagInFlightChunk("sendFailed")
                 GBL:FinishSending("peer offline")
             end
             return true  -- suppress the system message
@@ -727,19 +730,10 @@ function GBL:DisableSync()
             .. " abandoned - sync disabled")
         self:_AbortSyncPrep("sync disabled")
     elseif syncState.sending then
-        -- Tag the chunk that was in flight, before FinishSending reads the
-        -- table. Absent whenever the last ACK has landed and the next chunk
-        -- has not issued yet, which is most of a chunk cycle, so the session's
-        -- own verdict is passed in below rather than read back out of here.
-        -- Inside this arm rather than above the branch, which is where the
-        -- first cut of #272 had it: during a preparation the accept has already
-        -- set chunkOutcomes empty and sendChunkIndex to 0, so there is nothing
-        -- to tag and an outer `sending` test only repeated this one.
-        local disabledIdx = syncState.sendChunkIndex
-        if syncState.chunkOutcomes and syncState.chunkOutcomes[disabledIdx]
-            and syncState.chunkOutcomes[disabledIdx].outcome == "pending" then
-            syncState.chunkOutcomes[disabledIdx].outcome = "disabledAbort"
-        end
+        -- Tagged before FinishSending reads the table. Most of a chunk cycle
+        -- has no chunk in flight, so the session's own verdict is passed in
+        -- below rather than read back out of the tag.
+        self:_TagInFlightChunk("disabledAbort")
         self:FinishSending("sync disabled")
     end
 
@@ -3024,6 +3018,26 @@ function GBL:PrepareChunks(transactions, moneyTransactions, eventCounts)
     return chunks
 end
 
+--- Tag a chunk with how its session stopped, for the FinishSending
+-- histogram. The one writer of every abort outcome (#281).
+--
+-- Only a pending chunk is tagged. HandleAck's "ok" is final, so no abort can
+-- count a delivered chunk as lost, and a chunk a loading screen tagged turns
+-- pending again when SendNextChunk puts it back on the wire. The chunk is the
+-- caller's `idx`, or else the send index. Read at the index, an abort that
+-- lands while the index sits below the chunk still owed tags nothing (#296);
+-- the verdict clause still says how the session ended. `chunkOutcomes` is
+-- always a table, since every writer assigns one, and with no send live it
+-- is empty and the index 0, so a call is a no-op.
+-- @param outcome string One of the abort outcomes FinishSending counts
+-- @param idx number|nil The chunk to tag; the send index when nil
+function GBL:_TagInFlightChunk(outcome, idx)
+    local entry = syncState.chunkOutcomes[idx or syncState.sendChunkIndex]
+    if entry and entry.outcome == "pending" then
+        entry.outcome = outcome
+    end
+end
+
 --- Send the next chunk in the queue. Aborts if no more chunks remain.
 function GBL:SendNextChunk()
     if not syncState.sending then return end
@@ -3174,6 +3188,10 @@ function GBL:SendNextChunk()
             bytes = 0,
             ratio = 0,
         }
+    elseif syncState.chunkOutcomes[idx].outcome ~= "ok" then
+        -- Back on the wire, so pending again, whatever a loading screen tagged
+        -- it (#281). An acked chunk stays acked: a NACK can name one (#290).
+        syncState.chunkOutcomes[idx].outcome = "pending"
     end
     syncState.chunkOutcomes[idx].attempts = syncState.chunkOutcomes[idx].attempts + 1
 
@@ -3325,10 +3343,11 @@ function GBL:SendNextChunk()
                     end
                     self:SendNextChunk()
                 else
-                    -- v0.28.4: record abort outcome for this chunk
-                    if syncState.chunkOutcomes and syncState.chunkOutcomes[idx] then
-                        syncState.chunkOutcomes[idx].outcome = "aborted"
-                    end
+                    -- v0.28.4: record abort outcome on this timer's own chunk,
+                    -- the one that ran out of attempts. A NACK can move the
+                    -- send index below it while its last attempt is still
+                    -- queued (#281).
+                    self:_TagInFlightChunk("aborted", idx)
                     self:SyncError("ACK timeout from "
                         .. (syncState.sendTarget or "unknown")
                         .. " after " .. (MAX_RETRIES + 1) .. " attempts, aborting")
@@ -3338,11 +3357,9 @@ function GBL:SendNextChunk()
         end) then
         self:SyncError("Target " .. (syncState.sendTarget or "?")
             .. " went offline, aborting send")
-        -- v0.28.7: tag outcome for histogram attribution
-        if syncState.chunkOutcomes and syncState.chunkOutcomes[idx]
-            and syncState.chunkOutcomes[idx].outcome == "pending" then
-            syncState.chunkOutcomes[idx].outcome = "sendFailed"
-        end
+        -- v0.28.7: tag outcome for histogram attribution. The index is still
+        -- idx here: nothing between the issue and the refusal moves it.
+        self:_TagInFlightChunk("sendFailed")
         self:FinishSending("peer offline")
         return
     end
@@ -3355,9 +3372,10 @@ end
 -- `HandleAck` marks the acked chunk "ok" without advancing it, so between an
 -- ACK and the next issue (at least `INTER_CHUNK_GAP_FLOOR`, against a measured
 -- 0.2 to 0.5s wire-to-ACK) the indexed chunk is already settled and no chunk is
--- on the wire at all. Every abort path tags `chunkOutcomes[sendChunkIndex]`
--- under an `outcome == "pending"` guard, so in that window it tags nothing,
--- which is honest about the wire and says nothing about the session. Reading
+-- on the wire at all. Abort paths tag through `_TagInFlightChunk`, which tags
+-- only a pending chunk, so in that window they tag nothing, which is honest
+-- about the wire and says nothing about the session. (The 120s send-stall
+-- teardown tags nothing at all: #298.) Reading
 -- the histogram as the session's verdict is what made a BUSY-killed send
 -- indistinguishable from a clean one even after the block started being
 -- written. The cause is therefore carried in, not inferred: the histogram stays
@@ -4760,16 +4778,9 @@ function GBL:HandleBusy(sender, data)
             self:AddAuditEntry(cleanSender .. " busy - abandoned serve preparation")
         else
             -- v0.28.7: tag the chunk that was in flight when BUSY arrived.
-            -- Absent whenever the last ACK has landed and the next chunk has
-            -- not issued yet, which is most of a chunk cycle, so the session's
-            -- own verdict goes to FinishSending rather than being read back
-            -- out of the tag here.
-            local busyIdx = syncState.sendChunkIndex
-            if busyIdx and syncState.chunkOutcomes
-                and syncState.chunkOutcomes[busyIdx]
-                and syncState.chunkOutcomes[busyIdx].outcome == "pending" then
-                syncState.chunkOutcomes[busyIdx].outcome = "busyAbort"
-            end
+            -- Most of a chunk cycle has none, so the session's own verdict
+            -- goes to FinishSending rather than being read back out of the tag.
+            self:_TagInFlightChunk("busyAbort")
 
             -- The abort is named before the block that explains it, the way
             -- OnCombatStart orders "Combat started - aborting sync" ahead of
@@ -4778,7 +4789,7 @@ function GBL:HandleBusy(sender, data)
             self:AddAuditEntry(cleanSender .. " busy - aborting send")
 
             -- FinishSending is the teardown, not a hand-copied subset of it
-            -- (#202); the history is in CLAUDE.md. Three things must not move.
+            -- (#202); the history is in .claude/rules/sync.md. Three things must not move.
             -- The abort line goes out first, as above. The cause is passed in
             -- rather than inferred from the tag, for the reason above it. And
             -- the mid-prep arm stays on the other side of this call, because
@@ -4834,13 +4845,7 @@ function GBL:OnCombatStart()
     end
 
     -- v0.28.7: tag the in-flight chunk as combatAbort before FinishSending runs
-    if syncState.sending and syncState.chunkOutcomes then
-        local combatIdx = syncState.sendChunkIndex
-        if combatIdx and syncState.chunkOutcomes[combatIdx]
-            and syncState.chunkOutcomes[combatIdx].outcome == "pending" then
-            syncState.chunkOutcomes[combatIdx].outcome = "combatAbort"
-        end
-    end
+    self:_TagInFlightChunk("combatAbort")
     -- Abort active sync. The preparation is checked first because it implies
     -- sending: the slot is claimed before the chain starts, so testing
     -- `sending` first would make this arm unreachable and every existing
@@ -4942,13 +4947,7 @@ function GBL:OnLoadingScreenStart()
     -- to a zone pause, not to a successful ACK on the pre-pause chunk. The
     -- sync resumes post-cooldown but this chunk's ACK timer was cancelled,
     -- so its outcome is genuinely indeterminate until the next chunk fires.
-    if syncState.sending and syncState.chunkOutcomes then
-        local zoneIdx = syncState.sendChunkIndex
-        if zoneIdx and syncState.chunkOutcomes[zoneIdx]
-            and syncState.chunkOutcomes[zoneIdx].outcome == "pending" then
-            syncState.chunkOutcomes[zoneIdx].outcome = "zoneAbort"
-        end
-    end
+    self:_TagInFlightChunk("zoneAbort")
 
     -- Cancel pending cooldown from a prior zone change (double zone change)
     if syncState.zoneCooldownTimer then

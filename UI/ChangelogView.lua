@@ -29,6 +29,14 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.41.18
+    {"0.41.18", "2026-09-30", {
+        Fixed = {
+            "The sync log no longer reports a chunk your guildmate already received as lost to an ACK timeout. It happened when their addon asked for that chunk a second time and then stopped answering, and it made the connection look less reliable than it was.",
+            "A chunk that goes out again after a loading screen and then times out is now counted as an ACK timeout in the sync log, not as the loading screen.",
+            "When the game reports that the guildmate you are sending to has gone offline, the sync log now counts the chunk that was on its way as offline. Before, the line read \"0 offline\" beside \"session ended by peer offline\".",
+        },
+    }},
     -- v0.41.17
     {"0.41.17", "2026-09-30", {
         Fixed = {

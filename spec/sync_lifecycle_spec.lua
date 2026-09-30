@@ -225,6 +225,42 @@ describe("Sync session lifecycle", function()
             assert.is_false(GBL:IsSyncing())
         end)
 
+        -- #281: this teardown ends a live send for the same reason the refused
+        -- whisper in SendNextChunk does, and left its chunk untagged, so the
+        -- histogram read "+ 0 offline" beside a verdict of "peer offline".
+        it("tags the chunk in flight when the target is confirmed offline", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            MockWoW.guildRoster = {
+                { name = "OnlinePeer-TestRealm", isOnline = true },
+            }
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "offline_tag:0",
+            })
+            GBL:HandleSyncRequest("OnlinePeer", request{ sinceTimestamp = 0 })
+            local state = GBL:GetSyncStateForTests()
+            local outcomes = state.chunkOutcomes
+            local idx = state.sendChunkIndex
+            assert.equals("pending", outcomes[idx].outcome,
+                "fixture must have a chunk in flight")
+            GBL._recentWhisperTargets["OnlinePeer"] = MockWoW.serverTime
+
+            filter(nil, "CHAT_MSG_SYSTEM",
+                "No player named 'OnlinePeer' is currently playing.")
+
+            assert.is_false(GBL:IsSyncing())
+            assert.equals("sendFailed", outcomes[idx].outcome)
+            local line
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message:find("Sync outcomes for OnlinePeer", 1, true) then
+                    line = entry.message
+                    break
+                end
+            end
+            assert.is_not_nil(line, "no Sync outcomes line to read")
+            assert.is_not_nil(line:find("+ 1 offline +", 1, true), "got: " .. line)
+        end)
+
         it("keeps tracking entry after suppression (CTL multi-piece)", function()
             GBL._recentWhisperTargets["SomePeer"] = MockWoW.serverTime
 
@@ -1605,6 +1641,28 @@ describe("Sync session lifecycle", function()
 
             GBL:OnLoadingScreenStart()
             assert.is_true(GBL:GetSyncStatus().zonePaused)
+        end)
+
+        -- #281: the one tag site that does not end the session. The chunk's
+        -- ACK timer is cancelled, so the tag records that its fate is unknown.
+        it("tags the chunk in flight at a loading screen and keeps the send", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "zone_tag:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+            local state = GBL:GetSyncStateForTests()
+            local idx = state.sendChunkIndex
+            assert.equals("pending", state.chunkOutcomes[idx].outcome,
+                "fixture must have a chunk in flight")
+
+            GBL:OnLoadingScreenStart()
+
+            assert.equals("zoneAbort", state.chunkOutcomes[idx].outcome)
+            assert.is_true(GBL:GetSyncStatus().sending,
+                "a loading screen pauses a send rather than ending it")
         end)
 
         it("resumes sync after cooldown on loading screen end", function()
