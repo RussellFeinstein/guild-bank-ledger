@@ -99,6 +99,45 @@ describe("Sync HELLO", function()
             assert.equals(2, #MockAce.sentCommMessages)
         end)
 
+        -- #276 through the door production uses. GetGuildData follows the
+        -- live guild name, so joining another guild without a relog points
+        -- the next HELLO at a different table, and when the two histories
+        -- hold the same number of records a count-only cache advertised the
+        -- first guild's hash to the second guild's members.
+        it("advertises the new guild's hash after a guild change with a tied record count", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            local t0 = 3600 * 475100
+            table.insert(guildData.transactions, {
+                id = "deposit|A|100|1|1|475100:0", timestamp = t0,
+            })
+            GBL:BroadcastHello(true)
+            local ok1, first = GBL:Deserialize(MockAce.sentCommMessages[1].text)
+            assert.is_true(ok1)
+            -- The tie is the precondition: the second HELLO's count is pinned
+            -- below, and a count-only cache recomputes on any change.
+            assert.equals(1, first.txCount)
+            assert.equals(GBL:ComputeDataHash(guildData), first.dataHash)
+
+            MockWoW.guild.name = "Other Guild"
+            local otherData = GBL:GetGuildData()
+            assert.are_not.equal(guildData, otherData)
+            table.insert(otherData.transactions, {
+                id = "deposit|Z|900|9|9|475101:0", timestamp = t0 + 3600,
+            })
+            -- Non-degenerate: tied counts, different data.
+            assert.are_not.equals(GBL:ComputeDataHash(guildData), GBL:ComputeDataHash(otherData))
+
+            MockWoW.serverTime = MockWoW.serverTime + GBL.SYNC_FORCED_HELLO_COOLDOWN
+            GBL:BroadcastHello(true)
+
+            assert.equals(2, #MockAce.sentCommMessages)
+            local ok2, second = GBL:Deserialize(MockAce.sentCommMessages[2].text)
+            assert.is_true(ok2)
+            assert.equals("Other Guild", second.guild)
+            assert.equals(1, second.txCount)
+            assert.equals(GBL:ComputeDataHash(otherData), second.dataHash)
+        end)
+
         it("suppresses heartbeat during active send", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
             -- Send initial HELLO to establish lastHelloTime
