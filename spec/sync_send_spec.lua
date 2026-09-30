@@ -2448,20 +2448,10 @@ describe("Sync send path", function()
                 "got: " .. line)
         end)
 
-        --- Fire the resend a NACK schedules. It is the newest timer, and the
-        --- caller checks the index it leaves, so a miss cannot pass quietly.
-        local function fireNackResend()
-            local resend = MockWoW.pendingTimers[#MockWoW.pendingTimers]
-            assert.is_false(resend.cancelled == true, "the NACK's resend is not pending")
-            MockWoW.serverTime = MockWoW.serverTime + 10
-            resend.callback()
-        end
-
-        -- HandleNack is the only code that moves the send index backward, and
-        -- it leaves the retry count alone. A NACK can name a chunk the peer
-        -- has already acked: #290's arrival count does that after a mid-stream
-        -- bootstrap. If the peer then goes quiet, the ladder runs out on a
-        -- chunk that was delivered.
+        -- A NACK moves the send index back and leaves the retry count alone,
+        -- and it can name a chunk the peer has already acked: #290's arrival
+        -- count does that after a mid-stream bootstrap. If the peer then goes
+        -- quiet, the ladder runs out on a chunk that was delivered.
         it("leaves an acked chunk alone when the ladder gives up on it", function()
             startSend(8)
             assert.is_true(#state().sendChunks >= 2, "fixture needs two chunks")
@@ -2473,7 +2463,8 @@ describe("Sync send path", function()
             assert.equals("ok", outcomes[1].outcome)
 
             GBL:HandleNack("OfficerB", { chunk = 1 })
-            fireNackResend()
+            MockWoW.serverTime = MockWoW.serverTime + 10
+            fireNextChunkDelay()
             assert.equals(1, state().sendChunkIndex,
                 "the NACK should have rewound the send onto chunk 1")
 
@@ -2555,39 +2546,103 @@ describe("Sync send path", function()
                 "got: " .. line)
         end)
 
+        -- A loading screen tags the chunk in flight zoneAbort, and the send
+        -- resumes past it. If the receiver then NACKs that chunk it goes back
+        -- on the wire, so when the peer goes quiet and its ladder runs out it
+        -- is counted as an ACK timeout, not as the loading screen it outlived.
+        it("counts a chunk resent after a loading screen by how it finally ended", function()
+            startSend(12)
+            assert.is_true(#state().sendChunks >= 3, "fixture needs three chunks")
+            GBL:HandleAck("OfficerB", { chunk = 1 })
+            MockWoW.serverTime = MockWoW.serverTime + 10
+            fireNextChunkDelay()
+            local outcomes = state().chunkOutcomes
+            GBL:OnLoadingScreenStart()
+            assert.equals("zoneAbort", outcomes[2].outcome,
+                "fixture must have the loading screen tag chunk 2")
+            GBL:OnLoadingScreenEnd()
+            MockWoW.serverTime = MockWoW.serverTime + 10
+            Helpers.fireTimersAt(GBL.SYNC_ZONE_COOLDOWN)
+            assert.equals(3, state().sendChunkIndex,
+                "the resume should have moved on to chunk 3")
+
+            GBL:HandleNack("OfficerB", { chunk = 2 })
+            MockWoW.serverTime = MockWoW.serverTime + 10
+            fireNextChunkDelay()
+            assert.equals(2, state().sendChunkIndex,
+                "the NACK's resend should have put chunk 2 back on the wire")
+
+            exhaustLadder()
+
+            assert.equals("aborted", outcomes[2].outcome)
+            local line = outcomesLine()
+            assert.is_not_nil(line, "no Sync outcomes line to read")
+            assert.is_not_nil(line:find("aborted: 1 ackTimeout + 0 combat + 0 zone", 1, true),
+                "got: " .. line)
+        end)
+
         -- Structural, on the shape of schema_version_spec's rung scan: it
-        -- reads src/Sync.lua, so a seventh tag written by hand, or an outcome
-        -- word FinishSending never counts, fails here without anyone having
-        -- to remember this case. Lists rather than counts, so a scan that
-        -- finds nothing fails too.
+        -- reads src/Sync.lua, so a tag written by hand, or an outcome word
+        -- FinishSending never counts, fails here without anyone having to
+        -- remember this case. It checks three things: every literal write of
+        -- an outcome word, in either quote or the bracket spelling, is pinned
+        -- to the function making it; every helper call names its word
+        -- literally; and each word named is a counter FinishSending keeps.
+        -- Sets rather than counts, so an empty scan fails and one word can be
+        -- used at more than one site. Comments are dropped before any of it.
         it("keeps every abort outcome on one writer, in words the histogram counts", function()
             local fh = io.open("src/Sync.lua", "rb")
             assert.is_not_nil(fh, "could not read src/Sync.lua, so this proves nothing")
             local source = fh:read("*a")
             fh:close()
 
-            local literals, tagged = {}, {}
-            for line in source:gmatch("[^\r\n]+") do
-                if not line:match("^%s*%-%-") then
-                    for word in line:gmatch('[%.%s]outcome%s*=%s*"(%w+)"') do
-                        literals[word] = true
+            local literalWrites, variableWrites, words, code = {}, {}, {}, {}
+            local current
+            for raw in source:gmatch("[^\r\n]+") do
+                local fn = raw:match("^function GBL:([%w_]+)")
+                if fn then
+                    current = fn
+                elseif raw:match("^function ") or raw:match("^local function ") then
+                    current = nil
+                end
+                local line = raw:gsub("%-%-.*$", "")
+                code[#code + 1] = line
+                for _, pattern in ipairs({
+                    "[%.%s]outcome%s*=%s*[\"']([%w_]+)[\"']",
+                    "%[%s*[\"']outcome[\"']%s*%]%s*=%s*[\"']([%w_]+)[\"']",
+                }) do
+                    for word in line:gmatch(pattern) do
+                        literalWrites[tostring(current) .. ":" .. word] = true
                     end
-                    for word in line:gmatch('_TagInFlightChunk%("(%w+)"%)') do
-                        tagged[#tagged + 1] = word
+                end
+                if line:match("[%.%s]outcome%s*=%s*[%a_]") then
+                    variableWrites[tostring(current)] = true
+                end
+                if not line:match("^function GBL:_TagInFlightChunk") then
+                    for args in line:gmatch("_TagInFlightChunk%s*(%b())") do
+                        local word = args:match("^%(%s*[\"']([%w_]+)[\"']")
+                        assert.is_not_nil(word,
+                            "every _TagInFlightChunk call must name its outcome, got " .. args)
+                        words[word] = true
                     end
                 end
             end
-            local written = {}
-            for word in pairs(literals) do written[#written + 1] = word end
-            table.sort(written)
-            table.sort(tagged)
+            local function sorted(set)
+                local out = {}
+                for key in pairs(set) do out[#out + 1] = key end
+                table.sort(out)
+                return out
+            end
 
-            assert.same({ "ok", "pending" }, written,
-                "only the ACK and the chunk's creation may write an outcome word")
+            assert.same({ "HandleAck:ok", "SendNextChunk:pending" }, sorted(literalWrites),
+                "only the ACK and the chunk's own issue may write an outcome word")
+            assert.same({ "_TagInFlightChunk" }, sorted(variableWrites),
+                "only the helper may write an outcome it was handed")
+            local tagged = sorted(words)
             assert.same({ "aborted", "busyAbort", "combatAbort", "disabledAbort",
                 "sendFailed", "zoneAbort" }, tagged)
 
-            local counter = source:match("local outcomes = (%b{})")
+            local counter = table.concat(code, "\n"):match("local outcomes = (%b{})")
             assert.is_not_nil(counter, "could not find FinishSending's outcome counter")
             for _, word in ipairs(tagged) do
                 assert.is_not_nil(counter:find("[%s{,]" .. word .. "%s*=%s*0"),
