@@ -1607,6 +1607,28 @@ describe("Sync session lifecycle", function()
             assert.is_true(GBL:GetSyncStatus().zonePaused)
         end)
 
+        -- #281: the one tag site that does not end the session. The chunk's
+        -- ACK timer is cancelled, so the tag records that its fate is unknown.
+        it("tags the chunk in flight at a loading screen and keeps the send", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "zone_tag:0",
+            })
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+            local state = GBL:GetSyncStateForTests()
+            local idx = state.sendChunkIndex
+            assert.equals("pending", state.chunkOutcomes[idx].outcome,
+                "fixture must have a chunk in flight")
+
+            GBL:OnLoadingScreenStart()
+
+            assert.equals("zoneAbort", state.chunkOutcomes[idx].outcome)
+            assert.is_true(GBL:GetSyncStatus().sending,
+                "a loading screen pauses a send rather than ending it")
+        end)
+
         it("resumes sync after cooldown on loading screen end", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 

@@ -2322,6 +2322,108 @@ describe("Sync send path", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- #281: the in-flight chunk tag
+    --
+    -- Six places tag the chunk on the wire with how its session ended, and
+    -- until #281 each was a hand-written copy. Three of them had no spec at
+    -- all: the ACK ladder's give-up, the refused whisper and the loading
+    -- screen (the last lives in spec/sync_lifecycle_spec.lua beside the other
+    -- zone cases). FinishSending replaces chunkOutcomes, so every case holds a
+    -- reference to the session's table from before the abort.
+    ---------------------------------------------------------------------------
+
+    describe("in-flight chunk tag (#281)", function()
+        local function state() return GBL:GetSyncStateForTests() end
+
+        --- A live send to OfficerB, who is online in the roster so a later
+        --- case can take them offline.
+        local function startSend(records)
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            MockWoW.guildRoster = {
+                { name = "OfficerB-TestRealm", isOnline = true },
+            }
+            for i = 1, records do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000, id = "inflight_" .. i .. ":0",
+                })
+            end
+            Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending,
+                "fixture must reach a live send")
+            assert.is_false(GBL:GetSyncStatus().preparing,
+                "fixture must be past the preparation")
+        end
+
+        local function outcomesLine()
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message:find("Sync outcomes for OfficerB", 1, true) then
+                    return entry.message
+                end
+            end
+            return nil
+        end
+
+        --- Run the ACK ladder out: every retry, then the timeout that gives
+        --- up. The clock moves each round so the gap floor lets a retry issue.
+        local function exhaustLadder()
+            for attempt = 1, GBL.SYNC_MAX_RETRIES do
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
+                assert.is_true(GBL:GetSyncStatus().sending,
+                    "the ladder should still be retrying at attempt " .. attempt)
+            end
+            MockWoW.serverTime = MockWoW.serverTime + 10
+            fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
+            assert.is_false(GBL:GetSyncStatus().sending,
+                "the ladder should have given up")
+        end
+
+        it("tags the chunk the ACK ladder gives up on", function()
+            startSend(4)
+            local outcomes = state().chunkOutcomes
+            local idx = state().sendChunkIndex
+            assert.equals("pending", outcomes[idx].outcome,
+                "fixture must have a chunk waiting on its ACK")
+
+            exhaustLadder()
+
+            assert.equals("aborted", outcomes[idx].outcome)
+            local line = outcomesLine()
+            assert.is_not_nil(line, "no Sync outcomes line to read")
+            assert.is_not_nil(line:find("aborted: 1 ackTimeout", 1, true),
+                "the give-up should be counted as an ACK timeout, got: " .. line)
+            assert.is_not_nil(line:find("session ended by ack timeout", 1, true),
+                "got: " .. line)
+        end)
+
+        it("tags the chunk a refused whisper was carrying", function()
+            startSend(8)
+            assert.is_true(#state().sendChunks >= 2,
+                "fixture needs a second chunk to refuse")
+            GBL:HandleAck("OfficerB", { chunk = 1 })
+            -- OfficerB logs off before chunk 2 goes out, so SendSyncWhisper
+            -- refuses it.
+            MockWoW.guildRoster = {
+                { name = "OfficerB-TestRealm", isOnline = false },
+            }
+            MockWoW.serverTime = MockWoW.serverTime + 10
+            local outcomes = state().chunkOutcomes
+
+            fireNextChunkDelay()
+
+            assert.is_false(GBL:GetSyncStatus().sending)
+            assert.equals("sendFailed", outcomes[2].outcome)
+            local line = outcomesLine()
+            assert.is_not_nil(line, "no Sync outcomes line to read")
+            assert.is_not_nil(line:find("+ 1 offline +", 1, true),
+                "the refused chunk should be counted as offline, got: " .. line)
+            assert.is_not_nil(line:find("session ended by peer offline at chunk 2/", 1, true),
+                "got: " .. line)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- Sender offline detection
     ---------------------------------------------------------------------------
 
