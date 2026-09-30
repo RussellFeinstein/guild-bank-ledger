@@ -1505,6 +1505,30 @@ describe("Sync request and serve", function()
             assertChainIsDead()
         end)
 
+        -- The slot is claimed before the chain starts, so the requester is
+        -- waiting on a session that will now never send, and a disabled client
+        -- will not hear its resends (#279).
+        it("tells the requester when sync is disabled mid-preparation", function()
+            startPrep()
+
+            GBL:DisableSync()
+
+            local busy = {}
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and data.type == "BUSY" then
+                    busy[#busy + 1] = {
+                        target = msg.target, prio = msg.prio, reason = data.reason,
+                    }
+                end
+            end
+            assert.equals(1, #busy, "the requester gets one BUSY")
+            assert.equals("PeerA", busy[1].target)
+            assert.equals("disabled", busy[1].reason)
+            assert.equals("NORMAL", busy[1].prio)
+            assertChainIsDead()
+        end)
+
         it("abandons the preparation when sync state is reset", function()
             startPrep()
 

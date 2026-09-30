@@ -964,6 +964,217 @@ describe("Sync session lifecycle", function()
             assert.equals("0/0", status.receiveProgress)
             assert.is_nil(status.receiveSource)
         end)
+
+        -- Telling the partners (#279). A disabled client reads nothing, so a
+        -- peer serving us works its whole ACK ladder (booked as wire loss) and
+        -- a peer we were serving waits out 140s of NACKs. BUSY already means
+        -- "stop, try later" on the other side, and HandleBusy tears down both
+        -- directions on it.
+
+        --- Every BUSY whispered since the last clear, decoded.
+        local function busySent()
+            local out = {}
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and type(data) == "table" and data.type == "BUSY" then
+                    out[#out + 1] = {
+                        target = msg.target, prio = msg.prio, reason = data.reason,
+                    }
+                end
+            end
+            return out
+        end
+
+        local function countByTarget(busy)
+            local n = {}
+            for _, b in ipairs(busy) do n[b.target] = (n[b.target] or 0) + 1 end
+            return n
+        end
+
+        -- NORMAL, not the ALERT the combat abort uses. Our last chunk to this
+        -- peer can still be queued at NORMAL, and an ALERT BUSY can leave ahead
+        -- of it: the peer clears its receive on the BUSY, then reopens one
+        -- when the chunk lands. At NORMAL the BUSY queues behind it.
+        it("tells the peer it was sending to", function()
+            startSend("PeerA")
+            MockAce.sentCommMessages = {}
+
+            GBL:DisableSync()
+
+            local busy = busySent()
+            assert.equals(1, #busy, "one BUSY, to the one partner")
+            assert.equals("PeerA", busy[1].target)
+            assert.equals("disabled", busy[1].reason,
+                "the reason is what the partner's log will name")
+            assert.equals("NORMAL", busy[1].prio,
+                "an ALERT BUSY can overtake the chunk still queued to this peer")
+        end)
+
+        it("tells the peer it was receiving from", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:RequestSync("OfficerB", 0)
+            deliverChunk("OfficerB", 1)
+            MockAce.sentCommMessages = {}
+
+            GBL:DisableSync()
+
+            local busy = busySent()
+            assert.equals(1, #busy, "one BUSY, to the one partner")
+            assert.equals("OfficerB", busy[1].target)
+            assert.equals("disabled", busy[1].reason)
+            assert.equals("NORMAL", busy[1].prio,
+                "an ALERT BUSY can overtake a request still queued to this peer")
+        end)
+
+        -- Nothing has arrived, but the request is out and the peer may already
+        -- be preparing the serve.
+        it("tells a peer it asked before any chunk arrived", function()
+            GBL:RequestSync("OfficerB", 0)
+            assert.is_true(GBL:GetSyncStatus().receiving,
+                "fixture must leave a receive waiting on its first chunk")
+            MockAce.sentCommMessages = {}
+
+            GBL:DisableSync()
+
+            local busy = busySent()
+            assert.equals(1, #busy)
+            assert.equals("OfficerB", busy[1].target)
+        end)
+
+        it("tells a peer whose data opened the receive unasked", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            deliverChunk("OfficerB", 2)
+            assert.is_true(GBL:GetSyncStatus().receiving,
+                "fixture must bootstrap a receive from unsolicited data")
+            MockAce.sentCommMessages = {}
+
+            GBL:DisableSync()
+
+            local busy = busySent()
+            assert.equals(1, #busy)
+            assert.equals("OfficerB", busy[1].target)
+        end)
+
+        it("tells both partners when it was sending to one and receiving from "
+            .. "another", function()
+            startSend("PeerA")
+            GBL:RequestSync("OfficerB", 0)
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            MockAce.sentCommMessages = {}
+
+            GBL:DisableSync()
+
+            local busy = busySent()
+            assert.equals(2, #busy)
+            local n = countByTarget(busy)
+            assert.equals(1, n.PeerA, "one BUSY to the send target")
+            assert.equals(1, n.OfficerB, "one BUSY to the receive source")
+        end)
+
+        -- HandleBusy tears down both directions on one message, so a second
+        -- one to the same peer is noise at best.
+        it("tells a peer holding both directions once", function()
+            startSend("PeerA")
+            GBL:RequestSync("PeerA", 0)
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            MockAce.sentCommMessages = {}
+
+            GBL:DisableSync()
+
+            local busy = busySent()
+            assert.equals(1, #busy, "one message covers both directions")
+            assert.equals("PeerA", busy[1].target)
+        end)
+
+        it("whispers nothing when no session is live", function()
+            MockAce.sentCommMessages = {}
+            GBL:ClearLog("sync")
+
+            GBL:DisableSync()
+
+            assert.equals(0, #MockAce.sentCommMessages)
+            assert.is_false(hasLine("Sent BUSY"))
+        end)
+
+        -- The partner names are read straight off syncState with no "is the
+        -- session live" test beside them, which is only safe because every
+        -- teardown clears them. A send that finished on its own is the case
+        -- that would expose a stale one.
+        it("whispers nothing once a send has finished on its own", function()
+            startSend("PeerA")
+            Sync.drainSend(GBL, "PeerA")
+            assert.is_false(GBL:GetSyncStatus().sending,
+                "fixture must let the send end on its own")
+            MockAce.sentCommMessages = {}
+
+            GBL:DisableSync()
+
+            assert.equals(0, #busySent(),
+                "a finished session leaves no partner to tell")
+        end)
+
+        -- Sent after the teardown, as OnCombatStart and FinishReceiving order
+        -- their own whispers. Serializing and whispering can raise, and a raise
+        -- from the middle of the teardown leaves a session half up.
+        it("whispers only once both sessions are down", function()
+            startSend("PeerA")
+            GBL:RequestSync("OfficerB", 0)
+            local seen = {}
+            local orig = GBL.SendCommMessage
+            GBL.SendCommMessage = function(self, prefix, text, ...)
+                local ok, data = GBL:Deserialize(text)
+                if ok and type(data) == "table" and data.type == "BUSY" then
+                    local status = GBL:GetSyncStatus()
+                    seen[#seen + 1] = {
+                        sending = status.sending, receiving = status.receiving,
+                    }
+                end
+                return orig(self, prefix, text, ...)
+            end
+
+            GBL:DisableSync()
+            GBL.SendCommMessage = orig
+
+            assert.equals(2, #seen, "no BUSY seen, so there was nothing to order")
+            for _, state in ipairs(seen) do
+                assert.is_false(state.sending, "the send was still up at the BUSY")
+                assert.is_false(state.receiving,
+                    "the receive was still up at the BUSY")
+            end
+        end)
+
+        it("does not claim a BUSY the roster refused", function()
+            startSend("PeerA")
+            MockWoW.guildRoster = {
+                { name = "PeerA-TestRealm", isOnline = false },
+            }
+            MockAce.sentCommMessages = {}
+            GBL:ClearLog("sync")
+
+            GBL:DisableSync()
+
+            assert.is_true(hasLine("Blocked whisper to offline player: PeerA"),
+                "the BUSY should have been tried and refused")
+            assert.equals(0, #busySent())
+            assert.is_false(hasLine("Sent BUSY"),
+                "the line reports a whisper that went out, and this one did not")
+            assert.is_false(GBL:GetSyncStatus().sending,
+                "the teardown does not depend on the whisper")
+        end)
+
+        it("says in the log which partners were told", function()
+            MockWoW.guildRoster = {
+                { name = "PeerA-TestRealm", isOnline = true },
+            }
+            startSend("PeerA")
+            GBL:RequestSync("OfficerB", 0)
+            GBL:ClearLog("sync")
+
+            GBL:DisableSync()
+
+            assert.is_true(hasLine("Sent BUSY to send target: PeerA"))
+            assert.is_true(hasLine("Sent BUSY to receive source: OfficerB"))
+        end)
     end)
 
     ---------------------------------------------------------------------------
