@@ -2489,17 +2489,21 @@ describe("Sync send path", function()
                 "the verdict still names the ending, got: " .. line)
         end)
 
-        -- A send-completion callback cannot be cancelled. When the last
-        -- attempt of chunk 2 finishes transmitting after a NACK has rewound
-        -- the send, it installs an ACK timer for chunk 2 while the index
-        -- points at chunk 1. The give-up acts on the index, as the retry
-        -- branch of the same timer and the verdict clause do.
-        it("gives up on the chunk the send index names, not the timer's own", function()
+        -- A send-completion callback cannot be cancelled. The receiver NACKs
+        -- chunk 2 while that chunk's last attempt is still queued, so
+        -- HandleNack moves the send index below it. The attempt then finishes
+        -- transmitting and sets an ACK timer for chunk 2. If that timer runs
+        -- out before the NACK's resend goes out, the chunk that used up its
+        -- attempts is chunk 2, the timer's own, while the index names chunk 1,
+        -- acked long before. The first cut of #281 tagged the index here and
+        -- so tagged nothing; its code review found this shape.
+        it("gives up on the chunk its own timer was waiting on, not the send index", function()
             local held = {}
             GBL.SendCommMessage = function(_self, prefix, text, dist, target,
-                    _prio, cbFn, cbArg)
+                    prio, cbFn, cbArg)
                 table.insert(MockAce.sentCommMessages, {
-                    prefix = prefix, text = text, distribution = dist, target = target,
+                    prefix = prefix, text = text, distribution = dist,
+                    target = target, prio = prio,
                 })
                 if cbFn then
                     table.insert(held, { fn = cbFn, arg = cbArg })
@@ -2529,13 +2533,12 @@ describe("Sync send path", function()
             end
             assert.equals(1, #held, "chunk 2's last attempt should still be queued")
 
-            GBL:HandleNack("OfficerB", { chunk = 1 })
-            fireNackResend()
+            GBL:HandleNack("OfficerB", { chunk = 2 })
             assert.equals(1, state().sendChunkIndex,
-                "the NACK should have rewound the send onto chunk 1")
-            -- Chunk 2's last attempt leaves the queue ahead of chunk 1's resend.
+                "the NACK should have moved the index below chunk 2")
+            -- Chunk 2's last attempt finishes transmitting. The NACK's resend
+            -- has not gone out yet.
             completeOldest()
-            assert.equals(1, #held, "chunk 1's resend should still be queued")
             assert.equals(1, Helpers.timersAt(GBL.SYNC_ACK_TIMEOUT),
                 "the only live ACK timer should be the one chunk 2's callback set")
             local outcomes = state().chunkOutcomes
@@ -2543,12 +2546,12 @@ describe("Sync send path", function()
             fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
 
             assert.is_false(GBL:GetSyncStatus().sending, "the ladder should have given up")
+            assert.equals("aborted", outcomes[2].outcome,
+                "chunk 2 is the one that used up its attempts")
             assert.equals("ok", outcomes[1].outcome)
-            assert.equals("pending", outcomes[2].outcome,
-                "the timer's own chunk is not the one the send was waiting on")
             local line = outcomesLine()
             assert.is_not_nil(line, "no Sync outcomes line to read")
-            assert.is_not_nil(line:find("session ended by ack timeout at chunk 1/", 1, true),
+            assert.is_not_nil(line:find("aborted: 1 ackTimeout", 1, true),
                 "got: " .. line)
         end)
 
