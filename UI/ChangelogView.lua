@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.41.16
+    {"0.41.16", "2026-09-30", {
+        Fixed = {
+            "Turning sync off in the middle of a sync now tells the guildmate on the other end. Before, their addon had no way to know: one sending to you kept resending for about half a minute and logged every attempt as a lost message, and one you were sending to waited over two minutes before giving up. Now each of them stops straight away, and a guildmate on version 0.37.16 or later sees \"reason: disabled\" in their sync log.",
+        },
+    }},
     -- v0.41.15
     {"0.41.15", "2026-09-29", {
         Fixed = {
