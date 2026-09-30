@@ -371,6 +371,12 @@ describe("Sync receive and intake", function()
             GBL:RequestSync("OfficerB", 0)
             chunk(1, 100)
             assert.is_true(GBL:GetSyncStatus().receiving)
+            -- Still true only if RequestSync opened the session. Had it bailed,
+            -- the chunk would have bootstrapped one stamped at the same instant
+            -- and this case would stop pinning RequestSync's own stamp.
+            assert.is_true(GBL:GetSyncStateForTests().receiveRequested,
+                "RequestSync must have opened this session, not the bootstrap")
+            MockAce.sentCommMessages = {}
             MockWoW.serverTime = MockWoW.serverTime + GBL.SYNC_MAX_RECEIVE_DURATION + 1
 
             assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
@@ -378,6 +384,7 @@ describe("Sync receive and intake", function()
             assert.is_truthy(logLine("Receive timeout: stuck for >"),
                 "the watchdog must end the session")
             assert.is_false(GBL:GetSyncStatus().receiving)
+            assert.equals(0, nacksSent(), "an ended session must not NACK")
         end)
     end)
 
