@@ -277,6 +277,118 @@ describe("Sync receive and intake", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Receive backstop (#280)
+    --
+    -- The MAX_RECEIVE_DURATION watchdog is gated on receiveStartTime > 0.
+    -- RequestSync stamps it and the HandleSyncData auto-bootstrap did not, so
+    -- a session opened by data we never asked for had no absolute cap, and
+    -- FinishReceiving reported its length as the whole server clock. These
+    -- move MockWoW.serverTime and never call SetReceiveStartTime, which
+    -- would overwrite the stamp under test.
+    ---------------------------------------------------------------------------
+
+    describe("receive backstop (#280)", function()
+        local function chunk(n, total)
+            GBL:HandleSyncData("OfficerB", {
+                chunk = n, totalChunks = total,
+                transactions = {}, moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+        end
+
+        local function startTime()
+            return GBL:GetSyncStateForTests().receiveStartTime
+        end
+
+        local function logLine(pattern)
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message:match(pattern) then return entry.message end
+            end
+            return nil
+        end
+
+        local function nacksSent()
+            local n = 0
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and type(data) == "table" and data.type == "NACK" then
+                    n = n + 1
+                end
+            end
+            return n
+        end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+        end)
+
+        it("stamps the start time on a session opened by unsolicited data", function()
+            chunk(1, 100)
+            assert.is_true(GBL:GetSyncStatus().receiving,
+                "fixture must bootstrap a receive from unsolicited data")
+            assert.equals(MockWoW.serverTime, startTime())
+        end)
+
+        it("aborts an unsolicited session held past MAX_RECEIVE_DURATION", function()
+            chunk(5, 100)
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            MockAce.sentCommMessages = {}
+            MockWoW.serverTime = MockWoW.serverTime + GBL.SYNC_MAX_RECEIVE_DURATION + 1
+
+            assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
+
+            assert.is_truthy(logLine("Receive timeout: stuck for >"),
+                "the watchdog must end the session")
+            assert.is_false(GBL:GetSyncStatus().receiving)
+            assert.equals(0, nacksSent(), "an ended session must not NACK")
+        end)
+
+        it("keeps the first chunk's stamp for the rest of the session", function()
+            chunk(1, 100)
+            local t0 = MockWoW.serverTime
+            MockWoW.serverTime = t0 + 100
+            chunk(2, 100)
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            assert.equals(t0, startTime(),
+                "a later chunk must not restart the clock the watchdog reads")
+        end)
+
+        it("reports the unsolicited session's own length when it completes", function()
+            chunk(1, 2)
+            MockWoW.serverTime = MockWoW.serverTime + 7
+            chunk(2, 2)
+            assert.is_false(GBL:GetSyncStatus().receiving)
+
+            local line = logLine("Sync complete from OfficerB")
+            assert.is_truthy(line, "expected the completion line")
+            local chunks, secs = line:match("(%d+) chunks, (%d+)s")
+            assert.equals(2, tonumber(chunks))
+            assert.equals(7, tonumber(secs))
+        end)
+
+        it("aborts a requested session held past MAX_RECEIVE_DURATION", function()
+            GBL:RequestSync("OfficerB", 0)
+            chunk(1, 100)
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            -- Still true only if RequestSync opened the session. Had it bailed,
+            -- the chunk would have bootstrapped one stamped at the same instant
+            -- and this case would stop pinning RequestSync's own stamp.
+            assert.is_true(GBL:GetSyncStateForTests().receiveRequested,
+                "RequestSync must have opened this session, not the bootstrap")
+            MockAce.sentCommMessages = {}
+            MockWoW.serverTime = MockWoW.serverTime + GBL.SYNC_MAX_RECEIVE_DURATION + 1
+
+            assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
+
+            assert.is_truthy(logLine("Receive timeout: stuck for >"),
+                "the watchdog must end the session")
+            assert.is_false(GBL:GetSyncStatus().receiving)
+            assert.equals(0, nacksSent(), "an ended session must not NACK")
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- NormalizeRecordId
     ---------------------------------------------------------------------------
 
