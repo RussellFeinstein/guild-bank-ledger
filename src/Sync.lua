@@ -3690,6 +3690,9 @@ function GBL:HandleSyncData(sender, data)
         -- session of pure duplicates and whispering a second receipt reading
         -- 100% duped for a session that already sent one.
         syncState.receiveRequested = false
+        -- Stamped as RequestSync stamps, or the MAX_RECEIVE_DURATION
+        -- watchdog never ends this session (#280).
+        syncState.receiveStartTime = GetServerTime()
         if data.chunk and data.chunk > 1 then
             self:AddAuditEntry("Auto-bootstrap at chunk " .. data.chunk
                 .. " from " .. sender
