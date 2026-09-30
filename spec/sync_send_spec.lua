@@ -2379,6 +2379,32 @@ describe("Sync send path", function()
                 "the ladder should have given up")
         end
 
+        describe("_TagInFlightChunk", function()
+            it("tags the pending chunk at the send index", function()
+                startSend(4)
+                local idx = state().sendChunkIndex
+                GBL:_TagInFlightChunk("busyAbort")
+                assert.equals("busyAbort", state().chunkOutcomes[idx].outcome)
+            end)
+
+            it("leaves a chunk that was already acked alone", function()
+                startSend(4)
+                local idx = state().sendChunkIndex
+                GBL:HandleAck("OfficerB", { chunk = idx })
+                assert.equals("ok", state().chunkOutcomes[idx].outcome,
+                    "fixture must leave the indexed chunk settled")
+                GBL:_TagInFlightChunk("busyAbort")
+                assert.equals("ok", state().chunkOutcomes[idx].outcome)
+            end)
+
+            it("does nothing when no send is live", function()
+                assert.equals(0, state().sendChunkIndex)
+                assert.is_nil(next(state().chunkOutcomes))
+                GBL:_TagInFlightChunk("busyAbort")
+                assert.is_nil(next(state().chunkOutcomes))
+            end)
+        end)
+
         it("tags the chunk the ACK ladder gives up on", function()
             startSend(4)
             local outcomes = state().chunkOutcomes
