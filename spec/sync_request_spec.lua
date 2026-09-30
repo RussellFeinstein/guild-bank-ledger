@@ -1513,19 +1513,16 @@ describe("Sync request and serve", function()
 
             GBL:DisableSync()
 
-            local busy = {}
-            for _, msg in ipairs(MockAce.sentCommMessages) do
-                local ok, data = GBL:Deserialize(msg.text)
-                if ok and data.type == "BUSY" then
-                    busy[#busy + 1] = {
-                        target = msg.target, prio = msg.prio, reason = data.reason,
-                    }
-                end
-            end
+            local busy = Sync.busySent(GBL)
             assert.equals(1, #busy, "the requester gets one BUSY")
             assert.equals("PeerA", busy[1].target)
             assert.equals("disabled", busy[1].reason)
             assert.equals("NORMAL", busy[1].prio)
+            -- _AbortSyncPrep logs at DEBUG, which no capture keeps, so without
+            -- this the BUSY line would be the only trace and name no cause.
+            assert.is_true(
+                auditHas("Serve preparation for PeerA abandoned - sync disabled"),
+                "the capture has to say what the BUSY was for")
             assertChainIsDead()
         end)
 

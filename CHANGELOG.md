@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- Turning sync off in the middle of a sync now tells the guildmate on the other end. Before, their addon had no way to know: one sending to you kept resending for about half a minute and logged every attempt as a lost message, and one you were sending to waited over two minutes before giving up. Now each of them stops straight away, and their sync log gives sync being turned off as the reason.
+- Turning sync off in the middle of a sync now tells the guildmate on the other end. Before, their addon had no way to know: one sending to you kept resending for about half a minute and logged every attempt as a lost message, and one you were sending to waited over two minutes before giving up. Now each of them stops straight away, and a guildmate on version 0.37.16 or later sees "reason: disabled" in their sync log.
 
 ## [0.41.15] - 2026-09-29
 

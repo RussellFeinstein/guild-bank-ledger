@@ -356,6 +356,7 @@ end
 -- @param sendTarget string|nil The peer we were sending to
 -- @param receiveSource string|nil The peer we were receiving from
 function GBL:_SendBusyToPartners(reason, sendTarget, receiveSource)
+    -- No partner, no codec: an idle disable should not reach code that can raise.
     if not sendTarget and not receiveSource then return end
     local busyMsg = compressMessage(self:Serialize(self:BuildBusyMessage(reason)))
     if sendTarget and self:SendSyncWhisper(PREFIX, busyMsg, sendTarget, "NORMAL") then
@@ -720,6 +721,10 @@ function GBL:DisableSync()
     -- chunks" block plus four statistics lines for a session that never put a
     -- byte on the wire.
     if syncState.prep then
+        -- INFO, because _AbortSyncPrep logs at DEBUG and a capture would
+        -- otherwise show the BUSY below with no cause in front of it.
+        self:AddAuditEntry("Serve preparation for " .. tostring(sendTarget)
+            .. " abandoned - sync disabled")
         self:_AbortSyncPrep("sync disabled")
     elseif syncState.sending then
         -- Tag the chunk that was in flight, before FinishSending reads the

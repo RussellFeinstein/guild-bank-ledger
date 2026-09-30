@@ -971,19 +971,7 @@ describe("Sync session lifecycle", function()
         -- "stop, try later" on the other side, and HandleBusy tears down both
         -- directions on it.
 
-        --- Every BUSY whispered since the last clear, decoded.
-        local function busySent()
-            local out = {}
-            for _, msg in ipairs(MockAce.sentCommMessages) do
-                local ok, data = GBL:Deserialize(msg.text)
-                if ok and type(data) == "table" and data.type == "BUSY" then
-                    out[#out + 1] = {
-                        target = msg.target, prio = msg.prio, reason = data.reason,
-                    }
-                end
-            end
-            return out
-        end
+        local function busySent() return Sync.busySent(GBL) end
 
         local function countByTarget(busy)
             local n = {}
@@ -1086,14 +1074,20 @@ describe("Sync session lifecycle", function()
             assert.equals("PeerA", busy[1].target)
         end)
 
+        -- Nothing built either: with no partner there is no reason to reach
+        -- the serializer and codec, which can raise, from the last statement
+        -- of a checkbox callback.
         it("whispers nothing when no session is live", function()
             MockAce.sentCommMessages = {}
             GBL:ClearLog("sync")
+            local serializedBefore = MockAce._serializedCounter
 
             GBL:DisableSync()
 
             assert.equals(0, #MockAce.sentCommMessages)
             assert.is_false(hasLine("Sent BUSY"))
+            assert.equals(serializedBefore, MockAce._serializedCounter,
+                "an idle disable should not build a BUSY it will not send")
         end)
 
         -- The partner names are read straight off syncState with no "is the
@@ -1105,6 +1099,20 @@ describe("Sync session lifecycle", function()
             Sync.drainSend(GBL, "PeerA")
             assert.is_false(GBL:GetSyncStatus().sending,
                 "fixture must let the send end on its own")
+            MockAce.sentCommMessages = {}
+
+            GBL:DisableSync()
+
+            assert.equals(0, #busySent(),
+                "a finished session leaves no partner to tell")
+        end)
+
+        it("whispers nothing once a receive has finished on its own", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:RequestSync("OfficerB", 0)
+            for n = 1, 3 do deliverChunk("OfficerB", n) end
+            assert.is_false(GBL:GetSyncStatus().receiving,
+                "fixture must let the receive end on its own")
             MockAce.sentCommMessages = {}
 
             GBL:DisableSync()
@@ -1143,10 +1151,16 @@ describe("Sync session lifecycle", function()
             end
         end)
 
+        -- The roster flips after both sessions are live: offline from the
+        -- start, the first chunk and the request are refused and there is
+        -- nothing left to disable.
         it("does not claim a BUSY the roster refused", function()
             startSend("PeerA")
+            GBL:RequestSync("OfficerB", 0)
+            assert.is_true(GBL:GetSyncStatus().receiving)
             MockWoW.guildRoster = {
                 { name = "PeerA-TestRealm", isOnline = false },
+                { name = "OfficerB-TestRealm", isOnline = false },
             }
             MockAce.sentCommMessages = {}
             GBL:ClearLog("sync")
@@ -1154,12 +1168,16 @@ describe("Sync session lifecycle", function()
             GBL:DisableSync()
 
             assert.is_true(hasLine("Blocked whisper to offline player: PeerA"),
-                "the BUSY should have been tried and refused")
+                "the BUSY to the send target should be tried and refused")
+            assert.is_true(hasLine("Blocked whisper to offline player: OfficerB"),
+                "the BUSY to the receive source should be tried and refused")
             assert.equals(0, #busySent())
             assert.is_false(hasLine("Sent BUSY"),
-                "the line reports a whisper that went out, and this one did not")
-            assert.is_false(GBL:GetSyncStatus().sending,
+                "the line reports a whisper that went out, and neither did")
+            local status = GBL:GetSyncStatus()
+            assert.is_false(status.sending,
                 "the teardown does not depend on the whisper")
+            assert.is_false(status.receiving)
         end)
 
         it("says in the log which partners were told", function()
