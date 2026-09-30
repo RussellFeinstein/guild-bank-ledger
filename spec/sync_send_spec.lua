@@ -2447,6 +2447,150 @@ describe("Sync send path", function()
             assert.is_not_nil(line:find("session ended by peer offline at chunk 2/", 1, true),
                 "got: " .. line)
         end)
+
+        --- Fire the resend a NACK schedules. It is the newest timer, and the
+        --- caller checks the index it leaves, so a miss cannot pass quietly.
+        local function fireNackResend()
+            local resend = MockWoW.pendingTimers[#MockWoW.pendingTimers]
+            assert.is_false(resend.cancelled == true, "the NACK's resend is not pending")
+            MockWoW.serverTime = MockWoW.serverTime + 10
+            resend.callback()
+        end
+
+        -- HandleNack is the only code that moves the send index backward, and
+        -- it leaves the retry count alone. A NACK can name a chunk the peer
+        -- has already acked: #290's arrival count does that after a mid-stream
+        -- bootstrap. If the peer then goes quiet, the ladder runs out on a
+        -- chunk that was delivered.
+        it("leaves an acked chunk alone when the ladder gives up on it", function()
+            startSend(8)
+            assert.is_true(#state().sendChunks >= 2, "fixture needs two chunks")
+            GBL:HandleAck("OfficerB", { chunk = 1 })
+            MockWoW.serverTime = MockWoW.serverTime + 10
+            fireNextChunkDelay()
+            assert.equals(2, state().sendChunkIndex, "chunk 2 should be in flight")
+            local outcomes = state().chunkOutcomes
+            assert.equals("ok", outcomes[1].outcome)
+
+            GBL:HandleNack("OfficerB", { chunk = 1 })
+            fireNackResend()
+            assert.equals(1, state().sendChunkIndex,
+                "the NACK should have rewound the send onto chunk 1")
+
+            exhaustLadder()
+
+            assert.equals("ok", outcomes[1].outcome,
+                "a delivered chunk must not be counted as lost")
+            local line = outcomesLine()
+            assert.is_not_nil(line, "no Sync outcomes line to read")
+            assert.is_not_nil(line:find("aborted: 0 ackTimeout", 1, true),
+                "got: " .. line)
+            assert.is_not_nil(line:find("session ended by ack timeout at chunk 1/", 1, true),
+                "the verdict still names the ending, got: " .. line)
+        end)
+
+        -- A send-completion callback cannot be cancelled. When the last
+        -- attempt of chunk 2 finishes transmitting after a NACK has rewound
+        -- the send, it installs an ACK timer for chunk 2 while the index
+        -- points at chunk 1. The give-up acts on the index, as the retry
+        -- branch of the same timer and the verdict clause do.
+        it("gives up on the chunk the send index names, not the timer's own", function()
+            local held = {}
+            GBL.SendCommMessage = function(_self, prefix, text, dist, target,
+                    _prio, cbFn, cbArg)
+                table.insert(MockAce.sentCommMessages, {
+                    prefix = prefix, text = text, distribution = dist, target = target,
+                })
+                if cbFn then
+                    table.insert(held, { fn = cbFn, arg = cbArg })
+                end
+            end
+            -- Oldest first, the order ChatThrottleLib drains one queue in.
+            local function completeOldest()
+                local entry = table.remove(held, 1)
+                entry.fn(entry.arg, 100, 100)
+            end
+
+            startSend(8)
+            assert.is_true(#state().sendChunks >= 2, "fixture needs two chunks")
+            completeOldest()
+            GBL:HandleAck("OfficerB", { chunk = 1 })
+            MockWoW.serverTime = MockWoW.serverTime + 10
+            fireNextChunkDelay()
+            completeOldest()
+            assert.equals(2, state().sendChunkIndex, "chunk 2 should be in flight")
+
+            -- Every retry of chunk 2 but the last completes; the last one's
+            -- callback is still queued when the NACK arrives.
+            for attempt = 1, GBL.SYNC_MAX_RETRIES do
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
+                if attempt < GBL.SYNC_MAX_RETRIES then completeOldest() end
+            end
+            assert.equals(1, #held, "chunk 2's last attempt should still be queued")
+
+            GBL:HandleNack("OfficerB", { chunk = 1 })
+            fireNackResend()
+            assert.equals(1, state().sendChunkIndex,
+                "the NACK should have rewound the send onto chunk 1")
+            -- Chunk 2's last attempt leaves the queue ahead of chunk 1's resend.
+            completeOldest()
+            assert.equals(1, #held, "chunk 1's resend should still be queued")
+            assert.equals(1, Helpers.timersAt(GBL.SYNC_ACK_TIMEOUT),
+                "the only live ACK timer should be the one chunk 2's callback set")
+            local outcomes = state().chunkOutcomes
+
+            fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
+
+            assert.is_false(GBL:GetSyncStatus().sending, "the ladder should have given up")
+            assert.equals("ok", outcomes[1].outcome)
+            assert.equals("pending", outcomes[2].outcome,
+                "the timer's own chunk is not the one the send was waiting on")
+            local line = outcomesLine()
+            assert.is_not_nil(line, "no Sync outcomes line to read")
+            assert.is_not_nil(line:find("session ended by ack timeout at chunk 1/", 1, true),
+                "got: " .. line)
+        end)
+
+        -- Structural, on the shape of schema_version_spec's rung scan: it
+        -- reads src/Sync.lua, so a seventh tag written by hand, or an outcome
+        -- word FinishSending never counts, fails here without anyone having
+        -- to remember this case. Lists rather than counts, so a scan that
+        -- finds nothing fails too.
+        it("keeps every abort outcome on one writer, in words the histogram counts", function()
+            local fh = io.open("src/Sync.lua", "rb")
+            assert.is_not_nil(fh, "could not read src/Sync.lua, so this proves nothing")
+            local source = fh:read("*a")
+            fh:close()
+
+            local literals, tagged = {}, {}
+            for line in source:gmatch("[^\r\n]+") do
+                if not line:match("^%s*%-%-") then
+                    for word in line:gmatch('[%.%s]outcome%s*=%s*"(%w+)"') do
+                        literals[word] = true
+                    end
+                    for word in line:gmatch('_TagInFlightChunk%("(%w+)"%)') do
+                        tagged[#tagged + 1] = word
+                    end
+                end
+            end
+            local written = {}
+            for word in pairs(literals) do written[#written + 1] = word end
+            table.sort(written)
+            table.sort(tagged)
+
+            assert.same({ "ok", "pending" }, written,
+                "only the ACK and the chunk's creation may write an outcome word")
+            assert.same({ "aborted", "busyAbort", "combatAbort", "disabledAbort",
+                "sendFailed", "zoneAbort" }, tagged)
+
+            local counter = source:match("local outcomes = (%b{})")
+            assert.is_not_nil(counter, "could not find FinishSending's outcome counter")
+            for _, word in ipairs(tagged) do
+                assert.is_not_nil(counter:find("[%s{,]" .. word .. "%s*=%s*0"),
+                    word .. " is tagged but FinishSending never counts it")
+            end
+        end)
     end)
 
     ---------------------------------------------------------------------------
