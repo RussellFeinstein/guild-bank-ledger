@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- A sync that reaches you without your addon asking for it, which happens after a /reload in the middle of receiving or when your addon missed the end of an earlier sync, now has the same 30-minute limit as any other. Before, one that kept stalling and resuming could run until you reloaded, and your addon would not start another sync while it lasted. Its line in the sync log also reports how long it took, where it used to print a ten-digit number of seconds.
+- A sync that reaches you without your addon asking for it, which happens after a /reload in the middle of receiving or when your addon missed the end of an earlier sync, now has the same 30-minute limit as any other. Before, it had no overall time limit, and your addon would not start another sync while it lasted. Its line in the sync log also reports how long it took, where it used to print a ten-digit number of seconds.
 
 ## [0.41.16] - 2026-09-30
 
