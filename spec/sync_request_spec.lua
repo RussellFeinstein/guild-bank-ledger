@@ -1505,6 +1505,27 @@ describe("Sync request and serve", function()
             assertChainIsDead()
         end)
 
+        -- The slot is claimed before the chain starts, so the requester is
+        -- waiting on a session that will now never send, and a disabled client
+        -- will not hear its resends (#279).
+        it("tells the requester when sync is disabled mid-preparation", function()
+            startPrep()
+
+            GBL:DisableSync()
+
+            local busy = Sync.busySent(GBL)
+            assert.equals(1, #busy, "the requester gets one BUSY")
+            assert.equals("PeerA", busy[1].target)
+            assert.equals("disabled", busy[1].reason)
+            assert.equals("NORMAL", busy[1].prio)
+            -- _AbortSyncPrep logs at DEBUG, which no capture keeps, so without
+            -- this the BUSY line would be the only trace and name no cause.
+            assert.is_true(
+                auditHas("Serve preparation for PeerA abandoned - sync disabled"),
+                "the capture has to say what the BUSY was for")
+            assertChainIsDead()
+        end)
+
         it("abandons the preparation when sync state is reset", function()
             startPrep()
 

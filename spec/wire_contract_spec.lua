@@ -762,6 +762,40 @@ describe("Wire contract", function()
             assert.equals("combat", aborted.reason,
                 "a combat abort says so")
         end)
+
+        -- A third site of the same builder (#279). Its own case, because the
+        -- one above ends its send with the combat abort and leaves no session
+        -- for a disable to end.
+        it("the disable's BUSY carries the same keys and names the disable",
+        function()
+            local gd = configureGuild()
+            GBL.db.profile.sync.enabled = true
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local record = copy(RECORD_CASES[1].stripped)
+            record._occurrence = 0
+            record.scanTime = record.timestamp
+            record.scannedBy = "OfficerA-TestRealm"
+            table.insert(gd.transactions, record)
+            gd.seenTxHashes[record.id] = record.timestamp
+
+            GBL:HandleSyncRequest("PeerA", {
+                sinceTimestamp = 0,
+                version = GBL.version,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            assert.is_true(GBL:GetSyncStatus().sending)
+
+            local disabled = firstOfType(capturePayloads(function()
+                GBL:DisableSync()
+            end), "BUSY")
+            assert.is_table(disabled, "DisableSync built no BUSY")
+
+            assert.same(BUSY_KEYS, keySet(disabled))
+            assert.equals("disabled", disabled.reason,
+                "the partner's log has to tell a disable from a combat abort")
+        end)
     end)
 
     --------------------------------------------------------------------
