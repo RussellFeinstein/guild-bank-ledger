@@ -331,9 +331,9 @@ GBL._nackBackoff = nackBackoff
 -- will free up on its own schedule; one entering combat may be gone for the
 -- length of a fight), and the receiver could not tell them apart. Three sends
 -- killed by BUSY in the 2026-08-12 capture are still unexplained for that
--- reason. Shipped values are "combat" and "sending:<peer>"; the receiver
--- treats the field as an opaque string, so a later producer adds a value
--- without touching the wire contract. Issue #97.
+-- reason. Shipped values are "combat", "sending:<peer>", "preparing:<peer>"
+-- and "disabled"; the receiver treats the field as an opaque string, so a
+-- later producer adds a value without touching the wire contract. Issue #97.
 -- @param reason string Why we are busy
 -- @return table BUSY message
 function GBL:BuildBusyMessage(reason)
@@ -343,6 +343,28 @@ function GBL:BuildBusyMessage(reason)
         guild = self:GetGuildName(),
         reason = reason,
     }
+end
+
+--- Whisper one BUSY to each partner of a session that has just ended.
+--
+-- NORMAL priority, the same as the chunks and requests we send a partner:
+-- an ALERT BUSY can leave ahead of one still queued at NORMAL, and the peer
+-- then acts on the message that arrives second (#279). One message when the
+-- same peer held both directions, since HandleBusy tears down both on it.
+-- The log line is written only for a whisper that went out.
+-- @param reason string Passed to BuildBusyMessage
+-- @param sendTarget string|nil The peer we were sending to
+-- @param receiveSource string|nil The peer we were receiving from
+function GBL:_SendBusyToPartners(reason, sendTarget, receiveSource)
+    if not sendTarget and not receiveSource then return end
+    local busyMsg = compressMessage(self:Serialize(self:BuildBusyMessage(reason)))
+    if sendTarget and self:SendSyncWhisper(PREFIX, busyMsg, sendTarget, "NORMAL") then
+        self:AddAuditEntry("Sent BUSY to send target: " .. sendTarget)
+    end
+    if receiveSource and receiveSource ~= sendTarget
+        and self:SendSyncWhisper(PREFIX, busyMsg, receiveSource, "NORMAL") then
+        self:AddAuditEntry("Sent BUSY to receive source: " .. receiveSource)
+    end
 end
 
 --- Build a SYNC_RECEIPT: what a completed receive made of what it was served.
@@ -676,6 +698,11 @@ end
 function GBL:DisableSync()
     self.db.profile.sync.enabled = false
 
+    -- Read before the teardown clears them. Every teardown nils both, so no
+    -- liveness test is needed beside them (#279).
+    local sendTarget = syncState.sendTarget
+    local receiveSource = syncState.receiveSource
+
     -- A preparation in flight has to be told to stop, or it finishes on its
     -- own timer and serves a peer the user has just switched sync off for. It
     -- is checked FIRST because it implies sending: the slot is claimed before
@@ -746,6 +773,11 @@ function GBL:DisableSync()
     syncState.lastHelloReplyHash = {}
     syncState.lastSupersetNudge = {}
     syncState.incompatibleReplied = {}
+
+    -- Last, once both sessions are down: a disabled client reads nothing, so
+    -- without this a peer serving us works its whole ACK ladder and a peer we
+    -- were serving waits out its NACKs (#279).
+    self:_SendBusyToPartners("disabled", sendTarget, receiveSource)
 end
 
 ------------------------------------------------------------------------
