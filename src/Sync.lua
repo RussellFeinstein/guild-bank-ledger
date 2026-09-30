@@ -3016,8 +3016,7 @@ function GBL:PrepareChunks(transactions, moneyTransactions, eventCounts)
 end
 
 --- Tag the chunk in flight with how its session stopped, for the
--- FinishSending histogram. Every abort outcome but the ACK ladder's give-up
--- is written here (#281).
+-- FinishSending histogram. The one writer of every abort outcome (#281).
 --
 -- Only a pending chunk is tagged, which is what lets a later ACK's "ok" win.
 -- It reads `sendChunkIndex`, the chunk the ACK ladder retries and the verdict
@@ -3334,10 +3333,10 @@ function GBL:SendNextChunk()
                     end
                     self:SendNextChunk()
                 else
-                    -- v0.28.4: record abort outcome for this chunk
-                    if syncState.chunkOutcomes and syncState.chunkOutcomes[idx] then
-                        syncState.chunkOutcomes[idx].outcome = "aborted"
-                    end
+                    -- v0.28.4: record abort outcome. By the send index, not
+                    -- this timer's idx: a callback landing after a NACK's
+                    -- rewind keys the timer to a chunk the send has left (#281).
+                    self:_TagInFlightChunk("aborted")
                     self:SyncError("ACK timeout from "
                         .. (syncState.sendTarget or "unknown")
                         .. " after " .. (MAX_RETRIES + 1) .. " attempts, aborting")
@@ -3362,8 +3361,9 @@ end
 -- `HandleAck` marks the acked chunk "ok" without advancing it, so between an
 -- ACK and the next issue (at least `INTER_CHUNK_GAP_FLOOR`, against a measured
 -- 0.2 to 0.5s wire-to-ACK) the indexed chunk is already settled and no chunk is
--- on the wire at all. Every abort path tags `chunkOutcomes[sendChunkIndex]`
--- under an `outcome == "pending"` guard, so in that window it tags nothing,
+-- on the wire at all. Every abort path tags through `_TagInFlightChunk`, which
+-- reads `chunkOutcomes[sendChunkIndex]` and tags only a pending chunk, so in
+-- that window it tags nothing,
 -- which is honest about the wire and says nothing about the session. Reading
 -- the histogram as the session's verdict is what made a BUSY-killed send
 -- indistinguishable from a clean one even after the block started being

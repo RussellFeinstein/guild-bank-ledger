@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- The sync log no longer reports a chunk your guildmate already received as lost to an ACK timeout. It happened when their addon asked for that chunk a second time and then stopped answering, and it made the connection look less reliable than it was.
+
 ## [0.41.17] - 2026-09-30
 
 ### Fixed
