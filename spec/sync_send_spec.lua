@@ -2364,6 +2364,29 @@ describe("Sync send path", function()
             return nil
         end
 
+        --- Hold every send-completion callback instead of firing it, the way
+        --- ChatThrottleLib holds a queued message. Returns a function that
+        --- completes the oldest held one (one queue drains oldest first), and
+        --- the held list itself.
+        local function holdCallbacks()
+            local held = {}
+            GBL.SendCommMessage = function(_self, prefix, text, dist, target,
+                    prio, cbFn, cbArg)
+                table.insert(MockAce.sentCommMessages, {
+                    prefix = prefix, text = text, distribution = dist,
+                    target = target, prio = prio,
+                })
+                if cbFn then
+                    table.insert(held, { fn = cbFn, arg = cbArg })
+                end
+            end
+            local function completeOldest()
+                local entry = table.remove(held, 1)
+                entry.fn(entry.arg, 100, 100)
+            end
+            return completeOldest, held
+        end
+
         --- Run the ACK ladder out: every retry, then the timeout that gives
         --- up. The clock moves each round so the gap floor lets a retry issue.
         local function exhaustLadder()
@@ -2489,22 +2512,7 @@ describe("Sync send path", function()
         -- acked long before. The first cut of #281 tagged the index here and
         -- so tagged nothing; its code review found this shape.
         it("gives up on the chunk its own timer was waiting on, not the send index", function()
-            local held = {}
-            GBL.SendCommMessage = function(_self, prefix, text, dist, target,
-                    prio, cbFn, cbArg)
-                table.insert(MockAce.sentCommMessages, {
-                    prefix = prefix, text = text, distribution = dist,
-                    target = target, prio = prio,
-                })
-                if cbFn then
-                    table.insert(held, { fn = cbFn, arg = cbArg })
-                end
-            end
-            -- Oldest first, the order ChatThrottleLib drains one queue in.
-            local function completeOldest()
-                local entry = table.remove(held, 1)
-                entry.fn(entry.arg, 100, 100)
-            end
+            local completeOldest, held = holdCallbacks()
 
             startSend(8)
             assert.is_true(#state().sendChunks >= 2, "fixture needs two chunks")
@@ -2546,10 +2554,12 @@ describe("Sync send path", function()
                 "got: " .. line)
         end)
 
-        -- A loading screen tags the chunk in flight zoneAbort, and the send
-        -- resumes past it. If the receiver then NACKs that chunk it goes back
-        -- on the wire, so when the peer goes quiet and its ladder runs out it
-        -- is counted as an ACK timeout, not as the loading screen it outlived.
+        -- A loading screen tags the chunk in flight zoneAbort, and the resume
+        -- puts that chunk back on the wire (#295). When the peer then goes
+        -- quiet and its ladder runs out, it is counted as an ACK timeout, not
+        -- as the loading screen it outlived. Until #295 this case had the
+        -- resume move on to chunk 3 and a NACK put chunk 2 back, which pinned
+        -- the skip as correct behaviour.
         it("counts a chunk resent after a loading screen by how it finally ended", function()
             startSend(12)
             assert.is_true(#state().sendChunks >= 3, "fixture needs three chunks")
@@ -2563,14 +2573,8 @@ describe("Sync send path", function()
             GBL:OnLoadingScreenEnd()
             MockWoW.serverTime = MockWoW.serverTime + 10
             Helpers.fireTimersAt(GBL.SYNC_ZONE_COOLDOWN)
-            assert.equals(3, state().sendChunkIndex,
-                "the resume should have moved on to chunk 3")
-
-            GBL:HandleNack("OfficerB", { chunk = 2 })
-            MockWoW.serverTime = MockWoW.serverTime + 10
-            fireNextChunkDelay()
             assert.equals(2, state().sendChunkIndex,
-                "the NACK's resend should have put chunk 2 back on the wire")
+                "the resume should have put chunk 2 back on the wire")
 
             exhaustLadder()
 
@@ -2579,6 +2583,383 @@ describe("Sync send path", function()
             assert.is_not_nil(line, "no Sync outcomes line to read")
             assert.is_not_nil(line:find("aborted: 1 ackTimeout + 0 combat + 0 zone", 1, true),
                 "got: " .. line)
+        end)
+
+        -- A loading screen pauses a live send: OnLoadingScreenStart tags the
+        -- chunk in flight zoneAbort and cancels its ACK timer, and the cooldown
+        -- resume calls SendNextChunk. Until #295 that moved on to the next
+        -- chunk, so the paused one never went out again and the next chunk
+        -- ran on what was left of its retries. Nested here to reuse startSend
+        -- and outcomesLine; #299 lifts them into spec/sync_helpers.lua.
+        describe("loading-screen resume (#295)", function()
+            --- The SYNC_DATA chunk numbers sent since `mark`, in order.
+            local function chunksSentSince(mark)
+                local out = {}
+                for i = mark + 1, #MockAce.sentCommMessages do
+                    local ok, data = GBL:Deserialize(MockAce.sentCommMessages[i].text)
+                    if ok and type(data) == "table" and data.type == "SYNC_DATA" then
+                        out[#out + 1] = data.chunk
+                    end
+                end
+                return out
+            end
+
+            --- ACK each chunk below `k` so chunk `k` is the one in flight.
+            local function advanceTo(k)
+                for c = 1, k - 1 do
+                    GBL:HandleAck("OfficerB", { chunk = c })
+                    MockWoW.serverTime = MockWoW.serverTime + 10
+                    fireNextChunkDelay()
+                end
+                assert.equals(k, state().sendChunkIndex,
+                    "fixture should have chunk " .. k .. " in flight")
+            end
+
+            --- Let the zone cooldown run out, clear of the gap floor.
+            local function cooldown()
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                Helpers.fireTimersAt(GBL.SYNC_ZONE_COOLDOWN)
+            end
+
+            local function logged(fragment)
+                for _, entry in ipairs(GBL:GetAuditTrail()) do
+                    if entry.message:find(fragment, 1, true) then return true end
+                end
+                return false
+            end
+
+            it("puts the chunk the loading screen paused back on the wire", function()
+                startSend(12)
+                advanceTo(2)
+                GBL:OnLoadingScreenStart()
+                GBL:OnLoadingScreenEnd()
+                local mark = #MockAce.sentCommMessages
+
+                cooldown()
+
+                assert.same({ 2 }, chunksSentSince(mark),
+                    "the resume should resend chunk 2, not move on to chunk 3")
+                assert.equals(2, state().sendChunkIndex)
+                assert.equals("pending", state().chunkOutcomes[2].outcome)
+                assert.equals(2, state().chunkOutcomes[2].attempts)
+                assert.is_true(logged("Resending chunk 2 to OfficerB after the loading screen"),
+                    "a capture should show the resend")
+            end)
+
+            it("gives the chunk after it a full set of retries", function()
+                startSend(12)
+                advanceTo(2)
+                -- Chunk 2 times out twice, so it is on its third attempt.
+                for _ = 1, 2 do
+                    MockWoW.serverTime = MockWoW.serverTime + 10
+                    fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
+                end
+                assert.equals(2, state().sendRetryCount, "fixture: two retries on chunk 2")
+                GBL:OnLoadingScreenStart()
+                GBL:OnLoadingScreenEnd()
+                local mark = #MockAce.sentCommMessages
+                cooldown()
+                -- Before #295 chunk 3 went out here, carrying chunk 2's two
+                -- retries, so it got nine attempts instead of eleven.
+                assert.same({ 2 }, chunksSentSince(mark),
+                    "chunk 3 must not go out on what is left of chunk 2's retries")
+
+                -- The receiver gets the resend and ACKs it, so chunk 3 goes out.
+                GBL:HandleAck("OfficerB", { chunk = 2 })
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                fireNextChunkDelay()
+                assert.equals(3, state().sendChunkIndex, "chunk 3 should be in flight")
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
+
+                local expected = "retrying chunk 3 (attempt 2/" .. (GBL.SYNC_MAX_RETRIES + 1) .. ")"
+                assert.is_true(logged(expected),
+                    "chunk 3's first timeout should read as its first retry: " .. expected)
+            end)
+
+            it("resends a paused final chunk instead of reporting the send complete", function()
+                startSend(12)
+                local total = #state().sendChunks
+                advanceTo(total)
+                local outcomes = state().chunkOutcomes
+                GBL:OnLoadingScreenStart()
+                GBL:OnLoadingScreenEnd()
+                local mark = #MockAce.sentCommMessages
+
+                cooldown()
+
+                assert.is_true(GBL:GetSyncStatus().sending,
+                    "the final chunk was never ACKed, so the send is not complete")
+                assert.same({ total }, chunksSentSince(mark))
+                assert.is_nil(outcomesLine(), "no block until the final chunk is ACKed")
+
+                GBL:HandleAck("OfficerB", { chunk = total })
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                fireNextChunkDelay()
+
+                assert.is_false(GBL:GetSyncStatus().sending)
+                assert.equals("ok", outcomes[total].outcome)
+                assert.equals(0, #outcomes[total].retryReasons,
+                    "a resend after a loading screen is not a wire-loss retry")
+                local line = outcomesLine()
+                assert.is_not_nil(line, "no Sync outcomes line to read")
+                assert.is_not_nil(line:find("+ 0 zone +", 1, true), "got: " .. line)
+                assert.is_not_nil(line:find("session complete", 1, true), "got: " .. line)
+            end)
+
+            it("resends once after two loading screens back to back", function()
+                startSend(12)
+                advanceTo(2)
+                GBL:OnLoadingScreenStart()
+                GBL:OnLoadingScreenEnd()
+                -- The second screen comes before the first cooldown runs out.
+                GBL:OnLoadingScreenStart()
+                GBL:OnLoadingScreenEnd()
+                local mark = #MockAce.sentCommMessages
+
+                cooldown()
+
+                assert.same({ 2 }, chunksSentSince(mark))
+            end)
+
+            -- Pins from here on: each passes on the code before #295 too, and
+            -- each holds a way the fix could go wrong.
+
+            it("moves on when the paused chunk's ACK arrived during the pause", function()
+                startSend(12)
+                advanceTo(2)
+                GBL:OnLoadingScreenStart()
+                GBL:HandleAck("OfficerB", { chunk = 2 })
+                GBL:OnLoadingScreenEnd()
+                local mark = #MockAce.sentCommMessages
+
+                cooldown()
+
+                assert.same({ 3 }, chunksSentSince(mark))
+            end)
+
+            -- A pending chunk at the index has its own ACK timer to resend it.
+            -- A stray SendNextChunk, the call a stale deferred chain makes (the
+            -- overlap overlapTotal counts), must not put it out a second time:
+            -- only a chunk the pause left unanswered is resent. What does go
+            -- out instead is that overlap, and is deliberately not pinned.
+            it("does not resend a chunk the pause never touched", function()
+                startSend(12)
+                assert.equals("pending", state().chunkOutcomes[1].outcome,
+                    "fixture: chunk 1 in flight")
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                local mark = #MockAce.sentCommMessages
+
+                GBL:SendNextChunk()
+
+                assert.equals(1, state().chunkOutcomes[1].attempts)
+                for _, c in ipairs(chunksSentSince(mark)) do
+                    assert.are_not.equal(1, c, "chunk 1 went out a second time")
+                end
+            end)
+
+            -- Stepping the index back at the resume, the fix #295 first
+            -- proposed, leaves it one below the chunk owed while the resume's
+            -- send defers on ChatThrottleLib, which is usual straight after a
+            -- loading screen. A genuine ACK in that window then reads as stale.
+            it("accepts the paused chunk's ACK while the resume waits on ChatThrottleLib", function()
+                startSend(12)
+                advanceTo(2)
+                GBL:OnLoadingScreenStart()
+                GBL:OnLoadingScreenEnd()
+                _G.ChatThrottleLib = { avail = 100 }
+                local mark = #MockAce.sentCommMessages
+                cooldown()
+                assert.same({}, chunksSentSince(mark), "fixture: the resume should defer")
+
+                GBL:HandleAck("OfficerB", { chunk = 2 })
+
+                assert.equals("ok", state().chunkOutcomes[2].outcome)
+                assert.is_false(logged("Discarded stale ACK for chunk 2"))
+                _G.ChatThrottleLib = nil
+                Helpers.fireTimersAt(GBL.SYNC_CTL_BACKOFF_DELAY)
+                assert.same({ 3 }, chunksSentSince(mark))
+            end)
+
+            -- #284: a chunk still queued at the loading screen finishes during
+            -- the pause and its callback arms an ACK timer, which then fires
+            -- inside the cooldown and steps the index back. The resume must
+            -- still put the chunk out once, not twice. #284 stops that timer
+            -- being armed, and this case changes with it.
+            it("resends the paused chunk once after an ACK timer fired inside the pause", function()
+                local completeOldest = holdCallbacks()
+
+                startSend(12)
+                completeOldest()
+                GBL:HandleAck("OfficerB", { chunk = 1 })
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                fireNextChunkDelay()
+                assert.equals(2, state().sendChunkIndex, "chunk 2 should be queued")
+                GBL:OnLoadingScreenStart()
+                GBL:OnLoadingScreenEnd()
+                completeOldest()
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
+                local mark = #MockAce.sentCommMessages
+
+                cooldown()
+
+                assert.same({ 2 }, chunksSentSince(mark))
+                assert.equals(2, state().sendChunkIndex)
+            end)
+
+            -- The receiver has chunk 2, its ACK was lost to our loading screen,
+            -- and its receive timeout asks for chunk 3. The NACK moves the index
+            -- onto chunk 2, and the resume must follow the NACK, not the tag.
+            it("follows a NACK for the next chunk that arrived during the pause", function()
+                startSend(12)
+                advanceTo(2)
+                GBL:OnLoadingScreenStart()
+                GBL:HandleNack("OfficerB", { chunk = 3 })
+                GBL:OnLoadingScreenEnd()
+                local mark = #MockAce.sentCommMessages
+
+                cooldown()
+
+                assert.same({ 3 }, chunksSentSince(mark))
+            end)
+
+            it("follows a NACK for the next chunk that arrived just before the pause", function()
+                startSend(12)
+                advanceTo(2)
+                GBL:HandleNack("OfficerB", { chunk = 3 })
+                GBL:OnLoadingScreenStart()
+                GBL:OnLoadingScreenEnd()
+                local mark = #MockAce.sentCommMessages
+
+                cooldown()
+
+                assert.same({ 3 }, chunksSentSince(mark))
+            end)
+
+            -- A NACK for chunk 1 leaves the index at 0, with no chunk there.
+            it("sends chunk 1 once when a NACK for it arrived during the pause", function()
+                startSend(12)
+                GBL:OnLoadingScreenStart()
+                GBL:HandleNack("OfficerB", { chunk = 1 })
+                GBL:OnLoadingScreenEnd()
+                local mark = #MockAce.sentCommMessages
+
+                cooldown()
+
+                assert.same({ 1 }, chunksSentSince(mark))
+            end)
+
+            -- The NACK's mark belongs to one pass of the chunk. Once the chunk
+            -- goes out again, a later loading screen resends it as usual.
+            it("resends a chunk paused again after a NACK had once moved past it", function()
+                startSend(12)
+                advanceTo(2)
+                GBL:OnLoadingScreenStart()
+                GBL:HandleNack("OfficerB", { chunk = 3 })
+                GBL:OnLoadingScreenEnd()
+                cooldown()
+                assert.equals(3, state().sendChunkIndex, "fixture: chunk 3 in flight")
+
+                GBL:HandleNack("OfficerB", { chunk = 2 })
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                fireNextChunkDelay()
+                assert.equals(2, state().sendChunkIndex, "fixture: chunk 2 back in flight")
+                GBL:OnLoadingScreenStart()
+                GBL:OnLoadingScreenEnd()
+                local mark = #MockAce.sentCommMessages
+
+                cooldown()
+
+                assert.same({ 2 }, chunksSentSince(mark))
+            end)
+
+            -- A NACK past the chunk in flight says the receiver has it, so the
+            -- retries that chunk ran up are spent and must not pass to the
+            -- next one. The code review of #295 found this path still did.
+            local function nackPastPausedChunk(nackBeforePause)
+                startSend(12)
+                advanceTo(2)
+                for _ = 1, 2 do
+                    MockWoW.serverTime = MockWoW.serverTime + 10
+                    fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
+                end
+                assert.equals(2, state().sendRetryCount, "fixture: two retries on chunk 2")
+                if nackBeforePause then
+                    GBL:HandleNack("OfficerB", { chunk = 3 })
+                    GBL:OnLoadingScreenStart()
+                else
+                    GBL:OnLoadingScreenStart()
+                    GBL:HandleNack("OfficerB", { chunk = 3 })
+                end
+                GBL:OnLoadingScreenEnd()
+                cooldown()
+                assert.equals(3, state().sendChunkIndex, "fixture: chunk 3 in flight")
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
+
+                local expected = "retrying chunk 3 (attempt 2/" .. (GBL.SYNC_MAX_RETRIES + 1) .. ")"
+                assert.is_true(logged(expected),
+                    "chunk 3's first timeout should read as its first retry: " .. expected)
+            end
+
+            it("gives the next chunk a full set of retries when a NACK during the pause moves past", function()
+                nackPastPausedChunk(false)
+            end)
+
+            it("gives the next chunk a full set of retries when a NACK before the pause moves past", function()
+                nackPastPausedChunk(true)
+            end)
+
+            -- The reset is for a NACK past the chunk in flight. While a ladder
+            -- retry waits on ChatThrottleLib the index sits one below the chunk
+            -- still owed, on an acked chunk, and a NACK for the owed chunk is
+            -- its own ladder asking again: the count stays, as it does for a
+            -- NACK naming the chunk in flight.
+            it("keeps the retries of a chunk whose deferred retry a NACK asks for", function()
+                startSend(12)
+                advanceTo(2)
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
+                _G.ChatThrottleLib = { avail = 100 }
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
+                assert.equals(1, state().sendChunkIndex, "fixture: retry of chunk 2 deferred")
+                assert.equals(2, state().sendRetryCount, "fixture: two retries on chunk 2")
+
+                GBL:HandleNack("OfficerB", { chunk = 2 })
+                _G.ChatThrottleLib = nil
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                fireNextChunkDelay()
+                assert.equals(2, state().sendChunkIndex, "fixture: chunk 2 back in flight")
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
+
+                local expected = "retrying chunk 2 (attempt 4/" .. (GBL.SYNC_MAX_RETRIES + 1) .. ")"
+                assert.is_true(logged(expected),
+                    "chunk 2's ladder should carry on from its third attempt: " .. expected)
+            end)
+
+            -- An ACK landing after the resend is issued but before its own
+            -- callback fires answers a transmission from before the loading
+            -- screen. Timed from that anchor, the whole pause would go into the
+            -- Wire-to-ACK figure, which is read as ACK_TIMEOUT headroom.
+            it("records no wire-to-ACK across the pause for the resent chunk", function()
+                startSend(12)
+                advanceTo(2)
+                GBL:OnLoadingScreenStart()
+                GBL:OnLoadingScreenEnd()
+                MockWoW.serverTime = MockWoW.serverTime + 30
+                holdCallbacks()
+                cooldown()
+                assert.equals(2, state().sendChunkIndex, "fixture: chunk 2 resent, still queued")
+
+                GBL:HandleAck("OfficerB", { chunk = 2 })
+
+                assert.equals("ok", state().chunkOutcomes[2].outcome)
+                assert.is_nil(state().chunkOutcomes[2].wireToAck,
+                    "a reading across the loading screen is not a wire-to-ACK time")
+            end)
         end)
 
         -- Structural, on the shape of schema_version_spec's rung scan: it

@@ -143,6 +143,7 @@ GBL.SYNC_LAYOUT_REQUEST_THROTTLE = LAYOUT_REQUEST_THROTTLE
 GBL.SYNC_COMBAT_COOLDOWN = COMBAT_COOLDOWN
 GBL.SYNC_ZONE_COOLDOWN = ZONE_COOLDOWN
 GBL.SYNC_INTER_CHUNK_GAP_FLOOR = INTER_CHUNK_GAP_FLOOR
+GBL.SYNC_CTL_BACKOFF_DELAY = CTL_BACKOFF_DELAY
 
 ------------------------------------------------------------------------
 -- Version compatibility (v0.37.0)
@@ -514,7 +515,7 @@ local syncState = {
     lastSendIssuedAt = 0,         -- GetTime() when the previous SendNextChunk issued a send
     sendChunkTransmittedAt = 0,   -- GetTime() when the AceComm callback fired sent==totalBytes
     nacksForCurrentChunk = 0,     -- NACKs received while retrying the current chunk
-    chunkOutcomes = {},           -- [chunk] = { attempts, wireToAck, outcome }
+    chunkOutcomes = {},           -- [chunk] = { attempts, retryReasons, outcome, wireToAck, bytes, ratio, nackedPast }
 }
 
 --- Check if sync is paused due to zone change or combat.
@@ -3163,7 +3164,19 @@ function GBL:SendNextChunk()
         end
     end
 
-    syncState.sendChunkIndex = syncState.sendChunkIndex + 1
+    -- A loading screen tagged the chunk at the index zoneAbort and cancelled
+    -- its ACK timer, so unless a callback completing inside the pause armed a
+    -- new one (#284), the ladder will not resend it. It goes out again before
+    -- the send moves on, unless its ACK settled it during the pause or a NACK
+    -- has since asked past it (#295). Decided here rather than by stepping the
+    -- index back at the resume: this call can defer, and a stepped-back index
+    -- would read a genuine ACK for the chunk as stale.
+    local paused = syncState.chunkOutcomes[syncState.sendChunkIndex]
+    local resend = paused ~= nil and paused.outcome == "zoneAbort"
+        and not paused.nackedPast
+    if not resend then
+        syncState.sendChunkIndex = syncState.sendChunkIndex + 1
+    end
     local idx = syncState.sendChunkIndex
     local chunk = syncState.sendChunks[idx]
 
@@ -3171,6 +3184,14 @@ function GBL:SendNextChunk()
         syncState.sendChunkIndex = syncState.sendChunkIndex - 1
         self:FinishSending()
         return
+    end
+    if resend then
+        self:SyncInfo("Resending chunk %d to %s after the loading screen",
+            idx, tostring(syncState.sendTarget))
+        -- The anchor is the transmission from before the loading screen. An
+        -- ACK landing before this resend's own callback answers that one, and
+        -- timed from it the pause would read as wire-to-ACK time.
+        syncState.sendChunkTransmittedAt = 0
     end
 
     -- v0.28.4: record send attempt and inter-chunk gap for H2 diagnostics
@@ -3194,6 +3215,8 @@ function GBL:SendNextChunk()
         syncState.chunkOutcomes[idx].outcome = "pending"
     end
     syncState.chunkOutcomes[idx].attempts = syncState.chunkOutcomes[idx].attempts + 1
+    -- A NACK's mark covers one pass of the chunk (#295).
+    syncState.chunkOutcomes[idx].nackedPast = nil
 
     -- Attached at serialize time rather than baked into the chunk so a NACK
     -- or timeout retransmit of the final chunk still carries it. Only on the
@@ -4728,8 +4751,21 @@ function GBL:HandleNack(sender, data)
     if syncState.chunkOutcomes and syncState.chunkOutcomes[requestedChunk] then
         table.insert(syncState.chunkOutcomes[requestedChunk].retryReasons, "nack")
     end
+    -- A NACK past the chunk in flight says the receiver has that chunk, so
+    -- the retries it ran up are spent and do not pass to the next (#295).
+    local current = syncState.chunkOutcomes[syncState.sendChunkIndex]
+    if requestedChunk > syncState.sendChunkIndex and current
+        and current.outcome ~= "ok" then
+        syncState.sendRetryCount = 0
+    end
     -- Rewind to the requested chunk and re-send after a brief delay
     syncState.sendChunkIndex = requestedChunk - 1
+    -- The receiver has asked past the chunk below the one it wants, so a
+    -- loading screen's tag on that chunk no longer means resend it (#295).
+    local below = syncState.chunkOutcomes[requestedChunk - 1]
+    if below then
+        below.nackedPast = true
+    end
     C_Timer.After(0.5, function()
         self:SendNextChunk()
     end)
@@ -4943,10 +4979,11 @@ function GBL:OnLoadingScreenStart()
         self:_AbortSyncPrep("loading screen")
     end
 
-    -- v0.28.7: tag the in-flight chunk so the histogram attributes the gap
-    -- to a zone pause, not to a successful ACK on the pre-pause chunk. The
-    -- sync resumes post-cooldown but this chunk's ACK timer was cancelled,
-    -- so its outcome is genuinely indeterminate until the next chunk fires.
+    -- Tag the in-flight chunk: its ACK timer is cancelled below, so its fate
+    -- is unknown. The tag is control state as well as a histogram word: it is
+    -- what makes SendNextChunk put the chunk back on the wire after the
+    -- cooldown, unless its ACK lands first or a NACK asks past it (#295). It
+    -- stays a zone abort only when the chunk is never resent.
     self:_TagInFlightChunk("zoneAbort")
 
     -- Cancel pending cooldown from a prior zone change (double zone change)
@@ -4991,7 +5028,8 @@ function GBL:OnLoadingScreenEnd()
 
         self:AddAuditEntry("Zone cooldown complete - sync resumed")
 
-        -- Resume sending if we were the sender
+        -- Resume sending if we were the sender. SendNextChunk resends the
+        -- chunk the pause left unanswered before moving on (#295).
         if syncState.sending then
             self:SendNextChunk()
         end
