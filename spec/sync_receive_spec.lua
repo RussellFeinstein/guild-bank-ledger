@@ -640,6 +640,188 @@ describe("Sync receive and intake", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- A quiet receive nobody asked for (#309)
+    --
+    -- The auto-bootstrap opens a receive on any chunk that arrives with none
+    -- open. When that chunk is a straggler from a sender that has stopped, the
+    -- receive ran the whole NACK ladder at a peer discarding every NACK, and
+    -- each HELLO round in those 140 seconds answered verdict=receiving. It now
+    -- closes at its first timeout, and a sender still going reopens it with
+    -- its next chunk.
+    ---------------------------------------------------------------------------
+
+    describe("quiet unrequested receive (#309)", function()
+        -- Built fresh per call: the intake rewrites a record in place. With no
+        -- k the chunk carries no records, so the receive stores nothing.
+        local function payload(n, total, k)
+            local transactions = {}
+            if k then
+                transactions[1] = {
+                    type = "deposit", player = "Thrall" .. k,
+                    itemID = 12340 + k, count = 5, tab = 1,
+                    timestamp = 2000, scanTime = 2000,
+                    scannedBy = "OfficerB",
+                    id = "deposit|Thrall" .. k .. "|" .. (12340 + k) .. "|5|1|0",
+                }
+            end
+            return {
+                chunk = n, totalChunks = total,
+                transactions = transactions,
+                moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            }
+        end
+
+        local function sentOfType(kind)
+            local out = {}
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and type(data) == "table" and data.type == kind then
+                    out[#out + 1] = msg
+                end
+            end
+            return out
+        end
+
+        local function logEntry(text)
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message:find(text, 1, true) then return entry end
+            end
+            return nil
+        end
+
+        local function state() return GBL:GetSyncStateForTests() end
+
+        -- The post-sync HELLO goes out on a 0.5 to 2s timer. Collected first,
+        -- because a callback can schedule more.
+        local function firePostSyncTimers()
+            local due = {}
+            for _, t in ipairs(MockWoW.pendingTimers) do
+                if not t.cancelled and not t.fired
+                    and t.delay >= 0.5 and t.delay <= 2 then
+                    due[#due + 1] = t
+                end
+            end
+            for _, t in ipairs(due) do
+                t.fired = true
+                t.callback()
+            end
+        end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+        end)
+
+        it("closes at its first timeout instead of sending a NACK", function()
+            GBL:HandleSyncData("OfficerB", payload(5, 100, 1))
+            assert.is_true(GBL:GetSyncStatus().receiving,
+                "fixture must bootstrap a receive from unsolicited data")
+            assert.is_false(state().receiveRequested)
+            MockAce.sentCommMessages = {}
+
+            assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
+
+            assert.is_false(GBL:GetSyncStatus().receiving,
+                "a quiet receive nobody asked for must close, not NACK")
+            assert.equals(0, #sentOfType("NACK"))
+            local entry = logEntry(
+                "Unrequested receive from OfficerB went quiet after 1 chunk(s), closing")
+            assert.is_truthy(entry, "the close must say why in the sync log")
+            assert.equals("INFO", entry.level, "a DEBUG line never reaches a capture")
+        end)
+
+        it("lets the next HELLO round pull instead of answering receiving", function()
+            GBL:HandleSyncData("OfficerB", payload(5, 100, 1))
+            assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
+            assert.is_false(GBL:GetSyncStatus().receiving,
+                "the quiet receive must be closed before the HELLO lands")
+            GBL:ClearLog("sync")
+
+            GBL:HandleHello("OfficerC", {
+                type = "HELLO", version = GBL.version,
+                minSyncVersion = GBL.MIN_SYNC_VERSION,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+                txCount = 99, dataHash = 12345, lastScanTime = 1000,
+            })
+
+            local round = logEntry("HELLO round OfficerC")
+            assert.is_truthy(round, "expected the round line")
+            assert.is_truthy(round.message:find("verdict=requested", 1, true),
+                round.message)
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            assert.is_true(state().receiveRequested)
+        end)
+
+        it("advertises what the closed receive stored", function()
+            GBL:HandleSyncData("OfficerB", payload(5, 100, 1))
+            assert.equals(1, #guildData.transactions, "fixture must store the chunk")
+            assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
+            assert.is_false(GBL:GetSyncStatus().receiving)
+            GBL:ClearLog("sync")
+
+            firePostSyncTimers()
+
+            assert.is_truthy(logEntry("Post-sync HELLO broadcast"),
+                "the post-sync HELLO is what restarts the pull after the close")
+        end)
+
+        it("advertises nothing when the closed receive stored nothing", function()
+            GBL:HandleSyncData("OfficerB", payload(5, 100))
+            assert.equals(0, #guildData.transactions)
+            assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
+            assert.is_false(GBL:GetSyncStatus().receiving)
+            GBL:ClearLog("sync")
+
+            firePostSyncTimers()
+
+            assert.is_nil(logEntry("Post-sync HELLO broadcast"))
+        end)
+
+        it("tells the sender nothing: no BUSY and no receipt", function()
+            GBL:HandleSyncData("OfficerB", payload(5, 100, 1))
+            MockAce.sentCommMessages = {}
+
+            assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
+            assert.is_false(GBL:GetSyncStatus().receiving)
+
+            assert.equals(0, #Sync.busySent(GBL),
+                "a sender still going must not be told to stop")
+            assert.equals(0, #sentOfType("SYNC_RECEIPT"))
+        end)
+
+        it("reopens on the same sender's next chunk", function()
+            GBL:HandleSyncData("OfficerB", payload(5, 100, 1))
+            assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
+            assert.is_false(GBL:GetSyncStatus().receiving)
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleSyncData("OfficerB", payload(6, 100, 2))
+
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            assert.equals("OfficerB", state().receiveSource)
+            assert.equals(1, state().receiveGot, "a fresh session, not the closed one")
+            assert.equals(2, #guildData.transactions, "the chunk is stored")
+            assert.equals(1, #sentOfType("ACK"), "and acknowledged")
+        end)
+
+        it("leaves a requested receive on the NACK ladder", function()
+            GBL:RequestSync("OfficerB", 0)
+            GBL:HandleSyncData("OfficerB", payload(1, 100, 1))
+            assert.is_true(state().receiveRequested,
+                "RequestSync must have opened this session, not the bootstrap")
+            MockAce.sentCommMessages = {}
+
+            assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
+
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            assert.equals(1, #sentOfType("NACK"))
+            assert.is_nil(logEntry("went quiet"))
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- NormalizeRecordId
     ---------------------------------------------------------------------------
 
