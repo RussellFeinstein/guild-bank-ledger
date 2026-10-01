@@ -2563,10 +2563,12 @@ function GBL:HandleSyncRequest(sender, data)
     -- it holds one), so a duplicate from the peer we are already serving is
     -- simply ignored. Above the serve gate, because a loading screen pauses
     -- our send rather than ending it, and the gate's zone term would answer
-    -- this peer for the whole pause and its tail (#308).
+    -- this peer for the whole pause and its tail (#308). INFO, because a DEBUG
+    -- line never reaches a capture, where a swallowed repeat would then read
+    -- as one lost on the wire.
     if syncState.sending
         and self:CanonicalPeerKey(sender) == self:CanonicalPeerKey(syncState.sendTarget) then
-        self:SyncDebug("Ignoring repeat SYNC_REQUEST from %s, already sending to them",
+        self:SyncInfo("Ignoring repeat SYNC_REQUEST from %s, already sending to them",
             self:CanonicalPeerKey(sender))
         return
     end
