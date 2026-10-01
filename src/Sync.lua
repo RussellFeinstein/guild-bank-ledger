@@ -4727,6 +4727,15 @@ function GBL:ScheduleReceiveTimeout()
                 .. (syncState.receiveGot + 1) .. " from "
                 .. (syncState.receiveSource or "unknown") .. ", aborting")
             self:FinishReceiving(syncState.receiveSource)
+        elseif not syncState.receiveRequested then
+            -- We did not ask for this stream, so there is no request to
+            -- repeat (#293's receive reaches here with no chunk counted), and
+            -- a NACK reaches a sender that has stopped, or rewinds a live one
+            -- by an arrival count (#290). No BUSY: a live sender's next chunk
+            -- opens a fresh receive (#309).
+            self:SyncInfo("Unrequested receive from %s went quiet after %d chunk(s), closing",
+                tostring(syncState.receiveSource or "?"), syncState.receiveGot)
+            self:FinishReceiving(syncState.receiveSource)
         elseif syncState.receiveGot == 0 then
             -- Nothing has arrived at all, so what went missing is the request,
             -- not a chunk. A NACK here would ask the peer to retransmit chunk 1
@@ -4747,13 +4756,6 @@ function GBL:ScheduleReceiveTimeout()
                 return
             end
             self:ScheduleReceiveTimeout()
-        elseif not syncState.receiveRequested then
-            -- We did not ask for this stream, so a NACK reaches a sender that
-            -- has stopped, or rewinds a live one by an arrival count (#290).
-            -- No BUSY: a live sender's next chunk opens a fresh receive (#309).
-            self:SyncInfo("Unrequested receive from %s went quiet after %d chunk(s), closing",
-                tostring(syncState.receiveSource or "?"), syncState.receiveGot)
-            self:FinishReceiving(syncState.receiveSource)
         else
             self:SendNack(syncState.receiveSource, syncState.receiveGot + 1)
             -- Reschedule with increased backoff
