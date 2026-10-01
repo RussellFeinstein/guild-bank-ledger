@@ -2873,6 +2873,64 @@ describe("Sync send path", function()
 
                 assert.same({ 2 }, chunksSentSince(mark))
             end)
+
+            -- A NACK past the chunk in flight says the receiver has it, so the
+            -- retries that chunk ran up are spent and must not pass to the
+            -- next one. The code review of #295 found this path still did.
+            local function nackPastPausedChunk(nackBeforePause)
+                startSend(12)
+                advanceTo(2)
+                for _ = 1, 2 do
+                    MockWoW.serverTime = MockWoW.serverTime + 10
+                    fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
+                end
+                assert.equals(2, state().sendRetryCount, "fixture: two retries on chunk 2")
+                if nackBeforePause then
+                    GBL:HandleNack("OfficerB", { chunk = 3 })
+                    GBL:OnLoadingScreenStart()
+                else
+                    GBL:OnLoadingScreenStart()
+                    GBL:HandleNack("OfficerB", { chunk = 3 })
+                end
+                GBL:OnLoadingScreenEnd()
+                cooldown()
+                assert.equals(3, state().sendChunkIndex, "fixture: chunk 3 in flight")
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
+
+                local expected = "retrying chunk 3 (attempt 2/" .. (GBL.SYNC_MAX_RETRIES + 1) .. ")"
+                assert.is_true(logged(expected),
+                    "chunk 3's first timeout should read as its first retry: " .. expected)
+            end
+
+            it("gives the next chunk a full set of retries when a NACK during the pause moves past", function()
+                nackPastPausedChunk(false)
+            end)
+
+            it("gives the next chunk a full set of retries when a NACK before the pause moves past", function()
+                nackPastPausedChunk(true)
+            end)
+
+            -- An ACK landing after the resend is issued but before its own
+            -- callback fires answers a transmission from before the loading
+            -- screen. Timed from that anchor, the whole pause would go into the
+            -- Wire-to-ACK figure, which is read as ACK_TIMEOUT headroom.
+            it("records no wire-to-ACK across the pause for the resent chunk", function()
+                startSend(12)
+                advanceTo(2)
+                GBL:OnLoadingScreenStart()
+                GBL:OnLoadingScreenEnd()
+                MockWoW.serverTime = MockWoW.serverTime + 30
+                holdCallbacks()
+                cooldown()
+                assert.equals(2, state().sendChunkIndex, "fixture: chunk 2 resent, still queued")
+
+                GBL:HandleAck("OfficerB", { chunk = 2 })
+
+                assert.equals("ok", state().chunkOutcomes[2].outcome)
+                assert.is_nil(state().chunkOutcomes[2].wireToAck,
+                    "a reading across the loading screen is not a wire-to-ACK time")
+            end)
         end)
 
         -- Structural, on the shape of schema_version_spec's rung scan: it
