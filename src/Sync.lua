@@ -348,6 +348,7 @@ function GBL:BuildBusyMessage(reason)
 end
 
 --- Whisper one BUSY to each partner of a session that has just ended.
+-- Called by DisableSync (#279) and OnCombatStart (#291).
 --
 -- NORMAL priority, the same as the chunks and requests we send a partner:
 -- an ALERT BUSY can leave ahead of one still queued at NORMAL, and the peer
@@ -4943,18 +4944,9 @@ function GBL:OnCombatStart()
         self:FinishReceiving(receiveSource or "?")
     end
 
-    -- Notify partners via BUSY so they abort immediately. One message serves
-    -- both partners, and the reason is the same for each: we entered combat.
-    local busyMsg = compressMessage(self:Serialize(self:BuildBusyMessage("combat")))
-
-    if sendTarget then
-        self:SendSyncWhisper(PREFIX, busyMsg, sendTarget, "ALERT")
-        self:AddAuditEntry("Sent BUSY to send target: " .. sendTarget)
-    end
-    if receiveSource and receiveSource ~= sendTarget then
-        self:SendSyncWhisper(PREFIX, busyMsg, receiveSource, "ALERT")
-        self:AddAuditEntry("Sent BUSY to receive source: " .. receiveSource)
-    end
+    -- Last, once both sessions are down, so the partners abort too. Through
+    -- the helper, so at NORMAL behind anything still queued to them (#291).
+    self:_SendBusyToPartners("combat", sendTarget, receiveSource)
 end
 
 --- Resume sync after combat ends.

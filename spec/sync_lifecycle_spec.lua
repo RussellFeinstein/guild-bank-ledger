@@ -1015,7 +1015,7 @@ describe("Sync session lifecycle", function()
             return n
         end
 
-        -- NORMAL, not the ALERT the combat abort uses. Our last chunk to this
+        -- NORMAL, as every BUSY to a partner goes. Our last chunk to this
         -- peer can still be queued at NORMAL, and an ALERT BUSY can leave ahead
         -- of it: the peer clears its receive on the BUSY, then reopens one
         -- when the chunk lands. At NORMAL the BUSY queues behind it.
