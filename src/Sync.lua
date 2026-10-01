@@ -4892,7 +4892,7 @@ end
 ------------------------------------------------------------------------
 
 --- Abort sync immediately when combat starts.
--- Sends BUSY to partner, aborts in-progress sync, and sets combatPaused.
+-- Sets combatPaused, aborts the in-progress sync, then BUSYs each partner.
 -- No-op if not actively sending or receiving.
 -- Called by PLAYER_REGEN_DISABLED event.
 function GBL:OnCombatStart()
