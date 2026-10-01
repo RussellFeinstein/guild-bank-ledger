@@ -333,9 +333,10 @@ GBL._nackBackoff = nackBackoff
 -- will free up on its own schedule; one entering combat may be gone for the
 -- length of a fight), and the receiver could not tell them apart. Three sends
 -- killed by BUSY in the 2026-08-12 capture are still unexplained for that
--- reason. Shipped values are "combat", "sending:<peer>", "preparing:<peer>"
--- and "disabled"; the receiver treats the field as an opaque string, so a
--- later producer adds a value without touching the wire contract. Issue #97.
+-- reason. Shipped values are "combat", "loading" (#308), "sending:<peer>",
+-- "preparing:<peer>" and "disabled"; the receiver treats the field as an
+-- opaque string, so a later producer adds a value without touching the wire
+-- contract. Issue #97.
 -- @param reason string Why we are busy
 -- @return table BUSY message
 function GBL:BuildBusyMessage(reason)
@@ -532,12 +533,15 @@ end
 -- can carry one term alone. The zone term is the serve gate's: a loading
 -- screen sends nobody a BUSY, so a chunk landing in its tail comes from a
 -- guildmate still sending, and the bootstrap takes it (#289).
+-- The second return is the BUSY reason the refused peer's log reads. A loading
+-- screen has its own, so that log does not report a fight (#308).
 -- @param withZone boolean Also refuse through a loading screen's pause and tail
 -- @return string|nil "in combat", "zone cooldown" or "combat cooldown"
+-- @return string|nil "combat" or "loading"
 local function combatGateReason(withZone)
-    if InCombatLockdown and InCombatLockdown() then return "in combat" end
-    if withZone and syncState.zonePaused then return "zone cooldown" end
-    if syncState.combatPaused then return "combat cooldown" end
+    if InCombatLockdown and InCombatLockdown() then return "in combat", "combat" end
+    if withZone and syncState.zonePaused then return "zone cooldown", "loading" end
+    if syncState.combatPaused then return "combat cooldown", "combat" end
     return nil
 end
 
@@ -547,8 +551,9 @@ end
 -- out.
 -- @param peer string The sender, as AceComm gave it
 -- @param what string The refusal, e.g. "Declined sync from X (in combat)"
-local function refuseForCombat(self, peer, what)
-    local busy = compressMessage(self:Serialize(self:BuildBusyMessage("combat")))
+-- @param word string The BUSY reason, combatGateReason's second return
+local function refuseForCombat(self, peer, what, word)
+    local busy = compressMessage(self:Serialize(self:BuildBusyMessage(word)))
     local sent = self:SendSyncWhisper(PREFIX, busy, peer, "NORMAL")
     self:SyncInfo("%s%s", what, sent and " - sent BUSY" or "")
 end
@@ -2551,6 +2556,21 @@ function GBL:HandleSyncRequest(sender, data)
         return
     end
 
+    -- A peer whose request went missing resends it, and the resend can
+    -- arrive while we are already answering the first one. Answering that
+    -- with BUSY would make it abort the receive we are feeding right now
+    -- (HandleBusy tears down the receive it names, and its own send to us if
+    -- it holds one), so a duplicate from the peer we are already serving is
+    -- simply ignored. Above the serve gate, because a loading screen pauses
+    -- our send rather than ending it, and the gate's zone term would answer
+    -- this peer for the whole pause and its tail (#308).
+    if syncState.sending
+        and self:CanonicalPeerKey(sender) == self:CanonicalPeerKey(syncState.sendTarget) then
+        self:SyncDebug("Ignoring repeat SYNC_REQUEST from %s, already sending to them",
+            self:CanonicalPeerKey(sender))
+        return
+    end
+
     -- Combat is no time to spend the main thread on a backfill, and serving
     -- was a door in that policy with no check on it (the auto-bootstrap in
     -- HandleSyncData was another, #289). HandleHello defers
@@ -2562,28 +2582,19 @@ function GBL:HandleSyncRequest(sender, data)
     -- the retry past the fight. The pause flags cover the transition tails,
     -- where the live API already reads false. Sits after the version gate so
     -- an incompatible peer keeps getting silence rather than a retry signal,
-    -- and ahead of every piece of prep state so a refused request allocates
-    -- nothing.
-    local gateReason = combatGateReason(true)
+    -- after the same-peer ignore so it never answers the peer our paused send
+    -- is feeding, and ahead of every piece of prep state so a refused request
+    -- allocates nothing.
+    local gateReason, busyWord = combatGateReason(true)
     if gateReason then
         refuseForCombat(self, sender, "Declined sync from " .. sender
-            .. " (" .. gateReason .. ")")
+            .. " (" .. gateReason .. ")", busyWord)
         return
     end
 
     if syncState.sending then
-        -- A peer whose request went missing resends it, and the resend can
-        -- arrive while we are already answering the first one. Answering that
-        -- with BUSY would make it abort the receive we are feeding right now
-        -- (HandleBusy tears down the receive it names), so a duplicate from
-        -- the peer we are already serving is simply ignored. BUSY still goes
-        -- to anyone else, who genuinely does need to try later.
-        if self:CanonicalPeerKey(sender) == self:CanonicalPeerKey(syncState.sendTarget) then
-            self:SyncDebug("Ignoring repeat SYNC_REQUEST from %s, already sending to them",
-                self:CanonicalPeerKey(sender))
-            return
-        end
-
+        -- Anyone but the peer we are serving, who was ignored above,
+        -- genuinely does need to try later, so they get BUSY.
         self:AddAuditEntry("Declined sync from " .. sender
             .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
         -- Send BUSY so requester doesn't wait 60s for data that will never come.
@@ -3760,12 +3771,12 @@ function GBL:HandleSyncData(sender, data)
         -- and refused the pull after it (#289). Refused with BUSY so a sender
         -- that lost the first one hears it again, and flagged so the end of
         -- the fight re-advertises, as HandleHello's combat arm does.
-        local gateReason = combatGateReason(false)
+        local gateReason, busyWord = combatGateReason(false)
         if gateReason then
             syncState.helloAfterCombat = true
             refuseForCombat(self, sender, "Declined chunk "
                 .. tostring(data.chunk or "?") .. " from " .. sender
-                .. " (" .. gateReason .. ")")
+                .. " (" .. gateReason .. ")", busyWord)
             return
         end
         syncState.receiving = true
