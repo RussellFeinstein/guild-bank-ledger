@@ -3076,7 +3076,7 @@ describe("Sync send path", function()
 
                     local line = transmittedLine(2)
                     assert.is_not_nil(line, "no transmitted line for chunk 2")
-                    assert.truthy(line:find("paused: zone, no ACK timer", 1, true), line)
+                    assert.truthy(line:find("paused, no ACK timer", 1, true), line)
                     local before = transmittedLine(1)
                     assert.is_not_nil(before, "no transmitted line for chunk 1")
                     assert.falsy(before:find("paused", 1, true), before)
@@ -3098,6 +3098,30 @@ describe("Sync send path", function()
                     local mark = #MockAce.sentCommMessages
                     cooldown()
                     assert.same({ 3 }, chunksSentSince(mark))
+                end)
+
+                -- The resend is still queued when the ACK lands, so the ACK
+                -- answers the transmission that completed in the pause, and
+                -- that completion's stamp is a valid anchor. The resend used
+                -- to zero it (#295), which since the loading screen zeroes
+                -- the anchor itself only ever threw this reading away.
+                it("times an ACK that beats the resend from the chunk's completion in the pause", function()
+                    local completeOldest = queueChunk2()
+                    GBL:OnLoadingScreenStart()
+                    GBL:OnLoadingScreenEnd()
+                    completeOldest()
+                    local completedAt = MockWoW.serverTime
+                    local mark = #MockAce.sentCommMessages
+                    cooldown()
+                    assert.same({ 2 }, chunksSentSince(mark),
+                        "fixture: chunk 2 resent and still queued")
+                    MockWoW.serverTime = MockWoW.serverTime + 1
+
+                    GBL:HandleAck("OfficerB", { chunk = 2 })
+
+                    assert.equals("ok", state().chunkOutcomes[2].outcome)
+                    assert.equals(MockWoW.serverTime - completedAt,
+                        state().chunkOutcomes[2].wireToAck)
                 end)
             end)
         end)
