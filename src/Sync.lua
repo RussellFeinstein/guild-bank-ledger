@@ -3188,10 +3188,9 @@ function GBL:SendNextChunk()
     if resend then
         self:SyncInfo("Resending chunk %d to %s after the loading screen",
             idx, tostring(syncState.sendTarget))
-        -- The anchor is the transmission from before the loading screen. An
-        -- ACK landing before this resend's own callback answers that one, and
-        -- timed from it the pause would read as wire-to-ACK time.
-        syncState.sendChunkTransmittedAt = 0
+        -- The anchor is left alone. The loading screen zeroed it, so a stamp
+        -- here is one a transmission completing inside the pause wrote, and
+        -- that is what an ACK landing before this resend's callback answers.
     end
 
     -- v0.28.4: record send attempt and inter-chunk gap for H2 diagnostics
@@ -3340,10 +3339,7 @@ function GBL:SendNextChunk()
             local queueDuration = string.format("%.2f", GetTime() - issuedAt)
             local postAvail = _G.ChatThrottleLib and _G.ChatThrottleLib.avail
                 and string.format("%.0f", _G.ChatThrottleLib.avail) or "?"
-            local pausedStr = syncPaused
-                and (", paused: " .. (syncState.zonePaused and "zone" or "combat")
-                    .. ", no ACK timer")
-                or ""
+            local pausedStr = syncPaused and ", paused, no ACK timer" or ""
             self:AddAuditEntry("Chunk " .. idx .. " transmitted ("
                 .. queueDuration .. "s queue-to-wire, CTL.avail=" .. postAvail
                 .. pausedStr .. ")")
