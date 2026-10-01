@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- If combat stops a sync, a chunk your guildmate had already sent no longer starts a new sync while you are fighting, or in the few seconds after a fight or a loading screen that interrupted one. Your addon turns the chunk away and tells your guildmate's addon it is busy, so that addon stops sending if it had not already and waits half a minute before asking yours for a sync. Before, your addon took the chunk, could wait over two minutes for the rest of a sync your guildmate had already stopped, and after a short fight could turn down the sync that should have started next.
+
 ## [0.41.20] - 2026-09-30
 
 ### Fixed

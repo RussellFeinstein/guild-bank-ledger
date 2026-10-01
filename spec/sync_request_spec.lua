@@ -90,7 +90,8 @@ describe("Sync request and serve", function()
     -- Combat serve gate (issue #126)
     ---------------------------------------------------------------------------
 
-    -- Serving was the one door in the combat policy with no check on it.
+    -- Serving was a door in the combat policy with no check on it (the
+    -- auto-bootstrap of unsolicited data was another, #289).
     -- HandleHello defers requesting while InCombatLockdown reads true, and a
     -- live session entering combat is aborted outright, but an idle client
     -- never sets combatPaused (OnCombatStart returns early when nothing is in

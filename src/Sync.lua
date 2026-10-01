@@ -2536,7 +2536,8 @@ function GBL:HandleSyncRequest(sender, data)
     end
 
     -- Combat is no time to spend the main thread on a backfill, and serving
-    -- was the one door in that policy with no check on it. HandleHello defers
+    -- was a door in that policy with no check on it (the auto-bootstrap in
+    -- HandleSyncData was another, #289). HandleHello defers
     -- requesting while the lockdown reads true, and a live session entering
     -- combat is aborted outright, but an idle client never sets combatPaused
     -- (OnCombatStart returns early when nothing is in flight), so a raider
@@ -3731,13 +3732,28 @@ end
 --- Process an incoming SYNC_DATA chunk — dedup, normalize IDs, and store.
 -- When a fuzzy duplicate is detected, adopts the sender's ID and timestamp
 -- (sender-wins) so the receiver fully converges in a single sync cycle.
--- Sends an ACK back to the sender after processing.
+-- Sends an ACK back to the sender after processing. A chunk that would open
+-- a receive in combat or a pause tail is refused with BUSY instead (#289).
 -- @param sender string Sender name
 -- @param data table Deserialized chunk payload
 function GBL:HandleSyncData(sender, data)
     if not syncState.receiving then
-        -- Unexpected but valid data — start receiving
+        -- Unexpected but valid data: start receiving, unless combat says no.
         if not data.transactions and not data.moneyTransactions then return end
+        -- A chunk the sender issued before our combat BUSY reached it still
+        -- lands, and a receive opened on it held `receiving` through the fight
+        -- and refused the pull after it (#289). Refused with BUSY so a sender
+        -- that lost the first one hears it again. This branch only: a loading
+        -- screen pauses a live receive, and its chunks must keep landing.
+        local gateReason = combatGateReason()
+        if gateReason then
+            local busy = compressMessage(self:Serialize(self:BuildBusyMessage("combat")))
+            local sent = self:SendSyncWhisper(PREFIX, busy, sender, "NORMAL")
+            self:AddAuditEntry("Declined chunk " .. tostring(data.chunk or "?")
+                .. " from " .. sender .. " (" .. gateReason .. ")"
+                .. (sent and " - sent BUSY" or ""))
+            return
+        end
         syncState.receiving = true
         syncState.receiveSource = self:CanonicalPeerKey(sender)
         clearReceiveCounters()
