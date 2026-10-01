@@ -3788,7 +3788,9 @@ function GBL:HandleSyncData(sender, data)
         -- what stops a retransmitted FINAL chunk (the ACK was lost, the sender
         -- resends, we are no longer receiving) from bootstrapping a one-chunk
         -- session of pure duplicates and whispering a second receipt reading
-        -- 100% duped for a session that already sent one.
+        -- 100% duped for a session that already sent one. The receive timer
+        -- reads it too: a quiet session we did not ask for closes rather
+        -- than NACKing (#309).
         syncState.receiveRequested = false
         -- Stamped as RequestSync stamps, or the MAX_RECEIVE_DURATION
         -- watchdog never ends this session (#280).
@@ -4693,6 +4695,7 @@ end
 --- Schedule (or reschedule) the receive timeout with NACK backoff.
 -- Cancels any existing receive timer first. Uses progressive delays:
 -- 20s → 30s → 45s (capped). After MAX_NACK_RETRIES, aborts the sync.
+-- A receive we did not ask for closes at its first timeout instead (#309).
 function GBL:ScheduleReceiveTimeout()
     if syncState.receiveTimer then
         syncState.receiveTimer:Cancel()
@@ -4744,6 +4747,13 @@ function GBL:ScheduleReceiveTimeout()
                 return
             end
             self:ScheduleReceiveTimeout()
+        elseif not syncState.receiveRequested then
+            -- We did not ask for this stream, so a NACK reaches a sender that
+            -- has stopped, or rewinds a live one by an arrival count (#290).
+            -- No BUSY: a live sender's next chunk opens a fresh receive (#309).
+            self:SyncInfo("Unrequested receive from %s went quiet after %d chunk(s), closing",
+                tostring(syncState.receiveSource or "?"), syncState.receiveGot)
+            self:FinishReceiving(syncState.receiveSource)
         else
             self:SendNack(syncState.receiveSource, syncState.receiveGot + 1)
             -- Reschedule with increased backoff
