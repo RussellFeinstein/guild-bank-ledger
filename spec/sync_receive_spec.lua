@@ -804,6 +804,9 @@ describe("Sync receive and intake", function()
             assert.equals(1, state().receiveGot, "a fresh session, not the closed one")
             assert.equals(2, #guildData.transactions, "the chunk is stored")
             assert.equals(1, #sent("ACK"), "and acknowledged")
+            assert.is_truthy(logEntry("Auto-bootstrap at chunk 6 from OfficerB"
+                .. " (no receive open: a missed abort, or a quiet stream we closed)"),
+                "the reopen must not blame a missed abort alone")
         end)
 
         it("leaves a requested receive on the NACK ladder", function()
