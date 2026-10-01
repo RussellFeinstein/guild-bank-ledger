@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.41.21
+    {"0.41.21", "2026-10-01", {
+        Fixed = {
+            "If combat stops a sync, a chunk your guildmate had already sent no longer starts a new sync while you are fighting, or in the couple of seconds after the fight. Your addon turns the chunk away and tells your guildmate's addon it is busy, so that addon stops sending if it had not already and waits half a minute before asking yours for a sync. Before, your addon took the chunk, could wait over two minutes for the rest of a sync your guildmate had already stopped, and after a short fight could turn down the sync that should have started next.",
+            "When your addon turns down a guildmate's sync request because you are in combat or already syncing with someone else, the sync log no longer says it told them so if they had gone offline and the message never left.",
+        },
+    }},
     -- v0.41.20
     {"0.41.20", "2026-09-30", {
         Fixed = {
