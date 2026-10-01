@@ -2762,6 +2762,9 @@ describe("Sync send path", function()
             -- proposed, leaves it one below the chunk owed while the resume's
             -- send defers on ChatThrottleLib, which is usual straight after a
             -- loading screen. A genuine ACK in that window then reads as stale.
+            -- The ACK's own next-chunk timer is still pending at the end, a
+            -- second send chain beside the backoff's; firing it advances
+            -- past chunk 3 unacknowledged, which is #306.
             it("accepts the paused chunk's ACK while the resume waits on ChatThrottleLib", function()
                 startSend(12)
                 advanceTo(2)
@@ -3028,6 +3031,8 @@ describe("Sync send path", function()
                     assert.equals(0, state().sendRetryCount)
                 end)
 
+                -- As in the #295 case above, the ACK's own next-chunk timer
+                -- is left pending: a second send chain, which is #306.
                 it("accepts the chunk's ACK while the resume waits on ChatThrottleLib", function()
                     local completeOldest = queueChunk2()
                     GBL:OnLoadingScreenStart()
