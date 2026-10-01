@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- A loading screen in the middle of a sync no longer skips the chunk that was on its way. Once the loading screen ends, your addon sends that chunk again, unless your guildmate's acknowledgement for it came in during the pause, and only then goes on to the next one. Before, it moved straight on, so a chunk lost to the loading screen was sent again only if your guildmate's addon asked for it. The next chunk also inherited the skipped one's retries, which could end the sync after only a few attempts.
+
 ## [0.41.18] - 2026-09-30
 
 ### Fixed
