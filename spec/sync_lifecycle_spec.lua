@@ -679,7 +679,9 @@ describe("Sync session lifecycle", function()
         it("receive timeout resets stuck receive state after NACK retries", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Start receiving (multi-chunk)
+            -- Start receiving (multi-chunk), in a session we asked for: only
+            -- that kind NACKs (#309)
+            GBL:RequestSync("OfficerB", 0)
             GBL:HandleSyncData("OfficerB", {
                 chunk = 1,
                 totalChunks = 3,

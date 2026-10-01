@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.41.24
+    {"0.41.24", "2026-10-01", {
+        Fixed = {
+            "A late piece of sync data from a guildmate who had already stopped sending could leave your addon waiting on a sync it never asked for, for over two minutes, and every chance to pull new data from the guild in that time was turned down. This was most likely right after a short fight. Your addon now closes a sync it did not ask for once 20 seconds pass with nothing arriving, notes it in the sync log, and goes back to pulling as usual. If that guildmate was in fact still sending and had only paused, their next piece starts the sync again, unless your addon has begun a sync with someone else by then. In that case their sync with you ends, and what it had left comes in a later sync.",
+            "A sync that opened while your addon was still reading your guild's name, and so could not use what arrived, no longer sends that guildmate a sync request your addon never decided to make after a loading screen. It closes instead.",
+        },
+    }},
     -- v0.41.23
     {"0.41.23", "2026-10-01", {
         Fixed = {
