@@ -3265,10 +3265,10 @@ describe("Sync send path", function()
             MockAce.sentCommMessages = {}
 
             -- Fire timeout — should send NACK (sender is online)
-            fireReceiveTimeout()
+            assert.is_true(fireReceiveTimeout(), "a receive timer must be armed")
 
             assert.is_true(GBL:GetSyncStatus().receiving)
-            assert.is_true(#MockAce.sentCommMessages >= 1)
+            assert.equals(1, #Sync.messagesOfType(GBL, "NACK", "OfficerB"))
         end)
 
         it("proceeds with NACK when sender not found in roster", function()
@@ -3287,9 +3287,10 @@ describe("Sync send path", function()
             MockAce.sentCommMessages = {}
 
             -- Fire timeout — nil return means proceed with NACK
-            fireReceiveTimeout()
+            assert.is_true(fireReceiveTimeout(), "a receive timer must be armed")
 
             assert.is_true(GBL:GetSyncStatus().receiving)
+            assert.equals(1, #Sync.messagesOfType(GBL, "NACK", "OfficerB"))
         end)
 
         it("proceeds with NACK when roster is empty", function()
@@ -3305,9 +3306,10 @@ describe("Sync send path", function()
             })
             MockAce.sentCommMessages = {}
 
-            fireReceiveTimeout()
+            assert.is_true(fireReceiveTimeout(), "a receive timer must be armed")
 
             assert.is_true(GBL:GetSyncStatus().receiving)
+            assert.equals(1, #Sync.messagesOfType(GBL, "NACK", "OfficerB"))
         end)
     end)
 
