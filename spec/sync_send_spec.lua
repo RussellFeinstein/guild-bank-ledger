@@ -2911,6 +2911,35 @@ describe("Sync send path", function()
                 nackPastPausedChunk(true)
             end)
 
+            -- The reset is for a NACK past the chunk in flight. While a ladder
+            -- retry waits on ChatThrottleLib the index sits one below the chunk
+            -- still owed, on an acked chunk, and a NACK for the owed chunk is
+            -- its own ladder asking again: the count stays, as it does for a
+            -- NACK naming the chunk in flight.
+            it("keeps the retries of a chunk whose deferred retry a NACK asks for", function()
+                startSend(12)
+                advanceTo(2)
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
+                _G.ChatThrottleLib = { avail = 100 }
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
+                assert.equals(1, state().sendChunkIndex, "fixture: retry of chunk 2 deferred")
+                assert.equals(2, state().sendRetryCount, "fixture: two retries on chunk 2")
+
+                GBL:HandleNack("OfficerB", { chunk = 2 })
+                _G.ChatThrottleLib = nil
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                fireNextChunkDelay()
+                assert.equals(2, state().sendChunkIndex, "fixture: chunk 2 back in flight")
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
+
+                local expected = "retrying chunk 2 (attempt 4/" .. (GBL.SYNC_MAX_RETRIES + 1) .. ")"
+                assert.is_true(logged(expected),
+                    "chunk 2's ladder should carry on from its third attempt: " .. expected)
+            end)
+
             -- An ACK landing after the resend is issued but before its own
             -- callback fires answers a transmission from before the loading
             -- screen. Timed from that anchor, the whole pause would go into the
