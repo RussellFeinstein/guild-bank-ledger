@@ -1410,6 +1410,134 @@ describe("Sync session lifecycle", function()
             assert.is_true(targets["PeerB"], "BUSY should be sent to receive source")
         end)
 
+        -- How the combat abort tells its partners (#291): through the helper
+        -- the disable uses (#279), so at NORMAL, once per peer, and logged only
+        -- for a whisper that went out. At ALERT the BUSY could leave ahead of
+        -- our chunk or request still queued at NORMAL for the same peer, and
+        -- the peer then acts on whichever arrives second.
+        describe("telling the partners", function()
+            local function busySent() return Sync.busySent(GBL) end
+
+            local function hasLine(needle)
+                for _, entry in ipairs(GBL:GetAuditTrail()) do
+                    if entry.message and entry.message:find(needle, 1, true) then
+                        return true
+                    end
+                end
+                return false
+            end
+
+            it("tells the send target at NORMAL", function()
+                enterSendingState()
+                MockAce.sentCommMessages = {}
+
+                GBL:OnCombatStart()
+
+                local busy = busySent()
+                assert.equals(1, #busy, "one BUSY, to the one partner")
+                assert.equals("PeerA", busy[1].target)
+                assert.equals("combat", busy[1].reason)
+                assert.equals("NORMAL", busy[1].prio,
+                    "an ALERT BUSY can overtake the chunk still queued to this peer")
+            end)
+
+            it("tells the receive source at NORMAL", function()
+                enterReceivingState()
+                MockAce.sentCommMessages = {}
+
+                GBL:OnCombatStart()
+
+                local busy = busySent()
+                assert.equals(1, #busy, "one BUSY, to the one partner")
+                assert.equals("PeerB", busy[1].target)
+                assert.equals("combat", busy[1].reason)
+                assert.equals("NORMAL", busy[1].prio,
+                    "an ALERT BUSY can overtake a request still queued to this peer")
+            end)
+
+            -- HandleBusy tears down both directions on one message.
+            it("tells a peer holding both directions once", function()
+                enterSendingState()
+                GBL:RequestSync("PeerA", 0)
+                assert.is_true(GBL:GetSyncStatus().receiving,
+                    "fixture must have PeerA on both sides")
+                MockAce.sentCommMessages = {}
+
+                GBL:OnCombatStart()
+
+                local busy = busySent()
+                assert.equals(1, #busy, "one message covers both directions")
+                assert.equals("PeerA", busy[1].target)
+            end)
+
+            -- The roster flips after both sessions are live: offline from the
+            -- start, there would be no session to abort.
+            it("does not claim a BUSY the roster refused", function()
+                enterSendingState()
+                enterReceivingState()
+                MockWoW.guildRoster = {
+                    { name = "PeerA-TestRealm", isOnline = false },
+                    { name = "PeerB-TestRealm", isOnline = false },
+                }
+                MockAce.sentCommMessages = {}
+                GBL:ClearLog("sync")
+
+                GBL:OnCombatStart()
+
+                assert.is_true(hasLine("Blocked whisper to offline player: PeerA"),
+                    "the BUSY to the send target should be tried and refused")
+                assert.is_true(hasLine("Blocked whisper to offline player: PeerB"),
+                    "the BUSY to the receive source should be tried and refused")
+                assert.equals(0, #busySent())
+                assert.is_false(hasLine("Sent BUSY"),
+                    "the line reports a whisper that went out, and neither did")
+                local status = GBL:GetSyncStatus()
+                assert.is_false(status.sending,
+                    "the teardown does not depend on the whisper")
+                assert.is_false(status.receiving)
+            end)
+
+            it("says in the log which partners were told", function()
+                enterSendingState()
+                enterReceivingState()
+                GBL:ClearLog("sync")
+
+                GBL:OnCombatStart()
+
+                assert.is_true(hasLine("Sent BUSY to send target: PeerA"))
+                assert.is_true(hasLine("Sent BUSY to receive source: PeerB"))
+            end)
+
+            -- Serializing and whispering can raise, and a raise from the
+            -- middle of the teardown leaves a session half up.
+            it("whispers only once both sessions are down", function()
+                enterSendingState()
+                enterReceivingState()
+                local seen = {}
+                local orig = GBL.SendCommMessage
+                GBL.SendCommMessage = function(self, prefix, text, ...)
+                    local ok, data = GBL:Deserialize(text)
+                    if ok and type(data) == "table" and data.type == "BUSY" then
+                        local status = GBL:GetSyncStatus()
+                        seen[#seen + 1] = {
+                            sending = status.sending, receiving = status.receiving,
+                        }
+                    end
+                    return orig(self, prefix, text, ...)
+                end
+
+                GBL:OnCombatStart()
+                GBL.SendCommMessage = orig
+
+                assert.equals(2, #seen, "no BUSY seen, so there was nothing to order")
+                for _, state in ipairs(seen) do
+                    assert.is_false(state.sending, "the send was still up at the BUSY")
+                    assert.is_false(state.receiving,
+                        "the receive was still up at the BUSY")
+                end
+            end)
+        end)
+
         it("OnCombatStart is no-op when idle", function()
             assert.is_false(GBL:GetSyncStatus().sending)
             assert.is_false(GBL:GetSyncStatus().receiving)
