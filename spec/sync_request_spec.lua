@@ -118,6 +118,16 @@ describe("Sync request and serve", function()
             if not ok then error(err, 0) end
         end
 
+        local function declineLine(peer)
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message
+                    and entry.message:find("Declined sync from " .. peer, 1, true) then
+                    return entry.message
+                end
+            end
+            return nil
+        end
+
         before_each(function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
             for i = 1, 3 do
@@ -180,6 +190,10 @@ describe("Sync request and serve", function()
             assert.equals(1, sent["BUSY"] or 0)
             assert.is_nil(sent["SYNC_DATA"])
             assert.is_false(GBL:GetSyncStatus().sending)
+            local line = declineLine("PeerA")
+            assert.is_not_nil(line, "the decline has to name itself in the capture")
+            assert.is_not_nil(line:find("(combat cooldown)", 1, true),
+                "the decline names the tail it fell in, got: " .. line)
         end)
 
         it("declines during the zone cooldown tail", function()
@@ -197,6 +211,10 @@ describe("Sync request and serve", function()
             assert.equals(1, sent["BUSY"] or 0)
             assert.is_nil(sent["SYNC_DATA"])
             assert.is_false(GBL:GetSyncStatus().sending)
+            local line = declineLine("PeerA")
+            assert.is_not_nil(line, "the decline has to name itself in the capture")
+            assert.is_not_nil(line:find("(zone cooldown)", 1, true),
+                "the decline names the tail it fell in, got: " .. line)
         end)
 
         -- The version gate stays ahead of this one. BUSY reads as "try again

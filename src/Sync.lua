@@ -524,6 +524,19 @@ local function isSyncPaused()
     return syncState.zonePaused or syncState.combatPaused
 end
 
+--- Why a new session must not start now, or nil when it may.
+-- Both terms, always: combatPaused is set only by an abort, so an idle client
+-- in a raid never sets it, and the live API reads false through the cooldown
+-- tail (#126). Every door that declines with BUSY reads this, so none can
+-- carry one term alone.
+-- @return string|nil "in combat", "zone cooldown" or "combat cooldown"
+local function combatGateReason()
+    if InCombatLockdown and InCombatLockdown() then return "in combat" end
+    if syncState.zonePaused then return "zone cooldown" end
+    if syncState.combatPaused then return "combat cooldown" end
+    return nil
+end
+
 -- Track names we're actively whispering via sync, so the system message
 -- filter can distinguish addon-caused errors from user-caused errors.
 -- Keyed by StripRealm output, NOT CanonicalPeerKey: a "no player named X"
@@ -2534,16 +2547,10 @@ function GBL:HandleSyncRequest(sender, data)
     -- an incompatible peer keeps getting silence rather than a retry signal,
     -- and ahead of every piece of prep state so a refused request allocates
     -- nothing.
-    local inCombat = InCombatLockdown and InCombatLockdown()
-    if inCombat or isSyncPaused() then
-        local why
-        if inCombat then
-            why = "in combat"
-        else
-            why = (syncState.zonePaused and "zone" or "combat") .. " cooldown"
-        end
+    local gateReason = combatGateReason()
+    if gateReason then
         self:AddAuditEntry("Declined sync from " .. sender
-            .. " (" .. why .. ") - sent BUSY")
+            .. " (" .. gateReason .. ") - sent BUSY")
         local busy = compressMessage(self:Serialize(self:BuildBusyMessage("combat")))
         self:SendSyncWhisper(PREFIX, busy, sender)
         return
