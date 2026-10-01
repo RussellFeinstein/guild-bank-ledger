@@ -2782,11 +2782,12 @@ describe("Sync send path", function()
             end)
 
             -- #284: a chunk still queued at the loading screen finishes during
-            -- the pause and its callback arms an ACK timer, which then fires
-            -- inside the cooldown and steps the index back. The resume must
-            -- still put the chunk out once, not twice. #284 stops that timer
-            -- being armed, and this case changes with it.
-            it("resends the paused chunk once after an ACK timer fired inside the pause", function()
+            -- the cooldown. Its callback used to arm an ACK timer that fired
+            -- inside the pause, stepped the index back and booked an
+            -- ackTimeout, and the resume then reached the chunk by advancing
+            -- onto it. No timer is armed while sync is paused: the resume
+            -- resends the chunk because the loading screen tagged it, once.
+            it("arms no ACK timer for a chunk that completes in the cooldown, and resends it once", function()
                 local completeOldest = holdCallbacks()
 
                 startSend(12)
@@ -2798,14 +2799,20 @@ describe("Sync send path", function()
                 GBL:OnLoadingScreenStart()
                 GBL:OnLoadingScreenEnd()
                 completeOldest()
-                MockWoW.serverTime = MockWoW.serverTime + 10
-                fireAckTimeout(GBL.SYNC_ACK_TIMEOUT)
+
+                assert.equals(0, Helpers.timersAt(GBL.SYNC_ACK_TIMEOUT),
+                    "no ACK timer while sync is paused")
                 local mark = #MockAce.sentCommMessages
 
                 cooldown()
 
                 assert.same({ 2 }, chunksSentSince(mark))
                 assert.equals(2, state().sendChunkIndex)
+                assert.is_true(logged("Resending chunk 2 to OfficerB after the loading screen"),
+                    "the resume, not a timer, should have put chunk 2 back")
+                assert.same({}, state().chunkOutcomes[2].retryReasons,
+                    "a loading screen is not wire loss")
+                assert.equals(0, state().sendRetryCount)
             end)
 
             -- The receiver has chunk 2, its ACK was lost to our loading screen,
