@@ -614,15 +614,18 @@ sits on the History switch row.
 
 ## 17. The issues this files
 
-Filed with this doc, under the milestone "Account view", each body carrying its work in full and
-closing with "Done when":
+Filed with this doc on 2026-09-30, under the milestone "Account view", each body carrying its work
+in full and closing with "Done when":
 
-1. Key guild tables by name and guild realm, so two guilds with one name never share a ledger; a
-   renamed or moved guild keeps its table by club id. `type: bug`, `area: storage`.
-2. The roster records each character's guild and rank, so the account can be shown each guild
-   under that guild's own policy. `type: enhancement`, `area: storage`.
-3. The History views show one guild, another of the account's guilds, or all of them at once.
-   `type: enhancement`, `area: ui`.
+1. #302: Key guild tables by name and guild realm, so two guilds with one name never share a
+   ledger. `type: bug`, `area: storage`. Section 4.
+2. #303: Record each character's guild and rank, so the account can be shown each guild under that
+   guild's own policy. `type: enhancement`, `area: storage`. Sections 5, 6 and 8. Waits on #302,
+   D1 and D2.
+3. #304: History views show one guild, another of the account's guilds, or all of them at once.
+   `type: enhancement`, `area: ui`. Sections 7 and 9 to 13. Waits on #303, #227, #228 and #229.
+
+All three sit in #188's "Not buildable yet" table until Russell says to start.
 
 ## 18. Sources
 
