@@ -819,6 +819,25 @@ describe("Sync receive and intake", function()
             assert.equals(1, #sentOfType("NACK"))
             assert.is_nil(logEntry("went quiet"))
         end)
+
+        -- The offline arm comes first. Reading only "offline" from the trail
+        -- would not show it: the bootstrap's ACK to an offline sender already
+        -- logs "Blocked whisper to offline player" before the timer fires.
+        it("leaves a sender gone offline to the offline arm", function()
+            MockWoW.guildRoster = {
+                { name = "OfficerA-TestRealm", isOnline = true },
+                { name = "OfficerB-TestRealm", isOnline = false },
+            }
+            GBL:HandleSyncData("OfficerB", payload(5, 100, 1))
+            assert.is_true(GBL:GetSyncStatus().receiving)
+
+            assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
+
+            assert.is_false(GBL:GetSyncStatus().receiving)
+            assert.is_truthy(logEntry("Sender OfficerB offline, aborting receive"),
+                "an offline sender is named as offline, not as quiet")
+            assert.is_nil(logEntry("went quiet"))
+        end)
     end)
 
     ---------------------------------------------------------------------------
