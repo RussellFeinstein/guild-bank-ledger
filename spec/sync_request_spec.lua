@@ -212,6 +212,8 @@ describe("Sync request and serve", function()
             assert.is_not_nil(line, "the decline has to name itself in the capture")
             assert.is_not_nil(line:find("(combat cooldown)", 1, true),
                 "the decline names the tail it fell in, got: " .. line)
+            -- The peer's log reads the wire word: a combat tail says combat.
+            assert.equals("combat", Sync.busySent(GBL)[1].reason)
         end)
 
         it("declines during the zone cooldown tail", function()
@@ -235,6 +237,9 @@ describe("Sync request and serve", function()
             assert.is_not_nil(line, "the decline has to name itself in the capture")
             assert.is_not_nil(line:find("(zone cooldown)", 1, true),
                 "the decline names the tail it fell in, got: " .. line)
+            -- The peer's log reads the wire word, and a loading screen is not
+            -- a fight (#308).
+            assert.equals("loading", Sync.busySent(GBL)[1].reason)
         end)
 
         -- A fight inside a loading screen's cooldown leaves both tails
@@ -259,6 +264,121 @@ describe("Sync request and serve", function()
             local line = declineLine("PeerA")
             assert.is_not_nil(line, "the decline has to name itself in the capture")
             assert.is_not_nil(line:find("(zone cooldown)", 1, true), "got: " .. line)
+            -- The word follows the line, so both name the loading screen.
+            assert.equals("loading", Sync.busySent(GBL)[1].reason)
+        end)
+
+        -- Live combat outranks either tail, on the line and on the wire.
+        it("names live combat during a zone tail, on the wire too", function()
+            GBL:RequestSync("OfficerC", 0)
+            GBL:OnLoadingScreenStart()
+            GBL:OnLoadingScreenEnd()
+            GBL:FinishReceiving("OfficerC")
+            assert.is_true(GBL:GetSyncStatus().zonePaused,
+                "fixture: the zone tail is running")
+            MockAce.sentCommMessages = {}
+
+            inCombat(function()
+                GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            end)
+
+            local busy = Sync.busySent(GBL)
+            assert.equals(1, #busy)
+            assert.equals("combat", busy[1].reason)
+            local line = declineLine("PeerA")
+            assert.is_not_nil(line, "the decline has to name itself in the capture")
+            assert.is_not_nil(line:find("(in combat) - sent BUSY", 1, true),
+                "got: " .. line)
+        end)
+
+        -- A loading screen pauses a live send rather than ending it, so the
+        -- peer we are sending to is still our partner through the pause and
+        -- its tail. Its zero-chunk resend of the request can land there, and a
+        -- BUSY would make it tear down its receive of our paused send, and its
+        -- own send to us if it holds one (#308).
+        describe("the peer we are sending to, through a loading screen (#308)",
+        function()
+            local function startServing(peer)
+                GBL:HandleSyncRequest(peer, request{ sinceTimestamp = 0 })
+                local status = GBL:GetSyncStatus()
+                assert.is_true(status.sending, "fixture: the send should be live")
+                assert.equals(peer, status.sendTarget)
+            end
+
+            it("ignores its repeat request during the pause", function()
+                startServing("PeerB")
+                GBL:RequestSync("PeerB", 0)
+                assert.equals("PeerB", GBL:GetSyncStatus().receiveSource,
+                    "fixture: we are pulling from the same peer")
+                GBL:OnLoadingScreenStart()
+                assert.is_true(GBL:GetSyncStatus().zonePaused,
+                    "fixture: the loading screen pauses both sessions")
+                local progressBefore = GBL:GetSyncStatus().sendProgress
+                MockAce.sentCommMessages = {}
+                GBL:ClearLog("sync")
+
+                GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
+
+                assert.equals(0, #Sync.busySent(GBL),
+                    "a BUSY would end the receive our paused send is feeding")
+                assert.is_nil(declineLine("PeerB"),
+                    "a repeat from our own send target is not a decline")
+                local status = GBL:GetSyncStatus()
+                assert.is_true(status.sending)
+                assert.equals("PeerB", status.sendTarget)
+                assert.is_true(status.receiving)
+                assert.equals("PeerB", status.receiveSource)
+                assert.equals(progressBefore, status.sendProgress,
+                    "the repeat should not restart or advance the send")
+            end)
+
+            it("ignores it in the tail, and the send resumes to that peer",
+            function()
+                startServing("PeerB")
+                GBL:OnLoadingScreenStart()
+                GBL:OnLoadingScreenEnd()
+                assert.is_true(GBL:GetSyncStatus().zonePaused,
+                    "fixture: the zone cooldown has not run out")
+                MockAce.sentCommMessages = {}
+
+                GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
+
+                assert.equals(0, #Sync.busySent(GBL),
+                    "a BUSY would end the receive our paused send is feeding")
+
+                -- The tail runs out clear of the gap floor, and the chunk the
+                -- pause left unanswered goes back to the same peer (#295).
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                Helpers.fireTimersAt(GBL.SYNC_ZONE_COOLDOWN)
+                assert.is_false(GBL:GetSyncStatus().zonePaused)
+                assert.is_true((sentTo("PeerB")["SYNC_DATA"] or 0) > 0,
+                    "the paused send should resume to the peer that asked again")
+                assert.equals(0, #Sync.busySent(GBL))
+                assert.is_true(GBL:GetSyncStatus().sending)
+            end)
+
+            it("still turns a third peer away, naming the loading screen",
+            function()
+                startServing("PeerB")
+                GBL:OnLoadingScreenStart()
+                MockAce.sentCommMessages = {}
+                GBL:ClearLog("sync")
+
+                GBL:HandleSyncRequest("PeerC", request{ sinceTimestamp = 0 })
+
+                local busy = Sync.busySent(GBL)
+                assert.equals(1, #busy, "the third peer is told to wait")
+                assert.equals("PeerC", busy[1].target)
+                assert.equals("NORMAL", busy[1].prio)
+                assert.equals("loading", busy[1].reason,
+                    "the peer's log reads this word, and we are not fighting")
+                local line = declineLine("PeerC")
+                assert.is_not_nil(line, "the decline has to name itself in the capture")
+                assert.is_not_nil(line:find("(zone cooldown) - sent BUSY", 1, true),
+                    "got: " .. line)
+                assert.equals("PeerB", GBL:GetSyncStatus().sendTarget,
+                    "the send in flight is not the third peer's to end")
+            end)
         end)
 
         -- The version gate stays ahead of this one. BUSY reads as "try again
