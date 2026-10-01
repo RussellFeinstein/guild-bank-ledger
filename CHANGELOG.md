@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.41.22] - 2026-10-01
 
 ### Fixed
 - When combat stops a sync, the message telling your guildmate's addon that yours is busy now waits behind anything your addon was still sending them. Before, it could arrive first. Their addon could then take a chunk that was already on its way as the start of a new sync and wait over two minutes for the rest, or start preparing a sync you had asked for just before the fight, which your addon then had to turn away.
