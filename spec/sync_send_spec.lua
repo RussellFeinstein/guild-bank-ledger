@@ -2730,6 +2730,26 @@ describe("Sync send path", function()
                 assert.same({ 3 }, chunksSentSince(mark))
             end)
 
+            -- A pending chunk at the index has its own ACK timer to resend it.
+            -- A stray SendNextChunk, the call a stale deferred chain makes (the
+            -- overlap overlapTotal counts), must not put it out a second time:
+            -- only a chunk the pause left unanswered is resent. What does go
+            -- out instead is that overlap, and is deliberately not pinned.
+            it("does not resend a chunk the pause never touched", function()
+                startSend(12)
+                assert.equals("pending", state().chunkOutcomes[1].outcome,
+                    "fixture: chunk 1 in flight")
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                local mark = #MockAce.sentCommMessages
+
+                GBL:SendNextChunk()
+
+                assert.equals(1, state().chunkOutcomes[1].attempts)
+                for _, c in ipairs(chunksSentSince(mark)) do
+                    assert.are_not.equal(1, c, "chunk 1 went out a second time")
+                end
+            end)
+
             -- Stepping the index back at the resume, the fix #295 first
             -- proposed, leaves it one below the chunk owed while the resume's
             -- send defers on ChatThrottleLib, which is usual straight after a
