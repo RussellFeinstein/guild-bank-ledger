@@ -337,6 +337,42 @@ describe("Sync peer identity and pairing", function()
             assert.is_true(found, "BUSY message should have been sent to PeerB")
         end)
 
+        -- The requester can drop offline before we answer. The line reports
+        -- a whisper that went out, not one that was meant (#279).
+        it("does not claim a BUSY the roster refused when already sending", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            local gd = GBL:GetGuildData()
+            table.insert(gd.transactions, {
+                type = "deposit", player = "Player1", tab = 1, itemID = 123,
+                classID = 0, subclassID = 0, count = 1,
+                timestamp = 1000 * 3600, id = "abc:277:0",
+                _occurrence = 0, scanTime = 1000 * 3600, scannedBy = "OfficerA",
+            })
+            gd.seenTxHashes["abc:277:0"] = 1000 * 3600
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending)
+            MockWoW.guildRoster = {
+                { name = "PeerB-TestRealm", isOnline = false },
+            }
+            MockAce.sentCommMessages = {}
+            GBL:ClearLog("sync")
+
+            GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
+
+            assert.equals(0, #Sync.busySent(GBL))
+            local declined = false
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message:find("Declined sync from PeerB", 1, true) then
+                    declined = true
+                end
+                assert.is_nil(entry.message:find("Sent BUSY to PeerB", 1, true),
+                    "no BUSY went out, got: " .. entry.message)
+            end
+            assert.is_true(declined, "the decline is logged either way")
+            assert.is_true(GBL:GetSyncStatus().sending,
+                "the session in flight is not the requester's to end")
+        end)
+
         -- The retry above means the peer we are already serving may ask again
         -- while its first request is being answered. Answering that with BUSY
         -- would make it abort the very receive we are feeding, so a duplicate

@@ -1509,6 +1509,66 @@ describe("Sync session lifecycle", function()
                 "the peer's reply to our re-advertisement should start a sync")
         end)
 
+        -- #289, the same loop with the chunk that was already on its way. The
+        -- combat BUSY stops the sender, but a chunk it issued before the BUSY
+        -- landed still arrives, and the bootstrap used to open a receive on
+        -- it in combat. That receive outlived a short fight, so the round
+        -- that should have restarted the pull answered verdict=receiving.
+        it("a chunk landing after the combat abort leaves the post-combat pull free", function()
+            enterReceivingState()
+            GBL:UpdatePeer("PeerQ", { version = GBL.version, txCount = 20, dataHash = 888 })
+
+            MockWoW.inCombat = true
+            GBL:OnCombatStart()
+            assert.is_false(GBL:GetSyncStatus().receiving)
+
+            GBL:HandleSyncData("PeerB", {
+                chunk = 3, totalChunks = 10,
+                transactions = {}, moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            assert.is_false(GBL:GetSyncStatus().receiving,
+                "the late chunk must not reopen the receive combat ended")
+
+            MockWoW.inCombat = false
+            GBL:OnCombatEnd()
+            Helpers.fireTimersAt(GBL.SYNC_COMBAT_COOLDOWN)
+
+            MockAce.sentCommMessages = {}
+            GBL:HandleHello("PeerQ", {
+                version = GBL.version,
+                minSyncVersion = GBL.MIN_SYNC_VERSION,
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+                txCount = 20,
+                dataHash = 888,
+                isReply = true,
+            })
+
+            -- Exactly one, so no earlier round can stand in for this one.
+            local rounds = {}
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message and entry.message:find("HELLO round PeerQ:", 1, true) then
+                    rounds[#rounds + 1] = entry.message
+                end
+            end
+            assert.equals(1, #rounds, "the reply writes one round line")
+            assert.is_truthy(rounds[1]:find("verdict=requested", 1, true),
+                "the round after combat should pull, got: " .. rounds[1])
+
+            local requestSent = false
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                if msg.target == "PeerQ" then
+                    local ok, data = GBL:Deserialize(msg.text)
+                    if ok and data.type == "SYNC_REQUEST" then
+                        requestSent = true
+                    end
+                end
+            end
+            assert.is_true(requestSent, "the pull the fight deferred should go out")
+        end)
+
         it("rapid combat in/out cancels stale cooldown timer", function()
             enterSendingState()
             GBL:OnCombatStart()

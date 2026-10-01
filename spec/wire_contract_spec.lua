@@ -796,6 +796,31 @@ describe("Wire contract", function()
             assert.equals("disabled", disabled.reason,
                 "the partner's log has to tell a disable from a combat abort")
         end)
+
+        -- Another site of the same builder (#289): a chunk nobody asked for,
+        -- arriving in combat, is refused with BUSY rather than opening a
+        -- receive. Its own case, because no session exists for the others to end.
+        it("a chunk refused in combat draws a BUSY with the same keys, naming combat",
+        function()
+            configureGuild()
+            GBL.db.profile.sync.enabled = true
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            MockWoW.inCombat = true
+            local refused = firstOfType(capturePayloads(function()
+                GBL:HandleSyncData("PeerA", {
+                    chunk = 2, totalChunks = 5,
+                    transactions = {}, moneyTransactions = {},
+                    protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                    guild = "Test Guild",
+                })
+            end), "BUSY")
+            MockWoW.inCombat = false
+            assert.is_table(refused, "HandleSyncData built no BUSY")
+
+            assert.same(BUSY_KEYS, keySet(refused))
+            assert.equals("combat", refused.reason)
+        end)
     end)
 
     --------------------------------------------------------------------

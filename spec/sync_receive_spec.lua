@@ -389,6 +389,257 @@ describe("Sync receive and intake", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- Combat gate on unsolicited data (#289)
+    --
+    -- OnCombatStart ends a live receive and BUSYs the sender, but a chunk the
+    -- sender issued before that BUSY landed still arrives. The auto-bootstrap
+    -- opened a fresh receive on it with no combat check, and that receive ran
+    -- the whole NACK ladder through the fight. Every case here enters through
+    -- a state the client reaches: combat itself, the combat cooldown tail, and
+    -- a loading screen's pause and tail, which the gate leaves alone.
+    ---------------------------------------------------------------------------
+
+    describe("combat gate on unsolicited data (#289)", function()
+        -- Built fresh per call: the intake rewrites a record in place.
+        local function payload(n, total)
+            return {
+                chunk = n, totalChunks = total,
+                transactions = {
+                    {
+                        type = "deposit", player = "Thrall",
+                        itemID = 12345, count = 5, tab = 1,
+                        timestamp = 2000, scanTime = 2000,
+                        scannedBy = "OfficerB",
+                        id = "deposit|Thrall|12345|5|1|0",
+                    },
+                },
+                moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            }
+        end
+
+        local function sentOfType(target, msgType)
+            local out = {}
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                if msg.target == target then
+                    local ok, data = GBL:Deserialize(msg.text)
+                    if ok and type(data) == "table" and data.type == msgType then
+                        out[#out + 1] = { data = data, prio = msg.prio }
+                    end
+                end
+            end
+            return out
+        end
+
+        -- Plain find, unlike the backstop describe's logLine, which matches a
+        -- Lua pattern. The names differ so neither can be hoisted over the other.
+        local function lineWith(text)
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message and entry.message:find(text, 1, true) then
+                    return entry.message
+                end
+            end
+            return nil
+        end
+
+        -- A receive from OfficerC ended by combat, the fight over, and the
+        -- combat cooldown still running.
+        local function enterCombatCooldown()
+            GBL:RequestSync("OfficerC", 0)
+            MockWoW.inCombat = true
+            GBL:OnCombatStart()
+            MockWoW.inCombat = false
+            GBL:OnCombatEnd()
+            assert.is_true(GBL:GetSyncStatus().combatPaused,
+                "fixture: the cooldown has not run out")
+            assert.is_false(GBL:GetSyncStatus().receiving)
+        end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+        end)
+
+        after_each(function()
+            MockWoW.inCombat = false
+        end)
+
+        it("opens no session in combat, where the same chunk out of combat does", function()
+            MockWoW.inCombat = true
+            GBL:HandleSyncData("OfficerB", payload(5, 10))
+
+            assert.is_false(GBL:GetSyncStatus().receiving,
+                "a chunk arriving in combat must not open a receive")
+            assert.equals(0, #guildData.transactions, "nothing is stored in combat")
+            assert.equals(0, #sentOfType("OfficerB", "ACK"), "nothing is acknowledged")
+            assert.is_nil(GBL:GetSyncStateForTests().receiveTimer,
+                "no receive timer is armed")
+
+            -- The denominator: out of combat the same chunk opens the session
+            -- and stores its record, so the zero above is a refusal and not a
+            -- fixture that stores nothing.
+            MockWoW.inCombat = false
+            GBL:HandleSyncData("OfficerB", payload(5, 10))
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            assert.equals(1, #guildData.transactions)
+        end)
+
+        it("answers the sender with one BUSY naming combat, at NORMAL", function()
+            MockWoW.inCombat = true
+            GBL:HandleSyncData("OfficerB", payload(5, 10))
+
+            local busy = sentOfType("OfficerB", "BUSY")
+            assert.equals(1, #busy, "one chunk draws one BUSY")
+            assert.equals("combat", busy[1].data.reason)
+            -- At ALERT it could leave ahead of a message still queued for that
+            -- peer at NORMAL, and the peer acts on whichever arrives second (#279).
+            assert.equals("NORMAL", busy[1].prio)
+        end)
+
+        it("names the refusal in the sync log, and bootstraps nothing", function()
+            MockWoW.inCombat = true
+            GBL:HandleSyncData("OfficerB", payload(5, 10))
+
+            assert.is_truthy(lineWith("Declined chunk 5 from OfficerB (in combat) - sent BUSY"))
+            assert.is_nil(lineWith("Auto-bootstrap"),
+                "a refused chunk opens no session, so nothing bootstraps")
+        end)
+
+        -- The sender can drop offline between its chunk and our answer. The
+        -- line reports a whisper that went out, not one that was meant (#279).
+        it("does not claim a BUSY the roster refused", function()
+            MockWoW.guildRoster = {
+                { name = "OfficerB-TestRealm", isOnline = false },
+            }
+            MockWoW.inCombat = true
+            GBL:HandleSyncData("OfficerB", payload(5, 10))
+
+            assert.equals(0, #sentOfType("OfficerB", "BUSY"))
+            assert.is_truthy(lineWith("Blocked whisper to offline player: OfficerB"))
+            local line = lineWith("Declined chunk 5 from OfficerB (in combat)")
+            assert.is_truthy(line, "the refusal is logged either way")
+            assert.is_nil(line:find("sent BUSY", 1, true),
+                "no BUSY went out, got: " .. line)
+            assert.is_false(GBL:GetSyncStatus().receiving)
+        end)
+
+        -- InCombatLockdown reads false the moment the fight ends, and the
+        -- sender's ACK ladder can still be retransmitting the chunk then.
+        it("refuses in the combat cooldown, where the live API already reads false", function()
+            enterCombatCooldown()
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleSyncData("OfficerC", payload(5, 10))
+
+            assert.is_false(GBL:GetSyncStatus().receiving)
+            assert.equals(0, #guildData.transactions)
+            assert.equals(1, #sentOfType("OfficerC", "BUSY"))
+            assert.is_truthy(lineWith("Declined chunk 5 from OfficerC (combat cooldown)"))
+        end)
+
+        -- A fight inside a loading screen's tail runs both tails at once. The
+        -- gate ignores the zone half, and must not drop the combat half with it.
+        it("still refuses in the combat tail when a loading screen's tail overlaps it", function()
+            GBL:RequestSync("OfficerC", 0)
+            GBL:OnLoadingScreenStart()
+            GBL:OnLoadingScreenEnd()
+            MockWoW.inCombat = true
+            GBL:OnCombatStart()
+            MockWoW.inCombat = false
+            GBL:OnCombatEnd()
+            local status = GBL:GetSyncStatus()
+            assert.is_true(status.zonePaused, "fixture: the zone tail is running")
+            assert.is_true(status.combatPaused, "fixture: the combat tail is running")
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleSyncData("OfficerC", payload(5, 10))
+
+            assert.is_false(GBL:GetSyncStatus().receiving)
+            assert.equals(1, #sentOfType("OfficerC", "BUSY"))
+            assert.is_truthy(lineWith("Declined chunk 5 from OfficerC (combat cooldown)"))
+        end)
+
+        -- A loading screen sends nobody a BUSY, so a chunk landing in its tail
+        -- comes from a guildmate who is still sending. Refusing it only turned
+        -- live partners away (a delivered session logged as ended by busy, a
+        -- partner's receive of our paused send torn down), so the gate is
+        -- combat only.
+        it("takes a chunk in a loading screen's tail, which told nobody to stop", function()
+            -- OnLoadingScreenStart only pauses a live session, so enter one,
+            -- let the loading screen end, and end the session inside the tail.
+            GBL:RequestSync("OfficerC", 0)
+            GBL:OnLoadingScreenStart()
+            GBL:OnLoadingScreenEnd()
+            GBL:FinishReceiving("OfficerC")
+            assert.is_true(GBL:GetSyncStatus().zonePaused, "fixture: the zone tail is running")
+            assert.is_false(GBL:GetSyncStatus().receiving)
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleSyncData("OfficerB", payload(5, 10))
+
+            assert.is_true(GBL:GetSyncStatus().receiving, "the chunk opens a receive")
+            assert.equals(1, #guildData.transactions)
+            assert.equals(1, #sentOfType("OfficerB", "ACK"))
+            assert.equals(0, #sentOfType("OfficerB", "BUSY"))
+        end)
+
+        -- An idle client sets no combatPaused at the pull, so nothing else
+        -- would re-advertise after the fight and the refused records would
+        -- wait for a heartbeat. HandleHello's combat arm sets the same flag.
+        it("re-advertises after the fight when it refused a chunk while idle", function()
+            MockWoW.inCombat = true
+            GBL:OnCombatStart()
+            assert.is_false(GBL:GetSyncStatus().combatPaused, "fixture: idle at the pull")
+            GBL:HandleSyncData("OfficerB", payload(5, 10))
+            assert.is_false(GBL:GetSyncStatus().receiving)
+
+            MockWoW.inCombat = false
+            MockAce.sentCommMessages = {}
+            GBL:OnCombatEnd()
+
+            local scheduled = 0
+            for _, t in ipairs(MockWoW.pendingTimers) do
+                if t.delay == 2 and not t.cancelled and not t.fired then
+                    scheduled = scheduled + 1
+                end
+            end
+            assert.equals(1, scheduled, "the fight's end should schedule a re-advertise")
+            Helpers.fireTimersAt(2)
+
+            local hello = false
+            for _, msg in ipairs(MockAce.sentCommMessages) do
+                local ok, data = GBL:Deserialize(msg.text)
+                if ok and type(data) == "table" and data.type == "HELLO"
+                    and msg.distribution == "GUILD" then
+                    hello = true
+                end
+            end
+            assert.is_true(hello, "the re-advertise goes out to the guild")
+        end)
+
+        -- A loading screen pauses a live receive rather than ending it, so the
+        -- sender's chunks keep arriving with zonePaused set, and nothing may
+        -- turn them away. No door opens a receive while a combat term holds,
+        -- so this pins the pause, not where the gate sits in the function.
+        it("keeps taking the sender's chunks on a receive a loading screen paused", function()
+            GBL:RequestSync("OfficerB", 0)
+            GBL:OnLoadingScreenStart()
+            GBL:OnLoadingScreenEnd()
+            assert.is_true(GBL:GetSyncStatus().zonePaused,
+                "fixture: the zone cooldown has not run out")
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleSyncData("OfficerB", payload(1, 2))
+
+            assert.equals(1, #guildData.transactions, "the chunk is stored")
+            assert.equals(1, #sentOfType("OfficerB", "ACK"), "and acknowledged")
+            assert.equals(0, #sentOfType("OfficerB", "BUSY"))
+            assert.is_true(GBL:GetSyncStatus().receiving)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- NormalizeRecordId
     ---------------------------------------------------------------------------
 

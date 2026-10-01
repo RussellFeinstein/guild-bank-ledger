@@ -90,7 +90,8 @@ describe("Sync request and serve", function()
     -- Combat serve gate (issue #126)
     ---------------------------------------------------------------------------
 
-    -- Serving was the one door in the combat policy with no check on it.
+    -- Serving was a door in the combat policy with no check on it (the
+    -- auto-bootstrap of unsolicited data was another, #289).
     -- HandleHello defers requesting while InCombatLockdown reads true, and a
     -- live session entering combat is aborted outright, but an idle client
     -- never sets combatPaused (OnCombatStart returns early when nothing is in
@@ -116,6 +117,16 @@ describe("Sync request and serve", function()
             local ok, err = pcall(fn)
             _G.InCombatLockdown = origICL
             if not ok then error(err, 0) end
+        end
+
+        local function declineLine(peer)
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message
+                    and entry.message:find("Declined sync from " .. peer, 1, true) then
+                    return entry.message
+                end
+            end
+            return nil
         end
 
         before_each(function()
@@ -144,6 +155,11 @@ describe("Sync request and serve", function()
                 "no records should be served during combat")
             assert.is_false(GBL:GetSyncStatus().sending,
                 "no send session should be opened during combat")
+            -- The word the peer's log reads, pinned at this door as well as
+            -- at the others, so it cannot change here alone.
+            local busy = Sync.busySent(GBL)
+            assert.equals(1, #busy)
+            assert.equals("combat", busy[1].reason)
         end)
 
         it("names the reason in the sync log", function()
@@ -153,15 +169,27 @@ describe("Sync request and serve", function()
 
             -- Silence would leave a capture unable to tell this apart from a
             -- request that never arrived, which is the whole #115 symptom.
-            local logged = false
-            for _, entry in ipairs(GBL:GetAuditTrail()) do
-                if entry.message
-                    and entry.message:find("Declined sync from PeerA", 1, true)
-                    and entry.message:find("combat", 1, true) then
-                    logged = true
-                end
-            end
-            assert.is_true(logged, "the decline has to name itself in the capture")
+            local line = declineLine("PeerA")
+            assert.is_not_nil(line, "the decline has to name itself in the capture")
+            assert.is_not_nil(line:find("(in combat) - sent BUSY", 1, true),
+                "got: " .. line)
+        end)
+
+        -- The requester can drop offline before we answer. The line reports
+        -- a whisper that went out, not one that was meant (#279).
+        it("does not claim a BUSY the roster refused", function()
+            MockWoW.guildRoster = {
+                { name = "PeerA-TestRealm", isOnline = false },
+            }
+            inCombat(function()
+                GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            end)
+
+            assert.equals(0, #Sync.busySent(GBL))
+            local line = declineLine("PeerA")
+            assert.is_not_nil(line, "the refusal is logged either way")
+            assert.is_nil(line:find("sent BUSY", 1, true), "got: " .. line)
+            assert.is_false(GBL:GetSyncStatus().sending)
         end)
 
         -- InCombatLockdown reads false the instant regen returns, while a
@@ -180,13 +208,19 @@ describe("Sync request and serve", function()
             assert.equals(1, sent["BUSY"] or 0)
             assert.is_nil(sent["SYNC_DATA"])
             assert.is_false(GBL:GetSyncStatus().sending)
+            local line = declineLine("PeerA")
+            assert.is_not_nil(line, "the decline has to name itself in the capture")
+            assert.is_not_nil(line:find("(combat cooldown)", 1, true),
+                "the decline names the tail it fell in, got: " .. line)
         end)
 
         it("declines during the zone cooldown tail", function()
-            -- OnLoadingScreenStart only pauses a live session, so enter one
-            -- and end it, which leaves zonePaused set until its cooldown.
+            -- OnLoadingScreenStart only pauses a live session, so enter one,
+            -- let the loading screen end so its cooldown is running, and end
+            -- the session inside it.
             GBL:RequestSync("OfficerC", 0)
             GBL:OnLoadingScreenStart()
+            GBL:OnLoadingScreenEnd()
             GBL:FinishReceiving("OfficerC")
             assert.is_true(GBL:GetSyncStatus().zonePaused)
             MockAce.sentCommMessages = {}
@@ -197,6 +231,34 @@ describe("Sync request and serve", function()
             assert.equals(1, sent["BUSY"] or 0)
             assert.is_nil(sent["SYNC_DATA"])
             assert.is_false(GBL:GetSyncStatus().sending)
+            local line = declineLine("PeerA")
+            assert.is_not_nil(line, "the decline has to name itself in the capture")
+            assert.is_not_nil(line:find("(zone cooldown)", 1, true),
+                "the decline names the tail it fell in, got: " .. line)
+        end)
+
+        -- A fight inside a loading screen's cooldown leaves both tails
+        -- running at once. The decline has always named the zone one there,
+        -- and combatGateReason keeps that order for both doors.
+        it("names the zone cooldown when it overlaps the combat one", function()
+            GBL:RequestSync("OfficerC", 0)
+            GBL:OnLoadingScreenStart()
+            GBL:OnLoadingScreenEnd()
+            MockWoW.inCombat = true
+            GBL:OnCombatStart()
+            MockWoW.inCombat = false
+            GBL:OnCombatEnd()
+            local status = GBL:GetSyncStatus()
+            assert.is_true(status.zonePaused, "fixture: the zone tail is running")
+            assert.is_true(status.combatPaused, "fixture: the combat tail is running")
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+
+            assert.equals(1, sentTo("PeerA")["BUSY"] or 0)
+            local line = declineLine("PeerA")
+            assert.is_not_nil(line, "the decline has to name itself in the capture")
+            assert.is_not_nil(line:find("(zone cooldown)", 1, true), "got: " .. line)
         end)
 
         -- The version gate stays ahead of this one. BUSY reads as "try again
