@@ -157,6 +157,27 @@ function M.busySent(GBL)
     return out
 end
 
+--- Every message of one type sent since sentCommMessages was last cleared,
+-- decoded, optionally to one target. The general form of busySent.
+-- @param GBL table The addon object (its Deserialize reads the mock's table)
+-- @param kind string The message type, e.g. "NACK" or "HELLO"
+-- @param target string|nil Only messages whispered to this name
+-- @return table Array of { target, prio, distribution, data }
+function M.messagesOfType(GBL, kind, target)
+    local out = {}
+    for _, msg in ipairs(MockAce.sentCommMessages) do
+        local ok, data = GBL:Deserialize(msg.text)
+        if ok and type(data) == "table" and data.type == kind
+            and (target == nil or msg.target == target) then
+            out[#out + 1] = {
+                target = msg.target, prio = msg.prio,
+                distribution = msg.distribution, data = data,
+            }
+        end
+    end
+    return out
+end
+
 --- Fire the latest uncancelled receive timeout timer (any delay).
 -- With NACK backoff, delays change (20→30→45), so we can't match on exact delay.
 -- Finds the last (newest) uncancelled ticker and fires it.

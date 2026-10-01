@@ -673,16 +673,7 @@ describe("Sync receive and intake", function()
             }
         end
 
-        local function sentOfType(kind)
-            local out = {}
-            for _, msg in ipairs(MockAce.sentCommMessages) do
-                local ok, data = GBL:Deserialize(msg.text)
-                if ok and type(data) == "table" and data.type == kind then
-                    out[#out + 1] = msg
-                end
-            end
-            return out
-        end
+        local function sent(kind) return Sync.messagesOfType(GBL, kind) end
 
         local function logEntry(text)
             for _, entry in ipairs(GBL:GetAuditTrail()) do
@@ -693,11 +684,14 @@ describe("Sync receive and intake", function()
 
         local function state() return GBL:GetSyncStateForTests() end
 
-        -- The post-sync HELLO goes out on a 0.5 to 2s timer. Collected first,
-        -- because a callback can schedule more.
-        local function firePostSyncTimers()
+        -- The post-sync HELLO goes out on a 0.5 to 2s timer. Only timers
+        -- queued after `mark` count, so nothing the fixture scheduled in that
+        -- range fires with it. Collected first, because a callback can
+        -- schedule more.
+        local function firePostSyncTimers(mark)
             local due = {}
-            for _, t in ipairs(MockWoW.pendingTimers) do
+            for i = mark + 1, #MockWoW.pendingTimers do
+                local t = MockWoW.pendingTimers[i]
                 if not t.cancelled and not t.fired
                     and t.delay >= 0.5 and t.delay <= 2 then
                     due[#due + 1] = t
@@ -724,7 +718,7 @@ describe("Sync receive and intake", function()
 
             assert.is_false(GBL:GetSyncStatus().receiving,
                 "a quiet receive nobody asked for must close, not NACK")
-            assert.equals(0, #sentOfType("NACK"))
+            assert.equals(0, #sent("NACK"))
             local entry = logEntry(
                 "Unrequested receive from OfficerB went quiet after 1 chunk(s), closing")
             assert.is_truthy(entry, "the close must say why in the sync log")
@@ -754,29 +748,35 @@ describe("Sync receive and intake", function()
             assert.is_true(state().receiveRequested)
         end)
 
+        -- Read off the wire, not the log: the post-sync line is written even
+        -- when the forced-HELLO throttle drops the broadcast.
         it("advertises what the closed receive stored", function()
             GBL:HandleSyncData("OfficerB", payload(5, 100, 1))
             assert.equals(1, #guildData.transactions, "fixture must store the chunk")
+            local mark = #MockWoW.pendingTimers
             assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
             assert.is_false(GBL:GetSyncStatus().receiving)
-            GBL:ClearLog("sync")
+            MockAce.sentCommMessages = {}
 
-            firePostSyncTimers()
+            firePostSyncTimers(mark)
 
-            assert.is_truthy(logEntry("Post-sync HELLO broadcast"),
+            local hellos = sent("HELLO")
+            assert.equals(1, #hellos,
                 "the post-sync HELLO is what restarts the pull after the close")
+            assert.equals("GUILD", hellos[1].distribution)
         end)
 
         it("advertises nothing when the closed receive stored nothing", function()
             GBL:HandleSyncData("OfficerB", payload(5, 100))
             assert.equals(0, #guildData.transactions)
+            local mark = #MockWoW.pendingTimers
             assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
             assert.is_false(GBL:GetSyncStatus().receiving)
-            GBL:ClearLog("sync")
+            MockAce.sentCommMessages = {}
 
-            firePostSyncTimers()
+            firePostSyncTimers(mark)
 
-            assert.is_nil(logEntry("Post-sync HELLO broadcast"))
+            assert.equals(0, #sent("HELLO"))
         end)
 
         it("tells the sender nothing: no BUSY and no receipt", function()
@@ -788,7 +788,7 @@ describe("Sync receive and intake", function()
 
             assert.equals(0, #Sync.busySent(GBL),
                 "a sender still going must not be told to stop")
-            assert.equals(0, #sentOfType("SYNC_RECEIPT"))
+            assert.equals(0, #sent("SYNC_RECEIPT"))
         end)
 
         it("reopens on the same sender's next chunk", function()
@@ -803,7 +803,7 @@ describe("Sync receive and intake", function()
             assert.equals("OfficerB", state().receiveSource)
             assert.equals(1, state().receiveGot, "a fresh session, not the closed one")
             assert.equals(2, #guildData.transactions, "the chunk is stored")
-            assert.equals(1, #sentOfType("ACK"), "and acknowledged")
+            assert.equals(1, #sent("ACK"), "and acknowledged")
         end)
 
         it("leaves a requested receive on the NACK ladder", function()
@@ -816,7 +816,7 @@ describe("Sync receive and intake", function()
             assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
 
             assert.is_true(GBL:GetSyncStatus().receiving)
-            assert.equals(1, #sentOfType("NACK"))
+            assert.equals(1, #sent("NACK"))
             assert.is_nil(logEntry("went quiet"))
         end)
 
