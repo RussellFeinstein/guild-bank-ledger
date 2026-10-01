@@ -2967,6 +2967,139 @@ describe("Sync send path", function()
                 assert.is_nil(state().chunkOutcomes[2].wireToAck,
                     "a reading across the loading screen is not a wire-to-ACK time")
             end)
+
+            -- #284: a send-completion callback that lands while sync is
+            -- paused arms no ACK timer. The loading screen cancelled the
+            -- chunk's timer and the resume resends it (above), so a timer
+            -- armed in between could only book a retry for the loading
+            -- screen, or fire while the resume waits on ChatThrottleLib and
+            -- step the index below a chunk whose genuine ACK is then
+            -- discarded as stale. The wire anchor is timed from a completion
+            -- inside the pause and never from one before it.
+            describe("the ACK timer and wire anchor across a pause (#284)", function()
+                --- Chunk 1 acked, chunk 2 issued and held in the queue.
+                local function queueChunk2()
+                    local completeOldest = holdCallbacks()
+                    startSend(12)
+                    completeOldest()
+                    GBL:HandleAck("OfficerB", { chunk = 1 })
+                    MockWoW.serverTime = MockWoW.serverTime + 10
+                    fireNextChunkDelay()
+                    assert.equals(2, state().sendChunkIndex,
+                        "fixture: chunk 2 should be queued")
+                    return completeOldest
+                end
+
+                --- Let ACK_TIMEOUT of wall clock pass. A timer armed for it
+                --- fires; none armed is the behaviour under test, so this
+                --- does not insist on one the way fireAckTimeout does.
+                local function passAckTimeout()
+                    MockWoW.serverTime = MockWoW.serverTime + GBL.SYNC_ACK_TIMEOUT
+                    if Helpers.timersAt(GBL.SYNC_ACK_TIMEOUT) > 0 then
+                        Helpers.fireTimersAt(GBL.SYNC_ACK_TIMEOUT)
+                    end
+                end
+
+                local function transmittedLine(chunk)
+                    local found
+                    for _, entry in ipairs(GBL:GetAuditTrail()) do
+                        if entry.message:find("Chunk " .. chunk .. " transmitted (", 1, true) then
+                            found = entry.message
+                        end
+                    end
+                    return found
+                end
+
+                it("arms no ACK timer for a chunk that completes during the loading screen", function()
+                    local completeOldest = queueChunk2()
+                    GBL:OnLoadingScreenStart()
+                    completeOldest()
+
+                    assert.equals(0, Helpers.timersAt(GBL.SYNC_ACK_TIMEOUT),
+                        "no ACK timer while sync is paused")
+                    passAckTimeout()
+                    GBL:OnLoadingScreenEnd()
+                    local mark = #MockAce.sentCommMessages
+                    cooldown()
+
+                    assert.same({ 2 }, chunksSentSince(mark))
+                    assert.same({}, state().chunkOutcomes[2].retryReasons,
+                        "a loading screen is not wire loss")
+                    assert.equals(0, state().sendRetryCount)
+                end)
+
+                it("accepts the chunk's ACK while the resume waits on ChatThrottleLib", function()
+                    local completeOldest = queueChunk2()
+                    GBL:OnLoadingScreenStart()
+                    GBL:OnLoadingScreenEnd()
+                    completeOldest()
+                    _G.ChatThrottleLib = { avail = 100 }
+                    local mark = #MockAce.sentCommMessages
+                    cooldown()
+                    assert.same({}, chunksSentSince(mark), "fixture: the resume should defer")
+
+                    passAckTimeout()
+                    GBL:HandleAck("OfficerB", { chunk = 2 })
+
+                    assert.equals("ok", state().chunkOutcomes[2].outcome)
+                    assert.is_false(logged("Discarded stale ACK for chunk 2"))
+                    assert.same({}, state().chunkOutcomes[2].retryReasons)
+                    _G.ChatThrottleLib = nil
+                    Helpers.fireTimersAt(GBL.SYNC_CTL_BACKOFF_DELAY)
+                    assert.same({ 3 }, chunksSentSince(mark))
+                end)
+
+                it("times no ACK across the pause for a chunk sent before the loading screen", function()
+                    startSend(12)
+                    advanceTo(2)
+                    assert.is_true(state().sendChunkTransmittedAt > 0,
+                        "fixture: chunk 2 should be on the wire before the loading screen")
+                    GBL:OnLoadingScreenStart()
+                    MockWoW.serverTime = MockWoW.serverTime + 20
+
+                    GBL:HandleAck("OfficerB", { chunk = 2 })
+
+                    assert.equals("ok", state().chunkOutcomes[2].outcome)
+                    assert.is_nil(state().chunkOutcomes[2].wireToAck,
+                        "a reading across the loading screen is not a wire-to-ACK time")
+                    GBL:OnLoadingScreenEnd()
+                    local mark = #MockAce.sentCommMessages
+                    cooldown()
+                    assert.same({ 3 }, chunksSentSince(mark))
+                end)
+
+                it("names the pause on the line of a chunk that completes in it", function()
+                    local completeOldest = queueChunk2()
+                    GBL:OnLoadingScreenStart()
+                    GBL:OnLoadingScreenEnd()
+                    completeOldest()
+
+                    local line = transmittedLine(2)
+                    assert.is_not_nil(line, "no transmitted line for chunk 2")
+                    assert.truthy(line:find("paused: zone, no ACK timer", 1, true), line)
+                    local before = transmittedLine(1)
+                    assert.is_not_nil(before, "no transmitted line for chunk 1")
+                    assert.falsy(before:find("paused", 1, true), before)
+                end)
+
+                -- Pin: passes before the fix too, and holds the anchor stamp
+                -- for a completion inside the pause.
+                it("times an ACK in the pause from the chunk's completion in it", function()
+                    local completeOldest = queueChunk2()
+                    GBL:OnLoadingScreenStart()
+                    GBL:OnLoadingScreenEnd()
+                    completeOldest()
+                    MockWoW.serverTime = MockWoW.serverTime + 1
+
+                    GBL:HandleAck("OfficerB", { chunk = 2 })
+
+                    assert.equals("ok", state().chunkOutcomes[2].outcome)
+                    assert.equals(1, state().chunkOutcomes[2].wireToAck)
+                    local mark = #MockAce.sentCommMessages
+                    cooldown()
+                    assert.same({ 3 }, chunksSentSince(mark))
+                end)
+            end)
         end)
 
         -- Structural, on the shape of schema_version_spec's rung scan: it
