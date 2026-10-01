@@ -2364,6 +2364,29 @@ describe("Sync send path", function()
             return nil
         end
 
+        --- Hold every send-completion callback instead of firing it, the way
+        --- ChatThrottleLib holds a queued message. Returns a function that
+        --- completes the oldest held one (one queue drains oldest first), and
+        --- the held list itself.
+        local function holdCallbacks()
+            local held = {}
+            GBL.SendCommMessage = function(_self, prefix, text, dist, target,
+                    prio, cbFn, cbArg)
+                table.insert(MockAce.sentCommMessages, {
+                    prefix = prefix, text = text, distribution = dist,
+                    target = target, prio = prio,
+                })
+                if cbFn then
+                    table.insert(held, { fn = cbFn, arg = cbArg })
+                end
+            end
+            local function completeOldest()
+                local entry = table.remove(held, 1)
+                entry.fn(entry.arg, 100, 100)
+            end
+            return completeOldest, held
+        end
+
         --- Run the ACK ladder out: every retry, then the timeout that gives
         --- up. The clock moves each round so the gap floor lets a retry issue.
         local function exhaustLadder()
@@ -2489,22 +2512,7 @@ describe("Sync send path", function()
         -- acked long before. The first cut of #281 tagged the index here and
         -- so tagged nothing; its code review found this shape.
         it("gives up on the chunk its own timer was waiting on, not the send index", function()
-            local held = {}
-            GBL.SendCommMessage = function(_self, prefix, text, dist, target,
-                    prio, cbFn, cbArg)
-                table.insert(MockAce.sentCommMessages, {
-                    prefix = prefix, text = text, distribution = dist,
-                    target = target, prio = prio,
-                })
-                if cbFn then
-                    table.insert(held, { fn = cbFn, arg = cbArg })
-                end
-            end
-            -- Oldest first, the order ChatThrottleLib drains one queue in.
-            local function completeOldest()
-                local entry = table.remove(held, 1)
-                entry.fn(entry.arg, 100, 100)
-            end
+            local completeOldest, held = holdCallbacks()
 
             startSend(8)
             assert.is_true(#state().sendChunks >= 2, "fixture needs two chunks")
@@ -2779,21 +2787,7 @@ describe("Sync send path", function()
             -- still put the chunk out once, not twice. #284 stops that timer
             -- being armed, and this case changes with it.
             it("resends the paused chunk once after an ACK timer fired inside the pause", function()
-                local held = {}
-                GBL.SendCommMessage = function(_self, prefix, text, dist, target,
-                        prio, cbFn, cbArg)
-                    table.insert(MockAce.sentCommMessages, {
-                        prefix = prefix, text = text, distribution = dist,
-                        target = target, prio = prio,
-                    })
-                    if cbFn then
-                        table.insert(held, { fn = cbFn, arg = cbArg })
-                    end
-                end
-                local function completeOldest()
-                    local entry = table.remove(held, 1)
-                    entry.fn(entry.arg, 100, 100)
-                end
+                local completeOldest = holdCallbacks()
 
                 startSend(12)
                 completeOldest()
