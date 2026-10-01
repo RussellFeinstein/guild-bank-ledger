@@ -503,6 +503,24 @@ describe("Sync receive and intake", function()
                 "a refused chunk opens no session, so nothing bootstraps")
         end)
 
+        -- The sender can drop offline between its chunk and our answer. The
+        -- line reports a whisper that went out, not one that was meant (#279).
+        it("does not claim a BUSY the roster refused", function()
+            MockWoW.guildRoster = {
+                { name = "OfficerB-TestRealm", isOnline = false },
+            }
+            MockWoW.inCombat = true
+            GBL:HandleSyncData("OfficerB", payload(5, 10))
+
+            assert.equals(0, #sentOfType("OfficerB", "BUSY"))
+            assert.is_truthy(logLine("Blocked whisper to offline player: OfficerB"))
+            local line = logLine("Declined chunk 5 from OfficerB (in combat)")
+            assert.is_truthy(line, "the refusal is logged either way")
+            assert.is_nil(line:find("sent BUSY", 1, true),
+                "no BUSY went out, got: " .. line)
+            assert.is_false(GBL:GetSyncStatus().receiving)
+        end)
+
         -- InCombatLockdown reads false the moment the fight ends, and the
         -- sender's ACK ladder can still be retransmitting the chunk then.
         it("refuses in the combat cooldown, where the live API already reads false", function()

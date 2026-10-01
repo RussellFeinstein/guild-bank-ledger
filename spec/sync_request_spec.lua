@@ -218,6 +218,30 @@ describe("Sync request and serve", function()
                 "the decline names the tail it fell in, got: " .. line)
         end)
 
+        -- A fight inside a loading screen's cooldown leaves both tails
+        -- running at once. The decline has always named the zone one there,
+        -- and combatGateReason keeps that order for both doors.
+        it("names the zone cooldown when it overlaps the combat one", function()
+            GBL:RequestSync("OfficerC", 0)
+            GBL:OnLoadingScreenStart()
+            GBL:OnLoadingScreenEnd()
+            MockWoW.inCombat = true
+            GBL:OnCombatStart()
+            MockWoW.inCombat = false
+            GBL:OnCombatEnd()
+            local status = GBL:GetSyncStatus()
+            assert.is_true(status.zonePaused, "fixture: the zone tail is running")
+            assert.is_true(status.combatPaused, "fixture: the combat tail is running")
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+
+            assert.equals(1, sentTo("PeerA")["BUSY"] or 0)
+            local line = declineLine("PeerA")
+            assert.is_not_nil(line, "the decline has to name itself in the capture")
+            assert.is_not_nil(line:find("(zone cooldown)", 1, true), "got: " .. line)
+        end)
+
         -- The version gate stays ahead of this one. BUSY reads as "try again
         -- shortly", which would drive an incompatible peer's retry loop for as
         -- long as it stays on the old version, in combat or out of it.
