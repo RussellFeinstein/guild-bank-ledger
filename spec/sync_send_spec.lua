@@ -2546,10 +2546,12 @@ describe("Sync send path", function()
                 "got: " .. line)
         end)
 
-        -- A loading screen tags the chunk in flight zoneAbort, and the send
-        -- resumes past it. If the receiver then NACKs that chunk it goes back
-        -- on the wire, so when the peer goes quiet and its ladder runs out it
-        -- is counted as an ACK timeout, not as the loading screen it outlived.
+        -- A loading screen tags the chunk in flight zoneAbort, and the resume
+        -- puts that chunk back on the wire (#295). When the peer then goes
+        -- quiet and its ladder runs out, it is counted as an ACK timeout, not
+        -- as the loading screen it outlived. Until #295 this case had the
+        -- resume move on to chunk 3 and a NACK put chunk 2 back, which pinned
+        -- the skip as correct behaviour.
         it("counts a chunk resent after a loading screen by how it finally ended", function()
             startSend(12)
             assert.is_true(#state().sendChunks >= 3, "fixture needs three chunks")
@@ -2563,14 +2565,8 @@ describe("Sync send path", function()
             GBL:OnLoadingScreenEnd()
             MockWoW.serverTime = MockWoW.serverTime + 10
             Helpers.fireTimersAt(GBL.SYNC_ZONE_COOLDOWN)
-            assert.equals(3, state().sendChunkIndex,
-                "the resume should have moved on to chunk 3")
-
-            GBL:HandleNack("OfficerB", { chunk = 2 })
-            MockWoW.serverTime = MockWoW.serverTime + 10
-            fireNextChunkDelay()
             assert.equals(2, state().sendChunkIndex,
-                "the NACK's resend should have put chunk 2 back on the wire")
+                "the resume should have put chunk 2 back on the wire")
 
             exhaustLadder()
 
