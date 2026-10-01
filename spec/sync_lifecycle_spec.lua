@@ -1546,15 +1546,16 @@ describe("Sync session lifecycle", function()
                 isReply = true,
             })
 
-            local round
+            -- Exactly one, so no earlier round can stand in for this one.
+            local rounds = {}
             for _, entry in ipairs(GBL:GetAuditTrail()) do
                 if entry.message and entry.message:find("HELLO round PeerQ:", 1, true) then
-                    round = entry.message
+                    rounds[#rounds + 1] = entry.message
                 end
             end
-            assert.is_not_nil(round, "the reply must write its round line")
-            assert.is_truthy(round:find("verdict=requested", 1, true),
-                "the round after combat should pull, got: " .. round)
+            assert.equals(1, #rounds, "the reply writes one round line")
+            assert.is_truthy(rounds[1]:find("verdict=requested", 1, true),
+                "the round after combat should pull, got: " .. rounds[1])
 
             local requestSent = false
             for _, msg in ipairs(MockAce.sentCommMessages) do
