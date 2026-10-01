@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.41.23
+    {"0.41.23", "2026-10-01", {
+        Fixed = {
+            "A loading screen in the middle of a sync no longer makes your addon tell the guildmate it is sending to that it is busy. When that guildmate asked again during the loading screen, the busy reply made their addon stop its side of the sync with you, including anything it was sending you, and yours could then wait over two minutes for chunks that were never coming. Your addon now lets the repeated request go unanswered, notes it in the sync log, and picks the sync back up once the loading screen is over.",
+            "When your addon turns down a guildmate's sync request during a loading screen, a guildmate on version 0.37.16 or later now sees \"reason: loading\" in their sync log. It used to say \"reason: combat\", which read as if you were in a fight.",
+        },
+    }},
     -- v0.41.22
     {"0.41.22", "2026-10-01", {
         Fixed = {

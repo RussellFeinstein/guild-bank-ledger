@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.41.23] - 2026-10-01
 
 ### Fixed
 - A loading screen in the middle of a sync no longer makes your addon tell the guildmate it is sending to that it is busy. When that guildmate asked again during the loading screen, the busy reply made their addon stop its side of the sync with you, including anything it was sending you, and yours could then wait over two minutes for chunks that were never coming. Your addon now lets the repeated request go unanswered, notes it in the sync log, and picks the sync back up once the loading screen is over.
