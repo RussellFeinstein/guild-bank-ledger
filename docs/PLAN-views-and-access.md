@@ -259,6 +259,9 @@ that loads the addon can write itself into one table on this machine.
   this guild, and it produces no new rows. A renamed or transferred character keeps its old rows
   under the old name; that is documented behaviour, not repaired.
 
+The account view doc (`docs/PLAN-account-view.md`, 2026-09-30) extends this across guilds; nothing
+here changes.
+
 ## 8. My record: the member view
 
 One view, not two. Russell named two things (what the guild gave me, my record) and the honest
