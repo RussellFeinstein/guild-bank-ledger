@@ -3798,7 +3798,7 @@ function GBL:HandleSyncData(sender, data)
         if data.chunk and data.chunk > 1 then
             self:AddAuditEntry("Auto-bootstrap at chunk " .. data.chunk
                 .. " from " .. sender
-                .. " (prior abort signal likely missed)")
+                .. " (no receive open: a missed abort, or a quiet stream we closed)")
         end
     elseif self:CanonicalPeerKey(sender) ~= self:CanonicalPeerKey(syncState.receiveSource) then
         -- Reject data from a different sender during active receive
