@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.41.24] - 2026-10-01
 
 ### Fixed
 - A late piece of sync data from a guildmate who had already stopped sending could leave your addon waiting on a sync it never asked for, for over two minutes, and every chance to pull new data from the guild in that time was turned down. This was most likely right after a short fight. Your addon now closes a sync it did not ask for once 20 seconds pass with nothing arriving, notes it in the sync log, and goes back to pulling as usual. If that guildmate was in fact still sending and had only paused, their next piece starts the sync again, unless your addon has begun a sync with someone else by then. In that case their sync with you ends, and what it had left comes in a later sync.
