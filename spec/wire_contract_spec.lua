@@ -821,6 +821,37 @@ describe("Wire contract", function()
             assert.same(BUSY_KEYS, keySet(refused))
             assert.equals("combat", refused.reason)
         end)
+
+        -- The serve gate's zone term has a word of its own (#308): a peer
+        -- turned away during a loading screen reads that, not combat.
+        it("a request refused during a loading screen draws a BUSY with the same keys, naming loading",
+        function()
+            configureGuild()
+            GBL.db.profile.sync.enabled = true
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            -- A loading screen pauses only a live session, so open one, let
+            -- the screen end so its cooldown is running, and end it in there.
+            GBL:RequestSync("OfficerC", 0)
+            GBL:OnLoadingScreenStart()
+            GBL:OnLoadingScreenEnd()
+            GBL:FinishReceiving("OfficerC")
+            assert.is_true(GBL:GetSyncStatus().zonePaused,
+                "fixture: the zone cooldown has not run out")
+
+            local refused = firstOfType(capturePayloads(function()
+                GBL:HandleSyncRequest("PeerA", {
+                    sinceTimestamp = 0,
+                    version = GBL.version,
+                    protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                    guild = "Test Guild",
+                })
+            end), "BUSY")
+            assert.is_table(refused, "HandleSyncRequest built no BUSY")
+
+            assert.same(BUSY_KEYS, keySet(refused))
+            assert.equals("loading", refused.reason)
+        end)
     end)
 
     --------------------------------------------------------------------
