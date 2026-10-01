@@ -29,6 +29,13 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.41.20
+    {"0.41.20", "2026-09-30", {
+        Fixed = {
+            "A chunk that finishes going out during a loading screen no longer starts the three-second wait for your guildmate's reply while sync is paused. That wait could run out before sync resumed, so the sync log counted the loading screen as a lost message and the chunk went out an extra time. If it ran out while sync was waiting for bandwidth after the loading screen, your addon could also set aside your guildmate's reply to that chunk as out of date. Sync now resends the chunk when it resumes, unless the reply has already arrived.",
+            "The Wire-to-ACK figure in the sync log no longer counts time spent on a loading screen. A reply that arrives during the pause, for a chunk sent before it, is left out of the figure.",
+        },
+    }},
     -- v0.41.19
     {"0.41.19", "2026-09-30", {
         Fixed = {

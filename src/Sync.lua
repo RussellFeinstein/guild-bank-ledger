@@ -3165,12 +3165,12 @@ function GBL:SendNextChunk()
     end
 
     -- A loading screen tagged the chunk at the index zoneAbort and cancelled
-    -- its ACK timer, so unless a callback completing inside the pause armed a
-    -- new one (#284), the ladder will not resend it. It goes out again before
-    -- the send moves on, unless its ACK settled it during the pause or a NACK
-    -- has since asked past it (#295). Decided here rather than by stepping the
-    -- index back at the resume: this call can defer, and a stepped-back index
-    -- would read a genuine ACK for the chunk as stale.
+    -- its ACK timer, and nothing arms another while sync is paused (#284), so
+    -- the ladder will not resend it. It goes out again before the send moves
+    -- on, unless its ACK settled it during the pause or a NACK has since asked
+    -- past it (#295). Decided here rather than by stepping the index back at
+    -- the resume: this call can defer, and a stepped-back index would read a
+    -- genuine ACK for the chunk as stale.
     local paused = syncState.chunkOutcomes[syncState.sendChunkIndex]
     local resend = paused ~= nil and paused.outcome == "zoneAbort"
         and not paused.nackedPast
@@ -3188,10 +3188,9 @@ function GBL:SendNextChunk()
     if resend then
         self:SyncInfo("Resending chunk %d to %s after the loading screen",
             idx, tostring(syncState.sendTarget))
-        -- The anchor is the transmission from before the loading screen. An
-        -- ACK landing before this resend's own callback answers that one, and
-        -- timed from it the pause would read as wire-to-ACK time.
-        syncState.sendChunkTransmittedAt = 0
+        -- The anchor is left alone. The loading screen zeroed it, so a stamp
+        -- here is one a transmission completing inside the pause wrote, and
+        -- that is what an ACK landing before this resend's callback answers.
     end
 
     -- v0.28.4: record send attempt and inter-chunk gap for H2 diagnostics
@@ -3328,13 +3327,23 @@ function GBL:SendNextChunk()
             end
             -- v0.28.4: record wire-completion time — anchor for wire-to-ACK latency
             syncState.sendChunkTransmittedAt = GetTime()
+            -- No ACK timer while sync is paused (#284). The pause cancelled
+            -- this chunk's timer and the resume resends it unless its ACK
+            -- lands first (#295), so a timer armed now could only book a
+            -- retry for the pause, or fire while the resume waits on
+            -- ChatThrottleLib and step the index below this chunk. The anchor
+            -- above is still stamped: the ACK can arrive inside the pause.
+            local syncPaused = isSyncPaused()
             -- Diagnostic: log transmit completion timing. From this attempt's
             -- own issue: a resend queued behind it rewrites sendChunkSentAt.
             local queueDuration = string.format("%.2f", GetTime() - issuedAt)
             local postAvail = _G.ChatThrottleLib and _G.ChatThrottleLib.avail
                 and string.format("%.0f", _G.ChatThrottleLib.avail) or "?"
+            local pausedStr = syncPaused and ", paused, no ACK timer" or ""
             self:AddAuditEntry("Chunk " .. idx .. " transmitted ("
-                .. queueDuration .. "s queue-to-wire, CTL.avail=" .. postAvail .. ")")
+                .. queueDuration .. "s queue-to-wire, CTL.avail=" .. postAvail
+                .. pausedStr .. ")")
+            if syncPaused then return end
             -- Message fully transmitted — now start ACK timer
             if syncState.sendTimer then
                 syncState.sendTimer:Cancel()
@@ -4992,7 +5001,8 @@ function GBL:OnLoadingScreenStart()
         syncState.zoneCooldownTimer = nil
     end
 
-    -- Cancel active timers to prevent false timeouts during loading
+    -- Cancel active timers to prevent false timeouts during loading. A send
+    -- completing during the pause arms no new ACK timer either (#284).
     if syncState.sendTimer then
         syncState.sendTimer:Cancel()
         syncState.sendTimer = nil
@@ -5005,6 +5015,10 @@ function GBL:OnLoadingScreenStart()
         syncState.receiveTimer:Cancel()
         syncState.receiveTimer = nil
     end
+    -- An ACK landing in the pause for a chunk already on the wire would be
+    -- timed across the loading screen, which is not a wire-to-ACK time. A
+    -- completion inside the pause stamps the anchor again (#284).
+    syncState.sendChunkTransmittedAt = 0
 end
 
 --- Resume sync after loading screen ends, with a brief cooldown.
