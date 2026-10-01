@@ -820,6 +820,36 @@ describe("Sync receive and intake", function()
             assert.is_nil(logEntry("went quiet"))
         end)
 
+        -- #293's state: a chunk that lands before the guild name is read
+        -- opens a receive and returns before counting it or arming a timer.
+        -- A loading screen's resume arms one. That receive sent no request,
+        -- so it has none to repeat: the close comes before the zero-chunk
+        -- resend.
+        it("closes rather than resend a request it never sent", function()
+            MockWoW.guild.name = nil
+            GBL._cachedGuildName = nil
+            GBL:HandleSyncData("OfficerB", payload(5, 100, 1))
+            assert.is_true(GBL:GetSyncStatus().receiving,
+                "fixture must open a receive before the guild name is read")
+            assert.equals(0, state().receiveGot)
+            assert.is_nil(state().receiveTimer, "and arm no timer (#293)")
+
+            MockWoW.guild.name = "Test Guild"
+            GBL:OnLoadingScreenStart()
+            GBL:OnLoadingScreenEnd()
+            Helpers.fireTimersAt(GBL.SYNC_ZONE_COOLDOWN)
+            MockAce.sentCommMessages = {}
+
+            assert.is_true(Sync.fireReceiveTimeout(),
+                "the loading screen's resume must arm a receive timer")
+
+            assert.is_false(GBL:GetSyncStatus().receiving,
+                "a receive we never asked for must not resend a request")
+            assert.equals(0, #sent("SYNC_REQUEST"))
+            assert.is_truthy(logEntry(
+                "Unrequested receive from OfficerB went quiet after 0 chunk(s), closing"))
+        end)
+
         -- The offline arm comes first. Reading only "offline" from the trail
         -- would not show it: the bootstrap's ACK to an offline sender already
         -- logs "Blocked whisper to offline player" before the timer fires.
