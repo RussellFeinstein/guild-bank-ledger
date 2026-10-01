@@ -332,6 +332,26 @@ describe("Sync request and serve", function()
                     "the repeat should not restart or advance the send")
             end)
 
+            -- Before #308 the pause answered this with an INFO decline line.
+            -- A DEBUG line never reaches a capture, so silence here would
+            -- read the same as a request that was lost on the wire.
+            it("names the ignored repeat in the sync log", function()
+                startServing("PeerB")
+                GBL:OnLoadingScreenStart()
+                GBL:ClearLog("sync")
+
+                GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
+
+                local found = false
+                for _, entry in ipairs(GBL:GetAuditTrail()) do
+                    if entry.message and entry.message:find(
+                        "Ignoring repeat SYNC_REQUEST from PeerB", 1, true) then
+                        found = true
+                    end
+                end
+                assert.is_true(found, "a capture has to show the request arrived")
+            end)
+
             it("ignores it in the tail, and the send resumes to that peer",
             function()
                 startServing("PeerB")
