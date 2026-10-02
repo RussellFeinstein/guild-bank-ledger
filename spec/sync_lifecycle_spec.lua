@@ -1097,8 +1097,8 @@ describe("Sync session lifecycle", function()
             assert.equals(1, n.OfficerB, "one BUSY to the receive source")
         end)
 
-        -- HandleBusy tears down both directions on one message, so a second
-        -- one to the same peer is noise at best.
+        -- HandleBusy tears down both directions on one disable BUSY, so a
+        -- second one to the same peer is noise at best.
         it("tells a peer holding both directions once", function()
             startSend("PeerA")
             GBL:RequestSync("PeerA", 0)
@@ -1457,7 +1457,7 @@ describe("Sync session lifecycle", function()
                     "an ALERT BUSY can overtake a request still queued to this peer")
             end)
 
-            -- HandleBusy tears down both directions on one message.
+            -- HandleBusy tears down both directions on one combat BUSY.
             it("tells a peer holding both directions once", function()
                 enterSendingState()
                 GBL:RequestSync("PeerA", 0)

@@ -334,9 +334,9 @@ GBL._nackBackoff = nackBackoff
 -- length of a fight), and the receiver could not tell them apart. Three sends
 -- killed by BUSY in the 2026-08-12 capture are still unexplained for that
 -- reason. Shipped values are "combat", "loading" (#308), "sending:<peer>",
--- "preparing:<peer>" and "disabled"; the receiver treats the field as an
--- opaque string, so a later producer adds a value without touching the wire
--- contract. Issue #97.
+-- "preparing:<peer>" and "disabled". A later producer adds a value without
+-- touching the wire contract (#97); the receiver acts on one only if it is
+-- declared in BUSY_REFUSAL_WORDS below.
 -- @param reason string Why we are busy
 -- @return table BUSY message
 function GBL:BuildBusyMessage(reason)
@@ -346,6 +346,26 @@ function GBL:BuildBusyMessage(reason)
         guild = self:GetGuildName(),
         reason = reason,
     }
+end
+
+-- The BUSY words that only ever answer a SYNC_REQUEST: "loading" from the
+-- serve gate's zone term, "sending:<peer>" and "preparing:<peer>" from the
+-- already-sending decline. One of them from the peer we are sending to
+-- refuses a request of ours and says nothing about our send, which that peer
+-- may still be receiving, so HandleBusy ends only the receive the request
+-- opened (#323). Every other word, an absent one and any this build does not
+-- know end both sessions, so a new producer gets that unless it is declared
+-- here. Keyed on the part before the colon.
+local BUSY_REFUSAL_WORDS = { loading = true, sending = true, preparing = true }
+
+--- Whether a BUSY reason only refuses a request of ours.
+-- A peer can put anything in the field, and a number or a boolean has no
+-- string methods, so those read as a word nobody declared.
+-- @param reason any The BUSY's reason field
+-- @return boolean
+local function busyRefusesRequest(reason)
+    return type(reason) == "string"
+        and BUSY_REFUSAL_WORDS[reason:match("^([^:]*)")] == true
 end
 
 --- Whisper one BUSY to a peer. Every BUSY goes out through here (#317).
@@ -367,8 +387,8 @@ end
 -- Called by DisableSync (#279) and OnCombatStart (#291).
 --
 -- One message when the same peer held both directions, since HandleBusy
--- tears down both on it. The log line is written only for a whisper that
--- went out.
+-- tears down both on combat and disabled. The log line is written only for
+-- a whisper that went out.
 -- @param reason string Passed to BuildBusyMessage
 -- @param sendTarget string|nil The peer we were sending to
 -- @param receiveSource string|nil The peer we were receiving from
@@ -2569,9 +2589,9 @@ function GBL:HandleSyncRequest(sender, data)
     -- A peer whose request went missing resends it, and the resend can
     -- arrive while we are already answering the first one. Answering that
     -- with BUSY would make it abort the receive we are feeding right now
-    -- (HandleBusy tears down the receive it names, and its own send to us if
-    -- it holds one), so a duplicate from the peer we are already serving is
-    -- simply ignored. Above the serve gate, because a loading screen pauses
+    -- (HandleBusy tears down the receive it names, and a peer older than #323
+    -- its own send to us as well), so a duplicate from the peer we are already
+    -- serving is simply ignored. Above the serve gate, because a loading screen pauses
     -- our send rather than ending it, and the gate's zone term would answer
     -- this peer for the whole pause and its tail (#308). INFO, because a DEBUG
     -- line never reaches a capture, where a swallowed repeat would then read
@@ -2601,9 +2621,12 @@ function GBL:HandleSyncRequest(sender, data)
     if gateReason then
         -- The peer our paused receive is coming from can ask us too, most
         -- often as the resend of a request that crossed ours. A BUSY would
-        -- make it end its send to us as well as that request (#318), so it
-        -- gets nothing and its own resend asks again after our tail. The
-        -- loading screen only: no receive is open while a combat term holds.
+        -- make a peer older than #323 end its send to us as well as that
+        -- request (#318), and would put an updated one on the 30s cooldown,
+        -- after which it asks again at its next HELLO or when its send to us
+        -- ends. So it gets nothing, and its own resend asks again after our
+        -- tail, which is usually no later. The loading screen only: no
+        -- receive is open while a combat term holds.
         -- receiveSource is nil with no receive open, so the compare needs no
         -- receiving term; it is re-canonicalised because a stored bare name
         -- can gain its realm once the roster is warm, as in HandleBusy.
@@ -4869,9 +4892,12 @@ end
 -- BUSY response
 ------------------------------------------------------------------------
 
---- Handle an incoming BUSY response from a peer we requested sync from.
--- Clears receiving state immediately (instead of waiting 60s for NACKs to expire)
--- and queues the peer for retry after the current sync completes.
+--- Handle an incoming BUSY from a peer we are receiving from or sending to.
+-- Ends the receive from that peer at once rather than waiting out its timeout.
+-- Ends our send to it too, unless the reason is a refusal of a request of
+-- ours (BUSY_REFUSAL_WORDS, #323). Either way the peer is left alone for
+-- BUSY_COOLDOWN. No timer retries: once it has passed, the next HELLO or the
+-- end of a session with that peer asks again.
 -- @param sender string Peer who is busy
 -- @param data table Deserialized BUSY payload
 function GBL:HandleBusy(sender, data)
@@ -4883,9 +4909,11 @@ function GBL:HandleBusy(sender, data)
     local reason = (data and data.reason) or "unknown"
     self:AddAuditEntry("Received BUSY from " .. cleanSender
         .. " (reason: " .. tostring(reason) .. ")")
+    local refusal = busyRefusesRequest(reason)
 
     -- Clear receiving state if we're waiting for this peer (even with partial data).
     -- Already-stored records are safe; next sync uses bucket hashes to avoid re-sending.
+    -- A refusal ends this too: the receive is the request it refused.
     if syncState.receiving
         and cleanSender == self:CanonicalPeerKey(syncState.receiveSource) then
         self:_ClearReceiveSession()
@@ -4893,8 +4921,11 @@ function GBL:HandleBusy(sender, data)
         self:AddAuditEntry(cleanSender .. " busy - cleared receive state, will retry later")
     end
 
-    -- Also abort sending if BUSY came from our send target
-    -- (partner entered combat or became busy while we were sending to them)
+    -- Also end our send if the BUSY came from our send target: the partner
+    -- entered combat or turned sync off. A refusal is not that. It answers a
+    -- request we sent, and the peer may still be receiving our send, which is
+    -- the route #323 found: a peer serving us and served by us, whose request
+    -- crossed ours, refused at our decline and ended its send to us.
     -- sendTarget was canonicalised when the slot was claimed, so comparing the
     -- locals is the same test at a third of the work.
     if syncState.sending and cleanSender == syncState.sendTarget then
@@ -4902,8 +4933,13 @@ function GBL:HandleBusy(sender, data)
         -- reached mid-prep too, and there the send it would tear down does not
         -- exist yet. Abandoning the chain is the whole job: nothing is in
         -- flight to tag, no timers are armed, and saying "aborting send" would
-        -- put a send in the capture that never happened.
-        if syncState.prep then
+        -- put a send in the capture that never happened. The refusal line
+        -- names the preparation for the same reason.
+        if refusal then
+            self:AddAuditEntry(cleanSender .. " busy - refused our request, our "
+                .. (syncState.prep and "serve preparation continues"
+                    or "send to them continues"))
+        elseif syncState.prep then
             self:_AbortSyncPrep("BUSY from " .. cleanSender)
             self:AddAuditEntry(cleanSender .. " busy - abandoned serve preparation")
         else

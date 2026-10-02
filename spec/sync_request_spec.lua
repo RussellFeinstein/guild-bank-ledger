@@ -403,9 +403,10 @@ describe("Sync request and serve", function()
 
         -- The mirror of #308. A peer that is sending to us can ask us for
         -- records too, most often as the zero-chunk resend of a request that
-        -- crossed ours on the wire. A BUSY from the gate's zone term makes it
+        -- crossed ours on the wire. A BUSY from the gate's zone term made it
         -- end its send to us as well as the receive it opened, and our paused
-        -- receive is left with no sender (#318). The request is dropped
+        -- receive was left with no sender (#318); a peer older than #323
+        -- still does. The request is dropped
         -- instead, and that peer's own resend asks again after our tail.
         describe("the peer we are receiving from, through a loading screen (#318)",
         function()
@@ -460,7 +461,7 @@ describe("Sync request and serve", function()
                 GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
 
                 assert.equals(0, #Sync.busySent(GBL),
-                    "a BUSY would make that peer end its send to us")
+                    "a BUSY would make an older peer end its send to us")
                 assert.is_nil(declineLine("PeerB"),
                     "a request from our own receive source is not a decline")
                 assert.is_false(GBL:GetSyncStatus().sending,
@@ -479,7 +480,7 @@ describe("Sync request and serve", function()
                 GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
 
                 assert.equals(0, #Sync.busySent(GBL),
-                    "a BUSY would make that peer end its send to us")
+                    "a BUSY would make an older peer end its send to us")
                 assert.is_nil(declineLine("PeerB"))
                 assert.is_false(GBL:GetSyncStatus().sending)
                 assertReceiveIntact("PeerB")
@@ -532,7 +533,7 @@ describe("Sync request and serve", function()
                 GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
 
                 assert.equals(0, #Sync.busySent(GBL),
-                    "a BUSY would make that peer end its send to us")
+                    "a BUSY would make an older peer end its send to us")
                 assertReceiveIntact("PeerB")
             end)
 
@@ -578,7 +579,7 @@ describe("Sync request and serve", function()
                 GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
 
                 assert.equals(0, #Sync.busySent(GBL),
-                    "a BUSY would make that peer end its send to us")
+                    "a BUSY would make an older peer end its send to us")
                 assertReceiveIntact("PeerB")
             end)
 
