@@ -1026,7 +1026,10 @@ describe("Sync send path", function()
                 "NACK counter should have reset — still receiving")
         end)
 
-        it("NACK from wrong sender is ignored", function()
+        -- A NACK from someone we are not sending to does not move our send.
+        -- Since #320 it is answered with a BUSY rather than ignored, so the
+        -- peer stops NACKing a send we are not making.
+        it("NACK from wrong sender does not move our send, and draws a BUSY", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
             -- Set up sender
@@ -1035,8 +1038,8 @@ describe("Sync send path", function()
                 scanTime = 1000, id = "nkign:0",
             })
             GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
-
-            local sentBefore = #MockAce.sentCommMessages
+            local progress = GBL:GetSyncStatus().sendProgress
+            MockAce.sentCommMessages = {}
 
             -- NACK from wrong sender
             GBL:HandleNack("OfficerC", { chunk = 1 })
@@ -1049,8 +1052,12 @@ describe("Sync send path", function()
                 end
             end
 
-            -- No new messages should have been sent (NACK was ignored)
-            assert.equals(sentBefore, #MockAce.sentCommMessages)
+            assert.equals(0, #Sync.messagesOfType(GBL, "SYNC_DATA"),
+                "the NACK must not resend OfficerB's chunk")
+            assert.equals(progress, GBL:GetSyncStatus().sendProgress)
+            local busy = Sync.busySent(GBL)
+            assert.equals(1, #busy)
+            assert.equals("OfficerC", busy[1].target)
         end)
 
         it("NACK for out-of-range chunk is ignored", function()
