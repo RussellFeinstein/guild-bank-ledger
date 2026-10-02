@@ -383,8 +383,8 @@ describe("SavedVariables", function()
             -- playerStats is empty here and the suite's held one phantom
             -- player. Seven production sites walk this table with pairs, four
             -- of them inside migrations, and two resolve every name they find
-            -- and write it back (src/Core.lua:761 in MigrateSchemaV2ToV3, and
-            -- :1704 in RepairPlayerNames, which is not a migration). So one
+            -- and write it back (the merges in MigrateSchemaV2ToV3 and
+            -- RepairPlayerNames, which is not a migration). So one
             -- migration was storing a resolved player no client can have.
             local stats = db.global.guilds["TestGuild"].playerStats
             assert.same({}, sortedKeys(stats))

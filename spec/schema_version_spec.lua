@@ -1,7 +1,7 @@
 ------------------------------------------------------------------------
 -- schema_version_spec.lua - the schemaVersion ladder (#76)
 --
--- schemaVersion defaults to 8 (src/Core.lua:124) while migrations run to 11,
+-- schemaVersion defaults to 8 (the defaults block in src/Core.lua) while migrations run to 11,
 -- and that is correct rather than stale. AceDB strips a value equal to its
 -- default before the SavedVariables file is written, so the default IS the
 -- stored version of every guild sitting at it: raise it and every one of
@@ -209,7 +209,7 @@ describe("schemaVersion", function()
 
         it("moves no version for a guild already at 11", function()
             -- "No version", not "no work": MigrateSortAccessShape has no
-            -- schemaVersion gate at all (src/Core.lua:2203) and rebuilds
+            -- schemaVersion gate at all (src/Core.lua) and rebuilds
             -- guildData.sortAccess on every run at any version. This case is
             -- about the version field only.
             guildData.schemaVersion = 11
@@ -224,7 +224,7 @@ describe("schemaVersion", function()
         end)
 
         it("calls RepairCorruptedPlayerRealms once per guild, ahead of rung 1", function()
-            -- The twelfth call in the per-guild loop (src/Core.lua:1615-1617).
+            -- The twelfth call in the per-guild loop (MigrateGuild, src/Core.lua).
             -- It writes no version, so the LADDER table cannot see it, and the
             -- comment on that call says it has to run before any migration that
             -- consults the roster cache. Nothing else in the suite pins either.
@@ -324,7 +324,7 @@ describe("schemaVersion", function()
 
     describe("MigrateCrossSlotDedup", function()
         it("drops the version to 4 so its pass 1 re-runs the same-slot dedup", function()
-            -- src/Core.lua:1081 sets the version to 4 before calling
+            -- MigrateCrossSlotDedup (src/Core.lua) sets the version to 4 before calling
             -- MigrateDeduplicateRecords, whose gate is `>= 5`. Without that
             -- write the nested call is entered at 5, returns 0 and pass 1
             -- silently does nothing, which is the whole reason this migration

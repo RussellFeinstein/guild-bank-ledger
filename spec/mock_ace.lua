@@ -54,8 +54,8 @@ end
 -- holding a phantom entry. guilds["*"].playerStats is the one that matters:
 -- seven production sites walk it with pairs, four of them inside migrations,
 -- and two of the seven resolve every name they find and write it back
--- (src/Core.lua:761 in MigrateSchemaV2ToV3, and :1704 in RepairPlayerNames,
--- which runs from OnEnable rather than the migration chain). The other five
+-- (the merges in MigrateSchemaV2ToV3 and RepairPlayerNames, src/Core.lua; the
+-- second runs from the first GUILD_ROSTER_UPDATE, not the migration chain). The other five
 -- are clear-and-repopulate loops. So one migration was resolving the phantom
 -- and storing the result, which is enough.
 --

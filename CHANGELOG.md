@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Removed
-- Two empty per-player slots in the addon's saved data that nothing ever wrote to.
+- Internal cleanup: two per-player tallies the addon declared and never filled are gone. Nothing changes on screen or in your saved data.
 
 ## [0.41.29] - 2026-10-02
 

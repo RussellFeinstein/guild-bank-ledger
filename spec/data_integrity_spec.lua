@@ -5,6 +5,20 @@
 local Helpers = require("spec.helpers")
 local MockWoW = Helpers.MockWoW
 
+-- What one playerStats entry holds since #64: the six totals UpdatePlayerStats
+-- writes. spec/savedvariables_spec.lua pins the template to the same list.
+local PLAYER_STATS_FIELDS = {
+    "firstSeen", "lastSeen", "moneyDeposited", "moneyWithdrawn",
+    "totalDepositCount", "totalWithdrawCount",
+}
+
+local function sortedKeys(t)
+    local keys = {}
+    for k in pairs(t) do keys[#keys + 1] = k end
+    table.sort(keys)
+    return keys
+end
+
 describe("Data integrity", function()
     local GBL, guildData
 
@@ -224,20 +238,12 @@ describe("Data integrity", function()
 
             assert.is_nil(rawget(guildData.playerStats, "Alice"))
             assert.equals(5, guildData.playerStats["Alice-TestRealm"].totalWithdrawCount)
-            local six = {
-                "firstSeen", "lastSeen", "moneyDeposited", "moneyWithdrawn",
-                "totalDepositCount", "totalWithdrawCount",
-            }
-            local function keysOf(t)
-                local keys = {}
-                for k in pairs(t) do keys[#keys + 1] = k end
-                table.sort(keys)
-                return keys
-            end
             -- Both entries come out of the new-entry constructor; the
             -- collision branch only adds into the one Alice's two forms share.
-            assert.same(six, keysOf(rawget(guildData.playerStats, "Alice-TestRealm")))
-            assert.same(six, keysOf(rawget(guildData.playerStats, "Bob-TestRealm")))
+            assert.same(PLAYER_STATS_FIELDS,
+                sortedKeys(rawget(guildData.playerStats, "Alice-TestRealm")))
+            assert.same(PLAYER_STATS_FIELDS,
+                sortedKeys(rawget(guildData.playerStats, "Bob-TestRealm")))
         end)
 
         it("sets schemaVersion to 3", function()
@@ -279,18 +285,6 @@ describe("Data integrity", function()
     ---------------------------------------------------------------------------
 
     describe("RepairPlayerNames", function()
-        local SIX = {
-            "firstSeen", "lastSeen", "moneyDeposited", "moneyWithdrawn",
-            "totalDepositCount", "totalWithdrawCount",
-        }
-
-        local function keysOf(t)
-            local keys = {}
-            for k in pairs(t) do keys[#keys + 1] = k end
-            table.sort(keys)
-            return keys
-        end
-
         local function stats(withdrawn, firstSeen, lastSeen)
             return {
                 totalWithdrawCount = withdrawn, totalDepositCount = 0,
@@ -322,22 +316,25 @@ describe("Data integrity", function()
             assert.equals(5, merged.totalWithdrawCount)
             assert.equals(500, merged.firstSeen)
             assert.equals(3000, merged.lastSeen)
-            assert.same(SIX, keysOf(merged))
+            assert.same(PLAYER_STATS_FIELDS, sortedKeys(merged))
         end)
 
-        it("leaves playerStats alone when no record needed a repair", function()
+        it("rewrites no id when no record needed a repair", function()
+            -- The early return guards the id and dedup-index rebuild. What it
+            -- leaves in playerStats is deliberately not pinned: a bare key
+            -- beside its qualified one is never folded on this path, and that
+            -- may be a defect rather than a contract.
+            local ts = 3600 * 475100 + 100
             table.insert(guildData.transactions, {
                 type = "deposit", player = "Alice-Wyrmrest", itemID = 12345,
-                count = 5, tab = 1, timestamp = 3600 * 475100 + 100, id = "fine:0",
+                count = 5, tab = 1, timestamp = ts, id = "fine:0",
             })
-            local bare = rawget(guildData.playerStats, "Alice")
-            local qualified = rawget(guildData.playerStats, "Alice-Wyrmrest")
+            guildData.seenTxHashes["fine:0"] = ts
 
             GBL:RepairPlayerNames()
 
-            assert.equals(bare, rawget(guildData.playerStats, "Alice"))
-            assert.equals(qualified, rawget(guildData.playerStats, "Alice-Wyrmrest"))
-            assert.equals(3, bare.totalWithdrawCount)
+            assert.equals("fine:0", guildData.transactions[1].id)
+            assert.same({ "fine:0" }, sortedKeys(guildData.seenTxHashes))
         end)
     end)
 

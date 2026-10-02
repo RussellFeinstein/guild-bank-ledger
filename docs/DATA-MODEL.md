@@ -776,6 +776,7 @@ All under the **Data model integrity** milestone.
 | 2 | `snapshots`, `teams` declared, never written | closed (#71): `snapshots` removed, `teams` reserved for the Teams feature |
 | 2 | `altLinks` declared, never written | #52 |
 | 2 | `eventCounts` written, never declared | closed (#71): declared |
+| 2 | Per-player category totals declared, never accumulated | closed (#64): both maps removed |
 | 3 | Two structures named `peers`, the persisted one write-only | #72 |
 | 4 | No deposit or withdraw record knows its tab | closed in v0.37.0 (#67) |
 | 5 | Item records with no `itemID` collide in the money branch | #69 (locally scanned, unscheduled); sync-received closed in v0.37.0 (#68) |
@@ -791,7 +792,6 @@ All under the **Data model integrity** milestone.
 | 9 | AceDB's write path unmodelled in the suite | closed in #77 |
 | 9 | `eventCounts` is unreachable where the empty-chunk SYNC_DATA builder writes it | dead write closed in v0.37.3 |
 | 9 | SYNC_DATA and BUSY each built in two places | closed in v0.37.13 (#70); HELLO still a pair |
-| 2 | Per-player category totals declared, never accumulated | closed (#64): both maps removed |
 
 The compatibility break several of these rode was #74, **and it has now been spent.** v0.37.0 shipped
 the version floor along with #67 and #68. Two peers on different releases now sync, so any later
