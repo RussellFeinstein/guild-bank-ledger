@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.41.28] - 2026-10-02
 
 ### Fixed
 - When your addon was sending data to a guildmate and had also asked that guildmate for data, a reply saying they were busy (sending to someone else, getting ready to, or in a loading screen) made your addon stop sending to them as well as dropping its request. It now keeps sending, drops only the request, and waits at least 30 seconds before asking them again. Their reply has not changed, so this works as soon as you update, whatever version they run. A guildmate on an older version still stops sending to you when your addon tells them it is busy, until they update. A reply saying they are in combat or have turned sync off still ends the sync both ways.
