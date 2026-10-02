@@ -92,6 +92,7 @@
           - 'src/Scanner.lua'
           - 'src/Categories.lua'
           - 'spec/ledger_spec.lua'
+          - 'spec/ledger_log_spec.lua'
           - 'spec/dedup_spec.lua'
           - 'spec/scanner_spec.lua'
           - 'spec/categories_spec.lua'
