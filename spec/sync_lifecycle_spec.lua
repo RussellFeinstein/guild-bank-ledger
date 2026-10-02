@@ -1982,6 +1982,27 @@ describe("Sync session lifecycle", function()
                 assert.equals(0, postSyncHelloTimers())
             end)
 
+            -- FinishReceiving walks the history and can raise on a record the
+            -- corruption class reaches (CLAUDE.md, #263); the quiet clear it
+            -- replaced could not. Ending the send and starting the cooldown
+            -- come first, so a raise there cannot leave our send to the peer
+            -- running or the peer free to be asked again at once.
+            it("ends the send and sets the cooldown before the report can raise", function()
+                enterSendingState()
+                receiveOneChunk(true)
+                GBL.CleanupWithEventCounts = function()
+                    error("corrupt record")
+                end
+
+                assert.has_error(function()
+                    GBL:HandleBusy("PeerA", { reason = "combat" })
+                end)
+
+                assert.is_false(GBL:GetSyncStatus().sending,
+                    "combat ends our send to PeerA before the report runs")
+                assert.is_true(GBL:IsPeerBusy("PeerA"))
+            end)
+
             -- Nothing arrived, so there is no session to report: the BUSY
             -- refused the request itself.
             it("keeps the quiet clear when no chunk has arrived", function()
