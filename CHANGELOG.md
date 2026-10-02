@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.41.27] - 2026-10-01
 
 ### Fixed
 - After leaving one guild and joining another without logging out, the addon could show the old guild's tab names for the new guild's bank tabs. The Restock and Layout headings showed them until the new guild's bank named those tabs, and transactions received from guildmates could keep the old name for good. Tab names are now remembered separately for each guild.
