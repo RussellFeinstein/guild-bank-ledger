@@ -169,10 +169,10 @@ describe("Data integrity", function()
         end)
 
         it("merges playerStats on collision", function()
-            -- Simulate bare + realm-qualified entries for same player
+            -- Simulate bare + realm-qualified entries for same player. The
+            -- per-category maps this fixture used to carry were never written
+            -- by any version, and #64 removed the merge that summed them.
             guildData.playerStats["Alice"] = {
-                withdrawals = { flask = 3 },
-                deposits = {},
                 totalWithdrawCount = 3,
                 totalDepositCount = 0,
                 moneyWithdrawn = 0,
@@ -181,8 +181,6 @@ describe("Data integrity", function()
                 lastSeen = 2000,
             }
             guildData.playerStats["Alice-TestRealm"] = {
-                withdrawals = { flask = 2, gem = 1 },
-                deposits = { ore = 5 },
                 totalWithdrawCount = 3,
                 totalDepositCount = 5,
                 moneyWithdrawn = 100,
@@ -200,13 +198,46 @@ describe("Data integrity", function()
             assert.equals(100, merged.moneyWithdrawn)
             assert.equals(500, merged.firstSeen)
             assert.equals(3000, merged.lastSeen)
-            assert.equals(5, merged.withdrawals.flask)
-            assert.equals(1, merged.withdrawals.gem)
-            assert.equals(5, merged.deposits.ore)
             -- Bare key should be cleared (AceDB wildcard returns default with all zeros)
             local bare = guildData.playerStats["Alice"]
             assert.equals(0, bare.totalWithdrawCount)
             assert.equals(0, bare.totalDepositCount)
+        end)
+
+        it("leaves merged and copied playerStats entries holding only the six totals", function()
+            -- Sits under this describe's schemaVersion = 2: the rung returns
+            -- at 3 and the default is 8, so outside it nothing runs and the
+            -- fixture's own keys would pass. The bare key going and the sum
+            -- below can only come from the merge having run.
+            local function entry(withdrawn)
+                return {
+                    totalWithdrawCount = withdrawn, totalDepositCount = 0,
+                    moneyWithdrawn = 0, moneyDeposited = 0,
+                    firstSeen = 1000, lastSeen = 2000,
+                }
+            end
+            guildData.playerStats["Alice"] = entry(3)
+            guildData.playerStats["Alice-TestRealm"] = entry(2)
+            guildData.playerStats["Bob"] = entry(1)
+
+            GBL:MigrateSchemaV2ToV3(guildData)
+
+            assert.is_nil(rawget(guildData.playerStats, "Alice"))
+            assert.equals(5, guildData.playerStats["Alice-TestRealm"].totalWithdrawCount)
+            local six = {
+                "firstSeen", "lastSeen", "moneyDeposited", "moneyWithdrawn",
+                "totalDepositCount", "totalWithdrawCount",
+            }
+            local function keysOf(t)
+                local keys = {}
+                for k in pairs(t) do keys[#keys + 1] = k end
+                table.sort(keys)
+                return keys
+            end
+            -- Both entries come out of the new-entry constructor; the
+            -- collision branch only adds into the one Alice's two forms share.
+            assert.same(six, keysOf(rawget(guildData.playerStats, "Alice-TestRealm")))
+            assert.same(six, keysOf(rawget(guildData.playerStats, "Bob-TestRealm")))
         end)
 
         it("sets schemaVersion to 3", function()
@@ -239,6 +270,74 @@ describe("Data integrity", function()
 
             -- sync: prefix preserved, realm kept
             assert.equals("sync:Bob-Wyrmrest", guildData.transactions[1].scannedBy)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- RepairPlayerNames (not a migration: once per session, from the first
+    -- GUILD_ROSTER_UPDATE). Its playerStats merge mirrors MigrateSchemaV2ToV3's.
+    ---------------------------------------------------------------------------
+
+    describe("RepairPlayerNames", function()
+        local SIX = {
+            "firstSeen", "lastSeen", "moneyDeposited", "moneyWithdrawn",
+            "totalDepositCount", "totalWithdrawCount",
+        }
+
+        local function keysOf(t)
+            local keys = {}
+            for k in pairs(t) do keys[#keys + 1] = k end
+            table.sort(keys)
+            return keys
+        end
+
+        local function stats(withdrawn, firstSeen, lastSeen)
+            return {
+                totalWithdrawCount = withdrawn, totalDepositCount = 0,
+                moneyWithdrawn = 0, moneyDeposited = 0,
+                firstSeen = firstSeen, lastSeen = lastSeen,
+            }
+        end
+
+        before_each(function()
+            guildData.playerRealms = { Alice = "Wyrmrest" }
+            guildData.playerStats["Alice"] = stats(3, 1000, 2000)
+            guildData.playerStats["Alice-Wyrmrest"] = stats(2, 500, 3000)
+        end)
+
+        it("merges a bare name's playerStats into its resolved entry", function()
+            -- A record still carrying the bare name is what makes the function
+            -- do anything: it returns before the merge when no record needed a
+            -- repair, so the bare key going is the proof the merge ran.
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "Alice", itemID = 12345, count = 5,
+                tab = 1, timestamp = 3600 * 475100 + 100, id = "stale:0",
+            })
+
+            GBL:RepairPlayerNames()
+
+            assert.equals("Alice-Wyrmrest", guildData.transactions[1].player)
+            assert.is_nil(rawget(guildData.playerStats, "Alice"))
+            local merged = rawget(guildData.playerStats, "Alice-Wyrmrest")
+            assert.equals(5, merged.totalWithdrawCount)
+            assert.equals(500, merged.firstSeen)
+            assert.equals(3000, merged.lastSeen)
+            assert.same(SIX, keysOf(merged))
+        end)
+
+        it("leaves playerStats alone when no record needed a repair", function()
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "Alice-Wyrmrest", itemID = 12345,
+                count = 5, tab = 1, timestamp = 3600 * 475100 + 100, id = "fine:0",
+            })
+            local bare = rawget(guildData.playerStats, "Alice")
+            local qualified = rawget(guildData.playerStats, "Alice-Wyrmrest")
+
+            GBL:RepairPlayerNames()
+
+            assert.equals(bare, rawget(guildData.playerStats, "Alice"))
+            assert.equals(qualified, rawget(guildData.playerStats, "Alice-Wyrmrest"))
+            assert.equals(3, bare.totalWithdrawCount)
         end)
     end)
 

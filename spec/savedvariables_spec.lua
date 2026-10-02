@@ -106,6 +106,15 @@ local SURVIVES_WHEN_DIVERGED = {
     { key = "transactions", diverge = function(g) g.transactions[1] = { id = "t:0" } end },
 }
 
+-- What one player's playerStats entry holds: the six totals UpdatePlayerStats
+-- writes. The per-category withdrawals and deposits maps left the template in
+-- #64, because nothing had ever written or read them.
+local PLAYER_STATS_FIELDS = {
+    "firstSeen", "lastSeen", "moneyDeposited", "moneyWithdrawn",
+    "totalDepositCount", "totalWithdrawCount",
+}
+table.sort(PLAYER_STATS_FIELDS)
+
 describe("SavedVariables", function()
     local GBL, db
 
@@ -144,6 +153,14 @@ describe("SavedVariables", function()
             for _, entry in ipairs(SURVIVES_WHEN_DIVERGED) do accounted[#accounted + 1] = entry.key end
             table.sort(accounted)
             assert.same(DECLARED, accounted)
+        end)
+
+        it("declares a player entry as exactly the six totals", function()
+            -- The whole key set, not the fields a fixture put in: an extra
+            -- template key is invisible to every assertion that reads named
+            -- fields (#64).
+            local entry = db.global.guilds["TestGuild"].playerStats["Alice-Realm"]
+            assert.same(PLAYER_STATS_FIELDS, sortedKeys(entry))
         end)
     end)
 
@@ -772,6 +789,16 @@ describe("SavedVariables", function()
                 sortedKeys(theirs.global.guilds["TestGuild"].playerStats),
                 sortedKeys(mine.global.guilds["TestGuild"].playerStats)
             )
+        end)
+
+        it("vivifies a player entry as exactly the six totals", function()
+            -- Absolute rather than port-against-library: the agreement case
+            -- above holds whatever the template says, because both sides read
+            -- the same defaults table.
+            local sv = {}
+            local theirs = RealAceDB:New(sv, db._defaults)
+            local entry = theirs.global.guilds["TestGuild"].playerStats["Alice-Realm"]
+            assert.same(PLAYER_STATS_FIELDS, sortedKeys(entry))
         end)
     end)
 end)
