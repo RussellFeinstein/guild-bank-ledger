@@ -148,6 +148,18 @@ describe("Ledger", function()
             assert.equals("Potions", GBL:GetTabName(1, "Potions"))
         end)
 
+        it("still answers while GetGuildInfo briefly answers nothing", function()
+            -- GetGuildInfo answers nothing for a few frames after a loading
+            -- screen (#222). GetGuildName answers the last name it read, and
+            -- the cache is filed under it, so a redraw in that window still
+            -- finds the name.
+            MockWoW.addTab("Raid Use 1")
+            assert.equals("Raid Use 1", GBL:GetTabName(1))
+            MockWoW.guild.name = nil
+            MockWoW.guildBank.tabs = {}
+            assert.equals("Raid Use 1", GBL:GetTabName(1, "Potions"))
+        end)
+
         it("escapes the escape introducer in a stored name", function()
             -- tabs[].name reaches storage from a peer through copyTab, which
             -- validates nothing, and from here it reaches heading:SetText on

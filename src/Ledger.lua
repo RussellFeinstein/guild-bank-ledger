@@ -63,9 +63,9 @@ end
 -- another without logging out, and BackfillTabNames stores what this
 -- answers on records for good, so a name the first guild's bank gave must
 -- never answer for the second. It is keyed by GetGuildName, the key
--- GetGuildData uses, so a backfill reads and writes one guild even in a
--- frame where GetGuildInfo answers nothing. With no guild name known
--- nothing is filed.
+-- GetGuildData uses, which answers the last name it read, so a remembered
+-- name still answers in the frames after a loading screen where
+-- GetGuildInfo answers nothing. With no guild name known nothing is filed.
 --
 -- `fallback` is for the window before the bank has been opened at all,
 -- where a capture-time name still beats "Tab 3". It is type-tested and its
