@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.41.25] - 2026-10-01
 
 ### Changed
 - The addon's saved data now declares the counts it keeps of how often each guild bank event appeared, which it uses to tell a real repeat from a duplicate copy. They used to be created on first use. Nothing changes on screen, and a guild with no counts no longer writes an empty table to its saved data.
