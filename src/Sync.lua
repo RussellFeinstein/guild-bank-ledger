@@ -4844,7 +4844,8 @@ end
 -- @param sender string Sender name
 -- @param data table Deserialized NACK payload
 function GBL:HandleNack(sender, data)
-    if not syncState.sending or self:CanonicalPeerKey(sender) ~= self:CanonicalPeerKey(syncState.sendTarget) then
+    local key = self:CanonicalPeerKey(sender)
+    if not syncState.sending or key ~= self:CanonicalPeerKey(syncState.sendTarget) then
         -- We are idle, or serving or preparing for someone else, so this peer
         -- is NACKing a send of ours that has stopped. Silence left it on its
         -- whole NACK ladder, 140s; a BUSY ends its receive at the first NACK
@@ -4854,7 +4855,7 @@ function GBL:HandleNack(sender, data)
         -- Not to our live receive source: a build without the word reads it
         -- as ending both sessions, and its send to us is still running. The
         -- source is nil with no receive open, so no receiving term is needed.
-        if self:CanonicalPeerKey(sender) == self:CanonicalPeerKey(syncState.receiveSource) then
+        if key == self:CanonicalPeerKey(syncState.receiveSource) then
             self:SyncInfo("%s - no BUSY: receiving from them, and a BUSY would end their send",
                 what)
             return
@@ -4936,29 +4937,7 @@ function GBL:HandleBusy(sender, data)
         .. " (reason: " .. tostring(reason) .. ")")
     local refusal = busyRefusesRequest(reason)
 
-    -- End the receive if we're waiting for this peer (even with partial data).
-    -- Already-stored records are safe; next sync uses bucket hashes to avoid re-sending.
-    -- A refusal ends this too: the receive is the request it refused.
-    if syncState.receiving
-        and cleanSender == self:CanonicalPeerKey(syncState.receiveSource) then
-        if syncState.receiveGot > 0 then
-            -- A session that took chunks ends the way the NACK ladder's abort
-            -- ends it, which a not-sending BUSY now replaces at the first
-            -- NACK (#320): the checkpoint, the event-count trim, the hash
-            -- cache reset after an in-place id rewrite, the report and the
-            -- post-sync HELLO. Named first, as OnCombatStart names its abort.
-            self:AddAuditEntry(cleanSender .. " busy - ending receive after "
-                .. syncState.receiveGot .. " chunk(s)")
-            self:FinishReceiving(syncState.receiveSource)
-        else
-            -- Nothing arrived, so the BUSY refused the request itself and
-            -- there is no session to report.
-            self:_ClearReceiveSession()
-            self:AddAuditEntry(cleanSender .. " busy - cleared receive state, will retry later")
-        end
-    end
-
-    -- Also end our send if the BUSY came from our send target: the partner
+    -- End our send if the BUSY came from our send target: the partner
     -- entered combat or turned sync off. A refusal is not that. It answers a
     -- request we sent, and the peer may still be receiving our send, which is
     -- the route #323 found: a peer serving us and served by us, whose request
@@ -5006,6 +4985,30 @@ function GBL:HandleBusy(sender, data)
     -- Nothing schedules a retry: they will advertise again, and we answer
     -- once the cooldown has passed.
     syncState.peerBusyUntil[cleanSender] = GetServerTime() + BUSY_COOLDOWN
+
+    -- End the receive if we're waiting for this peer (even with partial data).
+    -- Already-stored records are safe; next sync uses bucket hashes to avoid re-sending.
+    -- A refusal ends this too: the receive is the request it refused. Last,
+    -- because FinishReceiving walks the history and can raise on a corrupt
+    -- record, and the send teardown and the cooldown above must not wait on it.
+    if syncState.receiving
+        and cleanSender == self:CanonicalPeerKey(syncState.receiveSource) then
+        if syncState.receiveGot > 0 then
+            -- A session that took chunks ends the way the NACK ladder's abort
+            -- ends it, which a not-sending BUSY now replaces at the first
+            -- NACK (#320): the checkpoint, the event-count trim, the hash
+            -- cache reset after an in-place id rewrite, the report and the
+            -- post-sync HELLO. Named first, as OnCombatStart names its abort.
+            self:AddAuditEntry(cleanSender .. " busy - ending receive after "
+                .. syncState.receiveGot .. " chunk(s)")
+            self:FinishReceiving(syncState.receiveSource)
+        else
+            -- Nothing arrived, so the BUSY refused the request itself and
+            -- there is no session to report.
+            self:_ClearReceiveSession()
+            self:AddAuditEntry(cleanSender .. " busy - cleared receive state, will retry later")
+        end
+    end
 end
 
 ------------------------------------------------------------------------
