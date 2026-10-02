@@ -250,6 +250,19 @@ describe("SavedVariables", function()
             assert.same({}, sortedKeys(guild.eventCounts))
         end)
 
+        it("answers a key it does not hold with nil, and stores nothing", function()
+            -- The template is an empty table with no wildcard. An entry shape
+            -- declared the way playerStats declares one would answer every
+            -- probe with a zero entry and keep it. CleanupWithEventCounts probes
+            -- the hourly slots around every record it groups, and the serve
+            -- path walks this table with pairs, so those zeros would be offered
+            -- to peers beside the real counts. The rest of the suite stays
+            -- green under that change, so this case is what reds it.
+            local counts = db.global.guilds["TestGuild"].eventCounts
+            assert.is_nil(counts["h:475100"])
+            assert.same({}, sortedKeys(counts))
+        end)
+
         it("is stripped when empty, like every other declared table", function()
             -- The one change #71 makes to the file. Undeclared, an empty table
             -- (what the lazy create in StoreBatchRecords leaves when a scan has
