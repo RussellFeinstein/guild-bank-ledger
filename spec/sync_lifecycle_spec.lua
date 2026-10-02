@@ -1801,7 +1801,10 @@ describe("Sync session lifecycle", function()
                 return false
             end
 
-            for _, reason in ipairs({ "sending:PeerC-Stormrage", "preparing:PeerC", "loading" }) do
+            -- not-sending answers a NACK of ours (#320), the other three a
+            -- SYNC_REQUEST.
+            for _, reason in ipairs({ "sending:PeerC-Stormrage", "preparing:PeerC", "loading",
+                    "not-sending" }) do
                 it("leaves the send running on a refusal: " .. reason, function()
                     enterSendingState()
                     local progress = GBL:GetSyncStatus().sendProgress
@@ -1880,6 +1883,117 @@ describe("Sync session lifecycle", function()
 
                 assert.is_false(GBL:GetSyncStatus().sending)
                 assert.is_true(hasLine("reason: 42"))
+            end)
+
+            -- The shape #320 is about: our sender stopped while we were
+            -- sending to it too, and its answer to our NACK ends only the
+            -- receive the NACK came from.
+            it("ends the receive and keeps the send on not-sending", function()
+                enterSendingState()
+                GBL:RequestSync("PeerA", 0)
+                assert.is_true(GBL:GetSyncStatus().receiving,
+                    "fixture must have PeerA on both sides")
+
+                GBL:HandleBusy("PeerA", { reason = "not-sending" })
+
+                local status = GBL:GetSyncStatus()
+                assert.is_false(status.receiving)
+                assert.is_true(status.sending, "PeerA may still be receiving our send")
+                assert.equals("PeerA", status.sendTarget)
+                assert.is_true(GBL:IsPeerBusy("PeerA"))
+            end)
+        end)
+
+        -- A BUSY that ends a receive which has taken chunks ends it the way the
+        -- NACK ladder's abort did: through FinishReceiving, which checkpoints,
+        -- trims with the merged event counts, resets the hash cache after an
+        -- in-place id rewrite, writes the session's report and re-advertises.
+        -- #320 moves that abort from 140s to the first NACK, so the quiet clear
+        -- it used to take would have skipped all of it (#320). A refusal of a
+        -- request that has delivered nothing keeps the quiet clear.
+        describe("HandleBusy ends a receive with chunks through FinishReceiving (#320)", function()
+            local function hasLine(needle)
+                for _, entry in ipairs(GBL:GetAuditTrail()) do
+                    if entry.message and entry.message:find(needle, 1, true) then
+                        return true
+                    end
+                end
+                return false
+            end
+
+            local function postSyncHelloTimers()
+                local n = 0
+                for _, timer in ipairs(MockWoW.pendingTimers) do
+                    if not timer.cancelled and not timer.fired
+                        and timer.delay >= 0.5 and timer.delay <= 2.0 then
+                        n = n + 1
+                    end
+                end
+                return n
+            end
+
+            --- A receive from PeerA we asked for, with one chunk in that
+            -- stored a record when `stores` is set.
+            local function receiveOneChunk(stores)
+                GBL:RequestSync("PeerA", 0)
+                GBL:HandleSyncData("PeerA", {
+                    chunk = 1, totalChunks = 3,
+                    transactions = stores and {
+                        { type = "deposit", player = "Player1", tab = 1,
+                          itemID = 123, classID = 0, subclassID = 0, count = 1,
+                          timestamp = 1000 * 3600, id = "busy320:277:0" },
+                    } or {},
+                    moneyTransactions = {},
+                    protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                    guild = "Test Guild",
+                })
+                assert.is_true(GBL:GetSyncStatus().receiving,
+                    "the fixture must leave the receive open")
+                MockWoW.pendingTimers = {}
+                GBL:ClearLog("sync")
+            end
+
+            for _, reason in ipairs({ "not-sending", "combat" }) do
+                it("reports the session and re-advertises on " .. reason, function()
+                    receiveOneChunk(true)
+                    guildData.syncState.lastSyncTimestamp = 0
+
+                    GBL:HandleBusy("PeerA", { reason = reason })
+
+                    assert.is_false(GBL:GetSyncStatus().receiving)
+                    assert.is_true(hasLine("PeerA busy - ending receive after 1 chunk(s)"))
+                    assert.is_true(hasLine("Sync complete from PeerA - 1 new"))
+                    assert.is_true(guildData.syncState.lastSyncTimestamp > 0,
+                        "the checkpoint the ladder's abort wrote")
+                    assert.equals(1, postSyncHelloTimers(),
+                        "a stored record is advertised, as after the ladder")
+                    assert.is_true(GBL:IsPeerBusy("PeerA"))
+                end)
+            end
+
+            it("writes the report and no HELLO when the chunks stored nothing", function()
+                receiveOneChunk(false)
+
+                GBL:HandleBusy("PeerA", { reason = "not-sending" })
+
+                assert.is_false(GBL:GetSyncStatus().receiving)
+                assert.is_true(hasLine("Sync complete from PeerA - 0 new"))
+                assert.equals(0, postSyncHelloTimers())
+            end)
+
+            -- Nothing arrived, so there is no session to report: the BUSY
+            -- refused the request itself.
+            it("keeps the quiet clear when no chunk has arrived", function()
+                GBL:RequestSync("PeerA", 0)
+                MockWoW.pendingTimers = {}
+                GBL:ClearLog("sync")
+
+                GBL:HandleBusy("PeerA", { reason = "sending:PeerC" })
+
+                assert.is_false(GBL:GetSyncStatus().receiving)
+                assert.is_true(hasLine("PeerA busy - cleared receive state, will retry later"))
+                assert.is_false(hasLine("Sync complete from"))
+                assert.equals(0, postSyncHelloTimers())
             end)
         end)
 
