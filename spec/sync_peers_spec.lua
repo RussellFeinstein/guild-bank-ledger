@@ -431,6 +431,36 @@ describe("Sync peer identity and pairing", function()
                 "every BUSY is built in sendBusy and nowhere else")
         end)
 
+        -- The case above counts calls to the builder, so a BUSY written out as
+        -- a table literal would pass it, and every key, reason and priority
+        -- case with it. Only the builder may spell the message type.
+        it("spells out a BUSY message only in the builder", function()
+            local fh = io.open("src/Sync.lua", "rb")
+            assert.is_not_nil(fh, "could not read src/Sync.lua, so this proves nothing")
+            local source = fh:read("*a")
+            fh:close()
+
+            local sites = {}
+            local current
+            for raw in source:gmatch("[^\r\n]+") do
+                local fn = raw:match("^function GBL:([%w_]+)")
+                    or raw:match("^local function ([%w_]+)")
+                if fn then
+                    current = fn
+                elseif raw:match("^function ") then
+                    current = nil
+                end
+                local line = raw:gsub("%-%-.*$", "")
+                if line:find("[^%w_]type%s*=%s*[\"']BUSY[\"']")
+                    or line:find("^type%s*=%s*[\"']BUSY[\"']") then
+                    sites[#sites + 1] = tostring(current)
+                end
+            end
+
+            assert.same({ "BuildBusyMessage" }, sites,
+                "a BUSY is built by BuildBusyMessage and nowhere else")
+        end)
+
         -- The retry above means the peer we are already serving may ask again
         -- while its first request is being answered. Answering that with BUSY
         -- would make it abort the very receive we are feeding, so a duplicate
