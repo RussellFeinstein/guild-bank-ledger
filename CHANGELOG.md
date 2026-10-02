@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+- Two empty per-player slots in the addon's saved data that nothing ever wrote to.
+
 ## [0.41.29] - 2026-10-02
 
 ### Fixed

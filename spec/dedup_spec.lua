@@ -14,8 +14,6 @@ describe("Dedup", function()
 
         -- Mimic AceDB wildcard metatable for playerStats auto-vivification
         local statsDefaults = {
-            withdrawals = {},
-            deposits = {},
             totalWithdrawCount = 0,
             totalDepositCount = 0,
             moneyWithdrawn = 0,

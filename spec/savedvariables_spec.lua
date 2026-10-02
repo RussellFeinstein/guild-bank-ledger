@@ -231,8 +231,8 @@ describe("SavedVariables", function()
         end)
 
         it("strips a player who only ever held defaults", function()
-            -- Every playerStats field defaults to zero or an empty table, so a
-            -- player with no activity leaves no trace. That looks like data
+            -- Every playerStats field defaults to zero, so a player with no
+            -- activity leaves no trace. That looks like data
             -- loss and is not: UpdatePlayerStats vivifies the entry again on
             -- next use.
             local guild = db.global.guilds["TestGuild"]
