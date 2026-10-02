@@ -1090,9 +1090,10 @@ describe("Sync send path", function()
 
         -- Silence at zero chunks means the request itself went missing, so
         -- the thing to repeat is the request. NACKing chunk 1 asks a peer to
-        -- retransmit a chunk it never built, and HandleNack drops it on the
-        -- floor because it is not sending: the retry signal crossed the wire
-        -- and was discarded. Once chunks are arriving the NACK is right again.
+        -- retransmit a chunk it never built, and since #320 HandleNack
+        -- answers that with BUSY, which would end the receive over a request
+        -- that merely went missing. Once chunks are arriving the NACK is
+        -- right again.
         it("resends the request when the timeout fires at zero chunks", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 

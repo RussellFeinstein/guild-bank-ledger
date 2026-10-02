@@ -1785,10 +1785,11 @@ describe("Sync session lifecycle", function()
             assert.equals("PeerA", GBL:GetSyncStatus().sendTarget)
         end)
 
-        -- Three BUSY words only ever answer a SYNC_REQUEST: loading from the
-        -- serve gate's zone term, sending: and preparing: from the decline. So
-        -- one of them from the peer we are sending to refuses a request of
-        -- ours and says nothing about our send, which that peer may still be
+        -- Four BUSY words only ever answer a message of ours: loading from the
+        -- serve gate's zone term, sending: and preparing: from the decline,
+        -- all to a SYNC_REQUEST, and not-sending to a NACK (#320). So one of
+        -- them from the peer we are sending to refuses a request of ours and
+        -- says nothing about our send, which that peer may still be
         -- receiving. It used to end the send as well (#323). combat, disabled,
         -- an absent reason and any word not declared still end both.
         describe("HandleBusy scoped on the reason (#323)", function()
