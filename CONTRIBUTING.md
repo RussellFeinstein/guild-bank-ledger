@@ -74,7 +74,7 @@ This axis is the one that pays off later. Milestones are chronological arcs: the
 - **Put in the body what a label would have carried.** Which part of the addon it affects, whether it is a defect or a request, and anything that blocks it.
 - **Pull requests label themselves.** [.github/workflows/labeler.yml](.github/workflows/labeler.yml) applies `type:` from your branch prefix and `area:` from the files you changed, with rules in [.github/labeler.yml](.github/labeler.yml). The path globs are coarse, so a PR spanning subsystems picks up several area labels. The maintainer corrects what the globs get wrong; you do not need to.
 
-Milestones are release arcs, and membership means the work gates that arc rather than that it is urgent. `Sort rework`, `Restock rework`, `Data model integrity`, `Codebase refactor`, `Sync reliability`, `Accessibility to v1.0`, `Test suite refactor`, `Sort suite hardening` and `Ledger export` are the current set. An issue with no milestone is not neglected; it is unscheduled on purpose.
+Milestones are release arcs, and membership means the work gates that arc rather than that it is urgent. The current set is on the [Milestones page](https://github.com/RussellFeinstein/guild-bank-ledger/milestones), and each description says what the arc is for and what it gates; the order inside and across them is on the tracking issue. The maintainer gives every triaged issue a milestone, so an issue with none is either new and not triaged yet, or waiting on a call about which arc it belongs to. Like labels, milestones need triage permission, so you cannot set one and do not need to.
 
 ## Commit message format
 
