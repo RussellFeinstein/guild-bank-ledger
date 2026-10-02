@@ -1,19 +1,25 @@
 ------------------------------------------------------------------------
 -- GuildBankLedger -- Logger.lua
--- Per-channel session log: sync / sort / system
+-- Per-channel session log: sync / sort / system / ledger
 --
 -- Public API on GBL:
 --   GBL:LogSync(level, fmt, ...)    -- channel "sync"
 --   GBL:LogSort(level, fmt, ...)
 --   GBL:LogSystem(level, fmt, ...)
+--   GBL:LogLedger(level, fmt, ...)  -- transaction recording (#85)
 --
 --   GBL:SyncDebug / SyncInfo / SyncWarn / SyncError(fmt, ...)
 --   GBL:SortDebug / SortInfo / SortWarn / SortError(fmt, ...)
 --   GBL:SystemDebug / SystemInfo / SystemWarn / SystemError(fmt, ...)
+--   GBL:LedgerDebug / LedgerInfo / LedgerWarn / LedgerError(fmt, ...)
 --
 --   GBL:GetLog(channel)              snapshot, newest first
 --   GBL:GetMasterLog(opts)           k-way merge, opts = { channels?, limit? }
 --   GBL:ClearLog(channel)            nil = clear all
+--
+-- GBL.LOG_CHANNELS is the channel list, in display order. The capture's
+-- caps, the profile defaults and the offline reader each name the
+-- channels too, and spec/logger_spec.lua pins them against this list.
 --
 -- Levels: DEBUG | INFO | WARN | ERROR.
 --
@@ -28,16 +34,28 @@
 local ADDON_NAME = "GuildBankLedger"
 local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 
-local CHANNELS = { sync = true, sort = true, system = true }
+local CHANNEL_ORDER = { "sync", "sort", "system", "ledger" }
+local CHANNELS = {}
+for _, ch in ipairs(CHANNEL_ORDER) do CHANNELS[ch] = true end
 -- sort is the largest because a single sort run can emit thousands of lines
 -- (per-op done/timeout/reclassify + the v0.32.9 confirm timeline), and the
 -- "open sort log" pop-up is meant to hold a full run without evicting its start.
-local CAPS     = { sync = 2000, sort = 3000, system = 500 }
+-- ledger gets its own channel rather than sharing system (#85): a bank log
+-- read that stores something writes a line, up to 157 a day measured, and
+-- system's capture is the budget a restock run is kept inside (#199).
+local CAPS     = { sync = 2000, sort = 3000, system = 500, ledger = 500 }
 local LEVELS   = { DEBUG = true, INFO = true, WARN = true, ERROR = true }
 
-local CHAT_PREFIXES = { sync = "Sync: ", sort = "Sort: ", system = "System: " }
+local CHAT_PREFIXES = {
+    sync = "Sync: ", sort = "Sort: ", system = "System: ", ledger = "Ledger: ",
+}
 
-local entries = { sync = {}, sort = {}, system = {} }
+local entries = {}
+for _, ch in ipairs(CHANNEL_ORDER) do entries[ch] = {} end
+
+-- A copy, so a caller editing the list cannot change which channels exist.
+GBL.LOG_CHANNELS = {}
+for i, ch in ipairs(CHANNEL_ORDER) do GBL.LOG_CHANNELS[i] = ch end
 
 local function formatMessage(fmt, ...)
     if fmt == nil then return "(nil)" end
@@ -118,6 +136,7 @@ end
 function GBL:LogSync(level, fmt, ...)   emit(self, "sync",   level, fmt, ...) end
 function GBL:LogSort(level, fmt, ...)   emit(self, "sort",   level, fmt, ...) end
 function GBL:LogSystem(level, fmt, ...) emit(self, "system", level, fmt, ...) end
+function GBL:LogLedger(level, fmt, ...) emit(self, "ledger", level, fmt, ...) end
 
 ------------------------------------------------------------------------
 -- Public API: convenience wrappers
@@ -138,6 +157,11 @@ function GBL:SystemInfo (fmt, ...) emit(self, "system", "INFO",  fmt, ...) end
 function GBL:SystemWarn (fmt, ...) emit(self, "system", "WARN",  fmt, ...) end
 function GBL:SystemError(fmt, ...) emit(self, "system", "ERROR", fmt, ...) end
 
+function GBL:LedgerDebug(fmt, ...) emit(self, "ledger", "DEBUG", fmt, ...) end
+function GBL:LedgerInfo (fmt, ...) emit(self, "ledger", "INFO",  fmt, ...) end
+function GBL:LedgerWarn (fmt, ...) emit(self, "ledger", "WARN",  fmt, ...) end
+function GBL:LedgerError(fmt, ...) emit(self, "ledger", "ERROR", fmt, ...) end
+
 ------------------------------------------------------------------------
 -- Public API: read / clear
 ------------------------------------------------------------------------
@@ -149,11 +173,11 @@ function GBL:GetLog(channel)
 end
 
 --- K-way merge across channels (each is already newest-first), returning a
--- single timestamp-descending array. opts.channels optional list (default all
--- three). opts.limit caps output length.
+-- single timestamp-descending array. opts.channels optional list (default
+-- every channel). opts.limit caps output length.
 function GBL:GetMasterLog(opts)
     opts = opts or {}
-    local channels = opts.channels or { "sync", "sort", "system" }
+    local channels = opts.channels or CHANNEL_ORDER
     local limit = opts.limit
 
     local cursors = {}

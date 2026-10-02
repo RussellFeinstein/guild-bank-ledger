@@ -80,10 +80,12 @@ Auctionator is an optional dependency. With it installed, the Restock tab can se
 | `/gbl deviations` | List every slot where the bank differs from the layout |
 | `/gbl synclog` | Show the sync-channel session log in a copy-pastable pop-up |
 | `/gbl sortlog` | Show the sort-channel session log in a copy-pastable pop-up |
-| `/gbl logs` | Show the master log: sync + sort + system, merged in timestamp order |
+| `/gbl systemlog` | Show the system-channel session log (restock purchases, bank scans, migrations) in a copy-pastable pop-up |
+| `/gbl ledgerlog` | Show what each guild bank log read recorded: how many entries it read and stored per tab, and any entry it could not record |
+| `/gbl logs` | Show the master log: every channel, merged in timestamp order |
 | `/gbl logs dump [N]` | Dump the last N master entries to chat (default 50) |
-| `/gbl logs clear sync\|sort\|system\|all` | Truncate a channel |
-| `/gbl logs debug sync\|sort\|system on\|off` | Toggle per-channel DEBUG-to-chat mirroring |
+| `/gbl logs clear sync\|sort\|system\|ledger\|all` | Truncate a channel |
+| `/gbl logs debug sync\|sort\|system\|ledger on\|off` | Toggle per-channel DEBUG-to-chat mirroring |
 | `/gbl audit on\|off\|status\|clear` | Manage persistent log capture (on by default; off is the kill switch; clear wipes the whole account's captures) |
 | `/gbl syncdiag` | Compare your addon version against every peer the client has seen |
 | `/gbl epoch0` | Report records stamped with a zero timestamp (diagnostic for issue #93) |

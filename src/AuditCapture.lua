@@ -10,7 +10,7 @@
 -- SENDING captures to the maintainer, which is the uploader phase (not
 -- built yet) and will be opt-in and off by default there. A kill switch
 -- remains at db.profile.sync.auditCapture (/gbl audit off). When on,
--- INFO/WARN/ERROR entries from all three Logger channels are copied into
+-- INFO/WARN/ERROR entries from every Logger channel are copied into
 -- the current session. DEBUG is never captured.
 --
 -- SavedVariable shape:
@@ -18,8 +18,8 @@
 --     schemaVersion = 1,
 --     sessions = {
 --       { startedAt, addonVersion, protocolVersion, player, realm, guild,
---         entries = { sync = {...}, sort = {...}, system = {...} },
---         dropped = { sync = 0, sort = 0, system = 0 } },
+--         entries = { sync = {...}, sort = {...}, system = {...}, ledger = {...} },
+--         dropped = { sync = 0, sort = 0, system = 0, ledger = 0 } },
 --       ...
 --     },
 --   }
@@ -40,8 +40,11 @@ local GBL = LibStub("AceAddon-3.0"):GetAddon(ADDON_NAME)
 local AUDIT_DB_SCHEMA = 1
 local MAX_AUDIT_SESSIONS = 10
 -- sort gets the largest cap because one sort run emits hundreds of per-op
--- INFO lines; system stays small (login/combat/zone context only).
-local ENTRY_CAPS = { sync = 1000, sort = 1500, system = 300 }
+-- INFO lines. system holds the slot scan and a restock run (about 13 lines
+-- a purchase); ledger one line per bank log read that changed something.
+-- A session saved before v0.42.0 has no ledger list, and readers treat it
+-- as empty.
+local ENTRY_CAPS = { sync = 1000, sort = 1500, system = 300, ledger = 300 }
 
 GBL.AUDIT_DB_SCHEMA = AUDIT_DB_SCHEMA
 GBL.AUDIT_MAX_SESSIONS = MAX_AUDIT_SESSIONS
@@ -203,13 +206,14 @@ function GBL:HandleAuditCommand(rest)
         self:Print(string.format("Log capture %s. %d of %d saved sessions.",
             st.enabled and "ON" or "off", st.sessionCount, st.maxSessions))
         if st.enabled then
-            self:Print(string.format(
-                "This session: sync %d/%d, sort %d/%d, system %d/%d"
-                    .. " (evicted: %d, %d, %d).",
-                st.currentEntries.sync, st.caps.sync,
-                st.currentEntries.sort, st.caps.sort,
-                st.currentEntries.system, st.caps.system,
-                st.dropped.sync, st.dropped.sort, st.dropped.system))
+            local counts, evicted = {}, {}
+            for _, ch in ipairs(self.LOG_CHANNELS) do
+                counts[#counts + 1] = string.format("%s %d/%d",
+                    ch, st.currentEntries[ch] or 0, st.caps[ch] or 0)
+                evicted[#evicted + 1] = tostring(st.dropped[ch] or 0)
+            end
+            self:Print("This session: " .. table.concat(counts, ", ")
+                .. " (evicted: " .. table.concat(evicted, ", ") .. ").")
         end
         return
     end

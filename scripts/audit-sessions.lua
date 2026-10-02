@@ -31,8 +31,14 @@
 
 local M = {}
 
-local CHANNEL_ORDER = { "sync", "sort", "system" }
-local CHANNELS = { sync = true, sort = true, system = true }
+-- The same list as src/Logger.lua's, which this script cannot load;
+-- spec/logger_spec.lua pins the two against each other. A session saved
+-- before a channel existed reads as empty on it.
+local CHANNEL_ORDER = { "sync", "sort", "system", "ledger" }
+local CHANNELS = {}
+for _, ch in ipairs(CHANNEL_ORDER) do CHANNELS[ch] = true end
+M.CHANNELS = {}
+for i, ch in ipairs(CHANNEL_ORDER) do M.CHANNELS[i] = ch end
 
 ------------------------------------------------------------------------
 -- Loading
@@ -89,7 +95,8 @@ end
 --- One session's entries on one channel, oldest first (capture order).
 function M.channel(db, index, channel)
     if not CHANNELS[channel] then
-        return nil, "unknown channel '" .. tostring(channel) .. "' (sync, sort, system)"
+        return nil, "unknown channel '" .. tostring(channel) .. "' ("
+            .. table.concat(CHANNEL_ORDER, ", ") .. ")"
     end
     local sessions = (db and db.sessions) or {}
     local session = sessions[index]
@@ -515,8 +522,8 @@ local function printSessions(db)
         print("No sessions saved.")
         return
     end
-    print(string.format("%3s  %-21s %-9s %6s %6s %7s  %s",
-        "#", "started (UTC)", "version", "sync", "sort", "system", "dropped"))
+    print(string.format("%3s  %-21s %-9s %6s %6s %7s %7s  %s",
+        "#", "started (UTC)", "version", "sync", "sort", "system", "ledger", "dropped"))
     for _, row in ipairs(rows) do
         local dropped = {}
         for _, channel in ipairs(CHANNEL_ORDER) do
@@ -524,9 +531,9 @@ local function printSessions(db)
                 dropped[#dropped + 1] = channel .. ":" .. row.dropped[channel]
             end
         end
-        print(string.format("%3d  %-21s %-9s %6d %6d %7d  %s",
+        print(string.format("%3d  %-21s %-9s %6d %6d %7d %7d  %s",
             row.index, M.formatDate(row.startedAt), row.addonVersion,
-            row.counts.sync, row.counts.sort, row.counts.system,
+            row.counts.sync, row.counts.sort, row.counts.system, row.counts.ledger,
             #dropped > 0 and table.concat(dropped, " ") or "-"))
     end
 end

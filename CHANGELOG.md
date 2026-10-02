@@ -5,6 +5,12 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- A ledger log for transaction recording, opened with `/gbl ledgerlog`. It has its own space in the saved diagnostics, so a long sort or a restock run cannot push its lines out, and `/gbl audit status` counts it beside the others. `/gbl logs clear ledger` and `/gbl logs debug ledger on|off` work on it like the other logs.
+- `/gbl systemlog` opens the system log on its own: the Restock purchase steps, the bank scans and the migration notes. Before, those lines were only readable mixed in with every other log under `/gbl logs`.
+
 ## [0.41.31] - 2026-10-02
 
 ### Fixed
