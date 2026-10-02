@@ -628,8 +628,8 @@ describe("SavedVariables", function()
         -- OnInitialize had already driven against a freshly built real one,
         -- which balances only while OnInitialize writes nothing under global:
         -- one migration run at init, or RecordOwnCharacter firing earlier, and
-        -- all eight cases red while the port is correct. Found by the code
-        -- review of this PR.
+        -- every case built on it red while the port is correct. Found by the
+        -- code review of #77.
         local function bothImages(script)
             local defaults = db._defaults
 
@@ -712,6 +712,22 @@ describe("SavedVariables", function()
             end)
             assert.is_nil(rawget(mine.guilds.TestGuild, "eventCounts"))
             assert.same(theirs, mine)
+        end)
+
+        it("agrees that a read of a missing count answers nil and stores nothing", function()
+            -- The port-only case above is the one an entry wildcard reds. This
+            -- is the same probe on both sides, so the port cannot pass it by
+            -- vivifying differently from the library.
+            local savedInstance = MockAce.dbInstance
+            local mine = _G.LibStub("AceDB-3.0"):New("GuildBankLedgerDB", db._defaults)
+            MockAce.dbInstance = savedInstance
+            local theirs = RealAceDB:New({}, db._defaults)
+
+            for _, side in ipairs({ mine, theirs }) do
+                local counts = side.global.guilds["TestGuild"].eventCounts
+                assert.is_nil(counts["h:475100"])
+                assert.same({}, sortedKeys(counts))
+            end
         end)
 
         it("agrees that a guild's counts come back after a login over the file", function()
