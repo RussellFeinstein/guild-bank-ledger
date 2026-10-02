@@ -61,11 +61,11 @@ Thirteen keys reach disk:
 |---|---|
 | `transactions` | Array of item transaction records (section 4) |
 | `moneyTransactions` | Array of money transaction records (section 4) |
-| `seenTxHashes` | `[full record id] = true`. Dedup membership set (section 5) |
+| `seenTxHashes` | `[full record id] = timestamp`. Dedup membership set (section 5). `GBL:MarkSeen` (`src/Dedup.lua`) stores the record's timestamp as the value, or the current server time when that timestamp is invalid |
 | `eventCounts` | `[prefix .. hourSlot] = {count, asOf}`. Dedup ground truth (section 5) |
 | `playerStats` | `[player] = {withdrawals, deposits, totalWithdrawCount, totalDepositCount, moneyWithdrawn, moneyDeposited, firstSeen, lastSeen}` |
 | `playerRealms` | `[bareName] = realm`, or `false` when the bare name is ambiguous in the roster |
-| `knownPeers` | `[canonical peer key] = {version, txCount, lastSeen}`. Written by `UpdatePeer`, `src/Sync.lua:2472` |
+| `knownPeers` | `[canonical peer key] = {version, minSyncVersion, txCount, lastSeen}`. Written by `GBL:UpdatePeer` (`src/Sync.lua`) on every HELLO it handles. `InitSync` drops expired entries and re-keys the rest to canonical names, `ConsolidatePeerKeys` re-keys them again after a roster update, and two migrations in `src/Core.lua` re-key it too, merging colliding entries by `lastSeen` (`MigrateNormalizePeerNames` and `MigrateRecoverPeerRealms`) |
 | `syncState` | `{lastSyncTimestamp, syncVersion, peers}`. See the name collision in section 3 |
 | `accessControl` | `{rankThreshold, restrictedMode, configuredBy, configuredAt}` |
 | `sortAccess` | `{rankThreshold, delegates, updatedBy, updatedAt}`. Two-tier sort policy |
@@ -76,7 +76,7 @@ Thirteen keys reach disk:
 ### Keys that are declared but absent, and why that is normal
 
 AceDB strips any value equal to its default before the SavedVariables file is written
-(`removeDefaults`, `Libs/AceDB-3.0/AceDB-3.0.lua:134`). An empty table default that was never
+(`removeDefaults` in AceDB-3.0, whose committed copy is `spec/vendor/AceDB-3.0.lua`). An empty table default that was never
 modified therefore leaves no trace on disk. **Absence from the file means "never diverged from the
 default", not "missing".** At runtime the key is present, because `copyDefaults` puts it back.
 
@@ -134,26 +134,37 @@ specs build by hand. Removing the guards means re-fixturing those specs first, w
 This is the single easiest thing to get wrong when reading the sync code.
 
 - **`guildData.syncState.peers`** is persisted, and holds `{lastSync, stored}` per peer.
-- **`syncState.peers`** in `src/Sync.lua` is a module-local runtime table, and holds
-  `{version, txCount, dataHash, lastScanTime, lastSeen}` per peer. Written by `GBL:UpdatePeer`
-  (`src/Sync.lua:2460`). It is not saved.
+- **`syncState.peers`** in `src/Sync.lua` is a module-local runtime table, and holds what each
+  peer last advertised: `{version, minSyncVersion, txCount, dataHash, lastScanTime, lastSeen}`, plus
+  `outdated` and `versionRelation` once a protocol or version check has refused that peer.
+  `GBL:UpdatePeer` writes the full entry on each HELLO. The other writers fill in around it:
+  `InitSync` seeds entries from `knownPeers`, without `dataHash` or `lastScanTime`; `OnSyncMessage`
+  creates a minimal `{lastSeen, txCount}` entry for a peer heard before its HELLO, and an entry
+  marked outdated, with no `minSyncVersion`, for a HELLO on another protocol version; `HandleHello`
+  marks a version refusal; `ConsolidatePeerKeys` re-keys entries to canonical names after a roster
+  update; and `ResetSyncState` empties it. It is not saved.
 
 The persisted record of what version a peer runs is **`knownPeers`**, not either of the above.
 
 **Verdict: being resolved, issue #72.** The inventory done for that issue turned up something the first
-pass missed: **the persisted table is write-only.** It is written at exactly one site
-(`src/Sync.lua:2335`, in `FinishReceiving`) and its values are read nowhere in `src/`, `UI/` or
-`spec/`. The only other code that touches it is two migrations rewriting its keys
-(`src/Core.lua:1345`, `:1548`), so those migrations canonicalize a table nobody consults. Its sibling
-`syncState.lastSyncTimestamp` is genuinely live by contrast (written `:2333`, read `:1032`, `:2038`,
-`:2644`). So the resolution may be a retirement rather than a rename, which would remove the collision
-outright instead of moving it. The runtime table, for what it is worth, is 25 occurrences across 23
-lines of one file with no persisted state, so renaming that side needs no migration at all. Direction
-is #72's call.
+pass missed: **the persisted table is write-only.** `FinishReceiving` in `src/Sync.lua` is the one
+site that writes it, and nothing in `src/`, `UI/` or `spec/` reads its values except to rewrite its
+keys. Two migrations in `src/Core.lua` do that, `MigrateNormalizePeerNames` (which reads `lastSync`
+only to decide which of two colliding keys survives) and `MigrateRecoverPeerRealms`, and the specs
+that touch the table are those two migrations' tests. So those migrations canonicalize a table nobody
+consults. Its sibling `syncState.lastSyncTimestamp` does have readers by contrast: `FinishReceiving`
+writes it, and `HandleHello` and `FinishSending`'s bidirectional check each hand it to `RequestSync`,
+which sends it as the request's `sinceTimestamp`. The serving side filters on that only in its
+fallback for a request with no bucket hashes, which `SendSyncRequestTo` produces only when it has no
+guild data, so it is read and transmitted more than it decides anything. So the resolution may be a
+retirement rather than a rename, which would remove the collision outright instead of moving it. The
+runtime table, for what it is worth, is module-local to `src/Sync.lua` (other files reach it only
+through `GetSyncPeers` and `GetAllPeers`) and is never saved, so renaming
+that side needs no migration at all. Direction is #72's call.
 
 ## 4. Record shapes
 
-Two builders, `GBL:CreateTxRecord` and `GBL:CreateMoneyTxRecord` (`src/Ledger.lua:79` and `:131`).
+Two builders, `GBL:CreateTxRecord` and `GBL:CreateMoneyTxRecord`, both in `src/Ledger.lua`.
 The builders assign a fixed set of fields, but several are nil in practice and Lua drops nil keys, so
 the shapes on disk are narrower than the builders suggest.
 
@@ -165,7 +176,8 @@ the shapes on disk are narrower than the builders suggest.
   _occurrence = 0, id = "withdraw|Speaknglide-Area52|10000000|493216:0" }
 ```
 
-**Item record**, 12 to 17 keys. The measured distribution across all 12,310 transaction records:
+**Item record**, 12 to 17 keys. The measured distribution across all 12,310 transaction records in
+the 2026-08-07 file, which predates v0.37.0 and so predates the tab fix in the first bullet below:
 
 | Count | Shape |
 |---|---|
@@ -179,27 +191,33 @@ the shapes on disk are narrower than the builders suggest.
 
 Three fields behave differently from the rest and account for most of the variation:
 
-- **`tab` is only ever set on `move` records.** `GetGuildBankTransaction(tab, i)` takes the tab whose
-  log is being read as its first argument, and returns `tab1`/`tab2` as the move pair, source and
-  destination. A move is the only transaction that spans two tabs, so it is the only one that needs
-  them; a deposit or withdraw happened in the tab already being read, and WoW returns nil for both.
-  `ReadTabTransactions` (`src/Ledger.lua:255`) passes `tab1` through to the builder (`:266-269`), so
-  `record.tab` means "source tab of a move" and is nil on everything else. The tab actually being read
-  is the function's own `tab` parameter, in scope at the call site and never recorded. So no deposit or
-  withdraw record knows which tab it happened in. `destTab` and `destTabName` follow the same rule, and
-  so does **`tabName`**, which `src/Ledger.lua:95` derives from the same nil. `BackfillTabNames` cannot
-  repair it, because there is no tab number to derive a name from.
+- **`tab` was only ever set on `move` records before v0.37.0**, which is what the table above
+  measured. `GetGuildBankTransaction(tab, i)` takes the tab whose log is being read as its first
+  argument, and returns `tab1`/`tab2` as the move pair, source and destination. A move is the only
+  transaction that spans two tabs, so it is the only one that needs them; a deposit or withdraw
+  happened in the tab already being read, and WoW returns nil for both. `ReadTabTransactions`
+  (`src/Ledger.lua`) used to pass `tab1` straight through to the builder, so `record.tab` meant
+  "source tab of a move" and was nil on everything else. The tab actually being read is the
+  function's own `tab` parameter, in scope at the call site, and it was never recorded. So no deposit
+  or withdraw record stored before v0.37.0 knows which tab it happened in, and none carries a
+  **`tabName`** either, since `CreateTxRecord` derives that from `tab`. `destTab` and `destTabName`
+  are set on moves only, and still are.
 
-  **Verdict: being fixed forward, issue #67.** The true tab goes into `record.tab`, which puts it in
-  the identity prefix, so it rides the MIN_SYNC_VERSION floor release (#74) where the compatibility
-  break is already being paid. Two seams come with it and are accepted rather than fixed: old records
-  stay tabless forever, since their true tab was never written anywhere and cannot be recovered, so
-  historical deposits never match a tab filter while new ones do; and one event can briefly appear
-  twice while old-form and new-form ids coexist, bounded by WoW's roughly 25-entry per-tab log window.
-- **`itemLink` and `category` do not cross the wire.** `stripForSync` removes them, and only
-  `category` is recomputed on arrival, and only when `itemID` and `classID` are both present
-  (`src/Sync.lua:1173`). Money records never get it back. `tabName` and `destTabName` are also
-  stripped and are refilled later by `BackfillTabNames`.
+  **Verdict: fixed forward in v0.37.0, issue #67.** `ReadTabTransactions` passes `tab1 or tab`, so a
+  deposit or withdraw scanned since then carries the tab it happened in, as `tab` and `tabName`, and
+  the tab is in the identity prefix. That is why it rode the MIN_SYNC_VERSION floor release (#74),
+  where the compatibility break was already being paid. Two seams came with it and are accepted
+  rather than fixed: records stored before it stay tabless forever, since their true tab was never
+  written anywhere and cannot be recovered, so historical deposits never match a tab filter while new
+  ones do; and one event could briefly appear twice while old-form and new-form ids coexisted,
+  bounded by WoW's roughly 25-entry per-tab log window. `BackfillTabNames` cannot repair the old
+  ones, because there is no tab number to derive a name from.
+- **`itemLink` and `category` do not cross the wire.** `stripForSync` (`src/Sync.lua`) removes them,
+  along with `tabName`, `destTabName`, `scanTime`, `scannedBy` and `_occurrence`. On arrival
+  `reconstructSyncRecord` rebuilds `category` from `classID` and `subclassID` for every item record
+  it accepts, because since #68 (v0.37.0) `RepairSyncRecordItemFields` runs first and refills a
+  missing `classID` or `subclassID` from the `itemID`. `itemLink` is never rebuilt, and money records
+  carry no category. `tabName` and `destTabName` are refilled later by `BackfillTabNames`.
 - **`scannedBy` carries a `sync:` prefix on anything received from a peer**, and the bare form
   (`"Rexxybear"` rather than `"Rexxybear-Tichondrius"`) appears on 961 records written before
   2026-04-13. Those are historical. Current writes are always realm-qualified.
@@ -212,7 +230,8 @@ Record identity is the triple **(prefix, hourSlot, occurrence)**, serialized int
 record.id = prefix .. hourSlot .. ":" .. occurrence
 ```
 
-`buildPrefix` (`src/Dedup.lua:39-51`) has two forms and picks by whether `itemID` is set:
+`buildPrefix` (a file-local in `src/Dedup.lua`, exposed as `GBL:BuildTxPrefix`) has two forms and
+picks by whether `itemID` is set:
 
 ```
 items:  type|player|itemID|count|tab|
@@ -235,10 +254,11 @@ ever stored, and needs a migration and a wire-fixture update.
 
 Two consequences of the current prefix that are worth knowing:
 
-- Because `tab` is nil on deposits and withdrawals, `buildPrefix` coerces it to `0`. Two deposits of
-  the same item and count by the same player in the same hour into two different tabs share a prefix
-  and are separated only by occurrence. Closed by #67, which is what makes that change identity
-  affecting and therefore floor-bound.
+- `buildPrefix` coerces a nil `tab` to `0`, and before v0.37.0 `tab` was nil on every deposit and
+  withdrawal. So two deposits of the same item and count by the same player in the same hour into two
+  different tabs shared a prefix and were separated only by occurrence. Closed by #67, which is what
+  made that change identity affecting and therefore floor-bound. Records stored before it keep the
+  `0`: their `tab` is still nil, and any rebuild of their ids reads the field.
 - An item record with no `itemID` falls through to the **money** branch, so its prefix is
   `type|player|0|` and it collides with every other such record from the same player, type and hour.
   108 records on the live file are in this state. **Issue #69 owns both halves**, the scan-side cause
@@ -253,11 +273,12 @@ Two consequences of the current prefix that are worth knowing:
 
 ### One identity namespace, two arrays
 
-Records live in two arrays but identity is pooled. `seenTxHashes` (`src/Dedup.lua:127-130`),
-`eventCounts` (`StoreBatchRecords` in `src/Dedup.lua`), the fingerprint accumulator and its buckets
-(`src/Fingerprint.lua:70-76`, `:129-145`) and the `idIndex` that `HandleSyncData` builds
-(`src/Sync.lua:2129-2135`) all walk `transactions` and `moneyTransactions` into one flat structure
-with no namespace tag. `BuildStoredRecordIndex` (`src/Dedup.lua:219-228`) is the only one that
+Records live in two arrays but identity is pooled. `seenTxHashes` (`GBL:MarkSeen` in
+`src/Dedup.lua`), `eventCounts` (`StoreBatchRecords` in `src/Dedup.lua`), the fingerprint
+accumulator and its buckets (`ComputeDataHash`, `ComputeBucketHashes` and the sliced
+`StepBucketHashScan` in `src/Fingerprint.lua`) and the `idIndex` that `HandleSyncData` builds at the
+top of each chunk (`src/Sync.lua`) all walk `transactions` and `moneyTransactions` into one flat
+structure with no namespace tag. `BuildStoredRecordIndex` (`src/Dedup.lua`) is the only one that
 takes a `storageKey`, so it is the exception rather than the rule.
 
 Nothing about that pooling is wrong on its own, because `buildPrefix` gives items five pipe fields
@@ -265,7 +286,7 @@ and money three, and a player name cannot contain a pipe. Well-formed item and m
 collide. It matters only in combination with the `itemID` fallthrough above: a record that reaches
 the money branch by accident lands in a shared namespace rather than an item-only one.
 
-The reachable consequence is in `NormalizeRecordId` (`src/Sync.lua:2071-2095`), which adopts the
+The reachable consequence is in `GBL:NormalizeRecordId` (`src/Sync.lua`), which adopts the
 sender's id for a local record it looks up as `idIndex[matchedKey]` and never checks which array
 that record came from. An incoming item record with no `itemID` that prefix-matches a stored money
 record would overwrite that money record's `id`, `_occurrence` and `timestamp`, and then be counted
@@ -279,23 +300,25 @@ and its test list should cover it.
 
 `type` is the first field of both prefixes. The money log is the one place where the API disagrees
 with itself: `GetGuildBankMoneyTransaction` returns `"withdrawal"` where `GetGuildBankTransaction`
-returns `"withdraw"` for the same user action. `CreateMoneyTxRecord` rewrites it
-(`src/Ledger.lua:133`), before `ComputeTxHash` runs, so `"withdraw"` is what goes into every money
+returns `"withdraw"` for the same user action. `CreateMoneyTxRecord` (`src/Ledger.lua`) rewrites it
+in its first statement, before `ComputeTxHash` runs, so `"withdraw"` is what goes into every money
 id ever stored.
 
 **Verdict: correct as it stands, and not cosmetic.** The differing record shapes do not make the
 string cosmetic, because nothing downstream reads the shape before reading the type. Every consumer
 matches the stored string exactly and not one of them accepts both spellings: player stats
-(`src/Ledger.lua:229`, `:238`), six sites in
-`UI/ConsumptionView.lua` (`:92`, `:101`, `:118`, `:192`, `:356`, `:420`), both type dropdowns
-(`UI/UI.lua:623`, `:1441`), and the filter equality test (`UI/FilterBar.lua:105`). An
+(`UpdatePlayerStats` in `src/Ledger.lua`, once for items and once for money), six sites in
+`UI/ConsumptionView.lua` (three in `BuildConsumptionSummary`, one each in `ComputeGoldLogSums`,
+`GetPlayerItemBreakdown` and `BuildGuildItemSummary`), both type dropdowns in `UI/UI.lua` (the one
+`BuildGoldLogTab` builds and the one in `CreateFilterWidgets`), and the filter equality test in
+`MatchesFilters` (`UI/FilterBar.lua`). An
 un-normalized record therefore contributes 0 to every money total and matches no filter. That
 silent zeroing is
 the v0.4.1 bug the normalization fixed, and it is why a spec pins the builder as well as the read
 path (`spec/ledger_spec.lua`).
 
 It also fails accessibility in all three channels at once, which is worth stating separately given
-that triple encoding is a v1.0 gate. `GetTxTypeDisplay` (`UI/Accessibility.lua:218-233`) resolves
+that triple encoding is a v1.0 gate. `GetTxTypeDisplay` (`UI/Accessibility.lua`) resolves
 color by comparison, icon by `A11Y.ICONS[txType]` and label by `A11Y.TX_LABELS[txType]`, so an
 unrecognized type falls to `NEUTRAL`, a nil icon and the raw string as its own label. Color, shape
 and text degrade together, which is exactly the failure triple encoding exists to prevent.
@@ -303,7 +326,8 @@ and text degrade together, which is exactly the failure triple encoding exists t
 Changing any of this is identity affecting. `"withdraw"` is already in every stored money id, so
 un-normalizing would need a migration, a wire-fixture update and a floor raise, and would leave a
 permanent bucket-hash mismatch against un-migrated peers in the meantime: the bucket key is parsed
-from the id's `|<hourSlot>:<occurrence>` suffix (`src/Fingerprint.lua:106-116`), so a type-only
+from the id's `|<hourSlot>:<occurrence>` suffix (`bucketKeyForRecord` in `src/Fingerprint.lua`, through
+the shared `RECORD_ID_SLOT` pattern), so a type-only
 change moves no record between buckets while changing its hash contribution, and the affected
 bucket re-syncs forever without converging.
 
@@ -313,16 +337,19 @@ Two smaller points follow from the same normalization:
   itemID-less item `withdraw` and a money `withdrawal` differed in their first prefix field.
   Afterwards they do not. `deposit` was already shared, since both APIs emit it verbatim, so the
   root cause is the `itemID` fallthrough and not the rewrite.
-- **Sync intake does not normalize.** `reconstructSyncRecord` (`src/Sync.lua:1146-1192`) never
-  inspects the value, and intake checks only that `type` is non-empty (section 8), so a
-  `"withdrawal"` record from a peer would be stored verbatim. No such record exists or can arrive:
-  the census found zero across all 12,310 stored records, no tagged release ever shipped the
-  un-normalized code (the money feature landed in v0.2.0 and the fix in v0.4.1 with no tag between
-  them, the earliest tag in the repo being v0.5.0-alpha), the concurrent money-tab-index bug in the
-  same commit meant money never loaded at all for a guild with fewer than eight tabs, and the exact
-  version match in `HandleHello` rules out a mixed-version peer today. **Verdict: closed by #68's
-  enum check**, which rejects it. Rejection is the right treatment rather than normalizing on
-  intake, because no legitimate sender of that string can exist.
+- **Sync intake did not normalize, and still does not.** Before #68, intake checked only that `type`
+  was non-empty (section 8) and nothing inspected the value, so a `"withdrawal"` record from a peer
+  would have been stored verbatim. No such record existed or could arrive: the census found zero
+  across all 12,310 stored records, no tagged release ever shipped the un-normalized code (the money
+  feature landed in v0.2.0 and the fix in v0.4.1 with no tag between them, the earliest tag in the
+  repo being v0.5.0-alpha), the concurrent money-tab-index bug in the same commit meant money never
+  loaded at all for a guild with fewer than eight tabs, and the exact version match `HandleHello`
+  enforced at the time ruled out a mixed-version peer. **Verdict: closed by #68's enum check in
+  v0.37.0.** `validateSyncRecord` (`src/Sync.lua`) rejects a type outside `VALID_RECORD_TYPES`, and
+  `"withdrawal"` is not in it. That matters more since the same release replaced the exact match
+  with a version floor, because peers on different releases now exchange records. Rejection is the
+  right treatment rather than normalizing on intake, because no legitimate sender of that string can
+  exist.
 
 ## 6. Timestamps
 
@@ -331,20 +358,36 @@ Two smaller points follow from the same normalization:
 than the sender's scan time. The `hourSlot` inside an id is `floor(timestamp / 3600)`, so it is hour
 granular by construction.
 
-`IsValidTimestamp` (`src/Dedup.lua:18`) rejects anything outside the WoW era at the storage boundary.
-Test fixtures use `3600 * 475100` and up for this reason.
+`GBL:IsValidTimestamp` (`src/Dedup.lua`) accepts a number at or after `MIN_VALID_TIMESTAMP`
+(2004-01-01, before WoW launched) and nothing else; there is no upper bound. What happens to a
+record that fails it depends on the path:
+
+- **Sync intake** rejects a timestamp that is present and not a number: `validateSyncRecord` runs
+  first for exactly that reason. A missing timestamp is recovered from the id (below), and one that
+  is a number but before the floor is replaced with the current server time by
+  `reconstructSyncRecord`. `StoreTx` and `StoreMoneyTx` repeat the replacement, but their only
+  production caller is the sync receive, which has already done it.
+- **The local scan path does not check.** `ReadTabTransactions` and `ReadMoneyTransactions` store
+  through `StoreBatchRecords`, and their timestamps come from `ComputeAbsoluteTimestamp`, which
+  subtracts the log's relative offset from the server clock, so they are always numbers. The one
+  value on that path that does pass through the guard is the `seenTxHashes` entry, through
+  `MarkSeen`.
+
+Test fixtures use `3600 * 475100` and up so that they sit well above the floor.
 
 When a synced record arrives with an id but no timestamp, `reconstructSyncRecord` recovers the
 timestamp as `hourSlot * 3600`, which is the start of the hour rather than the original moment.
 
 ## 7. The schema ladder, and why the default is 8
 
-`schemaVersion` defaults to **8** (`src/Core.lua:124`) even though migrations exist through 11. This
+`schemaVersion` defaults to **8** (the `defaults` table at the top of `src/Core.lua`) even though
+migrations exist through 11. This
 reads as a stale value and it is not one. Do not raise it.
 
 The reason is AceDB before it is anything about the migration chain. `removeDefaults` strips any scalar
-equal to its default before writing (`Libs/AceDB-3.0/AceDB-3.0.lua:173`), and `copyDefaults` puts
-**the current default** back on load (`:126-127`). So every guild sitting at exactly 8 has no
+equal to its default before writing, and `copyDefaults` puts **the current default** back on load
+for any key the stored table does not hold (both in AceDB-3.0; `spec/vendor/AceDB-3.0.lua` is the
+committed copy). So every guild sitting at exactly 8 has no
 `schemaVersion` in its file at all, and takes whatever the defaults block says next login. **The
 default value is the stored value of every guild at that version.** Raising it to 11 does not skip a
 warning, it silently advances all of those guilds to 11 without running migrations 9, 10 or 11, and
@@ -401,8 +444,8 @@ migration). Neither file changes the default, which stays as it is.
 One write is not a rung. It sits inside one, so "outside the ladder" is the wrong axis: what
 matters is whether a write advances the progression. There were two until #263.
 
-`MigrateCrossSlotDedup` **is** rung 5, and on entry it drops the version to 4
-(`src/Core.lua:1081`) so its pass 1 can re-run the same-slot dedup, whose own gate is `>= 5`, then
+`MigrateCrossSlotDedup` **is** rung 5, and its first statement past its own gate drops the version
+to 4 so its pass 1 can re-run the same-slot dedup, whose own gate is `>= 5`, then
 leaves at 6. That write is deliberate and load-bearing: without it the nested call is entered at 5,
 returns 0, and pass 1 silently does nothing.
 
@@ -478,17 +521,18 @@ needs a decision about what such a guild advertises on HELLO.
 
 ## 8. What validation guarantees, and what it does not
 
-Sync intake performs exactly two checks (`src/Sync.lua:1186-1187`):
+Before #68 (v0.37.0), sync intake performed exactly two checks, at the end of
+`reconstructSyncRecord` (`src/Sync.lua`):
 
 ```lua
 if not record.type   or record.type   == "" then return false end
 if not record.player or record.player == "" then return false end
 ```
 
-There is no enum check on `type`, no shape check, and no cross-field check. A record whose `type`
-reads `"wN260370"` is accepted.
+There was no enum check on `type`, no shape check, and no cross-field check, so a record whose `type`
+read `"wN260370"` was accepted. What intake checks now is in the verdict at the end of this section.
 
-The comment above those lines already names the failure it exists to catch: AceSerializer can mangle
+The comment above those two lines named the failure they existed to catch: AceSerializer can mangle
 field boundaries in transit, producing spliced keys like `typyer` from `type` and `player`. What was
 not known until this document is how often it happens and what gets through.
 
@@ -506,8 +550,8 @@ one key name joined to a suffix of another, with the original key lost.
 Sorted by what was lost: 195 records lost only `subclassID`, 22 lost nothing, and 6 lost `type`
 together with several other fields. Seventeen ended up with a `type` outside the six-value enum
 (`deposit`, `withdraw`, `move`, `repair`, `buyTab`, `depositSummary`), eleven of those having no
-`type` key at all. Six of the seventeen kept a non-empty `type` and a non-empty `player`, so the
-guard above would still accept them today.
+`type` key at all. Six of the seventeen kept a non-empty `type` and a non-empty `player`, so those
+two checks accepted them.
 
 Two things this does **not** establish:
 
@@ -530,15 +574,15 @@ scanned locally rather than received, so they are not part of the above. Issue #
 ### How much of this is a live problem, and how much is cosmetic
 
 The first pass did not separate the two, and the split matters because it decides what has to be fixed
-and what merely could be. The line is `buildPrefix`, which reads `type`, `player`, `itemID`, `count`
-and `tab` on item records and nothing else (`src/Dedup.lua:39-51`).
+and what merely could be. The line is `buildPrefix` (`src/Dedup.lua`), which reads `type`, `player`,
+`itemID`, `count` and `tab` on item records and nothing else.
 
 **The 195 that lost only `subclassID` still have ids that agree with their fields.** `subclassID` is
 not in the prefix. Same for the 19 that gained a `stamp` key and lost nothing, and the 22 that lost
 nothing at all. These cost a few bytes on re-send and are otherwise inert.
 
 **The roughly 17 with a corrupt or missing `type` are live inconsistency.** Their `buildPrefix` output
-disagrees with the id they carry, so `BuildStoredRecordIndex` (`src/Dedup.lua:219-228`) files them
+disagrees with the id they carry, so `BuildStoredRecordIndex` (`src/Dedup.lua`) files them
 under a prefix matching no id, `CountFromRecordIndex` undercounts, and `CleanupWithEventCounts` reasons
 about a group of one. Anything that lost `itemID` is in the same class by a different route: it flips
 to the money branch and collides.
@@ -547,24 +591,33 @@ to the money branch and collides.
 
 `record.id` begins with `type` and `player` as its first two pipe-delimited fields, and it was computed
 by a healthy sender before transmission. So a record that lost its `type` can usually get it back from
-its own id. That holds only if `CleanupWithEventCounts` has not already rebuilt the id from the corrupt
-fields (`src/Core.lua:2795-2833` runs whenever it removes anything), which is the first thing to check
-before relying on it.
+its own id. That holds only if `CleanupWithEventCounts` (`src/Core.lua`) has not already rebuilt the
+id from the corrupt fields, which it does to every record of the guild whenever it removes anything.
+That is the first thing to check before relying on it.
 
 ### The reject counter counts rejections as duplicates
 
-`HandleSyncData` increments `itemDuped` when `reconstructSyncRecord` returns false (`src/Sync.lua:2143`,
-money at `:2169`). No log, no counter, no warning. So total rejection is indistinguishable from perfect
-convergence: the `Redundancy from <peer>` line would read 100% duped, which the decision rule in
-`.claude/rules/sync.md` reads as "the bucket filter is doing most of the work, skip." Every redundancy reading
-taken so far has been inflated by the rejection rate.
+Before #68, `HandleSyncData` incremented `itemDuped` when `reconstructSyncRecord` returned false, and
+`moneyDuped` for a money record. No log, no counter, no warning. So total rejection was
+indistinguishable from perfect convergence: the `Redundancy from <peer>` line would read 100% duped,
+which the decision rule in `.claude/rules/sync.md` reads as redundancy worth designing a finer-grained
+exchange for (its `>70%` band), when the peer had sent nothing the receiver could store. Every
+redundancy reading taken before v0.37.0 is inflated by the rejection rate.
 
-**Verdict: split across two issues.** #68 hardens intake going forward: repair before rejection
-(recompute `classID` and `subclassID` from `itemID`, which is where `CreateTxRecord` gets them anyway),
-then reject on three checks (`type` in the enum, exactly one of `itemID` or `amount`, known fields hold
-the right type), plus a real reject counter. #75 repairs what is already stored, using the same repair
-helper and the id recovery channel above, deleting only records whose id is also unusable and taking
-their `seenTxHashes` entries with them.
+Since #68 a reject is counted apart from duplicates, per chunk and for the session, and counted again
+under the field whose check failed. The end of every receive that rejected anything names both in a
+WARN line (`Rejected N record(s) from <peer>: <fields>`). The SYNC_RECEIPT carries them back to the
+peer as well, because the peer holding the records is the only side that can act on them, but a
+receipt is sent only for a session this client asked for that completed, so an aborted receive or an
+unrequested one rejects and logs without telling the sender.
+
+**Verdict: split across two issues.** #68 hardened intake in v0.37.0. `reconstructSyncRecord` now
+opens with `RepairSyncRecordItemFields`, which recomputes a missing `classID` or `subclassID` from
+`itemID` (where `CreateTxRecord` gets them anyway), and then `validateSyncRecord`, which rejects on
+four checks: the known fields holding the right type, `type` in the six-value enum, `player`
+non-empty (the one check kept from before), and exactly one of `itemID` or `amount`. #75 will repair what is already stored, using the same repair helper and the
+id recovery channel above, deleting only records whose id is also unusable and taking their
+`seenTxHashes` entries with them.
 
 **Rejected: validating against a key whitelist.** The first pass listed this as the obvious fix and it
 is the wrong one. Unknown keys passing through untouched is what makes the record schema
@@ -576,7 +629,7 @@ as optional.
 
 ## 9. Numeric keys cross the wire, and now they are tested
 
-The spec mock serializer is pass-through (`spec/mock_ace.lua:161-176`: `Serialize` stashes the table
+The spec mock serializer is pass-through (`serializerMixin` in `spec/mock_ace.lua`: `Serialize` stashes the table
 and returns `"SER:<n>"`, `Deserialize` hands the same table object back), so for the project's whole
 life no test encoded a byte. Numeric key survival and payload size were in-game claims only.
 
@@ -595,7 +648,7 @@ fragment count is measured live as `syncState.lastChunkBytes`.
 
 **The scope named here was too narrow.** This section used to name `stockReserves` and
 `bankLayout.tabs[].items`, both of which ride LAYOUT_DATA, a rare pull. The larger exposure is the
-fingerprint bucket tables: `bucketKeyForRecord` (`src/Fingerprint.lua:106-116`) returns
+fingerprint bucket tables: `bucketKeyForRecord` (`src/Fingerprint.lua`) returns
 `math.floor(...)`, a number, so `bucketHashes` on SYNC_REQUEST is numeric-keyed and crosses the wire
 on **every sync**. (MANIFEST carried a second numeric-keyed `buckets` table until v0.37.6 retired it; the
 SYNC_REQUEST half is unaffected, because it is computed independently and was never fed by the
@@ -682,8 +735,8 @@ one worth remembering is that the mock built a vivified table by deep-copying th
 template, which copies the literal `"*"` key into it, so every `guildData.playerStats` in
 the suite held a phantom player that no client can have. Seven production sites walk that
 table with `pairs`, four of them inside migrations, and two resolve every name they find and
-write it back (`src/Core.lua:761` in `MigrateSchemaV2ToV3`, and `:1704` in
-`RepairPlayerNames`, which is not a migration). So one migration had been storing a
+write it back (the `playerStats` merge in `MigrateSchemaV2ToV3`, and the one in
+`RepairPlayerNames`, which is not a migration; both in `src/Core.lua`). So one migration had been storing a
 resolved phantom for as long as the mock has existed. Nothing went red when it
 disappeared, because nothing had ever asserted what that table contains, only what the
 fixtures put in it.
@@ -700,15 +753,18 @@ before choosing, so it wants a capture rather than a fix. Issue #69, outside the
 population cannot grow through sync (#68 rejects the shape at intake), which is what makes leaving it
 safe.
 
-**Answered: the tab on deposits and withdrawals.** Recorded going forward by #67, riding the floor
-release because it is identity affecting. Old records cannot be back-filled: their true tab was never
+**Answered: the tab on deposits and withdrawals.** Recorded going forward by #67 since v0.37.0, which
+rode the floor release because it is identity affecting. Old records cannot be back-filled: their true tab was never
 written anywhere. See section 4 for the two seams that come with it.
 
 **Answered: whether intake should validate against a key whitelist.** No. See section 8. The mechanism
 behind the splicing is still a hypothesis, and deliberately so: the validation in #68 checks the
 outcome rather than the hypothesis, so it is correct whether or not a lost AceComm fragment turns out
-to be the cause. Rejections get logged with the offending key names, so when sync traffic resumes there
-is evidence rather than another archaeology pass.
+to be the cause. Each rejection is counted under the field whose check failed, and the receive's
+WARN line names those fields (as does its SYNC_RECEIPT, when one is sent), so the evidence builds up as sync runs rather than
+needing another archaeology pass. The field named is the check that failed, not the spliced key
+itself: unknown keys pass intake untouched by design (section 8), so a garbage key alone is never a
+reason to reject.
 
 ## Where the disagreements are tracked
 
@@ -724,7 +780,7 @@ All under the **Data model integrity** milestone.
 | 4 | No deposit or withdraw record knows its tab | closed in v0.37.0 (#67) |
 | 5 | Item records with no `itemID` collide in the money branch | #69 (locally scanned, unscheduled); sync-received closed in v0.37.0 (#68) |
 | 5 | `NormalizeRecordId` can rewrite a money record from an item record | closed in v0.37.0 (#68) |
-| 5 | Sync intake does not normalize the money `type` | #68 |
+| 5 | Sync intake does not normalize the money `type` | closed in v0.37.0 (#68): rejected by the enum check |
 | 7 | Nothing stops the `schemaVersion` default being raised | closed in #76 |
 | 7 | `DeduplicateRecords` cannot restore the version it borrows, and raises on a nil | closed in #263 |
 | 7 | One guild's failed migration strands every guild after it in the walk | closed in #263 |
