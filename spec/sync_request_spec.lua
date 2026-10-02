@@ -401,6 +401,251 @@ describe("Sync request and serve", function()
             end)
         end)
 
+        -- The mirror of #308. A peer that is sending to us can ask us for
+        -- records too, most often as the zero-chunk resend of a request that
+        -- crossed ours on the wire. A BUSY from the gate's zone term makes it
+        -- end its send to us as well as the receive it opened, and our paused
+        -- receive is left with no sender (#318). The request is dropped
+        -- instead, and that peer's own resend asks again after our tail.
+        describe("the peer we are receiving from, through a loading screen (#318)",
+        function()
+            local BASE_SLOT = 476000
+
+            local function startReceiving(peer)
+                GBL:RequestSync(peer, 0)
+                local status = GBL:GetSyncStatus()
+                assert.is_true(status.receiving, "fixture: the receive should be live")
+                assert.equals(peer, status.receiveSource)
+                assert.is_false(status.sending, "fixture: we are not serving that peer")
+                MockAce.sentCommMessages = {}
+                GBL:ClearLog("sync")
+            end
+
+            local function ignoreLine(peer)
+                for _, entry in ipairs(GBL:GetAuditTrail()) do
+                    if entry.message and entry.message:find(
+                        "Ignoring SYNC_REQUEST from " .. peer, 1, true) then
+                        return entry
+                    end
+                end
+                return nil
+            end
+
+            local function assertReceiveIntact(peer)
+                local status = GBL:GetSyncStatus()
+                assert.is_true(status.receiving, "our receive from that peer must survive")
+                assert.equals(peer, status.receiveSource)
+            end
+
+            -- Past one tick's budget, so a preparation is still running when
+            -- the accepting call returns (the seed in "serve prep teardown").
+            local function seedPastOneTick()
+                for i = 1, GBL.SYNC_PREP_RECORDS_PER_TICK + 50 do
+                    local slot = BASE_SLOT + i
+                    table.insert(guildData.transactions, {
+                        type = "deposit", player = "P" .. i, itemID = 1000, count = 1,
+                        tab = 1, timestamp = slot * 3600, scanTime = slot * 3600,
+                        scannedBy = "OfficerA", id = "d|" .. slot .. ":0",
+                    })
+                end
+                GBL:ResetHashCache()
+            end
+
+            it("drops its request during the pause, with no BUSY", function()
+                startReceiving("PeerB")
+                GBL:OnLoadingScreenStart()
+                assert.is_true(GBL:GetSyncStatus().zonePaused,
+                    "fixture: the loading screen pauses the receive")
+
+                GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
+
+                assert.equals(0, #Sync.busySent(GBL),
+                    "a BUSY would make that peer end its send to us")
+                assert.is_nil(declineLine("PeerB"),
+                    "a request from our own receive source is not a decline")
+                assert.is_false(GBL:GetSyncStatus().sending,
+                    "nothing is served inside the pause either")
+                assertReceiveIntact("PeerB")
+            end)
+
+            it("drops it in the tail", function()
+                startReceiving("PeerB")
+                GBL:OnLoadingScreenStart()
+                GBL:OnLoadingScreenEnd()
+                assert.equals(1, Helpers.timersAt(GBL.SYNC_ZONE_COOLDOWN),
+                    "fixture: the zone cooldown has not run out")
+                assert.is_true(GBL:GetSyncStatus().zonePaused)
+
+                GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
+
+                assert.equals(0, #Sync.busySent(GBL),
+                    "a BUSY would make that peer end its send to us")
+                assert.is_nil(declineLine("PeerB"))
+                assert.is_false(GBL:GetSyncStatus().sending)
+                assertReceiveIntact("PeerB")
+            end)
+
+            it("serves the peer's next request once the tail has run out", function()
+                startReceiving("PeerB")
+                GBL:OnLoadingScreenStart()
+                GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
+                assert.equals(0, #Sync.busySent(GBL),
+                    "the request in the pause draws no BUSY")
+                GBL:OnLoadingScreenEnd()
+
+                -- The tail runs out clear of the gap floor.
+                MockWoW.serverTime = MockWoW.serverTime + 10
+                Helpers.fireTimersAt(GBL.SYNC_ZONE_COOLDOWN)
+                assert.is_false(GBL:GetSyncStatus().zonePaused)
+
+                -- That peer's own resend, from its receive timer.
+                GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
+
+                assert.is_true((sentTo("PeerB")["SYNC_DATA"] or 0) > 0,
+                    "the resend after the tail is served")
+                local status = GBL:GetSyncStatus()
+                assert.is_true(status.sending)
+                assert.equals("PeerB", status.sendTarget)
+                assertReceiveIntact("PeerB")
+                assert.equals(0, #Sync.busySent(GBL),
+                    "no BUSY anywhere in the exchange")
+                -- The receive came back from the pause rather than merely
+                -- surviving it: the cooldown re-armed its timer.
+                assert.equals(1, Helpers.timersAt(GBL._nackBackoff(0)),
+                    "the resumed receive should have its timeout armed again")
+            end)
+
+            -- Our loading screen abandons a preparation for that peer, so we
+            -- are no longer sending to it and #308's ignore cannot match.
+            it("drops the resend after a loading screen abandoned our preparation",
+            function()
+                seedPastOneTick()
+                GBL:RequestSync("PeerB", 0)
+                GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
+                assert.is_true(GBL:GetSyncStatus().preparing,
+                    "fixture: a preparation for that peer is running")
+                GBL:OnLoadingScreenStart()
+                assert.is_false(GBL:GetSyncStatus().sending,
+                    "fixture: the loading screen abandons the preparation")
+                MockAce.sentCommMessages = {}
+
+                GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
+
+                assert.equals(0, #Sync.busySent(GBL),
+                    "a BUSY would make that peer end its send to us")
+                assertReceiveIntact("PeerB")
+            end)
+
+            -- A DEBUG line never reaches a capture, and the peer's own log
+            -- reads the drop as a request that got no answer. This line is
+            -- what joins the two.
+            it("names the drop in the sync log at INFO", function()
+                startReceiving("PeerB")
+                GBL:OnLoadingScreenStart()
+
+                GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
+
+                local entry = ignoreLine("PeerB")
+                assert.is_truthy(entry, "a capture has to show the request arrived")
+                assert.equals("INFO", entry.level, "a DEBUG line never reaches a capture")
+                assert.is_truthy(entry.message:find(
+                    "(zone cooldown), receiving from them", 1, true),
+                    "got: " .. entry.message)
+            end)
+
+            it("drops it when the receive is one we did not ask for", function()
+                GBL:HandleSyncData("PeerB", {
+                    chunk = 1, totalChunks = 3,
+                    transactions = {
+                        {
+                            type = "deposit", player = "Thrall",
+                            itemID = 12345, count = 5, tab = 1,
+                            timestamp = 2000, scanTime = 2000,
+                            scannedBy = "OfficerB",
+                            id = "deposit|Thrall|12345|5|1|0",
+                        },
+                    },
+                    moneyTransactions = {},
+                    protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                    guild = "Test Guild",
+                })
+                assertReceiveIntact("PeerB")
+                assert.is_false(GBL:GetSyncStateForTests().receiveRequested,
+                    "fixture: the auto-bootstrap opened this receive")
+                GBL:OnLoadingScreenStart()
+                MockAce.sentCommMessages = {}
+
+                GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
+
+                assert.equals(0, #Sync.busySent(GBL),
+                    "a BUSY would make that peer end its send to us")
+                assertReceiveIntact("PeerB")
+            end)
+
+            it("still turns a third peer away with BUSY loading", function()
+                startReceiving("PeerB")
+                GBL:OnLoadingScreenStart()
+
+                GBL:HandleSyncRequest("PeerC", request{ sinceTimestamp = 0 })
+
+                local busy = Sync.busySent(GBL)
+                assert.equals(1, #busy, "the third peer is told to wait")
+                assert.equals("PeerC", busy[1].target)
+                assert.equals("NORMAL", busy[1].prio)
+                assert.equals("loading", busy[1].reason)
+                local line = declineLine("PeerC")
+                assert.is_not_nil(line, "the decline has to name itself in the capture")
+                assert.is_not_nil(line:find("(zone cooldown) - sent BUSY", 1, true),
+                    "got: " .. line)
+                assert.is_nil(ignoreLine("PeerC"))
+                assertReceiveIntact("PeerB")
+            end)
+
+            it("serves it outside a loading screen", function()
+                startReceiving("PeerB")
+
+                GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
+
+                assert.is_true((sentTo("PeerB")["SYNC_DATA"] or 0) > 0,
+                    "sending and receiving with one peer at once is by design")
+                assert.equals(0, #Sync.busySent(GBL))
+                assert.is_nil(ignoreLine("PeerB"))
+                assertReceiveIntact("PeerB")
+            end)
+
+            -- Not a state play reaches: combat start closes any receive, and
+            -- every way into one checks both combat terms. It pins that the
+            -- drop keys on the loading screen alone, so live combat keeps the
+            -- answer the combat policy gives everywhere else.
+            it("answers live combat with BUSY combat, ahead of the drop", function()
+                startReceiving("PeerB")
+                GBL:OnLoadingScreenStart()
+
+                inCombat(function()
+                    GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
+                end)
+
+                local busy = Sync.busySent(GBL)
+                assert.equals(1, #busy)
+                assert.equals("PeerB", busy[1].target)
+                assert.equals("combat", busy[1].reason)
+                assert.is_nil(ignoreLine("PeerB"))
+            end)
+
+            it("matches the peer by its canonical name", function()
+                assert.equals("PeerB", GBL:CanonicalPeerKey("PeerB-TestRealm"),
+                    "fixture: a same-realm qualified name canonicalises to the bare one")
+                startReceiving("PeerB")
+                GBL:OnLoadingScreenStart()
+
+                GBL:HandleSyncRequest("PeerB-TestRealm", request{ sinceTimestamp = 0 })
+
+                assert.equals(0, #Sync.busySent(GBL),
+                    "the same peer, named with its realm, is still our receive source")
+                assertReceiveIntact("PeerB")
+            end)
+        end)
+
         -- The version gate stays ahead of this one. BUSY reads as "try again
         -- shortly", which would drive an incompatible peer's retry loop for as
         -- long as it stays on the old version, in combat or out of it.
