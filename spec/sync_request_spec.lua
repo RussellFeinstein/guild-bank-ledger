@@ -1872,6 +1872,25 @@ describe("Sync request and serve", function()
             assertChainIsDead()
         end)
 
+        -- A refusal word answers a request of ours, so the serve PeerA asked
+        -- for goes on (#323). combat, above, still abandons it.
+        it("keeps preparing when the peer's BUSY only refuses our request", function()
+            startPrep()
+
+            GBL:HandleBusy("PeerA", { reason = "sending:PeerC" })
+
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "PeerA refused a request of ours, not the serve it asked for")
+            assert.is_true(auditHas(
+                "PeerA busy - refused our request, our serve preparation continues"))
+            assert.is_false(auditHas("abandoned serve preparation"))
+
+            Helpers.drainZeroDelayTimers()
+
+            assert.is_true(dataSent() > 0,
+                "the serve goes out once the preparation finishes")
+        end)
+
         it("records no tranche when BUSY abandons the preparation", function()
             startPrep()
             GBL:HandleBusy("PeerA", { reason = "combat" })
