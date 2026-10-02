@@ -4,9 +4,9 @@
 -- docs/DATA-MODEL.md section 2 rests on one AceDB behaviour: a value equal to
 -- its default is stripped before the file is written, so absence from the file
 -- means "never diverged from the default" rather than "missing". That single
--- fact explains the five declared-and-absent keys, decides what #71 does about
--- eventCounts, and is why raising the schemaVersion default would strand guilds
--- past migrations 9 to 11 (#76).
+-- fact explains the four declared-and-absent keys, is why an empty eventCounts
+-- stopped reaching the file once #71 declared it, and is why raising the
+-- schemaVersion default would strand guilds past migrations 9 to 11 (#76).
 --
 -- None of it was executable before #77: spec/mock_ace.lua modelled a login
 -- (copyDefaults) and never a logout (removeDefaults), so every claim in that
@@ -68,27 +68,32 @@ local function sortedKeys(t)
     return keys
 end
 
--- Every key declared under guilds["*"] in src/Core.lua. Seventeen.
+-- Every key declared under guilds["*"] in src/Core.lua. Seventeen: #71
+-- declared eventCounts and removed snapshots, which nothing had ever written.
 local DECLARED = {
-    "accessControl", "altLinks", "bankLayout", "knownPeers", "moneyTransactions",
-    "playerRealms", "playerStats", "restock", "schemaVersion", "seenTxHashes",
-    "snapshots", "sortAccess", "stockAlerts", "stockReserves", "syncState",
+    "accessControl", "altLinks", "bankLayout", "eventCounts", "knownPeers",
+    "moneyTransactions", "playerRealms", "playerStats", "restock", "schemaVersion",
+    "seenTxHashes", "sortAccess", "stockAlerts", "stockReserves", "syncState",
     "teams", "transactions",
 }
 table.sort(DECLARED)  -- compared against sortedKeys, so the order is the mechanism
 
--- Section 2's "declared but absent, and why that is normal" table. Five.
+-- Section 2's "declared but absent, and why that is normal" table. Four.
 -- dailySummaries and weeklySummaries left this list when #62 removed the tiered
--- storage module along with their declarations.
+-- storage module along with their declarations, and snapshots when #71 removed
+-- its declaration.
 local ABSENT_WHEN_UNTOUCHED = {
-    "altLinks", "restock", "snapshots", "stockAlerts", "teams",
+    "altLinks", "restock", "stockAlerts", "teams",
 }
 
--- The twelve declared keys section 2 lists as reaching disk. The thirteenth,
--- eventCounts, is undeclared and has its own describe below.
+-- The thirteen declared keys section 2 lists as reaching disk. eventCounts was
+-- the thirteenth on disk and undeclared until #71.
 local SURVIVES_WHEN_DIVERGED = {
     { key = "accessControl", diverge = function(g) g.accessControl.configuredAt = 500 end },
     { key = "bankLayout", diverge = function(g) g.bankLayout.version = 2 end },
+    { key = "eventCounts", diverge = function(g)
+        g.eventCounts["h:475100"] = { count = 2, asOf = 1710360000 }
+    end },
     { key = "knownPeers", diverge = function(g) g.knownPeers["Bob-Realm"] = { txCount = 1 } end },
     { key = "moneyTransactions", diverge = function(g) g.moneyTransactions[1] = { id = "m:0" } end },
     { key = "playerRealms", diverge = function(g) g.playerRealms["Bob"] = "Realm" end },
@@ -132,7 +137,7 @@ describe("SavedVariables", function()
         end)
 
         it("accounts for every declared key as either absent or surviving", function()
-            -- 5 + 12 = 17. This is the arithmetic section 2 turns on, and it is
+            -- 4 + 13 = 17. This is the arithmetic section 2 turns on, and it is
             -- what catches a key added to the defaults block and to neither list.
             local accounted = {}
             for _, k in ipairs(ABSENT_WHEN_UNTOUCHED) do accounted[#accounted + 1] = k end
@@ -163,7 +168,7 @@ describe("SavedVariables", function()
             assert.equals(11, guild.schemaVersion)
         end)
 
-        it("strips the five keys section 2 records as declared and absent", function()
+        it("strips the four keys section 2 records as declared and absent", function()
             -- Touched only by being read, which is what a real client does on
             -- every login, so this is the ordinary case rather than a corner.
             local guild = db.global.guilds["TestGuild"]
@@ -233,24 +238,48 @@ describe("SavedVariables", function()
     end)
 
     ---------------------------------------------------------------------------
-    -- eventCounts: the reverse case, and the one #71 changes
+    -- eventCounts: written undeclared until #71, declared since
     ---------------------------------------------------------------------------
 
     describe("eventCounts", function()
-        it("survives the strip even when empty, because it is undeclared", function()
-            -- An undeclared key is never subject to default stripping, so it is
-            -- written out verbatim. Declaring it (#71) changes exactly this, and
-            -- this assertion is what will have to be rewritten when it does.
+        it("is present at runtime on a guild that never kept a count", function()
+            -- What declaring it buys: copyDefaults puts it back at every login,
+            -- so a reader finds a table on a fresh profile as well.
             local guild = db.global.guilds["TestGuild"]
-            guild.eventCounts = {}
-            guild.schemaVersion = 11
-
-            db:_simulateLogout()
-            assert.is_not_nil(rawget(diskGuild(), "eventCounts"))
+            assert.is_table(rawget(guild, "eventCounts"))
+            assert.same({}, sortedKeys(guild.eventCounts))
         end)
 
-        it("is not in the declared set", function()
-            assert.is_nil(rawget(db.global.guilds["TestGuild"], "eventCounts"))
+        it("is stripped when empty, like every other declared table", function()
+            -- The one change #71 makes to the file. Undeclared, an empty table
+            -- (what the lazy create in StoreBatchRecords leaves when a scan has
+            -- no counts to keep) was written out verbatim. Declared, it is
+            -- stripped, so its absence now means no count was ever kept.
+            local guild = db.global.guilds["TestGuild"]
+            guild.eventCounts = {}
+            guild.schemaVersion = 11  -- so the guild itself survives
+
+            db:_simulateLogout()
+            assert.is_nil(rawget(diskGuild(), "eventCounts"))
+        end)
+
+        it("keeps a guild's counts through a logout and the next login", function()
+            -- The upgrade path: a guild already in the file arrives holding
+            -- counts, and copyDefaults re-applies the template over them. The
+            -- table is assigned whole rather than added to, so this holds with
+            -- or without the declaration, and the expectation is a separate
+            -- literal, so a strip that emptied the table in place cannot agree
+            -- with itself.
+            db.global.guilds["TestGuild"].eventCounts = {
+                ["h:475100"] = { count = 2, asOf = 1710360000 },
+            }
+            db:_simulateLogout()
+            db:_simulateLogin()
+
+            assert.same(
+                { ["h:475100"] = { count = 2, asOf = 1710360000 } },
+                db.global.guilds["TestGuild"].eventCounts
+            )
         end)
     end)
 
@@ -631,7 +660,7 @@ describe("SavedVariables", function()
             assert.same(theirs, mine)
         end)
 
-        it("agrees on the five declared-and-absent keys after a read", function()
+        it("agrees on the four declared-and-absent keys after a read", function()
             local mine, theirs = bothImages(function(g)
                 for _, key in ipairs(ABSENT_WHEN_UNTOUCHED) do
                     local _ = g[key]
@@ -651,11 +680,51 @@ describe("SavedVariables", function()
         end)
 
         it("agrees that an undeclared key survives the strip", function()
+            -- No key in the defaults block is undeclared since #71, so a probe
+            -- name stands in for one. The property still carries weight: a key
+            -- a newer build adds is undeclared to an older build, and it has to
+            -- survive that build's strip.
+            local mine, theirs = bothImages(function(g)
+                g.undeclaredProbe = {}
+                g.schemaVersion = 11
+            end)
+            assert.is_not_nil(rawget(mine.guilds.TestGuild, "undeclaredProbe"))
+            assert.same(theirs, mine)
+        end)
+
+        it("agrees that an empty eventCounts is stripped", function()
             local mine, theirs = bothImages(function(g)
                 g.eventCounts = {}
                 g.schemaVersion = 11
             end)
+            assert.is_nil(rawget(mine.guilds.TestGuild, "eventCounts"))
             assert.same(theirs, mine)
+        end)
+
+        it("agrees that a guild's counts come back after a login over the file", function()
+            -- The upgrade path on both sides. A real AceDB built a second time
+            -- over the same table is the next login over that file.
+            local defaults = db._defaults
+            local function seed(g)
+                g.eventCounts = { ["h:475100"] = { count = 2, asOf = 1710360000 } }
+            end
+
+            local savedInstance = MockAce.dbInstance
+            local mine = _G.LibStub("AceDB-3.0"):New("GuildBankLedgerDB", defaults)
+            MockAce.dbInstance = savedInstance
+            seed(mine.global.guilds["TestGuild"])
+            mine:_simulateLogout()
+            mine:_simulateLogin()
+
+            local sv = {}
+            local theirs = RealAceDB:New(sv, defaults)
+            seed(theirs.global.guilds["TestGuild"])
+            theirs:RegisterDefaults(nil)
+            local again = RealAceDB:New(sv, defaults)
+
+            local expected = { ["h:475100"] = { count = 2, asOf = 1710360000 } }
+            assert.same(expected, again.global.guilds["TestGuild"].eventCounts)
+            assert.same(expected, mine.global.guilds["TestGuild"].eventCounts)
         end)
 
         it("agrees on what a fresh vivification contains", function()
