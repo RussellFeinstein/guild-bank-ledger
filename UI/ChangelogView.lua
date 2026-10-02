@@ -29,6 +29,27 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.41.24
+    {"0.41.24", "2026-10-01", {
+        Fixed = {
+            "A late piece of sync data from a guildmate who had already stopped sending could leave your addon waiting on a sync it never asked for, for over two minutes, and every chance to pull new data from the guild in that time was turned down. This was most likely right after a short fight. Your addon now closes a sync it did not ask for once 20 seconds pass with nothing arriving, notes it in the sync log, and goes back to pulling as usual. If that guildmate was in fact still sending and had only paused, their next piece starts the sync again, unless your addon has begun a sync with someone else by then. In that case their sync with you ends, and what it had left comes in a later sync.",
+            "A sync that opened while your addon was still reading your guild's name, and so could not use what arrived, no longer sends that guildmate a sync request your addon never decided to make after a loading screen. It closes instead.",
+        },
+    }},
+    -- v0.41.23
+    {"0.41.23", "2026-10-01", {
+        Fixed = {
+            "A loading screen in the middle of a sync no longer makes your addon tell the guildmate it is sending to that it is busy. When that guildmate asked again during the loading screen, the busy reply made their addon stop its side of the sync with you, including anything it was sending you, and yours could then wait over two minutes for chunks that were never coming. Your addon now lets the repeated request go unanswered, notes it in the sync log, and picks the sync back up once the loading screen is over.",
+            "When your addon turns down a guildmate's sync request during a loading screen, a guildmate on version 0.37.16 or later now sees \"reason: loading\" in their sync log. It used to say \"reason: combat\", which read as if you were in a fight.",
+        },
+    }},
+    -- v0.41.22
+    {"0.41.22", "2026-10-01", {
+        Fixed = {
+            "When combat stops a sync, the message telling your guildmate's addon that yours is busy now waits behind anything your addon was still sending them. Before, it could arrive first. Their addon could then take a chunk that was already on its way as the start of a new sync and wait over two minutes for the rest, or start preparing a sync you had asked for just before the fight, which your addon then had to turn away.",
+            "When combat stops a sync with a guildmate who has just gone offline, the sync log no longer says your addon told them it was busy. The message never left.",
+        },
+    }},
     -- v0.41.21
     {"0.41.21", "2026-10-01", {
         Fixed = {

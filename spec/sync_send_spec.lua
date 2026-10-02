@@ -885,7 +885,9 @@ describe("Sync send path", function()
         it("receiver sends NACK on chunk timeout instead of aborting", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Set up receiver state: received chunk 1, waiting for chunk 2
+            -- Set up receiver state: received chunk 1, waiting for chunk 2.
+            -- Requested, since only a session we asked for NACKs (#309).
+            GBL:RequestSync("OfficerB", 0)
             GBL:HandleSyncData("OfficerB", {
                 type = "SYNC_DATA", chunk = 1, totalChunks = 3,
                 transactions = {{
@@ -951,7 +953,9 @@ describe("Sync send path", function()
         it("receiver aborts after MAX_NACK_RETRIES for same chunk", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Set up receiver — got chunk 1, waiting for chunk 2
+            -- Set up receiver: got chunk 1, waiting for chunk 2.
+            -- Requested, since only a session we asked for NACKs (#309).
+            GBL:RequestSync("OfficerB", 0)
             GBL:HandleSyncData("OfficerB", {
                 type = "SYNC_DATA", chunk = 1, totalChunks = 3,
                 transactions = {{
@@ -981,7 +985,9 @@ describe("Sync send path", function()
         it("NACK counter resets on successful chunk receipt", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Receive chunk 1
+            -- Receive chunk 1 of a session we asked for: only that kind
+            -- NACKs (#309).
+            GBL:RequestSync("OfficerB", 0)
             GBL:HandleSyncData("OfficerB", {
                 type = "SYNC_DATA", chunk = 1, totalChunks = 4,
                 transactions = {{
@@ -1216,7 +1222,9 @@ describe("Sync send path", function()
         it("uses progressive delays for successive NACKs", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Receive chunk 1 of 3 (triggers timeout for chunk 2)
+            -- Receive chunk 1 of 3 (triggers timeout for chunk 2), in a
+            -- session we asked for: only that kind NACKs (#309).
+            GBL:RequestSync("OfficerB", 0)
             GBL:HandleSyncData("OfficerB", {
                 chunk = 1, totalChunks = 3,
                 transactions = {}, moneyTransactions = {},
@@ -1253,7 +1261,9 @@ describe("Sync send path", function()
         it("resets backoff after successful chunk receipt", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
-            -- Receive chunk 1 of 4
+            -- Receive chunk 1 of 4, in a session we asked for: only that
+            -- kind NACKs (#309).
+            GBL:RequestSync("OfficerB", 0)
             GBL:HandleSyncData("OfficerB", {
                 chunk = 1, totalChunks = 4,
                 transactions = {}, moneyTransactions = {},
@@ -3244,6 +3254,8 @@ describe("Sync send path", function()
                 { name = "OfficerB-TestRealm", isOnline = true },
             }
 
+            -- Requested, since only a session we asked for NACKs (#309).
+            GBL:RequestSync("OfficerB", 0)
             GBL:HandleSyncData("OfficerB", {
                 chunk = 1, totalChunks = 3,
                 transactions = {}, moneyTransactions = {},
@@ -3253,10 +3265,10 @@ describe("Sync send path", function()
             MockAce.sentCommMessages = {}
 
             -- Fire timeout — should send NACK (sender is online)
-            fireReceiveTimeout()
+            assert.is_true(fireReceiveTimeout(), "a receive timer must be armed")
 
             assert.is_true(GBL:GetSyncStatus().receiving)
-            assert.is_true(#MockAce.sentCommMessages >= 1)
+            assert.equals(1, #Sync.messagesOfType(GBL, "NACK", "OfficerB"))
         end)
 
         it("proceeds with NACK when sender not found in roster", function()
@@ -3264,6 +3276,8 @@ describe("Sync send path", function()
                 { name = "OfficerA-TestRealm", isOnline = true },
             }
 
+            -- Requested, since only a session we asked for NACKs (#309).
+            GBL:RequestSync("OfficerB", 0)
             GBL:HandleSyncData("OfficerB", {
                 chunk = 1, totalChunks = 3,
                 transactions = {}, moneyTransactions = {},
@@ -3273,14 +3287,17 @@ describe("Sync send path", function()
             MockAce.sentCommMessages = {}
 
             -- Fire timeout — nil return means proceed with NACK
-            fireReceiveTimeout()
+            assert.is_true(fireReceiveTimeout(), "a receive timer must be armed")
 
             assert.is_true(GBL:GetSyncStatus().receiving)
+            assert.equals(1, #Sync.messagesOfType(GBL, "NACK", "OfficerB"))
         end)
 
         it("proceeds with NACK when roster is empty", function()
             MockWoW.guildRoster = {}
 
+            -- Requested, since only a session we asked for NACKs (#309).
+            GBL:RequestSync("OfficerB", 0)
             GBL:HandleSyncData("OfficerB", {
                 chunk = 1, totalChunks = 3,
                 transactions = {}, moneyTransactions = {},
@@ -3289,9 +3306,10 @@ describe("Sync send path", function()
             })
             MockAce.sentCommMessages = {}
 
-            fireReceiveTimeout()
+            assert.is_true(fireReceiveTimeout(), "a receive timer must be armed")
 
             assert.is_true(GBL:GetSyncStatus().receiving)
+            assert.equals(1, #Sync.messagesOfType(GBL, "NACK", "OfficerB"))
         end)
     end)
 

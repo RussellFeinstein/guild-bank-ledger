@@ -333,9 +333,10 @@ GBL._nackBackoff = nackBackoff
 -- will free up on its own schedule; one entering combat may be gone for the
 -- length of a fight), and the receiver could not tell them apart. Three sends
 -- killed by BUSY in the 2026-08-12 capture are still unexplained for that
--- reason. Shipped values are "combat", "sending:<peer>", "preparing:<peer>"
--- and "disabled"; the receiver treats the field as an opaque string, so a
--- later producer adds a value without touching the wire contract. Issue #97.
+-- reason. Shipped values are "combat", "loading" (#308), "sending:<peer>",
+-- "preparing:<peer>" and "disabled"; the receiver treats the field as an
+-- opaque string, so a later producer adds a value without touching the wire
+-- contract. Issue #97.
 -- @param reason string Why we are busy
 -- @return table BUSY message
 function GBL:BuildBusyMessage(reason)
@@ -348,6 +349,7 @@ function GBL:BuildBusyMessage(reason)
 end
 
 --- Whisper one BUSY to each partner of a session that has just ended.
+-- Called by DisableSync (#279) and OnCombatStart (#291).
 --
 -- NORMAL priority, the same as the chunks and requests we send a partner:
 -- an ALERT BUSY can leave ahead of one still queued at NORMAL, and the peer
@@ -531,12 +533,15 @@ end
 -- can carry one term alone. The zone term is the serve gate's: a loading
 -- screen sends nobody a BUSY, so a chunk landing in its tail comes from a
 -- guildmate still sending, and the bootstrap takes it (#289).
+-- The second return is the BUSY reason the refused peer's log reads. A loading
+-- screen has its own, so that log does not report a fight (#308).
 -- @param withZone boolean Also refuse through a loading screen's pause and tail
 -- @return string|nil "in combat", "zone cooldown" or "combat cooldown"
+-- @return string|nil "combat" or "loading"
 local function combatGateReason(withZone)
-    if InCombatLockdown and InCombatLockdown() then return "in combat" end
-    if withZone and syncState.zonePaused then return "zone cooldown" end
-    if syncState.combatPaused then return "combat cooldown" end
+    if InCombatLockdown and InCombatLockdown() then return "in combat", "combat" end
+    if withZone and syncState.zonePaused then return "zone cooldown", "loading" end
+    if syncState.combatPaused then return "combat cooldown", "combat" end
     return nil
 end
 
@@ -546,8 +551,9 @@ end
 -- out.
 -- @param peer string The sender, as AceComm gave it
 -- @param what string The refusal, e.g. "Declined sync from X (in combat)"
-local function refuseForCombat(self, peer, what)
-    local busy = compressMessage(self:Serialize(self:BuildBusyMessage("combat")))
+-- @param word string The BUSY reason, combatGateReason's second return
+local function refuseForCombat(self, peer, what, word)
+    local busy = compressMessage(self:Serialize(self:BuildBusyMessage(word)))
     local sent = self:SendSyncWhisper(PREFIX, busy, peer, "NORMAL")
     self:SyncInfo("%s%s", what, sent and " - sent BUSY" or "")
 end
@@ -2550,6 +2556,23 @@ function GBL:HandleSyncRequest(sender, data)
         return
     end
 
+    -- A peer whose request went missing resends it, and the resend can
+    -- arrive while we are already answering the first one. Answering that
+    -- with BUSY would make it abort the receive we are feeding right now
+    -- (HandleBusy tears down the receive it names, and its own send to us if
+    -- it holds one), so a duplicate from the peer we are already serving is
+    -- simply ignored. Above the serve gate, because a loading screen pauses
+    -- our send rather than ending it, and the gate's zone term would answer
+    -- this peer for the whole pause and its tail (#308). INFO, because a DEBUG
+    -- line never reaches a capture, where a swallowed repeat would then read
+    -- as one lost on the wire.
+    if syncState.sending
+        and self:CanonicalPeerKey(sender) == self:CanonicalPeerKey(syncState.sendTarget) then
+        self:SyncInfo("Ignoring repeat SYNC_REQUEST from %s, already sending to them",
+            self:CanonicalPeerKey(sender))
+        return
+    end
+
     -- Combat is no time to spend the main thread on a backfill, and serving
     -- was a door in that policy with no check on it (the auto-bootstrap in
     -- HandleSyncData was another, #289). HandleHello defers
@@ -2561,28 +2584,19 @@ function GBL:HandleSyncRequest(sender, data)
     -- the retry past the fight. The pause flags cover the transition tails,
     -- where the live API already reads false. Sits after the version gate so
     -- an incompatible peer keeps getting silence rather than a retry signal,
-    -- and ahead of every piece of prep state so a refused request allocates
-    -- nothing.
-    local gateReason = combatGateReason(true)
+    -- after the same-peer ignore so it never answers the peer our paused send
+    -- is feeding, and ahead of every piece of prep state so a refused request
+    -- allocates nothing.
+    local gateReason, busyWord = combatGateReason(true)
     if gateReason then
         refuseForCombat(self, sender, "Declined sync from " .. sender
-            .. " (" .. gateReason .. ")")
+            .. " (" .. gateReason .. ")", busyWord)
         return
     end
 
     if syncState.sending then
-        -- A peer whose request went missing resends it, and the resend can
-        -- arrive while we are already answering the first one. Answering that
-        -- with BUSY would make it abort the receive we are feeding right now
-        -- (HandleBusy tears down the receive it names), so a duplicate from
-        -- the peer we are already serving is simply ignored. BUSY still goes
-        -- to anyone else, who genuinely does need to try later.
-        if self:CanonicalPeerKey(sender) == self:CanonicalPeerKey(syncState.sendTarget) then
-            self:SyncDebug("Ignoring repeat SYNC_REQUEST from %s, already sending to them",
-                self:CanonicalPeerKey(sender))
-            return
-        end
-
+        -- Anyone but the peer we are serving, who was ignored above,
+        -- genuinely does need to try later, so they get BUSY.
         self:AddAuditEntry("Declined sync from " .. sender
             .. " (already sending to " .. (syncState.sendTarget or "?") .. ")")
         -- Send BUSY so requester doesn't wait 60s for data that will never come.
@@ -3759,12 +3773,12 @@ function GBL:HandleSyncData(sender, data)
         -- and refused the pull after it (#289). Refused with BUSY so a sender
         -- that lost the first one hears it again, and flagged so the end of
         -- the fight re-advertises, as HandleHello's combat arm does.
-        local gateReason = combatGateReason(false)
+        local gateReason, busyWord = combatGateReason(false)
         if gateReason then
             syncState.helloAfterCombat = true
             refuseForCombat(self, sender, "Declined chunk "
                 .. tostring(data.chunk or "?") .. " from " .. sender
-                .. " (" .. gateReason .. ")")
+                .. " (" .. gateReason .. ")", busyWord)
             return
         end
         syncState.receiving = true
@@ -3774,7 +3788,9 @@ function GBL:HandleSyncData(sender, data)
         -- what stops a retransmitted FINAL chunk (the ACK was lost, the sender
         -- resends, we are no longer receiving) from bootstrapping a one-chunk
         -- session of pure duplicates and whispering a second receipt reading
-        -- 100% duped for a session that already sent one.
+        -- 100% duped for a session that already sent one. The receive timer
+        -- reads it too: a quiet session we did not ask for closes rather
+        -- than NACKing (#309).
         syncState.receiveRequested = false
         -- Stamped as RequestSync stamps, or the MAX_RECEIVE_DURATION
         -- watchdog never ends this session (#280).
@@ -3782,7 +3798,7 @@ function GBL:HandleSyncData(sender, data)
         if data.chunk and data.chunk > 1 then
             self:AddAuditEntry("Auto-bootstrap at chunk " .. data.chunk
                 .. " from " .. sender
-                .. " (prior abort signal likely missed)")
+                .. " (no receive open: a missed abort, or a quiet stream we closed)")
         end
     elseif self:CanonicalPeerKey(sender) ~= self:CanonicalPeerKey(syncState.receiveSource) then
         -- Reject data from a different sender during active receive
@@ -4679,6 +4695,7 @@ end
 --- Schedule (or reschedule) the receive timeout with NACK backoff.
 -- Cancels any existing receive timer first. Uses progressive delays:
 -- 20s → 30s → 45s (capped). After MAX_NACK_RETRIES, aborts the sync.
+-- A receive we did not ask for closes at its first timeout instead (#309).
 function GBL:ScheduleReceiveTimeout()
     if syncState.receiveTimer then
         syncState.receiveTimer:Cancel()
@@ -4709,6 +4726,15 @@ function GBL:ScheduleReceiveTimeout()
             self:SyncError("Retry limit reached waiting on chunk "
                 .. (syncState.receiveGot + 1) .. " from "
                 .. (syncState.receiveSource or "unknown") .. ", aborting")
+            self:FinishReceiving(syncState.receiveSource)
+        elseif not syncState.receiveRequested then
+            -- We did not ask for this stream, so there is no request to
+            -- repeat (#293's receive reaches here with no chunk counted), and
+            -- a NACK reaches a sender that has stopped, or rewinds a live one
+            -- by an arrival count (#290). No BUSY: a live sender's next chunk
+            -- opens a fresh receive (#309).
+            self:SyncInfo("Unrequested receive from %s went quiet after %d chunk(s), closing",
+                tostring(syncState.receiveSource or "?"), syncState.receiveGot)
             self:FinishReceiving(syncState.receiveSource)
         elseif syncState.receiveGot == 0 then
             -- Nothing has arrived at all, so what went missing is the request,
@@ -4891,7 +4917,7 @@ end
 ------------------------------------------------------------------------
 
 --- Abort sync immediately when combat starts.
--- Sends BUSY to partner, aborts in-progress sync, and sets combatPaused.
+-- Sets combatPaused, aborts the in-progress sync, then BUSYs each partner.
 -- No-op if not actively sending or receiving.
 -- Called by PLAYER_REGEN_DISABLED event.
 function GBL:OnCombatStart()
@@ -4943,18 +4969,9 @@ function GBL:OnCombatStart()
         self:FinishReceiving(receiveSource or "?")
     end
 
-    -- Notify partners via BUSY so they abort immediately. One message serves
-    -- both partners, and the reason is the same for each: we entered combat.
-    local busyMsg = compressMessage(self:Serialize(self:BuildBusyMessage("combat")))
-
-    if sendTarget then
-        self:SendSyncWhisper(PREFIX, busyMsg, sendTarget, "ALERT")
-        self:AddAuditEntry("Sent BUSY to send target: " .. sendTarget)
-    end
-    if receiveSource and receiveSource ~= sendTarget then
-        self:SendSyncWhisper(PREFIX, busyMsg, receiveSource, "ALERT")
-        self:AddAuditEntry("Sent BUSY to receive source: " .. receiveSource)
-    end
+    -- Last, once both sessions are down, so the partners abort too. Through
+    -- the helper, so at NORMAL behind anything still queued to them (#291).
+    self:_SendBusyToPartners("combat", sendTarget, receiveSource)
 end
 
 --- Resume sync after combat ends.
