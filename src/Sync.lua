@@ -334,9 +334,9 @@ GBL._nackBackoff = nackBackoff
 -- length of a fight), and the receiver could not tell them apart. Three sends
 -- killed by BUSY in the 2026-08-12 capture are still unexplained for that
 -- reason. Shipped values are "combat", "loading" (#308), "sending:<peer>",
--- "preparing:<peer>" and "disabled". A later producer adds a value without
--- touching the wire contract (#97); the receiver acts on one only if it is
--- declared in BUSY_REFUSAL_WORDS below.
+-- "preparing:<peer>", "disabled" and "not-sending" (#320). A later producer
+-- adds a value without touching the wire contract (#97); the receiver acts on
+-- one only if it is declared in BUSY_REFUSAL_WORDS below.
 -- @param reason string Why we are busy
 -- @return table BUSY message
 function GBL:BuildBusyMessage(reason)
@@ -348,15 +348,18 @@ function GBL:BuildBusyMessage(reason)
     }
 end
 
--- The BUSY words that only ever answer a SYNC_REQUEST: "loading" from the
+-- The BUSY words that only ever answer a message of ours: "loading" from the
 -- serve gate's zone term, "sending:<peer>" and "preparing:<peer>" from the
--- already-sending decline. One of them from the peer we are sending to
--- refuses a request of ours and says nothing about our send, which that peer
--- may still be receiving, so HandleBusy ends only the receive the request
--- opened (#323). Every other word, an absent one and any this build does not
--- know end both sessions, so a new producer gets that unless it is declared
--- here. Keyed on the part before the colon.
-local BUSY_REFUSAL_WORDS = { loading = true, sending = true, preparing = true }
+-- already-sending decline, all three to a SYNC_REQUEST, and "not-sending" to
+-- a NACK (#320). One of them from the peer we are sending to refuses a
+-- request of ours and says nothing about our send, which that peer may still
+-- be receiving, so HandleBusy ends only the receive the request opened (#323).
+-- Every other word, an absent one and any this build does not know end both
+-- sessions, so a new producer gets that unless it is declared here. Keyed on
+-- the part before the colon.
+local BUSY_REFUSAL_WORDS = {
+    loading = true, sending = true, preparing = true, ["not-sending"] = true,
+}
 
 --- Whether a BUSY reason only refuses a request of ours.
 -- A peer can put anything in the field, and a number or a boolean has no
@@ -1901,7 +1904,9 @@ end
 -- the counters, the source and the start time answering for a session that had
 -- ended; and ResetSyncState held a divergent copy, clearing five counters and
 -- leaving the six per-type and reject ones standing, which is #237's shape at
--- a site that fix did not reach. That is #122's receive half.
+-- a site that fix did not reach. That is #122's receive half. Since #320
+-- HandleBusy reaches it only for a receive no chunk has reached; one with
+-- chunks ends through FinishReceiving, as the NACK ladder's abort does.
 --
 -- It deliberately is NOT FinishReceiving. That function reports on the session
 -- and then calls RefreshUI, which for the Sync tab is a ReleaseChildren
@@ -4785,8 +4790,9 @@ function GBL:ScheduleReceiveTimeout()
         elseif syncState.receiveGot == 0 then
             -- Nothing has arrived at all, so what went missing is the request,
             -- not a chunk. A NACK here would ask the peer to retransmit chunk 1
-            -- of a send it never started, and HandleNack discards it because it
-            -- is not sending: the retry crosses the wire and is thrown away.
+            -- of a send it never started, and since #320 HandleNack answers
+            -- that with BUSY, which would end this receive and hold the peer
+            -- off for BUSY_COOLDOWN over a request that merely went missing.
             -- Repeating the request is the signal that can actually be acted on,
             -- and since the manifest bounded it to a couple of fragments a
             -- resend is likely to survive the route that ate the first one.
@@ -4833,10 +4839,29 @@ function GBL:SendNack(target, chunkIndex)
 end
 
 --- Handle an incoming NACK — re-transmit the requested chunk.
+-- A NACK for a send we are not making is answered with BUSY (#320), except
+-- from our live receive source.
 -- @param sender string Sender name
 -- @param data table Deserialized NACK payload
 function GBL:HandleNack(sender, data)
-    if not syncState.sending or self:CanonicalPeerKey(sender) ~= self:CanonicalPeerKey(syncState.sendTarget) then
+    local key = self:CanonicalPeerKey(sender)
+    if not syncState.sending or key ~= self:CanonicalPeerKey(syncState.sendTarget) then
+        -- We are idle, or serving or preparing for someone else, so this peer
+        -- is NACKing a send of ours that has stopped. Silence left it on its
+        -- whole NACK ladder, 140s; a BUSY ends its receive at the first NACK
+        -- that lands, on any build (#320).
+        local what = "NACK from " .. tostring(sender) .. " for chunk "
+            .. tostring(data and data.chunk or "?") .. ", not sending to them"
+        -- Not to our live receive source: a build without the word reads it
+        -- as ending both sessions, and its send to us is still running. The
+        -- source is nil with no receive open, so no receiving term is needed.
+        if key == self:CanonicalPeerKey(syncState.receiveSource) then
+            self:SyncInfo("%s - no BUSY: receiving from them, and a BUSY would end their send",
+                what)
+            return
+        end
+        local sent = sendBusy(self, sender, "not-sending")
+        self:SyncInfo("%s%s", what, sent and " - sent BUSY" or "")
         return
     end
 
@@ -4893,9 +4918,10 @@ end
 ------------------------------------------------------------------------
 
 --- Handle an incoming BUSY from a peer we are receiving from or sending to.
--- Ends the receive from that peer at once rather than waiting out its timeout.
--- Ends our send to it too, unless the reason is a refusal of a request of
--- ours (BUSY_REFUSAL_WORDS, #323). Either way the peer is left alone for
+-- Ends the receive from that peer at once rather than waiting out its timeout,
+-- through FinishReceiving once a chunk has arrived (#320). Ends our send to it
+-- too, unless the reason is a refusal of a request of ours
+-- (BUSY_REFUSAL_WORDS, #323). Either way the peer is left alone for
 -- BUSY_COOLDOWN. No timer retries: once it has passed, the next HELLO or the
 -- end of a session with that peer asks again.
 -- @param sender string Peer who is busy
@@ -4911,17 +4937,7 @@ function GBL:HandleBusy(sender, data)
         .. " (reason: " .. tostring(reason) .. ")")
     local refusal = busyRefusesRequest(reason)
 
-    -- Clear receiving state if we're waiting for this peer (even with partial data).
-    -- Already-stored records are safe; next sync uses bucket hashes to avoid re-sending.
-    -- A refusal ends this too: the receive is the request it refused.
-    if syncState.receiving
-        and cleanSender == self:CanonicalPeerKey(syncState.receiveSource) then
-        self:_ClearReceiveSession()
-
-        self:AddAuditEntry(cleanSender .. " busy - cleared receive state, will retry later")
-    end
-
-    -- Also end our send if the BUSY came from our send target: the partner
+    -- End our send if the BUSY came from our send target: the partner
     -- entered combat or turned sync off. A refusal is not that. It answers a
     -- request we sent, and the peer may still be receiving our send, which is
     -- the route #323 found: a peer serving us and served by us, whose request
@@ -4969,6 +4985,30 @@ function GBL:HandleBusy(sender, data)
     -- Nothing schedules a retry: they will advertise again, and we answer
     -- once the cooldown has passed.
     syncState.peerBusyUntil[cleanSender] = GetServerTime() + BUSY_COOLDOWN
+
+    -- End the receive if we're waiting for this peer (even with partial data).
+    -- Already-stored records are safe; next sync uses bucket hashes to avoid re-sending.
+    -- A refusal ends this too: the receive is the request it refused. Last,
+    -- because FinishReceiving walks the history and can raise on a corrupt
+    -- record, and the send teardown and the cooldown above must not wait on it.
+    if syncState.receiving
+        and cleanSender == self:CanonicalPeerKey(syncState.receiveSource) then
+        if syncState.receiveGot > 0 then
+            -- A session that took chunks ends the way the NACK ladder's abort
+            -- ends it, which a not-sending BUSY now replaces at the first
+            -- NACK (#320): the checkpoint, the event-count trim, the hash
+            -- cache reset after an in-place id rewrite, the report and the
+            -- post-sync HELLO. Named first, as OnCombatStart names its abort.
+            self:AddAuditEntry(cleanSender .. " busy - ending receive after "
+                .. syncState.receiveGot .. " chunk(s)")
+            self:FinishReceiving(syncState.receiveSource)
+        else
+            -- Nothing arrived, so the BUSY refused the request itself and
+            -- there is no session to report.
+            self:_ClearReceiveSession()
+            self:AddAuditEntry(cleanSender .. " busy - cleared receive state, will retry later")
+        end
+    end
 end
 
 ------------------------------------------------------------------------

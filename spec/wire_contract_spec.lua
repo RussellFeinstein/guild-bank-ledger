@@ -852,6 +852,23 @@ describe("Wire contract", function()
             assert.same(BUSY_KEYS, keySet(refused))
             assert.equals("loading", refused.reason)
         end)
+
+        -- A NACK for a send we are not making has a word of its own (#320),
+        -- so the requester's log reads why its receive ended.
+        it("a NACK we cannot serve draws a BUSY with the same keys, naming not-sending",
+        function()
+            configureGuild()
+            GBL.db.profile.sync.enabled = true
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+
+            local answered = firstOfType(capturePayloads(function()
+                GBL:HandleNack("PeerA", { chunk = 3 })
+            end), "BUSY")
+            assert.is_table(answered, "HandleNack built no BUSY")
+
+            assert.same(BUSY_KEYS, keySet(answered))
+            assert.equals("not-sending", answered.reason)
+        end)
     end)
 
     --------------------------------------------------------------------

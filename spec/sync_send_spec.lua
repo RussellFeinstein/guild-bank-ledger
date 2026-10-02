@@ -1026,7 +1026,10 @@ describe("Sync send path", function()
                 "NACK counter should have reset — still receiving")
         end)
 
-        it("NACK from wrong sender is ignored", function()
+        -- A NACK from someone we are not sending to does not move our send.
+        -- Since #320 it is answered with a BUSY rather than ignored, so the
+        -- peer stops NACKing a send we are not making.
+        it("NACK from wrong sender does not move our send, and draws a BUSY", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
             -- Set up sender
@@ -1035,8 +1038,8 @@ describe("Sync send path", function()
                 scanTime = 1000, id = "nkign:0",
             })
             GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
-
-            local sentBefore = #MockAce.sentCommMessages
+            local progress = GBL:GetSyncStatus().sendProgress
+            MockAce.sentCommMessages = {}
 
             -- NACK from wrong sender
             GBL:HandleNack("OfficerC", { chunk = 1 })
@@ -1049,8 +1052,12 @@ describe("Sync send path", function()
                 end
             end
 
-            -- No new messages should have been sent (NACK was ignored)
-            assert.equals(sentBefore, #MockAce.sentCommMessages)
+            assert.equals(0, #Sync.messagesOfType(GBL, "SYNC_DATA"),
+                "the NACK must not resend OfficerB's chunk")
+            assert.equals(progress, GBL:GetSyncStatus().sendProgress)
+            local busy = Sync.busySent(GBL)
+            assert.equals(1, #busy)
+            assert.equals("OfficerC", busy[1].target)
         end)
 
         it("NACK for out-of-range chunk is ignored", function()
@@ -1083,9 +1090,10 @@ describe("Sync send path", function()
 
         -- Silence at zero chunks means the request itself went missing, so
         -- the thing to repeat is the request. NACKing chunk 1 asks a peer to
-        -- retransmit a chunk it never built, and HandleNack drops it on the
-        -- floor because it is not sending: the retry signal crossed the wire
-        -- and was discarded. Once chunks are arriving the NACK is right again.
+        -- retransmit a chunk it never built, and since #320 HandleNack
+        -- answers that with BUSY, which would end the receive over a request
+        -- that merely went missing. Once chunks are arriving the NACK is
+        -- right again.
         it("resends the request when the timeout fires at zero chunks", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
 
@@ -1203,6 +1211,182 @@ describe("Sync send path", function()
             fireReceiveTimeout()
             assert.is_false(GBL:GetSyncStatus().receiving,
                 "should abort after MAX_RECEIVE_DURATION exceeded")
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- A NACK we cannot serve (#320)
+    --
+    -- A requester whose sender has stopped (a /reload mid-send, the 120s
+    -- send-stall teardown, an ACK ladder run out) NACKed into silence for the
+    -- whole ladder, 140s. A BUSY ends its receive at the first NACK that
+    -- lands, on any build. Our live receive source is the exception: a build
+    -- that does not know the word ends both sessions, and its send to us is
+    -- the one still running.
+    ---------------------------------------------------------------------------
+
+    describe("a NACK we cannot serve (#320)", function()
+        local function hasLine(needle)
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message and entry.message:find(needle, 1, true) then
+                    return true
+                end
+            end
+            return false
+        end
+
+        local function dataSent()
+            return #Sync.messagesOfType(GBL, "SYNC_DATA")
+        end
+
+        --- Serve one peer one record, and hand back a clean slate.
+        local function serve(peer)
+            table.insert(guildData.transactions, {
+                type = "deposit", player = "X", timestamp = 1000,
+                scanTime = 1000, id = "nkserve:" .. peer,
+            })
+            GBL:HandleSyncRequest(peer, request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending,
+                "the fixture must leave a send running")
+            MockAce.sentCommMessages = {}
+            GBL:ClearLog("sync")
+        end
+
+        --- A receive we asked for, with its first chunk in.
+        local function receiveFrom(peer)
+            GBL:RequestSync(peer, 0)
+            GBL:HandleSyncData(peer, {
+                chunk = 1, totalChunks = 3,
+                transactions = {}, moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            })
+            assert.is_true(GBL:GetSyncStatus().receiving,
+                "the fixture must leave a receive open")
+            MockAce.sentCommMessages = {}
+            GBL:ClearLog("sync")
+        end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+        end)
+
+        it("answers with BUSY when we are not sending at all", function()
+            GBL:HandleNack("OfficerB", { chunk = 3 })
+
+            local busy = Sync.busySent(GBL)
+            assert.equals(1, #busy)
+            assert.equals("OfficerB", busy[1].target)
+            assert.equals("not-sending", busy[1].reason)
+            assert.equals("NORMAL", busy[1].prio)
+            assert.is_true(hasLine(
+                "NACK from OfficerB for chunk 3, not sending to them - sent BUSY"))
+        end)
+
+        it("answers with BUSY while preparing a serve for someone else", function()
+            for i = 1, GBL.SYNC_PREP_RECORDS_PER_TICK + 50 do
+                local slot = 476000 + i
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "P" .. i, itemID = 1000, count = 1,
+                    tab = 1, timestamp = slot * 3600, scanTime = slot * 3600,
+                    scannedBy = "OfficerA", id = "d|" .. slot .. ":0",
+                })
+            end
+            GBL:ResetHashCache()
+            GBL:HandleSyncRequest("OfficerB", request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "the fixture must leave a preparation running")
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleNack("OfficerC", { chunk = 1 })
+
+            local busy = Sync.busySent(GBL)
+            assert.equals(1, #busy)
+            assert.equals("OfficerC", busy[1].target)
+            assert.equals("not-sending", busy[1].reason)
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "the serve OfficerB asked for goes on")
+            assert.equals("OfficerB", GBL:GetSyncStatus().sendTarget)
+        end)
+
+        it("answers a peer other than our receive source while we receive", function()
+            receiveFrom("OfficerB")
+
+            GBL:HandleNack("OfficerC", { chunk = 2 })
+
+            local busy = Sync.busySent(GBL)
+            assert.equals(1, #busy)
+            assert.equals("OfficerC", busy[1].target)
+            assert.is_true(GBL:GetSyncStatus().receiving,
+                "our own receive from OfficerB is untouched")
+        end)
+
+        -- A NACK carries the chunk it wants, but the answer does not depend
+        -- on it: there is nothing of ours for any chunk to name.
+        it("answers a NACK that names no chunk", function()
+            GBL:HandleNack("OfficerB", {})
+
+            assert.equals(1, #Sync.busySent(GBL))
+        end)
+
+        it("stays silent to our live receive source", function()
+            receiveFrom("OfficerB")
+
+            GBL:HandleNack("OfficerB", { chunk = 2 })
+
+            assert.equals(0, #MockAce.sentCommMessages,
+                "a BUSY would end OfficerB's send to us on a build without the word")
+            assert.is_true(GBL:GetSyncStatus().receiving)
+            assert.is_true(hasLine("NACK from OfficerB for chunk 2, not sending to them"
+                .. " - no BUSY: receiving from them, and a BUSY would end their send"))
+        end)
+
+        it("stays silent to our receive source while we send to someone else", function()
+            serve("OfficerC")
+            local progress = GBL:GetSyncStatus().sendProgress
+            receiveFrom("OfficerB")
+
+            GBL:HandleNack("OfficerB", { chunk = 2 })
+
+            assert.equals(0, #Sync.busySent(GBL))
+            assert.equals(0, dataSent(), "OfficerC's send is not resent")
+            assert.equals("OfficerC", GBL:GetSyncStatus().sendTarget)
+            assert.equals(progress, GBL:GetSyncStatus().sendProgress)
+        end)
+
+        -- The receive source is stored as the request named it; the NACK
+        -- arrives in whatever form AceComm gives. Both go through
+        -- CanonicalPeerKey, as in HandleBusy.
+        it("knows our receive source by its canonical name", function()
+            receiveFrom("OfficerB")
+
+            GBL:HandleNack("OfficerB-TestRealm", { chunk = 2 })
+
+            assert.equals(0, #Sync.busySent(GBL))
+        end)
+
+        -- The #279 rule: a log never claims a BUSY the roster refused.
+        it("does not claim a BUSY to a requester gone offline", function()
+            MockWoW.guildRoster = {
+                { name = "OfficerB-TestRealm", isOnline = false },
+            }
+
+            GBL:HandleNack("OfficerB", { chunk = 3 })
+
+            assert.equals(0, #Sync.busySent(GBL))
+            assert.is_true(hasLine("NACK from OfficerB for chunk 3, not sending to them"))
+            assert.is_false(hasLine("sent BUSY"))
+        end)
+
+        -- Our own send target's NACK for a chunk we never built is #290's
+        -- and #296's to answer, not this: it stays silent.
+        it("still ignores our send target's NACK for a chunk out of range", function()
+            serve("OfficerB")
+
+            GBL:HandleNack("OfficerB", { chunk = 0 })
+            GBL:HandleNack("OfficerB", { chunk = 99 })
+
+            assert.equals(0, #MockAce.sentCommMessages)
         end)
     end)
 
