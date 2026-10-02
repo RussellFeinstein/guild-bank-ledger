@@ -560,9 +560,9 @@ describe("Sync request and serve", function()
                         {
                             type = "deposit", player = "Thrall",
                             itemID = 12345, count = 5, tab = 1,
-                            timestamp = 2000, scanTime = 2000,
+                            timestamp = BASE_SLOT * 3600, scanTime = BASE_SLOT * 3600,
                             scannedBy = "OfficerB",
-                            id = "deposit|Thrall|12345|5|1|0",
+                            id = "d|" .. BASE_SLOT .. ":0",
                         },
                     },
                     moneyTransactions = {},
@@ -643,6 +643,23 @@ describe("Sync request and serve", function()
                 assert.equals(0, #Sync.busySent(GBL),
                     "the same peer, named with its realm, is still our receive source")
                 assertReceiveIntact("PeerB")
+            end)
+
+            -- A bare name stored while the roster was cold gains its realm
+            -- once the roster is warm, so the stored source is canonicalised
+            -- again at the compare, as HandleBusy does.
+            it("matches a source stored before the roster knew its realm", function()
+                startReceiving("PeerB")
+                guildData.playerRealms = guildData.playerRealms or {}
+                guildData.playerRealms["PeerB"] = "OtherRealm"
+                assert.equals("PeerB-OtherRealm", GBL:CanonicalPeerKey("PeerB"),
+                    "fixture: the warm roster re-realms the stored bare name")
+                GBL:OnLoadingScreenStart()
+
+                GBL:HandleSyncRequest("PeerB-OtherRealm", request{ sinceTimestamp = 0 })
+
+                assert.equals(0, #Sync.busySent(GBL),
+                    "the source we stored bare is the peer now named with its realm")
             end)
         end)
 

@@ -2594,11 +2594,14 @@ function GBL:HandleSyncRequest(sender, data)
         -- make it end its send to us as well as that request (#318), so it
         -- gets nothing and its own resend asks again after our tail. The
         -- loading screen only: no receive is open while a combat term holds.
-        if busyWord == "loading" and syncState.receiving
-            and self:CanonicalPeerKey(sender)
-                == self:CanonicalPeerKey(syncState.receiveSource) then
+        -- receiveSource is nil with no receive open, so the compare needs no
+        -- receiving term; it is re-canonicalised because a stored bare name
+        -- can gain its realm once the roster is warm, as in HandleBusy.
+        local senderKey = self:CanonicalPeerKey(sender)
+        if busyWord == "loading"
+            and senderKey == self:CanonicalPeerKey(syncState.receiveSource) then
             self:SyncInfo("Ignoring SYNC_REQUEST from %s (%s), receiving from them:"
-                .. " a BUSY would end their send", self:CanonicalPeerKey(sender), gateReason)
+                .. " a BUSY would end their send", senderKey, gateReason)
             return
         end
         refuseForCombat(self, sender, "Declined sync from " .. sender
