@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.41.30
+    {"0.41.30", "2026-10-02", {
+        Removed = {
+            "Internal cleanup: two per-player tallies the addon declared and never filled are gone. Nothing changes on screen or in your saved data.",
+        },
+    }},
     -- v0.41.29
     {"0.41.29", "2026-10-02", {
         Fixed = {
