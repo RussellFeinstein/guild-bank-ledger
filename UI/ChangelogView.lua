@@ -29,6 +29,15 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.41.25
+    {"0.41.25", "2026-10-01", {
+        Changed = {
+            "The addon's saved data now declares the counts it keeps of how often each guild bank event appeared, which it uses to tell a real repeat from a duplicate copy. They used to be created on first use. Nothing changes on screen, and a guild with no counts no longer writes an empty table to its saved data.",
+        },
+        Removed = {
+            "An empty slot in the addon's saved data that nothing ever wrote to.",
+        },
+    }},
     -- v0.41.24
     {"0.41.24", "2026-10-01", {
         Fixed = {

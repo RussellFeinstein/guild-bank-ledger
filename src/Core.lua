@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.41.24"
+local VERSION = "0.41.25"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -78,7 +78,6 @@ local defaults = {
             ["*"] = {
                 transactions = {},
                 moneyTransactions = {},
-                snapshots = {},
                 playerStats = {
                     ["*"] = {
                         withdrawals = {},
@@ -91,13 +90,18 @@ local defaults = {
                         lastSeen = 0,
                     },
                 },
+                -- teams: reserved for the planned Teams feature (raid team
+                -- assignment, docs/ROADMAP.md). Nothing writes it yet. Do not repurpose.
                 teams = {},
                 altLinks = {},
-                -- stockAlerts: reserved for planned v1.3.0 low-stock alerts feature
+                -- stockAlerts: reserved for the planned low-stock alerts feature
                 -- (threshold-based chat pings). Semantically distinct from stockReserves
                 -- below (which holds sort/restock target counts). Do not repurpose.
                 stockAlerts = {},
                 seenTxHashes = {},
+                -- [prefix .. hourSlot] = { count, asOf }: dedup ground truth for how
+                -- many events share a prefix (docs/DATA-MODEL.md section 5).
+                eventCounts = {},
                 playerRealms = {},
                 syncState = { lastSyncTimestamp = 0, syncVersion = 0, peers = {} },
                 knownPeers = {},
