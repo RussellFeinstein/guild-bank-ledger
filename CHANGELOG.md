@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.41.29] - 2026-10-02
 
 ### Fixed
 - When a guildmate who was sending you data stopped partway but stayed online (after a /reload, for example), your addon kept asking them for the rest for over two minutes, and turned down every chance to pull new data from the guild in that time. Their addon now answers that it is no longer sending, and yours stops asking at the first answer, usually about 20 seconds after the last piece arrived. It waits at least 30 seconds before asking that guildmate again, and can pull from anyone else straight away. This needs the guildmate who stopped to be on this version. If your addon is sending data to that same guildmate at the time, theirs does not answer, because on older versions that answer would also stop what you are sending them, so that case still waits the full two minutes.
