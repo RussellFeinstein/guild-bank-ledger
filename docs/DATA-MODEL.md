@@ -85,7 +85,7 @@ is why the counts below are worth keeping exact: the seventeen declared keys, th
 are absent when untouched and the thirteen that survive once they diverge are each pinned,
 and so is the arithmetic between them, so a key added to the defaults block and to neither
 list fails the suite. Those cases run against a hand port of AceDB in `spec/mock_ace.lua`,
-and ten more run the same defaults through a real AceDB from `spec/vendor/` and compare
+and eleven more run the same defaults through a real AceDB from `spec/vendor/` and compare
 what each side leaves behind, because a port can only ever agree with itself.
 
 Four declared keys are absent from the live file for that reason. `dailySummaries` and
@@ -116,11 +116,18 @@ nil-guards it, so nothing broke. An undeclared key is never subject to default-s
 **#71 declared it**, because it is dedup ground truth rather than an incidental cache. That changed
 one observable thing: an empty `eventCounts` no longer reaches disk, because it is default-stripped
 like every other declared key. Its absence from a file now means no count was ever kept, and is not a
-regression. A guild already holding counts keeps them, since the template is an empty table with no
-wildcard and a login has nothing to merge into an entry; that is pinned against the port and against a
-real AceDB. The lazy creates and the nil-guards stay. Two specs set the key to nil deliberately, a
-guild table built outside AceDB never gets the default, and `CleanupWithEventCounts` guards `next()`
-as well as nil, which stays load-bearing whatever the defaults say.
+regression. Two more properties are pinned against the port and against a real AceDB. A guild already
+holding counts keeps them through a logout and the next login. And a read of a key the table does not
+hold answers nil and stores nothing, because the template is an empty table with no wildcard. An entry
+template declared the way `playerStats` declares one would break only the second: every slot
+`CleanupWithEventCounts` probes would gain a zero entry, and the serve path, which walks the table with
+`pairs`, would offer those zeros to peers.
+
+The lazy creates and the nil-guards stay, although no production state reaches them now: every guild
+table the addon reads comes from AceDB, which puts the key back. What still reaches them is spec
+fixtures, two specs that set a guild's `eventCounts` to nil deliberately and the guild tables other
+specs build by hand. Removing the guards means re-fixturing those specs first, which #71 left alone.
+`CleanupWithEventCounts` also guards `next()`, which stays load-bearing whatever the defaults say.
 
 ## 3. Two structures share the name `peers`
 
@@ -247,7 +254,7 @@ Two consequences of the current prefix that are worth knowing:
 ### One identity namespace, two arrays
 
 Records live in two arrays but identity is pooled. `seenTxHashes` (`src/Dedup.lua:127-130`),
-`eventCounts` (`src/Dedup.lua:405`), the fingerprint accumulator and its buckets
+`eventCounts` (`StoreBatchRecords` in `src/Dedup.lua`), the fingerprint accumulator and its buckets
 (`src/Fingerprint.lua:70-76`, `:129-145`) and the `idIndex` that `HandleSyncData` builds
 (`src/Sync.lua:2129-2135`) all walk `transactions` and `moneyTransactions` into one flat structure
 with no namespace tag. `BuildStoredRecordIndex` (`src/Dedup.lua:219-228`) is the only one that

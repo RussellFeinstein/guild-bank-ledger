@@ -8,7 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- The addon's saved data now declares the counts it keeps of how often each guild bank event appeared, which it uses to tell a real repeat from a duplicate copy. They used to be created on first use. Nothing changes on screen, and a guild with no counts no longer writes an empty table to its saved data. An empty placeholder nothing ever used is gone.
+- The addon's saved data now declares the counts it keeps of how often each guild bank event appeared, which it uses to tell a real repeat from a duplicate copy. They used to be created on first use. Nothing changes on screen, and a guild with no counts no longer writes an empty table to its saved data.
+
+### Removed
+- An empty slot in the addon's saved data that nothing ever wrote to.
 
 ## [0.41.24] - 2026-10-01
 
