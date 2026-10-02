@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.41.27
+    {"0.41.27", "2026-10-01", {
+        Fixed = {
+            "After leaving one guild and joining another without logging out, the addon could show the old guild's tab names for the new guild's bank tabs. The Restock and Layout headings showed them until the new guild's bank named those tabs, and transactions received from guildmates could keep the old name for good. Tab names are now remembered separately for each guild.",
+        },
+    }},
     -- v0.41.26
     {"0.41.26", "2026-10-01", {
         Fixed = {

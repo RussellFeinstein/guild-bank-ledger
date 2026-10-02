@@ -47,16 +47,25 @@ end
 ------------------------------------------------------------------------
 
 --- Name a guild bank tab, in four steps (#236): the live name, then one
--- this session has already read, then the caller's stored name, then the
--- index. Every live reader goes through here; a transaction record is the
--- exception and keeps the name it was created under.
+-- this session has already read from the current guild's bank, then the
+-- caller's stored name, then the index. Every live reader goes through
+-- here; a transaction record is the exception and keeps the name it was
+-- created under.
 --
 -- The session cache is what makes this work away from the bank.
--- BackfillTabNames below says the live read "only works while the bank is
--- open", and the Restock tab is worked at the auction house, so the live
--- branch answers nothing exactly where the name is wanted. A remembered
--- name is a reading rather than a guess, and it is per session, so a rename
--- is picked up on the next bank visit.
+-- BackfillTabNames (src/Core.lua) says the live read "only works while the
+-- bank is open", and the Restock tab is worked at the auction house, so the
+-- live branch answers nothing exactly where the name is wanted. A
+-- remembered name is a reading rather than a guess, and it is per session,
+-- so a rename is picked up on the next bank visit.
+--
+-- The cache is kept per guild (#287). A player can leave one guild and join
+-- another without logging out, and BackfillTabNames stores what this
+-- answers on records for good, so a name the first guild's bank gave must
+-- never answer for the second. It is keyed by GetGuildName, the key
+-- GetGuildData uses, which answers the last name it read, so a remembered
+-- name still answers in the frames after a loading screen where
+-- GetGuildInfo answers nothing. With no guild name known nothing is filed.
 --
 -- `fallback` is for the window before the bank has been opened at all,
 -- where a capture-time name still beats "Tab 3". It is type-tested and its
@@ -70,15 +79,21 @@ end
 function GBL:GetTabName(tab, fallback)
     if not tab then return nil end
     local key = tonumber(tab) or tab
+    local guildName = self:GetGuildName()
     if GetGuildBankTabInfo then
         local name = GetGuildBankTabInfo(tab)
         if name and name ~= "" then
-            self._tabNamesSeen = self._tabNamesSeen or {}
-            self._tabNamesSeen[key] = name
+            if guildName then
+                self._tabNamesSeen = self._tabNamesSeen or {}
+                local names = self._tabNamesSeen[guildName] or {}
+                self._tabNamesSeen[guildName] = names
+                names[key] = name
+            end
             return name
         end
     end
-    local seen = self._tabNamesSeen and self._tabNamesSeen[key]
+    local names = self._tabNamesSeen and self._tabNamesSeen[guildName]
+    local seen = names and names[key]
     if seen then return seen end
     if type(fallback) == "string" and fallback ~= "" then
         -- A lone "|" is WoW's escape introducer, and this one came from a

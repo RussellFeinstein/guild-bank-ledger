@@ -109,6 +109,57 @@ describe("Ledger", function()
             assert.equals("Raid Use One", GBL:GetTabName(1))
         end)
 
+        -- #287: a remembered name belongs to the guild whose bank it was read
+        -- from. A player can leave one guild and join another without logging
+        -- out, and an index the first guild named must not answer for the
+        -- second.
+        it("does not answer with another guild's remembered name", function()
+            MockWoW.addTab("Raid Use 1")
+            MockWoW.addTab("Raid Use 2")
+            MockWoW.addTab("Raid Use 3")
+            assert.equals("Raid Use 3", GBL:GetTabName(3))
+            MockWoW.guild.name = "Second Guild"
+            MockWoW.guildBank.tabs = {}
+            assert.equals("Potions", GBL:GetTabName(3, "Potions"))
+            assert.equals("Tab 3", GBL:GetTabName(3))
+        end)
+
+        it("keeps each guild's remembered names across a switch and back", function()
+            MockWoW.addTab("Raid Use 1")
+            assert.equals("Raid Use 1", GBL:GetTabName(1))
+            MockWoW.guild.name = "Second Guild"
+            MockWoW.guildBank.tabs[1].name = "Mats"
+            assert.equals("Mats", GBL:GetTabName(1))
+            MockWoW.guildBank.tabs = {}
+            assert.equals("Mats", GBL:GetTabName(1, "Potions"))
+            MockWoW.guild.name = "Test Guild"
+            assert.equals("Raid Use 1", GBL:GetTabName(1, "Potions"))
+        end)
+
+        it("neither remembers nor answers while no guild name is known", function()
+            -- GetGuildName answers nil only before any guild has been read this
+            -- session. The bank cannot be open then, since OnBankOpened waits
+            -- for the name, so there is no guild to file a name under.
+            MockWoW.guild.name = nil
+            GBL._cachedGuildName = nil
+            MockWoW.addTab("Raid Use 1")
+            assert.equals("Raid Use 1", GBL:GetTabName(1))
+            MockWoW.guildBank.tabs = {}
+            assert.equals("Potions", GBL:GetTabName(1, "Potions"))
+        end)
+
+        it("still answers while GetGuildInfo briefly answers nothing", function()
+            -- GetGuildInfo answers nothing for a few frames after a loading
+            -- screen (#222). GetGuildName answers the last name it read, and
+            -- the cache is filed under it, so a redraw in that window still
+            -- finds the name.
+            MockWoW.addTab("Raid Use 1")
+            assert.equals("Raid Use 1", GBL:GetTabName(1))
+            MockWoW.guild.name = nil
+            MockWoW.guildBank.tabs = {}
+            assert.equals("Raid Use 1", GBL:GetTabName(1, "Potions"))
+        end)
+
         it("escapes the escape introducer in a stored name", function()
             -- tabs[].name reaches storage from a peer through copyTab, which
             -- validates nothing, and from here it reaches heading:SetText on
@@ -125,6 +176,69 @@ describe("Ledger", function()
         it("returns nil for a nil tab", function()
             assert.is_nil(GBL:GetTabName(nil))
             assert.is_nil(GBL:GetTabName(nil, "Potions"))
+        end)
+    end)
+
+    -- BackfillTabNames is the path that stores a tab name on a record for
+    -- good. A synced record arrives with neither name (stripForSync drops
+    -- both), so the first bank open fills them from GetTabName.
+    describe("BackfillTabNames", function()
+        local function syncedMove(tab, destTab)
+            return {
+                type = "move", player = "Thrall-TestRealm", itemID = 12345,
+                count = 1, tab = tab, destTab = destTab,
+                timestamp = 3600 * 475100,
+            }
+        end
+
+        it("names both tabs of a record from the live read", function()
+            MockWoW.addTab("Raid Use 1")
+            MockWoW.addTab("Raid Use 2")
+            local rec = syncedMove(1, 2)
+            table.insert(GBL:GetGuildData().transactions, rec)
+            GBL:BackfillTabNames()
+            assert.equals("Raid Use 1", rec.tabName)
+            assert.equals("Raid Use 2", rec.destTabName)
+        end)
+
+        it("never rewrites a name a record already carries", function()
+            -- A record's name is what the tab was called at the transaction,
+            -- so a rename since then must not reach it.
+            MockWoW.addTab("Renamed 1")
+            MockWoW.addTab("Renamed 2")
+            local rec = syncedMove(1, 2)
+            rec.tabName = "Raid Use 1"
+            rec.destTabName = "Raid Use 2"
+            table.insert(GBL:GetGuildData().transactions, rec)
+            GBL:BackfillTabNames()
+            assert.equals("Raid Use 1", rec.tabName)
+            assert.equals("Raid Use 2", rec.destTabName)
+        end)
+
+        it("does not store another guild's remembered names (#287)", function()
+            -- The first guild's bank names tabs 1 to 3. The second guild's
+            -- bank names only tab 1, so tab 3 has no live name there.
+            MockWoW.addTab("Raid Use 1")
+            MockWoW.addTab("Raid Use 2")
+            MockWoW.addTab("Raid Use 3")
+            assert.equals("Raid Use 1", GBL:GetTabName(1))
+            assert.equals("Raid Use 3", GBL:GetTabName(3))
+            MockWoW.guild.name = "Second Guild"
+            MockWoW.guildBank.tabs = {}
+            MockWoW.addTab("Mats")
+            local out = syncedMove(1, 3)
+            local back = syncedMove(3, 1)
+            local txs = GBL:GetGuildData().transactions
+            table.insert(txs, out)
+            table.insert(txs, back)
+            GBL:BackfillTabNames()
+            -- The second guild's own name lands, so the backfill ran here.
+            assert.equals("Mats", out.tabName)
+            assert.equals("Mats", back.destTabName)
+            -- What it stores for a tab it cannot name is #242's question;
+            -- this pins only that it is not the first guild's name.
+            assert.are_not.equal("Raid Use 3", out.destTabName)
+            assert.are_not.equal("Raid Use 3", back.tabName)
         end)
     end)
 
