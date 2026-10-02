@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.41.29"
+local VERSION = "0.41.30"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -80,8 +80,6 @@ local defaults = {
                 moneyTransactions = {},
                 playerStats = {
                     ["*"] = {
-                        withdrawals = {},
-                        deposits = {},
                         totalWithdrawCount = 0,
                         totalDepositCount = 0,
                         moneyWithdrawn = 0,
@@ -783,18 +781,9 @@ function GBL:MigrateSchemaV2ToV3(guildData)
             if (stats.lastSeen or 0) > 0 then
                 existing.lastSeen = math.max(existing.lastSeen or 0, stats.lastSeen)
             end
-            -- Merge withdrawal/deposit category breakdowns
-            for cat, count in pairs(stats.withdrawals or {}) do
-                existing.withdrawals[cat] = (existing.withdrawals[cat] or 0) + count
-            end
-            for cat, count in pairs(stats.deposits or {}) do
-                existing.deposits[cat] = (existing.deposits[cat] or 0) + count
-            end
         else
-            -- Copy stats entry (shallow copy for tables)
+            -- Copy stats entry
             newStats[resolved] = {
-                withdrawals = {},
-                deposits = {},
                 totalWithdrawCount = stats.totalWithdrawCount or 0,
                 totalDepositCount = stats.totalDepositCount or 0,
                 moneyWithdrawn = stats.moneyWithdrawn or 0,
@@ -802,12 +791,6 @@ function GBL:MigrateSchemaV2ToV3(guildData)
                 firstSeen = stats.firstSeen or 0,
                 lastSeen = stats.lastSeen or 0,
             }
-            for cat, count in pairs(stats.withdrawals or {}) do
-                newStats[resolved].withdrawals[cat] = count
-            end
-            for cat, count in pairs(stats.deposits or {}) do
-                newStats[resolved].deposits[cat] = count
-            end
         end
     end
 
@@ -1039,7 +1022,6 @@ function GBL:MigrateDeduplicateRecords(guildData)
 
         -- Rebuild playerStats from scratch
         local statsDefaults = {
-            withdrawals = {}, deposits = {},
             totalWithdrawCount = 0, totalDepositCount = 0,
             moneyWithdrawn = 0, moneyDeposited = 0,
             firstSeen = 0, lastSeen = 0,
@@ -1237,7 +1219,6 @@ function GBL:MigrateCrossSlotDedup(guildData)
 
         -- Rebuild playerStats
         local statsDefaults = {
-            withdrawals = {}, deposits = {},
             totalWithdrawCount = 0, totalDepositCount = 0,
             moneyWithdrawn = 0, moneyDeposited = 0,
             firstSeen = 0, lastSeen = 0,
@@ -1815,16 +1796,8 @@ function GBL:RepairPlayerNames()
             if (stats.lastSeen or 0) > 0 then
                 existing.lastSeen = math.max(existing.lastSeen or 0, stats.lastSeen)
             end
-            for cat, count in pairs(stats.withdrawals or {}) do
-                existing.withdrawals[cat] = (existing.withdrawals[cat] or 0) + count
-            end
-            for cat, count in pairs(stats.deposits or {}) do
-                existing.deposits[cat] = (existing.deposits[cat] or 0) + count
-            end
         else
             newStats[resolved] = {
-                withdrawals = {},
-                deposits = {},
                 totalWithdrawCount = stats.totalWithdrawCount or 0,
                 totalDepositCount = stats.totalDepositCount or 0,
                 moneyWithdrawn = stats.moneyWithdrawn or 0,
@@ -1832,12 +1805,6 @@ function GBL:RepairPlayerNames()
                 firstSeen = stats.firstSeen or 0,
                 lastSeen = stats.lastSeen or 0,
             }
-            for cat, count in pairs(stats.withdrawals or {}) do
-                newStats[resolved].withdrawals[cat] = count
-            end
-            for cat, count in pairs(stats.deposits or {}) do
-                newStats[resolved].deposits[cat] = count
-            end
         end
     end
     for k in pairs(guildData.playerStats) do
@@ -3183,7 +3150,6 @@ function GBL:CleanupWithEventCounts(guildData)
 
         -- Rebuild playerStats
         local statsDefaults = {
-            withdrawals = {}, deposits = {},
             totalWithdrawCount = 0, totalDepositCount = 0,
             moneyWithdrawn = 0, moneyDeposited = 0,
             firstSeen = 0, lastSeen = 0,

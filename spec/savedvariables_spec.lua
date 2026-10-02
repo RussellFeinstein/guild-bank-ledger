@@ -106,6 +106,15 @@ local SURVIVES_WHEN_DIVERGED = {
     { key = "transactions", diverge = function(g) g.transactions[1] = { id = "t:0" } end },
 }
 
+-- What one player's playerStats entry holds: the six totals UpdatePlayerStats
+-- writes. The per-category withdrawals and deposits maps left the template in
+-- #64, because nothing had ever written or read them.
+local PLAYER_STATS_FIELDS = {
+    "firstSeen", "lastSeen", "moneyDeposited", "moneyWithdrawn",
+    "totalDepositCount", "totalWithdrawCount",
+}
+table.sort(PLAYER_STATS_FIELDS)
+
 describe("SavedVariables", function()
     local GBL, db
 
@@ -144,6 +153,14 @@ describe("SavedVariables", function()
             for _, entry in ipairs(SURVIVES_WHEN_DIVERGED) do accounted[#accounted + 1] = entry.key end
             table.sort(accounted)
             assert.same(DECLARED, accounted)
+        end)
+
+        it("declares a player entry as exactly the six totals", function()
+            -- The whole key set, not the fields a fixture put in: an extra
+            -- template key is invisible to every assertion that reads named
+            -- fields (#64).
+            local entry = db.global.guilds["TestGuild"].playerStats["Alice-Realm"]
+            assert.same(PLAYER_STATS_FIELDS, sortedKeys(entry))
         end)
     end)
 
@@ -214,8 +231,8 @@ describe("SavedVariables", function()
         end)
 
         it("strips a player who only ever held defaults", function()
-            -- Every playerStats field defaults to zero or an empty table, so a
-            -- player with no activity leaves no trace. That looks like data
+            -- Every playerStats field defaults to zero, so a player with no
+            -- activity leaves no trace. That looks like data
             -- loss and is not: UpdatePlayerStats vivifies the entry again on
             -- next use.
             local guild = db.global.guilds["TestGuild"]
@@ -366,8 +383,8 @@ describe("SavedVariables", function()
             -- playerStats is empty here and the suite's held one phantom
             -- player. Seven production sites walk this table with pairs, four
             -- of them inside migrations, and two resolve every name they find
-            -- and write it back (src/Core.lua:761 in MigrateSchemaV2ToV3, and
-            -- :1704 in RepairPlayerNames, which is not a migration). So one
+            -- and write it back (the merges in MigrateSchemaV2ToV3 and
+            -- RepairPlayerNames, which is not a migration). So one
             -- migration was storing a resolved player no client can have.
             local stats = db.global.guilds["TestGuild"].playerStats
             assert.same({}, sortedKeys(stats))
@@ -772,6 +789,16 @@ describe("SavedVariables", function()
                 sortedKeys(theirs.global.guilds["TestGuild"].playerStats),
                 sortedKeys(mine.global.guilds["TestGuild"].playerStats)
             )
+        end)
+
+        it("vivifies a player entry as exactly the six totals", function()
+            -- Absolute rather than port-against-library: the agreement case
+            -- above holds whatever the template says, because both sides read
+            -- the same defaults table.
+            local sv = {}
+            local theirs = RealAceDB:New(sv, db._defaults)
+            local entry = theirs.global.guilds["TestGuild"].playerStats["Alice-Realm"]
+            assert.same(PLAYER_STATS_FIELDS, sortedKeys(entry))
         end)
     end)
 end)

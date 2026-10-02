@@ -63,7 +63,7 @@ Thirteen keys reach disk:
 | `moneyTransactions` | Array of money transaction records (section 4) |
 | `seenTxHashes` | `[full record id] = timestamp`. Dedup membership set (section 5). `GBL:MarkSeen` (`src/Dedup.lua`) stores the record's timestamp as the value, or the current server time when that timestamp is invalid |
 | `eventCounts` | `[prefix .. hourSlot] = {count, asOf}`. Dedup ground truth (section 5) |
-| `playerStats` | `[player] = {withdrawals, deposits, totalWithdrawCount, totalDepositCount, moneyWithdrawn, moneyDeposited, firstSeen, lastSeen}` |
+| `playerStats` | `[player] = {totalWithdrawCount, totalDepositCount, moneyWithdrawn, moneyDeposited, firstSeen, lastSeen}` |
 | `playerRealms` | `[bareName] = realm`, or `false` when the bare name is ambiguous in the roster |
 | `knownPeers` | `[canonical peer key] = {version, minSyncVersion, txCount, lastSeen}`. Written by `GBL:UpdatePeer` (`src/Sync.lua`) on every HELLO it handles. `InitSync` drops expired entries and re-keys the rest to canonical names, `ConsolidatePeerKeys` re-keys them again after a roster update, and two migrations in `src/Core.lua` re-key it too, merging colliding entries by `lastSeen` (`MigrateNormalizePeerNames` and `MigrateRecoverPeerRealms`) |
 | `syncState` | `{lastSyncTimestamp, syncVersion, peers}`. See the name collision in section 3 |
@@ -776,6 +776,7 @@ All under the **Data model integrity** milestone.
 | 2 | `snapshots`, `teams` declared, never written | closed (#71): `snapshots` removed, `teams` reserved for the Teams feature |
 | 2 | `altLinks` declared, never written | #52 |
 | 2 | `eventCounts` written, never declared | closed (#71): declared |
+| 2 | Per-player category totals declared, never accumulated | closed (#64): both maps removed |
 | 3 | Two structures named `peers`, the persisted one write-only | #72 |
 | 4 | No deposit or withdraw record knows its tab | closed in v0.37.0 (#67) |
 | 5 | Item records with no `itemID` collide in the money branch | #69 (locally scanned, unscheduled); sync-received closed in v0.37.0 (#68) |
@@ -791,7 +792,6 @@ All under the **Data model integrity** milestone.
 | 9 | AceDB's write path unmodelled in the suite | closed in #77 |
 | 9 | `eventCounts` is unreachable where the empty-chunk SYNC_DATA builder writes it | dead write closed in v0.37.3 |
 | 9 | SYNC_DATA and BUSY each built in two places | closed in v0.37.13 (#70); HELLO still a pair |
-| - | Per-player category totals declared, never accumulated | #64 |
 
 The compatibility break several of these rode was #74, **and it has now been spent.** v0.37.0 shipped
 the version floor along with #67 and #68. Two peers on different releases now sync, so any later
@@ -802,5 +802,5 @@ identity-affecting idea in this document as costing a forced guild-wide update f
 What that leaves open, in rough order of how much it still hurts: #75 (the 223 damaged records
 already on disk, which #68 stops growing but does not repair, and which can now reuse
 `GBL:RepairSyncRecordItemFields`), #69 (the same itemID-less shape produced by local scans rather
-than by sync, still unscheduled), #72 and #64. None of those touch record
+than by sync, still unscheduled), and #72. None of those touch record
 identity, so none of them cost a floor raise.
