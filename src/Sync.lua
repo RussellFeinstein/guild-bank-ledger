@@ -2589,6 +2589,18 @@ function GBL:HandleSyncRequest(sender, data)
     -- allocates nothing.
     local gateReason, busyWord = combatGateReason(true)
     if gateReason then
+        -- The peer our paused receive is coming from can ask us too, most
+        -- often as the resend of a request that crossed ours. A BUSY would
+        -- make it end its send to us as well as that request (#318), so it
+        -- gets nothing and its own resend asks again after our tail. The
+        -- loading screen only: no receive is open while a combat term holds.
+        if busyWord == "loading" and syncState.receiving
+            and self:CanonicalPeerKey(sender)
+                == self:CanonicalPeerKey(syncState.receiveSource) then
+            self:SyncInfo("Ignoring SYNC_REQUEST from %s (%s), receiving from them:"
+                .. " a BUSY would end their send", self:CanonicalPeerKey(sender), gateReason)
+            return
+        end
         refuseForCombat(self, sender, "Declined sync from " .. sender
             .. " (" .. gateReason .. ")", busyWord)
         return
