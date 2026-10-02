@@ -81,45 +81,46 @@ modified therefore leaves no trace on disk. **Absence from the file means "never
 default", not "missing".** At runtime the key is present, because `copyDefaults` puts it back.
 
 Every claim in this section is asserted by `spec/savedvariables_spec.lua` from #77, which
-is why the counts below are worth keeping exact: the seventeen declared keys, the five that
-are absent when untouched and the twelve that survive once they diverge are each pinned,
+is why the counts below are worth keeping exact: the seventeen declared keys, the four that
+are absent when untouched and the thirteen that survive once they diverge are each pinned,
 and so is the arithmetic between them, so a key added to the defaults block and to neither
 list fails the suite. Those cases run against a hand port of AceDB in `spec/mock_ace.lua`,
-and eight more run the same defaults through a real AceDB from `spec/vendor/` and compare
-the file each leaves behind, because a port can only ever agree with itself.
+and ten more run the same defaults through a real AceDB from `spec/vendor/` and compare
+what each side leaves behind, because a port can only ever agree with itself.
 
-Five declared keys are absent from the live file for that reason (`dailySummaries` and
+Four declared keys are absent from the live file for that reason. `dailySummaries` and
 `weeklySummaries` left this list when #62 removed their declarations along with the tiered
-storage module):
+storage module, and `snapshots` left it when #71 removed its declaration, since no code path
+had ever written it:
 
 | Key | Status |
 |---|---|
-| `snapshots` | Never written by any code path. Remove or annotate as reserved, issue #71 |
-| `teams` | Never written by any code path. Remove or annotate as reserved, issue #71 |
+| `teams` | Reserved for the planned Teams feature (raid team assignment). Nothing writes it yet. Comment in the defaults block in `src/Core.lua`. Do not repurpose |
 | `altLinks` | Alt linking is designed but unbuilt, issue #52 |
-| `stockAlerts` | Reserved for the planned low-stock alerts feature. Comment at `src/Core.lua:94-96`. Do not repurpose |
+| `stockAlerts` | Reserved for the planned low-stock alerts feature. Comment in the defaults block in `src/Core.lua`. Do not repurpose |
 | `restock` | Guild-local restock settings: `items`, `budget`, and from #209 `pending[itemID] = { qty, unconfirmedQty, buyer, buyers, at, unconfirmedAt }`, purchases not yet seen in the bank. Appears on first use. #215 split the one quantity in two and dropped the stored `unconfirmed` boolean, which `GBL:_RestockPendingParts` derives; that function also reads the pre-split shape (`qty` plus the boolean) as wholly unconfirmed, so no migration runs over entries already on disk. **The accepted cost is a rollback**: the first write to an entry brings it onto the new shape, and a pre-#215 build reads `qty` alone, so a parked purchase reads as zero pending and the row is offered again. That matters here because the repo is symlinked into AddOns while CurseForge serves whatever was last tagged, so running an older build is a real state rather than a hypothetical one. Not defended against, because defending it means keeping the boolean beside the quantity for a release and that is the two-sources-for-one-fact shape the split exists to remove |
 
-`stockAlerts` is the model for the other two: a reserved key with a comment naming what reserves it is
-fine, and a reserved key without one is indistinguishable from an oversight. Its own comment does need
-a small correction, which belongs with #71 since that issue is already editing this block: it dates the
-alerts feature to v1.3.0, while `docs/ROADMAP.md` has stock alerts at v1.5.0 and v1.3.0 is alt linking.
-Drop the version from the comment rather than chase it, since the reservation is what matters.
+`stockAlerts` was the model #71 followed for `teams`: a reserved key with a comment naming what
+reserves it is fine, and a reserved key without one is indistinguishable from an oversight. Neither
+comment carries a version. The one on `stockAlerts` dated the feature to a release `docs/ROADMAP.md`
+had since given to alt linking, so #71 dropped it rather than chase it, since the reservation is what
+matters.
 
-### `eventCounts` is the reverse case
+### `eventCounts` was the reverse case, until #71
 
-It is stored on disk but **not** declared in the defaults. It is created lazily at
-`src/Dedup.lua:405` and `src/Sync.lua:2196`, and every reader nil-guards it (`src/Core.lua:2701-2702`,
-`src/Dedup.lua:427`, `:443`), so nothing breaks. The asymmetry worth knowing is that an undeclared
-key is never subject to default-stripping, so `eventCounts` is always written out verbatim while a
-declared-and-empty key never is.
+It was stored on disk but **not** declared in the defaults. It is created lazily in
+`StoreBatchRecords` (`src/Dedup.lua`) and `HandleSyncData` (`src/Sync.lua`), and every reader
+nil-guards it, so nothing broke. An undeclared key is never subject to default-stripping, so
+`eventCounts` was always written out verbatim, empty or not.
 
-**Verdict: being declared, issue #71.** This is dedup ground truth rather than an incidental cache, so
-the tidy move is the right one. Declaring it changes one observable thing: an empty `eventCounts` stops
-reaching disk, because it starts being default-stripped like every other declared key. Harmless given
-the nil-guards, and recorded here so the next person does not read that absence as a regression. The
-nil-guards stay regardless. Three specs set the key to nil deliberately, and `src/Core.lua:2701-2702`
-guards `next()` rather than nil, which stays load-bearing whatever the defaults say.
+**#71 declared it**, because it is dedup ground truth rather than an incidental cache. That changed
+one observable thing: an empty `eventCounts` no longer reaches disk, because it is default-stripped
+like every other declared key. Its absence from a file now means no count was ever kept, and is not a
+regression. A guild already holding counts keeps them, since the template is an empty table with no
+wildcard and a login has nothing to merge into an entry; that is pinned against the port and against a
+real AceDB. The lazy creates and the nil-guards stay. Two specs set the key to nil deliberately, a
+guild table built outside AceDB never gets the default, and `CleanupWithEventCounts` guards `next()`
+as well as nil, which stays load-bearing whatever the defaults say.
 
 ## 3. Two structures share the name `peers`
 
@@ -709,9 +710,9 @@ All under the **Data model integrity** milestone.
 | Section | Disagreement | Issue |
 |---|---|---|
 | 2 | `dailySummaries`, `weeklySummaries` declared, never written | closed (#62): keys and module removed |
-| 2 | `snapshots`, `teams` declared, never written | #71 |
+| 2 | `snapshots`, `teams` declared, never written | closed (#71): `snapshots` removed, `teams` reserved for the Teams feature |
 | 2 | `altLinks` declared, never written | #52 |
-| 2 | `eventCounts` written, never declared | #71 |
+| 2 | `eventCounts` written, never declared | closed (#71): declared |
 | 3 | Two structures named `peers`, the persisted one write-only | #72 |
 | 4 | No deposit or withdraw record knows its tab | closed in v0.37.0 (#67) |
 | 5 | Item records with no `itemID` collide in the money branch | #69 (locally scanned, unscheduled); sync-received closed in v0.37.0 (#68) |
@@ -738,5 +739,5 @@ identity-affecting idea in this document as costing a forced guild-wide update f
 What that leaves open, in rough order of how much it still hurts: #75 (the 223 damaged records
 already on disk, which #68 stops growing but does not repair, and which can now reuse
 `GBL:RepairSyncRecordItemFields`), #69 (the same itemID-less shape produced by local scans rather
-than by sync, still unscheduled), #71, #72 and #64. None of those touch record
+than by sync, still unscheduled), #72 and #64. None of those touch record
 identity, so none of them cost a floor raise.
