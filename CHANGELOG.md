@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- During a loading screen, a guildmate who was sending you data and asked you for data in return was told your addon was busy. That reply made their addon stop its side of the sync, including what it was sending you, and yours could then wait over two minutes for data that was never coming. Your addon now gives that guildmate no reply and notes the request in the sync log. Their addon (version 0.37.11 or later) asks again on its own, usually 20 to 45 seconds later, after your loading screen is over, and its sync log shows the wait as a request that got no answer. If your loading screen outlasts their last try, they ask again the next time your addons exchange news. Anyone else who asks during your loading screen is still told you are busy.
+- During a loading screen, a guildmate who was sending you data and asked you for data in return was told your addon was busy. That reply made their addon stop its side of the sync, including what it was sending you, and yours could then wait over two minutes for data that was never coming. Your addon now gives that guildmate no reply and notes the request in the sync log. Their addon (version 0.37.11 or later) keeps asking on its own, with 20 to 45 seconds between tries, and is answered once your loading screen is over. Its sync log shows the wait as requests that got no answer. If your loading screen outlasts their last try, they ask again the next time your addons exchange news. Anyone else who asks during your loading screen is still told you are busy.
 
 ## [0.41.25] - 2026-10-01
 
