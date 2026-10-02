@@ -65,7 +65,7 @@ Thirteen keys reach disk:
 | `eventCounts` | `[prefix .. hourSlot] = {count, asOf}`. Dedup ground truth (section 5) |
 | `playerStats` | `[player] = {withdrawals, deposits, totalWithdrawCount, totalDepositCount, moneyWithdrawn, moneyDeposited, firstSeen, lastSeen}` |
 | `playerRealms` | `[bareName] = realm`, or `false` when the bare name is ambiguous in the roster |
-| `knownPeers` | `[canonical peer key] = {version, minSyncVersion, txCount, lastSeen}`. Written by `GBL:UpdatePeer` (`src/Sync.lua`) on every HELLO it handles. `InitSync` drops expired entries and re-keys the rest to canonical names, and `ConsolidatePeerKeys` re-keys them again after a roster update |
+| `knownPeers` | `[canonical peer key] = {version, minSyncVersion, txCount, lastSeen}`. Written by `GBL:UpdatePeer` (`src/Sync.lua`) on every HELLO it handles. `InitSync` drops expired entries and re-keys the rest to canonical names, `ConsolidatePeerKeys` re-keys them again after a roster update, and two migrations in `src/Core.lua` re-key it too, merging colliding entries by `lastSeen` (`MigrateNormalizePeerNames` and `MigrateRecoverPeerRealms`) |
 | `syncState` | `{lastSyncTimestamp, syncVersion, peers}`. See the name collision in section 3 |
 | `accessControl` | `{rankThreshold, restrictedMode, configuredBy, configuredAt}` |
 | `sortAccess` | `{rankThreshold, delegates, updatedBy, updatedAt}`. Two-tier sort policy |
@@ -137,11 +137,12 @@ This is the single easiest thing to get wrong when reading the sync code.
 - **`syncState.peers`** in `src/Sync.lua` is a module-local runtime table, and holds what each
   peer last advertised: `{version, minSyncVersion, txCount, dataHash, lastScanTime, lastSeen}`, plus
   `outdated` and `versionRelation` once a protocol or version check has refused that peer.
-  `GBL:UpdatePeer` writes the full entry on each HELLO. Three other writers fill in around it:
+  `GBL:UpdatePeer` writes the full entry on each HELLO. The other writers fill in around it:
   `InitSync` seeds entries from `knownPeers`, without `dataHash` or `lastScanTime`; `OnSyncMessage`
-  creates a minimal `{lastSeen, txCount}` entry for a peer heard before its HELLO, and a full one
-  marked outdated for a HELLO on another protocol version; and `HandleHello` marks a version
-  refusal. It is not saved.
+  creates a minimal `{lastSeen, txCount}` entry for a peer heard before its HELLO, and an entry
+  marked outdated, with no `minSyncVersion`, for a HELLO on another protocol version; `HandleHello`
+  marks a version refusal; `ConsolidatePeerKeys` re-keys entries to canonical names after a roster
+  update; and `ResetSyncState` empties it. It is not saved.
 
 The persisted record of what version a peer runs is **`knownPeers`**, not either of the above.
 
@@ -157,7 +158,8 @@ which sends it as the request's `sinceTimestamp`. The serving side filters on th
 fallback for a request with no bucket hashes, which `SendSyncRequestTo` produces only when it has no
 guild data, so it is read and transmitted more than it decides anything. So the resolution may be a
 retirement rather than a rename, which would remove the collision outright instead of moving it. The
-runtime table, for what it is worth, lives entirely in `src/Sync.lua` and is never saved, so renaming
+runtime table, for what it is worth, is module-local to `src/Sync.lua` (other files reach it only
+through `GetSyncPeers` and `GetAllPeers`) and is never saved, so renaming
 that side needs no migration at all. Direction is #72's call.
 
 ## 4. Record shapes
@@ -357,10 +359,21 @@ than the sender's scan time. The `hourSlot` inside an id is `floor(timestamp / 3
 granular by construction.
 
 `GBL:IsValidTimestamp` (`src/Dedup.lua`) accepts a number at or after `MIN_VALID_TIMESTAMP`
-(2004-01-01, before WoW launched) and nothing else; there is no upper bound. A record that fails it
-is not rejected. `StoreTx` and `StoreMoneyTx` replace its timestamp with the current server time,
-and `reconstructSyncRecord` does the same on the sync path before either of them sees it. Test
-fixtures use `3600 * 475100` and up so that they sit well above the floor.
+(2004-01-01, before WoW launched) and nothing else; there is no upper bound. What happens to a
+record that fails it depends on the path:
+
+- **Sync intake** rejects a timestamp that is present and not a number: `validateSyncRecord` runs
+  first for exactly that reason. A missing timestamp is recovered from the id (below), and one that
+  is a number but before the floor is replaced with the current server time by
+  `reconstructSyncRecord`. `StoreTx` and `StoreMoneyTx` repeat the replacement, but their only
+  production caller is the sync receive, which has already done it.
+- **The local scan path does not check.** `ReadTabTransactions` and `ReadMoneyTransactions` store
+  through `StoreBatchRecords`, and their timestamps come from `ComputeAbsoluteTimestamp`, which
+  subtracts the log's relative offset from the server clock, so they are always numbers. The one
+  value on that path that does pass through the guard is the `seenTxHashes` entry, through
+  `MarkSeen`.
+
+Test fixtures use `3600 * 475100` and up so that they sit well above the floor.
 
 When a synced record arrives with an id but no timestamp, `reconstructSyncRecord` recovers the
 timestamp as `hourSlot * 3600`, which is the start of the hour rather than the original moment.
@@ -592,15 +605,17 @@ exchange for (its `>70%` band), when the peer had sent nothing the receiver coul
 redundancy reading taken before v0.37.0 is inflated by the rejection rate.
 
 Since #68 a reject is counted apart from duplicates, per chunk and for the session, and counted again
-under the field whose check failed. The end of the receive names both in a WARN line
-(`Rejected N record(s) from <peer>: <fields>`), and the SYNC_RECEIPT sent back to the peer carries
-them, because the peer holding the records is the only side that can act on them.
+under the field whose check failed. The end of every receive that rejected anything names both in a
+WARN line (`Rejected N record(s) from <peer>: <fields>`). The SYNC_RECEIPT carries them back to the
+peer as well, because the peer holding the records is the only side that can act on them, but a
+receipt is sent only for a session this client asked for that completed, so an aborted receive or an
+unrequested one rejects and logs without telling the sender.
 
 **Verdict: split across two issues.** #68 hardened intake in v0.37.0. `reconstructSyncRecord` now
 opens with `RepairSyncRecordItemFields`, which recomputes a missing `classID` or `subclassID` from
 `itemID` (where `CreateTxRecord` gets them anyway), and then `validateSyncRecord`, which rejects on
-three checks: `type` in the six-value enum, exactly one of `itemID` or `amount`, and the known fields
-holding the right type. #75 will repair what is already stored, using the same repair helper and the
+four checks: the known fields holding the right type, `type` in the six-value enum, `player`
+non-empty (the one check kept from before), and exactly one of `itemID` or `amount`. #75 will repair what is already stored, using the same repair helper and the
 id recovery channel above, deleting only records whose id is also unusable and taking their
 `seenTxHashes` entries with them.
 
@@ -746,7 +761,7 @@ written anywhere. See section 4 for the two seams that come with it.
 behind the splicing is still a hypothesis, and deliberately so: the validation in #68 checks the
 outcome rather than the hypothesis, so it is correct whether or not a lost AceComm fragment turns out
 to be the cause. Each rejection is counted under the field whose check failed, and the receive's
-WARN line and its SYNC_RECEIPT name those fields, so the evidence builds up as sync runs rather than
+WARN line names those fields (as does its SYNC_RECEIPT, when one is sent), so the evidence builds up as sync runs rather than
 needing another archaeology pass. The field named is the check that failed, not the spliced key
 itself: unknown keys pass intake untouched by design (section 8), so a garbage key alone is never a
 reason to reject.
