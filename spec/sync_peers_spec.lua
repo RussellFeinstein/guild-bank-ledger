@@ -373,6 +373,94 @@ describe("Sync peer identity and pairing", function()
                 "the session in flight is not the requester's to end")
         end)
 
+        -- The decline passed no priority and rode AceComm's default, which
+        -- happens to be NORMAL. Since #317 that is a choice, made once for
+        -- every BUSY.
+        it("sends the decline's BUSY at NORMAL", function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            local gd = GBL:GetGuildData()
+            table.insert(gd.transactions, {
+                type = "deposit", player = "Player1", tab = 1, itemID = 123,
+                classID = 0, subclassID = 0, count = 1,
+                timestamp = 1000 * 3600, id = "abc:277:0",
+                _occurrence = 0, scanTime = 1000 * 3600, scannedBy = "OfficerA",
+            })
+            gd.seenTxHashes["abc:277:0"] = 1000 * 3600
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending)
+            MockAce.sentCommMessages = {}
+
+            GBL:HandleSyncRequest("PeerB", request{ sinceTimestamp = 0 })
+
+            local busy = Sync.busySent(GBL)
+            assert.equals(1, #busy, "one BUSY, to the requester")
+            assert.equals("PeerB", busy[1].target)
+            assert.equals("sending:PeerA", busy[1].reason)
+            assert.equals("NORMAL", busy[1].prio,
+                "an ALERT BUSY can overtake what is still queued to this peer")
+        end)
+
+        -- One sender carries the rule for every BUSY: NORMAL, and a log line
+        -- only for a whisper that went out (#317). Structural, on the shape of
+        -- the #281 tag-writer case, so a BUSY built by hand somewhere new fails
+        -- here without anyone having to remember this case.
+        it("builds every BUSY in one sender", function()
+            local fh = io.open("src/Sync.lua", "rb")
+            assert.is_not_nil(fh, "could not read src/Sync.lua, so this proves nothing")
+            local source = fh:read("*a")
+            fh:close()
+
+            local sites = {}
+            local current
+            for raw in source:gmatch("[^\r\n]+") do
+                local fn = raw:match("^function GBL:([%w_]+)")
+                    or raw:match("^local function ([%w_]+)")
+                if fn then
+                    current = fn
+                elseif raw:match("^function ") then
+                    current = nil
+                end
+                local line = raw:gsub("%-%-.*$", "")
+                if line:find("BuildBusyMessage%s*%(")
+                    and not line:match("^function GBL:BuildBusyMessage") then
+                    sites[#sites + 1] = tostring(current)
+                end
+            end
+
+            assert.same({ "sendBusy" }, sites,
+                "every BUSY is built in sendBusy and nowhere else")
+        end)
+
+        -- The case above counts calls to the builder, so a BUSY written out as
+        -- a table literal would pass it, and every key, reason and priority
+        -- case with it. Only the builder may spell the message type.
+        it("spells out a BUSY message only in the builder", function()
+            local fh = io.open("src/Sync.lua", "rb")
+            assert.is_not_nil(fh, "could not read src/Sync.lua, so this proves nothing")
+            local source = fh:read("*a")
+            fh:close()
+
+            local sites = {}
+            local current
+            for raw in source:gmatch("[^\r\n]+") do
+                local fn = raw:match("^function GBL:([%w_]+)")
+                    or raw:match("^local function ([%w_]+)")
+                if fn then
+                    current = fn
+                elseif raw:match("^function ") then
+                    current = nil
+                end
+                local line = raw:gsub("%-%-.*$", "")
+                if line:find("[^%w_]type%s*=%s*[\"']BUSY[\"']")
+                    or line:find("^type%s*=%s*[\"']BUSY[\"']") then
+                    sites[#sites + 1] = tostring(current)
+                end
+            end
+
+            assert.same({ "BuildBusyMessage" }, sites,
+                "a BUSY is built by BuildBusyMessage and nowhere else")
+        end)
+
         -- The retry above means the peer we are already serving may ask again
         -- while its first request is being answered. Answering that with BUSY
         -- would make it abort the very receive we are feeding, so a duplicate

@@ -1097,8 +1097,8 @@ describe("Sync session lifecycle", function()
             assert.equals(1, n.OfficerB, "one BUSY to the receive source")
         end)
 
-        -- HandleBusy tears down both directions on one message, so a second
-        -- one to the same peer is noise at best.
+        -- HandleBusy tears down both directions on one disable BUSY, so a
+        -- second one to the same peer is noise at best.
         it("tells a peer holding both directions once", function()
             startSend("PeerA")
             GBL:RequestSync("PeerA", 0)
@@ -1457,7 +1457,7 @@ describe("Sync session lifecycle", function()
                     "an ALERT BUSY can overtake a request still queued to this peer")
             end)
 
-            -- HandleBusy tears down both directions on one message.
+            -- HandleBusy tears down both directions on one combat BUSY.
             it("tells a peer holding both directions once", function()
                 enterSendingState()
                 GBL:RequestSync("PeerA", 0)
@@ -1783,6 +1783,104 @@ describe("Sync session lifecycle", function()
             -- Still sending to PeerA
             assert.is_true(GBL:GetSyncStatus().sending)
             assert.equals("PeerA", GBL:GetSyncStatus().sendTarget)
+        end)
+
+        -- Three BUSY words only ever answer a SYNC_REQUEST: loading from the
+        -- serve gate's zone term, sending: and preparing: from the decline. So
+        -- one of them from the peer we are sending to refuses a request of
+        -- ours and says nothing about our send, which that peer may still be
+        -- receiving. It used to end the send as well (#323). combat, disabled,
+        -- an absent reason and any word not declared still end both.
+        describe("HandleBusy scoped on the reason (#323)", function()
+            local function hasLine(needle)
+                for _, entry in ipairs(GBL:GetAuditTrail()) do
+                    if entry.message and entry.message:find(needle, 1, true) then
+                        return true
+                    end
+                end
+                return false
+            end
+
+            for _, reason in ipairs({ "sending:PeerC-Stormrage", "preparing:PeerC", "loading" }) do
+                it("leaves the send running on a refusal: " .. reason, function()
+                    enterSendingState()
+                    local progress = GBL:GetSyncStatus().sendProgress
+                    GBL:ClearLog("sync")
+
+                    GBL:HandleBusy("PeerA", { reason = reason })
+
+                    local status = GBL:GetSyncStatus()
+                    assert.is_true(status.sending, "PeerA refused a request of ours, not our send")
+                    assert.equals("PeerA", status.sendTarget)
+                    assert.equals(progress, status.sendProgress)
+                    assert.is_true(hasLine(
+                        "PeerA busy - refused our request, our send to them continues"))
+                    assert.is_false(hasLine("busy - aborting send"))
+                    assert.is_false(hasLine("Send complete"))
+                end)
+            end
+
+            -- The shape #323 is about: PeerA serves us, we serve PeerA, and
+            -- PeerA's answer to our request is a refusal.
+            it("ends the receive and keeps the send when one peer holds both", function()
+                enterSendingState()
+                GBL:RequestSync("PeerA", 0)
+                assert.is_true(GBL:GetSyncStatus().receiving,
+                    "fixture must have PeerA on both sides")
+
+                GBL:HandleBusy("PeerA", { reason = "sending:PeerC" })
+
+                local status = GBL:GetSyncStatus()
+                assert.is_false(status.receiving, "the request PeerA refused is over")
+                assert.is_nil(status.receiveSource)
+                assert.is_true(status.sending, "PeerA is still receiving our send")
+                assert.equals("PeerA", status.sendTarget)
+            end)
+
+            it("still starts the peer's cooldown on a refusal", function()
+                enterSendingState()
+
+                GBL:HandleBusy("PeerA", { reason = "sending:PeerC" })
+
+                assert.is_true(GBL:IsPeerBusy("PeerA"))
+            end)
+
+            -- A word this build has not declared is read as ending both, so a
+            -- later producer gets today's behaviour unless it declares itself
+            -- a refusal.
+            it("ends both sessions on a word it does not know", function()
+                enterSendingState()
+                GBL:RequestSync("PeerA", 0)
+                assert.is_true(GBL:GetSyncStatus().receiving,
+                    "fixture must have PeerA on both sides")
+
+                GBL:HandleBusy("PeerA", { reason = "waiting:PeerC" })
+
+                assert.is_false(GBL:GetSyncStatus().receiving)
+                assert.is_false(GBL:GetSyncStatus().sending)
+            end)
+
+            it("ends the send when the send target turned sync off", function()
+                enterSendingState()
+
+                GBL:HandleBusy("PeerA", { reason = "disabled" })
+
+                assert.is_false(GBL:GetSyncStatus().sending)
+            end)
+
+            -- A peer can put anything in the field, and a number has no
+            -- string methods. It reads as a word nobody declared.
+            it("ends the send on a reason that is not a string, without raising", function()
+                enterSendingState()
+                GBL:ClearLog("sync")
+
+                assert.has_no.errors(function()
+                    GBL:HandleBusy("PeerA", { reason = 42 })
+                end)
+
+                assert.is_false(GBL:GetSyncStatus().sending)
+                assert.is_true(hasLine("reason: 42"))
+            end)
         end)
 
         it("OnLoadingScreenEnd defers resume when combatPaused", function()
