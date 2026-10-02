@@ -348,26 +348,38 @@ function GBL:BuildBusyMessage(reason)
     }
 end
 
+--- Whisper one BUSY to a peer. Every BUSY goes out through here (#317).
+--
+-- NORMAL priority, the same as the chunks and requests we send a peer: an
+-- ALERT BUSY can leave ahead of one still queued at NORMAL, and the peer then
+-- acts on the message that arrives second (#279). The caller writes its own
+-- line, and writes it only when this returns true, so a log never claims a
+-- BUSY the roster refused.
+-- @param peer string The peer to tell
+-- @param reason string Passed to BuildBusyMessage
+-- @return boolean true if the whisper went out
+local function sendBusy(self, peer, reason)
+    local busy = compressMessage(self:Serialize(self:BuildBusyMessage(reason)))
+    return self:SendSyncWhisper(PREFIX, busy, peer, "NORMAL")
+end
+
 --- Whisper one BUSY to each partner of a session that has just ended.
 -- Called by DisableSync (#279) and OnCombatStart (#291).
 --
--- NORMAL priority, the same as the chunks and requests we send a partner:
--- an ALERT BUSY can leave ahead of one still queued at NORMAL, and the peer
--- then acts on the message that arrives second (#279). One message when the
--- same peer held both directions, since HandleBusy tears down both on it.
--- The log line is written only for a whisper that went out.
+-- One message when the same peer held both directions, since HandleBusy
+-- tears down both on it. The log line is written only for a whisper that
+-- went out.
 -- @param reason string Passed to BuildBusyMessage
 -- @param sendTarget string|nil The peer we were sending to
 -- @param receiveSource string|nil The peer we were receiving from
 function GBL:_SendBusyToPartners(reason, sendTarget, receiveSource)
     -- No partner, no codec: an idle disable should not reach code that can raise.
     if not sendTarget and not receiveSource then return end
-    local busyMsg = compressMessage(self:Serialize(self:BuildBusyMessage(reason)))
-    if sendTarget and self:SendSyncWhisper(PREFIX, busyMsg, sendTarget, "NORMAL") then
+    if sendTarget and sendBusy(self, sendTarget, reason) then
         self:AddAuditEntry("Sent BUSY to send target: " .. sendTarget)
     end
     if receiveSource and receiveSource ~= sendTarget
-        and self:SendSyncWhisper(PREFIX, busyMsg, receiveSource, "NORMAL") then
+        and sendBusy(self, receiveSource, reason) then
         self:AddAuditEntry("Sent BUSY to receive source: " .. receiveSource)
     end
 end
@@ -546,15 +558,13 @@ local function combatGateReason(withZone)
 end
 
 --- Refuse a peer for combat: whisper it a BUSY and log the refusal.
--- One shape for both doors that decline with BUSY. NORMAL, as #279 set for a
--- BUSY to a partner, and the line claims the BUSY only for a whisper that went
--- out.
+-- One shape for both doors that decline with BUSY. The line claims the BUSY
+-- only for a whisper that went out.
 -- @param peer string The sender, as AceComm gave it
 -- @param what string The refusal, e.g. "Declined sync from X (in combat)"
 -- @param word string The BUSY reason, combatGateReason's second return
 local function refuseForCombat(self, peer, what, word)
-    local busy = compressMessage(self:Serialize(self:BuildBusyMessage(word)))
-    local sent = self:SendSyncWhisper(PREFIX, busy, peer, "NORMAL")
+    local sent = sendBusy(self, peer, word)
     self:SyncInfo("%s%s", what, sent and " - sent BUSY" or "")
 end
 
@@ -2619,9 +2629,7 @@ function GBL:HandleSyncRequest(sender, data)
         -- a send is minutes, and a capture reader cannot otherwise tell which
         -- one a declined peer was queued behind.
         local why = syncState.prep and "preparing:" or "sending:"
-        local msg = compressMessage(self:Serialize(
-            self:BuildBusyMessage(why .. (syncState.sendTarget or "?"))))
-        if self:SendSyncWhisper(PREFIX, msg, sender) then
+        if sendBusy(self, sender, why .. (syncState.sendTarget or "?")) then
             self:SyncInfo("Sent BUSY to %s", sender)
         end
         return
