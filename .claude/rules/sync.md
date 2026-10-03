@@ -32,7 +32,7 @@ Helpers:
 - `GBL:BuildRosterCache()`: populates `guildData.playerRealms[bareName] → realm`. Two-pass: detects bare-name ambiguity and writes the `false` sentinel when a bare name maps to multiple distinct realms in the roster (so `CanonicalPeerKey` can refuse to guess and keep ambiguous bare arrivals bare).
 - `GBL:RepairCorruptedPlayerRealms(t)`: trims hyphen-corrupted realm strings carried forward from a long-fixed code path; called from `BuildRosterCache` on each invocation. Leaves `false` sentinels untouched.
 
-`ResolvePlayerName` priority order: **explicit `playerRealms` arg → current guild's playerRealms → local realm fallback**. There is no cross-guild fallback. Bare names from the bank log are assumed to belong to the current guild, not a guild the user previously belonged to. Migrations pass the per-guild table explicitly via the `playerRealms` arg.
+`ResolvePlayerName` priority order: **explicit `playerRealms` arg → current guild's playerRealms → local realm fallback**. There is no cross-guild fallback. Bare names from the bank log are assumed to belong to the current guild, not a guild the user previously belonged to. The bank log gives a member of another realm with the realm already attached, and a member of the viewer's own realm bare (CLAUDE.md, Critical WoW API Facts). So a bare name from it belongs to the viewer's realm, and the fallback gives it the right realm. The roster lookup ahead of the fallback can only confirm that, or, when a same-named member elsewhere is on the roster, get it wrong (#350). Migrations pass the per-guild table explicitly via the `playerRealms` arg.
 
 ### Code invariants to preserve
 
