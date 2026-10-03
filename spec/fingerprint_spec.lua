@@ -1076,5 +1076,67 @@ describe("Fingerprint", function()
 
             assert.same(after, GBL:GetBucketHashes(guildData))
         end)
+
+        -- #342. A cleanup that removed nothing used to write the arrays back
+        -- gathered by prefix. That rewrites no id and moves no count, so
+        -- nothing reset, and a scan with its cursor mid-array read one record
+        -- twice (which cancels it out of its bucket's XOR) and never reached
+        -- another. The stamp then carried that map under an unchanged count.
+        describe("with a cleanup that removes nothing in the middle (#342)", function()
+            local function rec(player, slot)
+                return {
+                    type = "deposit", player = player, itemID = 1, count = 1, tab = 1,
+                    timestamp = slot * 3600 + 10,
+                    id = "deposit|" .. player .. "|1|1|1|" .. slot .. ":0",
+                    _occurrence = 0,
+                }
+            end
+
+            -- Two records of one prefix with another between them, days
+            -- apart, and one count for a prefix no record carries, so the
+            -- cleanup runs and has nothing to trim.
+            local function splitPair()
+                table.insert(guildData.transactions, rec("Bob-TestRealm", 475100))
+                table.insert(guildData.transactions, rec("Al-TestRealm", 475200))
+                table.insert(guildData.transactions, rec("Bob-TestRealm", 475300))
+                guildData.eventCounts = {
+                    ["deposit|Nobody|9|9|9|475100"] = { count = 1, asOf = 0 },
+                }
+                GBL:ResetHashCache()
+            end
+
+            it("stamps the map the records give", function()
+                splitPair()
+                local truth = GBL:ComputeBucketHashes(guildData)
+
+                local scan = GBL:StartBucketHashScan(guildData)
+                GBL:StepBucketHashScan(guildData, scan, 2)
+                assert.equals(0, GBL:CleanupWithEventCounts(guildData),
+                    "the fixture must give the cleanup nothing to trim")
+                local done = false
+                while not done do
+                    local _, finished = GBL:StepBucketHashScan(guildData, scan, 2)
+                    done = finished
+                end
+
+                assert.same(truth, GBL:ComputeBucketHashes(guildData),
+                    "a cleanup that removes nothing must not change what the records give")
+                assert.same(truth, GBL:GetBucketHashes(guildData))
+            end)
+
+            -- The other half of the same fix: the cure is leaving the arrays
+            -- alone, not resetting, which would cost a full walk of the
+            -- history at the next read after every sync receive (#115).
+            it("leaves a warm cache warm when no scan is in flight", function()
+                splitPair()
+                local warm = GBL:GetBucketHashes(guildData)
+
+                assert.equals(0, GBL:CleanupWithEventCounts(guildData),
+                    "the fixture must give the cleanup nothing to trim")
+
+                assert.equals(warm, GBL:_FreshBucketHashes(guildData),
+                    "the cache must still answer, with the table it held")
+            end)
+        end)
     end)
 end)

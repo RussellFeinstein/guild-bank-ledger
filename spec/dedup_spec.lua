@@ -1704,4 +1704,92 @@ describe("Dedup", function()
         end)
     end)
 
+    -- #342. The cleanup gathers each array's records by prefix and used to
+    -- write them back in that order whether or not it removed anything. The
+    -- serve's bucket walk holds a positional cursor across frames, so a
+    -- cleanup landing between two of its steps moved records across the
+    -- cursor: one walked twice, another never. On the saved store a cleanup
+    -- that removed nothing still moved 4,336 of 14,057 item records.
+    describe("an array the cleanup removed nothing from (#342)", function()
+        local function item(player, slot)
+            return {
+                type = "deposit", player = player, itemID = 1, count = 1, tab = 1,
+                timestamp = slot * 3600 + 10,
+                id = "deposit|" .. player .. "|1|1|1|" .. slot .. ":0",
+                _occurrence = 0,
+            }
+        end
+
+        local function money(player, slot)
+            return {
+                type = "deposit", player = player, amount = 500,
+                timestamp = slot * 3600 + 10,
+                id = "deposit|" .. player .. "|500|" .. slot .. ":0",
+                _occurrence = 0,
+            }
+        end
+
+        local function snapshot(list)
+            local copy = {}
+            for i, rec in ipairs(list) do copy[i] = rec end
+            return copy
+        end
+
+        local function assertInPlace(before, list, what)
+            assert.equals(#before, #list, what .. ": the length moved")
+            for i, rec in ipairs(before) do
+                assert.equals(rec, list[i],
+                    what .. ": position " .. i .. " holds another record")
+            end
+        end
+
+        -- Two records of one prefix with another prefix between them, days
+        -- apart, so gathering by prefix would put the third record second.
+        local function splitPair(make)
+            return { make("Bob-TestRealm", 475100), make("Al-TestRealm", 475200),
+                make("Bob-TestRealm", 475300) }
+        end
+
+        it("stays in place when nothing is removed", function()
+            guildData.transactions = splitPair(item)
+            guildData.moneyTransactions = splitPair(money)
+            -- One count, for a prefix no record carries: the pass runs and
+            -- has nothing to trim.
+            guildData.eventCounts = {
+                ["deposit|Nobody|9|9|9|475100"] = { count = 1, asOf = 0 },
+            }
+            local items = snapshot(guildData.transactions)
+            local gold = snapshot(guildData.moneyTransactions)
+
+            local removed = GBL:CleanupWithEventCounts(guildData)
+
+            assert.equals(0, removed, "the fixture must give the pass nothing to trim")
+            assertInPlace(items, guildData.transactions, "items")
+            assertInPlace(gold, guildData.moneyTransactions, "money")
+        end)
+
+        it("stays in place when only the other array is trimmed", function()
+            -- Three copies of one event against a count of one: two go.
+            local cluster = {}
+            for i = 1, 3 do
+                cluster[i] = item("Thrall-TestRealm", 475103)
+                cluster[i].timestamp = 475103 * 3600 + i * 10
+                cluster[i].id = "deposit|Thrall-TestRealm|1|1|1|475103:" .. (i - 1)
+                cluster[i]._occurrence = i - 1
+            end
+            guildData.transactions = cluster
+            guildData.moneyTransactions = splitPair(money)
+            guildData.eventCounts = {
+                ["deposit|Thrall-TestRealm|1|1|1|475103"] = { count = 1, asOf = 0 },
+            }
+            local gold = snapshot(guildData.moneyTransactions)
+
+            local removed = GBL:CleanupWithEventCounts(guildData)
+
+            assert.equals(2, removed, "the fixture must make the pass trim the items")
+            assert.equals(1, #guildData.transactions)
+            assertInPlace(gold, guildData.moneyTransactions, "money")
+        end)
+    end)
+
 end)
