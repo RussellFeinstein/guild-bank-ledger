@@ -1016,6 +1016,16 @@ describe("Sync receive and intake", function()
             assert.is_nil(logEntry("Repeated chunk"))
         end)
 
+        -- Before anything is taken the position and the total are both 0,
+        -- so a malformed chunk numbered 0 with a total of 0 matches them. A
+        -- copy needs a chunk taken first; this one is read, as it was before.
+        it("reads a chunk numbered 0 that arrives before any other", function()
+            deliver(0, 0, 1)
+
+            assert.equals(1, #guildData.transactions, "its record is read")
+            assert.is_nil(logEntry("Repeated chunk"))
+        end)
+
         -- In stop-and-wait a copy is of the chunk just taken. One from
         -- further back is walked and the position follows it, which costs
         -- that chunk once more. "At or below the highest" would instead skip
