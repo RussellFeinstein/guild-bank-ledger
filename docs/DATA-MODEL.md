@@ -313,6 +313,35 @@ within the hour. And a member stamped and then moved realm keeps the double coun
 looked for under the roster realm only. The producer is still reachable for a name the persistent
 cache lacks, which is #340.
 
+### Counts with no record, and records with no count
+
+A scan writes an event's count and its record together, but sync can carry each without the other, so
+either can exist alone. The live file holds both shapes.
+
+**Counts with no record.** Measured on 2026-10-03 against the file saved 2026-10-01 (17,454 count
+keys), read-only: 450 keys name a prefix no stored record carries. 449 were minted by other clients
+and merged here by sync. None of the 117 scans that wrote them ran within a minute of a scan by this
+client, while 77% of the counts whose records this client scanned did. Most fall on 04-26 and 05-12 to
+05-19, when this client did not open the bank and the money log rolled over before it came back.
+Until #114 (v0.41.8) a serve dealt every count in the differing buckets across its chunks from chunk
+1, with no tie to the chunk carrying the bucket's records, so an aborted session delivered counts
+whose records were still queued. The records never followed because the store holding the most
+records never requests from a smaller one, which is #345. The remaining key is the rename gap the
+#64 review found.
+
+**Verdict: explained, nothing to fix here, issue #333.** The counts are true: each is a peer's reading
+of an event the ledger lacks, among them three deposits worth 2,327,535 gold. `CleanupWithEventCounts`
+never trims a cluster with no records, so they touch nothing, and if the records arrive twice later
+the counts are what trims them. Deleting them would remove the only trace of those events. Eight are
+one event typed two ways: a peer's `withdraw` where this client stored `repair` for the same player,
+amount and hour, or the reverse. Why two clients read different types from one money log entry is not
+known; all eight are from April.
+
+**Records with no count.** The reverse shape: records of one prefix less than an hour apart with no
+count near any of them, which `CleanupWithEventCounts` keeps whole. Counts began on 2026-04-15, so
+the duplicates stored before then are this case. After #332's repair the file holds 81 such money
+records, all from April and about 1.12M gold counted twice, and about 670 item records. Issue #346.
+
 ### One identity namespace, two arrays
 
 Records live in two arrays but identity is pooled. `seenTxHashes` (`GBL:MarkSeen` in
@@ -827,6 +856,8 @@ All under the **Data model integrity** milestone.
 | 5 | Item records with no `itemID` collide in the money branch | #69 (locally scanned, unscheduled); sync-received closed in v0.37.0 (#68) |
 | 5 | `NormalizeRecordId` can rewrite a money record from an item record | closed in v0.37.0 (#68) |
 | 5 | One client's realm stamped on 563 records, 561 of them a second copy of a stored event | closed in v0.43.0 (#332); the producer is #340 |
+| 5 | 450 `eventCounts` keys name a prefix no stored record carries | explained (#333): peers' counts whose records never followed, for want of a pull (#345) |
+| 5 | Same-hour duplicates with no count are never trimmed | #346 |
 | 5 | Sync intake does not normalize the money `type` | closed in v0.37.0 (#68): rejected by the enum check |
 | 7 | Nothing stops the `schemaVersion` default being raised | closed in #76 |
 | 7 | `DeduplicateRecords` cannot restore the version it borrows, and raises on a nil | closed in #263 |
@@ -849,6 +880,7 @@ peer that has not run it hands the deleted records back as new ones.
 
 What that leaves open, in rough order of how much it still hurts: #75 (the 223 damaged records
 already on disk, which #68 stops growing but does not repair, and which can now reuse
-`GBL:RepairSyncRecordItemFields`), #69 (the same itemID-less shape produced by local scans rather
-than by sync, still unscheduled), and #72. None of those touch record
-identity, so none of them cost a floor raise.
+`GBL:RepairSyncRecordItemFields`), #346 (records stored twice before counts existed, which cleanup
+cannot trim; its candidate repair writes the missing counts, so a copy a peer hands back is trimmed
+again, which may spare it a floor raise), #69 (the same itemID-less shape produced by local scans
+rather than by sync, still unscheduled), and #72. None of those touch record identity.
