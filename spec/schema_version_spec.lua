@@ -947,8 +947,10 @@ describe("schemaVersion", function()
                 "MigrateCrossSlotDedup",
                 "MigrateRepairEpochTimestamps",
                 "MigrateNormalizeStoredRealms",
-                "MigrateForeignRealmTwins",
             }, rewriters)
+            -- MigrateForeignRealmTwins (#332) is not here on purpose: it only
+            -- drops records and rewrites no id, so the record count moves and
+            -- the caches miss on their own. It resets them anyway.
 
             for _, name in ipairs(rewriters) do
                 assert.is_true(resets[name] or false,

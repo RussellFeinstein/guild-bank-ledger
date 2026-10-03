@@ -1,5 +1,5 @@
 ------------------------------------------------------------------------
--- foreign_realm_twins_spec.lua - the #332 repair rung
+-- foreign_realm_twins_spec.lua - the #332 repair
 --
 -- Before v0.13.0 one client resolved bare names against a cold roster cache
 -- and stamped its own realm, Nesingwary, onto members of five other realms.
@@ -7,13 +7,16 @@
 -- most of the same events arrived from other clients, so each such event is
 -- stored twice under two players and every total counts it twice.
 --
--- The rung drops a copy that has a twin under the roster realm, renames a copy
--- with no twin when twins elsewhere prove its name and realm were stamped, and
--- leaves everything else alone. Measured on the live store: 560 dropped, 3
--- renamed, and 34 records on two other realms left as possible real history.
+-- The check drops a copy that has a twin under the roster realm and leaves
+-- everything else alone. It runs once as a migration rung and again after
+-- every sync receive, because peers whose stores differ at the update decide
+-- differently, and a kept copy would otherwise come back to peers that dropped
+-- it. Measured on the live store: 561 dropped, 2 left with no twin, and 34
+-- records on two other realms left as possible real history.
 ------------------------------------------------------------------------
 
 local Helpers = require("spec.helpers")
+local Sync = require("spec.sync_helpers")
 local MockWoW = Helpers.MockWoW
 
 -- A WoW-era hour slot, so every timestamp passes IsValidTimestamp.
@@ -133,58 +136,49 @@ describe("MigrateForeignRealmTwins (#332)", function()
             assert.same({ "Bob-Tichondrius" }, players(gd.moneyTransactions))
         end)
 
-        it("is absorbed one per twin, and a second copy is renamed", function()
+        it("is absorbed one per twin, and a second copy is kept", function()
             store(gd, item("Alice-Stormrage", at(0, 600)),
                 item("Alice-Nesingwary", at(0, 610)), item("Alice-Nesingwary", at(0, 900)))
 
-            local dropped, renamed = run()
+            local dropped = run()
 
             assert.equals(1, dropped)
-            assert.equals(1, renamed)
-            assert.same({ "Alice-Stormrage", "Alice-Stormrage" }, players(gd.transactions))
-            -- The twin keeps its id and the renamed copy takes the next free
-            -- index in that hour, so no existing record's id moves.
-            local base = GBL:ComputeTxHash(gd.transactions[1])
-            assert.equals(base .. ":0", gd.transactions[1].id)
-            assert.equals(base .. ":1", gd.transactions[2].id)
+            assert.same({ "Alice-Stormrage", "Alice-Nesingwary" }, players(gd.transactions))
             assert.equals(900, gd.transactions[2].timestamp - at(0, 0))
+        end)
+
+        it("pairs as many copies as any assignment could", function()
+            -- Nearest-first fails here: the first copy takes the later twin,
+            -- 1500s away, and leaves the second copy only the earlier one,
+            -- 4000s away. Walking both sides in time order pairs both.
+            store(gd, item("Alice-Stormrage", at(0, 600)), item("Alice-Stormrage", at(1, 1500)),
+                item("Alice-Nesingwary", at(1, 0)), item("Alice-Nesingwary", at(1, 1000)))
+
+            local dropped = run()
+
+            assert.equals(2, dropped)
+            assert.same({ "Alice-Stormrage", "Alice-Stormrage" }, players(gd.transactions))
         end)
     end)
 
     ---------------------------------------------------------------------------
-    -- Strays: a copy with no twin
+    -- A copy with no twin is left alone
     ---------------------------------------------------------------------------
 
     describe("a copy with no twin", function()
-        it("is renamed when twins prove its name and realm were stamped", function()
+        it("is left alone even when other copies of its name and realm had twins", function()
+            -- The 2 such records on the live store sit 60 and 63 minutes from a
+            -- match. Renaming would mint an id another peer could hold for a
+            -- different event, and the label is all that is wrong (Russell,
+            -- 2026-10-03).
             store(gd, item("Alice-Stormrage", at(0, 600)), item("Alice-Nesingwary", at(0, 630)),
                 item("Alice-Nesingwary", at(5, 600), { itemID = 2592 }))
-            local oldId = gd.transactions[3].id
-
-            local dropped, renamed = run()
-
-            assert.equals(1, dropped)
-            assert.equals(1, renamed)
-            local stray = gd.transactions[2]
-            assert.equals("Alice-Stormrage", stray.player)
-            assert.equals(GBL:ComputeTxHash(stray) .. ":0", stray.id)
-            assert.equals(0, stray._occurrence)
-            assert.is_nil(gd.seenTxHashes[oldId])
-            assert.is_not_nil(gd.seenTxHashes[stray.id])
-        end)
-
-        it("gets an index of its own when two land in one hour", function()
-            store(gd, item("Alice-Stormrage", at(0, 600)), item("Alice-Nesingwary", at(0, 630)),
-                item("Alice-Nesingwary", at(5, 600), { itemID = 2592 }),
-                item("Alice-Nesingwary", at(5, 700), { itemID = 2592 }))
+            local id = gd.transactions[3].id
 
             run()
 
-            local a, b = gd.transactions[2], gd.transactions[3]
-            assert.equals("Alice-Stormrage", a.player)
-            assert.equals("Alice-Stormrage", b.player)
-            local base = GBL:ComputeTxHash(a)
-            assert.same({ base .. ":0", base .. ":1" }, { a.id, b.id })
+            assert.same({ "Alice-Stormrage", "Alice-Nesingwary" }, players(gd.transactions))
+            assert.equals(id, gd.transactions[2].id)
         end)
 
         it("is left alone when its name and realm have no twin anywhere", function()
@@ -193,21 +187,11 @@ describe("MigrateForeignRealmTwins (#332)", function()
             store(gd, item("Cara-Thrall", at(0, 600)))
             local id = gd.transactions[1].id
 
-            local dropped, renamed = run()
+            local dropped = run()
 
             assert.equals(0, dropped)
-            assert.equals(0, renamed)
             assert.equals("Cara-Thrall", gd.transactions[1].player)
             assert.equals(id, gd.transactions[1].id)
-        end)
-
-        it("is not proven stamped by twins under a different realm", function()
-            store(gd, item("Alice-Stormrage", at(0, 600)), item("Alice-Nesingwary", at(0, 630)),
-                item("Alice-Thrall", at(5, 600), { itemID = 2592 }))
-
-            run()
-
-            assert.same({ "Alice-Stormrage", "Alice-Thrall" }, players(gd.transactions))
         end)
     end)
 
@@ -245,6 +229,8 @@ describe("MigrateForeignRealmTwins (#332)", function()
         end)
 
         it("bumps a guild whose cache is empty, with nothing to compare", function()
+            -- The check runs again after every receive, so a cache that warms
+            -- later still gets its turn.
             gd.playerRealms = {}
             store(gd, item("Alice-Stormrage", at(0, 600)), item("Alice-Nesingwary", at(0, 630)))
 
@@ -267,16 +253,6 @@ describe("MigrateForeignRealmTwins (#332)", function()
 
             assert.same({ "Bob-Tichondrius", "Bob-Nesingwary" }, players(gd.transactions))
         end)
-
-        it("is never renamed, since its id would come from each peer's clock", function()
-            store(gd, item("Alice-Stormrage", at(0, 600)), item("Alice-Nesingwary", at(0, 630)),
-                item("Alice-Nesingwary", 1000, { itemID = 2592 }))
-
-            local _, renamed = run()
-
-            assert.equals(0, renamed)
-            assert.same({ "Alice-Stormrage", "Alice-Nesingwary" }, players(gd.transactions))
-        end)
     end)
 
     ---------------------------------------------------------------------------
@@ -291,7 +267,7 @@ describe("MigrateForeignRealmTwins (#332)", function()
             gd.eventCounts[twinKey] = { count = 1, asOf = 1 }
             gd.eventCounts[copyKey] = { count = 2, asOf = 2 }
 
-            local _, _, moved = run()
+            local _, moved = run()
 
             assert.equals(1, moved)
             assert.is_nil(gd.eventCounts[copyKey])
@@ -311,19 +287,7 @@ describe("MigrateForeignRealmTwins (#332)", function()
             assert.equals(3, gd.eventCounts[twinKey].count)
         end)
 
-        it("move with a renamed stray", function()
-            store(gd, item("Alice-Stormrage", at(0, 600)), item("Alice-Nesingwary", at(0, 630)),
-                item("Alice-Nesingwary", at(5, 600), { itemID = 2592 }))
-            local oldKey = GBL:ComputeTxHash(gd.transactions[3])
-            gd.eventCounts[oldKey] = { count = 1, asOf = 1 }
-
-            run()
-
-            assert.is_nil(gd.eventCounts[oldKey])
-            assert.equals(1, gd.eventCounts[GBL:ComputeTxHash(gd.transactions[2])].count)
-        end)
-
-        it("move in every hour of a stamped prefix, not only the hours with a record", function()
+        it("move in every hour of a prefix whose records all went", function()
             store(gd, item("Alice-Stormrage", at(0, 600)), item("Alice-Nesingwary", at(0, 630)))
             local copyPrefix = GBL:BuildTxPrefix(gd.transactions[2])
             local twinPrefix = GBL:BuildTxPrefix(gd.transactions[1])
@@ -335,15 +299,42 @@ describe("MigrateForeignRealmTwins (#332)", function()
             assert.equals(4, gd.eventCounts[twinPrefix .. (H + 9)].count)
         end)
 
+        it("stay under a prefix that still holds a record", function()
+            -- The copy goes, the record two hours later stays, and its count
+            -- still describes it.
+            store(gd, item("Alice-Stormrage", at(0, 600)), item("Alice-Nesingwary", at(0, 630)),
+                item("Alice-Nesingwary", at(2, 600)))
+            local keptKey = GBL:ComputeTxHash(gd.transactions[3])
+            gd.eventCounts[keptKey] = { count = 1, asOf = 1 }
+
+            local dropped, moved = run()
+
+            assert.equals(1, dropped)
+            assert.equals(0, moved)
+            assert.equals(1, gd.eventCounts[keptKey].count)
+        end)
+
         it("stay where they are under a prefix whose records were left alone", function()
             store(gd, item("Cara-Thrall", at(0, 600)))
             local key = GBL:ComputeTxHash(gd.transactions[1])
             gd.eventCounts[key] = { count = 1, asOf = 1 }
 
-            local _, _, moved = run()
+            local _, moved = run()
 
             assert.equals(0, moved)
             assert.equals(1, gd.eventCounts[key].count)
+        end)
+
+        it("skip a key that is not a string rather than raising", function()
+            -- Sync intake merges a peer's keys without checking their type.
+            store(gd, item("Alice-Stormrage", at(0, 600)), item("Alice-Nesingwary", at(0, 630)))
+            gd.eventCounts[12345] = { count = 1, asOf = 1 }
+
+            local ok, err = pcall(run)
+
+            assert.is_true(ok, tostring(err))
+            assert.equals(12, gd.schemaVersion)
+            assert.equals(1, gd.eventCounts[12345].count)
         end)
     end)
 
@@ -434,9 +425,9 @@ describe("MigrateForeignRealmTwins (#332)", function()
             for i, r in ipairs(gd.transactions) do ids[i] = r.id end
 
             gd.schemaVersion = 11
-            local dropped, renamed, moved = run()
+            local dropped, moved = run()
 
-            assert.same({ 0, 0, 0 }, { dropped, renamed, moved })
+            assert.same({ 0, 0 }, { dropped, moved })
             local after = {}
             for i, r in ipairs(gd.transactions) do after[i] = r.id end
             assert.same(ids, after)
@@ -452,7 +443,6 @@ describe("MigrateForeignRealmTwins (#332)", function()
             store(gd, item("Alice-Stormrage", at(0, 600)),
                 item("Alice-Nesingwary", at(0, 610)), item("Alice-Nesingwary", at(0, 900)),
                 item("Alice-Nesingwary", at(5, 600), { itemID = 2592 }),
-                item("Alice-Nesingwary", at(5, 700), { itemID = 2592 }),
                 money("Bob-Tichondrius", at(1, 100)), money("Bob-Nesingwary", at(1, 200)))
 
             -- The same records and ids, stored in the reverse order in a second
@@ -482,8 +472,17 @@ describe("MigrateForeignRealmTwins (#332)", function()
                 return out
             end
             assert.same(outcome(gd), outcome(other))
-            -- Non-degenerate: two drops and three renames happened in each.
-            assert.equals(5, #outcome(gd))
+            -- Non-degenerate: an item copy and the money copy went in both, and
+            -- the item copy that went is the earlier one in both, though the
+            -- two guilds walked their records in opposite orders.
+            assert.equals(4, #outcome(gd))
+            for _, g in ipairs({ gd, other }) do
+                local kept
+                for _, r in ipairs(g.transactions) do
+                    if r.player == "Alice-Nesingwary" and r.itemID == 2589 then kept = r end
+                end
+                assert.equals(at(0, 900), kept.timestamp)
+            end
         end)
     end)
 
@@ -500,9 +499,8 @@ describe("MigrateForeignRealmTwins (#332)", function()
             return out
         end
 
-        it("names the guild and the three counts", function()
-            store(gd, item("Alice-Stormrage", at(0, 600)), item("Alice-Nesingwary", at(0, 630)),
-                item("Alice-Nesingwary", at(5, 600), { itemID = 2592 }))
+        it("names the guild and the two counts", function()
+            store(gd, item("Alice-Stormrage", at(0, 600)), item("Alice-Nesingwary", at(0, 630)))
             local copyKey = GBL:ComputeTxHash(gd.transactions[2])
             gd.eventCounts[copyKey] = { count = 1, asOf = 1 }
 
@@ -512,7 +510,7 @@ describe("MigrateForeignRealmTwins (#332)", function()
             assert.equals(1, #found)
             assert.equals("INFO", found[1].level)
             assert.is_truthy(found[1].message:find(
-                "Foreign-realm twins for TestGuild: dropped 1, renamed 1, counts moved 1", 1, true),
+                "Foreign-realm twins for TestGuild: dropped 1, counts moved 1", 1, true),
                 found[1].message)
         end)
 
@@ -534,6 +532,99 @@ describe("MigrateForeignRealmTwins (#332)", function()
             local found = lines()
             assert.equals(1, #found)
             assert.is_truthy(found[1].message:find("for TestGuild:", 1, true), found[1].message)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- After every sync receive, not only at the update
+    ---------------------------------------------------------------------------
+
+    describe("after a sync receive", function()
+        before_each(function()
+            GBL, gd = Sync.setup()
+            gd.schemaVersion = 12
+            gd.playerRealms = { Alice = "Stormrage" }
+        end)
+
+        it("drops a kept copy once its twin arrives", function()
+            -- A peer that held the copy without its twin at the update keeps it,
+            -- and must drop it when the twin comes in.
+            store(gd, item("Alice-Nesingwary", at(0, 630)))
+            assert.equals(0, (GBL:DropForeignRealmTwins(gd)))
+
+            store(gd, item("Alice-Stormrage", at(0, 600)))
+            local dropped = GBL:DropForeignRealmTwins(gd)
+
+            assert.equals(1, dropped)
+            assert.same({ "Alice-Stormrage" }, players(gd.transactions))
+        end)
+
+        it("drops a copy handed back after the repair", function()
+            local copy = item("Alice-Nesingwary", at(0, 630))
+            store(gd, item("Alice-Stormrage", at(0, 600)), copy)
+            GBL:DropForeignRealmTwins(gd)
+            assert.equals(1, #gd.transactions)
+
+            -- A peer that kept it sends it back under its old id.
+            local back = {}
+            for k, v in pairs(copy) do back[k] = v end
+            gd.transactions[#gd.transactions + 1] = back
+            gd.seenTxHashes[back.id] = back.timestamp
+
+            assert.equals(1, (GBL:DropForeignRealmTwins(gd)))
+            assert.same({ "Alice-Stormrage" }, players(gd.transactions))
+        end)
+
+        it("runs when a receive finishes", function()
+            store(gd, item("Alice-Stormrage", at(0, 600)), item("Alice-Nesingwary", at(0, 630)))
+            GBL:RequestSync("OfficerB", 0)
+            assert.is_true(GBL:GetSyncStatus().receiving)
+
+            GBL:FinishReceiving("OfficerB")
+
+            assert.same({ "Alice-Stormrage" }, players(gd.transactions))
+            assert.is_false(GBL:GetSyncStatus().receiving)
+        end)
+
+        it("finishes the receive and resets the hash cache when the check raises", function()
+            store(gd, item("Alice-Stormrage", at(0, 600)), item("Alice-Nesingwary", at(0, 630)))
+            local original, originalReset = GBL.DropForeignRealmTwins, GBL.ResetHashCache
+            local resets = 0
+            GBL.DropForeignRealmTwins = function() error("twin check exploded", 0) end
+            GBL.ResetHashCache = function(self, ...)
+                resets = resets + 1
+                return originalReset(self, ...)
+            end
+            GBL:RequestSync("OfficerB", 0)
+
+            local ok, err = pcall(GBL.FinishReceiving, GBL, "OfficerB")
+
+            GBL.DropForeignRealmTwins, GBL.ResetHashCache = original, originalReset
+            assert.is_true(ok, tostring(err))
+            assert.is_false(GBL:GetSyncStatus().receiving)
+            assert.is_true(resets > 0, "the failure branch did not reset the hash cache")
+            local errors = {}
+            for _, e in ipairs(GBL:GetLog("system")) do
+                if e.level == "ERROR" then errors[#errors + 1] = e.message end
+            end
+            assert.equals(1, #errors)
+            assert.is_truthy(errors[1]:find("twin check exploded", 1, true), errors[1])
+        end)
+
+        it("names a failing check once per session", function()
+            local original = GBL.DropForeignRealmTwins
+            GBL.DropForeignRealmTwins = function() error("twin check exploded", 0) end
+            GBL:RequestSync("OfficerB", 0)
+            GBL:FinishReceiving("OfficerB")
+            GBL:RequestSync("OfficerB", 0)
+            GBL:FinishReceiving("OfficerB")
+            GBL.DropForeignRealmTwins = original
+
+            local n = 0
+            for _, e in ipairs(GBL:GetLog("system")) do
+                if e.level == "ERROR" and e.message:find("twin check", 1, true) then n = n + 1 end
+            end
+            assert.equals(1, n)
         end)
     end)
 end)
