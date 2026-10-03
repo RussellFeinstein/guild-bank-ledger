@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.43.0] - 2026-10-03
 
 ### Fixed
 - Some guild bank transactions recorded before v0.13.0 (April 2026) were stored twice: once under the member's own realm, and once under the realm of the guildmate whose addon recorded them first, which was not the member's. Every total that counted them counted them twice: the Transactions list, the Gold log and the per-player figures. Your addon now removes the second copy when it loads, and checks again after every sync, so a copy that reaches it later is removed too. A record under a realm the roster disagrees with that has no correctly named copy within the hour is left as it is, because it may be a real realm transfer. The system log (`/gbl systemlog`) says how many records your addon removed. In the guild where this was found, 561 transactions from January to April 2026 had been counted twice.

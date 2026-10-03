@@ -74,7 +74,7 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 
 ---
 
-## Current: Beta (v0.42.x)
+## Current: Beta (v0.43.x)
 
 Per-area status:
 

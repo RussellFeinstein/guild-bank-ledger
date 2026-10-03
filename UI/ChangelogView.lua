@@ -29,6 +29,15 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.43.0
+    {"0.43.0", "2026-10-03", {
+        Fixed = {
+            "Some guild bank transactions recorded before v0.13.0 (April 2026) were stored twice: once under the member's own realm, and once under the realm of the guildmate whose addon recorded them first, which was not the member's. Every total that counted them counted them twice: the Transactions list, the Gold log and the per-player figures. Your addon now removes the second copy when it loads, and checks again after every sync, so a copy that reaches it later is removed too. A record under a realm the roster disagrees with that has no correctly named copy within the hour is left as it is, because it may be a real realm transfer. /gbl systemlog says how many records your addon removed. In the guild where this was found, 561 transactions from January to April 2026 had been counted twice.",
+        },
+        Changed = {
+            "This version syncs records only with guildmates on 0.43.0 or later. The duplicates above have to be removed on every member's addon, or an addon that still holds them would send them straight back. Until your guildmates update, your addon and theirs do not exchange records, though guild settings, sort access and the bank layout still pass between versions. Ask your guild to update.",
+        },
+    }},
     -- v0.42.1
     {"0.42.1", "2026-10-03", {
         Fixed = {

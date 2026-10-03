@@ -19,7 +19,9 @@ local PROTOCOL_VERSION = 4
 --
 -- Raise this ONLY for a wire, record-identity or fingerprint break, never for
 -- an ordinary release. Raising it re-imposes the split it exists to remove.
-local MIN_SYNC_VERSION = "0.37.0"
+-- Raised to 0.43.0 for #332: that release deletes records one client stamped
+-- with its own realm, and an older peer would hand them back as new.
+local MIN_SYNC_VERSION = "0.43.0"
 -- Chunk size tuning (#92 — the budget covers the whole message)
 --
 -- AceComm splits a message into 255-byte wire fragments, and whole-chunk loss

@@ -191,4 +191,4 @@ Recorded as available options, not current practice. The caveat that matters: ch
 
 ## Version
 
-Current: 0.42.1 (see `VERSION` file)
+Current: 0.43.0 (see `VERSION` file)
