@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.42.0] - 2026-10-02
 
 ### Added
 - Recording guild bank transactions now leaves a record of its own, in a new ledger log opened with `/gbl ledgerlog`. Before, the addon's core job was the one thing it never wrote down, so a transaction that did not show up could not be traced. Each time the addon reads the bank's logs it writes one line: how many entries it read and how many were new, tab by tab and for the money log.

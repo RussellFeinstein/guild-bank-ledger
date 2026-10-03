@@ -53,7 +53,7 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 - Severity levels (DEBUG / INFO / WARN / ERROR) with `pcall(string.format)` fallback
 - Surfaced on demand via `/gbl synclog`, `/gbl sortlog`, `/gbl systemlog`, `/gbl ledgerlog`, `/gbl logs` (master, interleaved by timestamp)
 - Audit panel removed from the Sync tab; logs are diagnostic artifacts, not always-visible UI
-- Transaction recording logs every bank log read to its own ledger channel (#85): what each read found and stored per tab, and the entries it could not record
+- Transaction recording logs every bank log read to its own ledger channel (v0.42.0, #85): what each read found and stored per tab, and the entries it could not record
 - Persistent capture (v0.36.0): every channel persists to `GuildBankLedgerAuditDB` per session (version-stamped headers, per-channel caps, 10-session rotation), managed via `/gbl audit`. On by default; nothing is transmitted. The opt-in uploader is phases 2-3 of docs/PLAN-audit-log-upload.md and stays unbuilt
 
 **Access control** (v0.15.0):
@@ -74,7 +74,7 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 
 ---
 
-## Current: Beta (v0.41.x)
+## Current: Beta (v0.42.x)
 
 Per-area status:
 
