@@ -4935,27 +4935,21 @@ function GBL:SendNack(target, chunkIndex)
 end
 
 --- Handle an incoming NACK — re-transmit the requested chunk.
--- A NACK for a send we are not making is answered with BUSY (#320), except
--- from our live receive source. One past any chunk we sent is ignored (#290).
+-- A NACK for a send we are not making is answered with BUSY (#320), whoever
+-- it comes from (#334). One past any chunk we sent is ignored (#290).
 -- @param sender string Sender name
 -- @param data table Deserialized NACK payload
 function GBL:HandleNack(sender, data)
-    local key = self:CanonicalPeerKey(sender)
-    if not syncState.sending or key ~= self:CanonicalPeerKey(syncState.sendTarget) then
+    if not syncState.sending or self:CanonicalPeerKey(sender)
+            ~= self:CanonicalPeerKey(syncState.sendTarget) then
         -- We are idle, or serving or preparing for someone else, so this peer
         -- is NACKing a send of ours that has stopped. Silence left it on its
         -- whole NACK ladder, 140s; a BUSY ends its receive at the first NACK
-        -- that lands, on any build (#320).
+        -- that lands (#320). The peer sending to us gets one too (#334): it
+        -- reads the word as a refusal and keeps its send, and the builds
+        -- that read it as ending both sessions are below the v0.43.0 floor.
         local what = "NACK from " .. tostring(sender) .. " for chunk "
             .. tostring(data and data.chunk or "?") .. ", not sending to them"
-        -- Not to our live receive source: a build without the word reads it
-        -- as ending both sessions, and its send to us is still running. The
-        -- source is nil with no receive open, so no receiving term is needed.
-        if key == self:CanonicalPeerKey(syncState.receiveSource) then
-            self:SyncInfo("%s - no BUSY: receiving from them, and a BUSY would end their send",
-                what)
-            return
-        end
         local sent = sendBusy(self, sender, "not-sending")
         self:SyncInfo("%s%s", what, sent and " - sent BUSY" or "")
         return
