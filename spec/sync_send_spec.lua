@@ -1220,9 +1220,9 @@ describe("Sync send path", function()
     -- A requester whose sender has stopped (a /reload mid-send, the 120s
     -- send-stall teardown, an ACK ladder run out) NACKed into silence for the
     -- whole ladder, 140s. A BUSY ends its receive at the first NACK that
-    -- lands, on any build. Our live receive source is the exception: a build
-    -- that does not know the word ends both sessions, and its send to us is
-    -- the one still running.
+    -- lands. Our live receive source gets one too (#334): the silence it used
+    -- to get was for a build that read the word as ending both sessions, and
+    -- the v0.43.0 floor keeps every such build out of a session with us.
     ---------------------------------------------------------------------------
 
     describe("a NACK we cannot serve (#320)", function()
@@ -1329,40 +1329,45 @@ describe("Sync send path", function()
             assert.equals(1, #Sync.busySent(GBL))
         end)
 
-        it("stays silent to our live receive source", function()
+        -- The peer sending to us is answered like anyone else (#334). Its
+        -- build reads the word as a refusal of its NACK, so it ends the
+        -- receive that NACKed and keeps its send to us, which is why our own
+        -- receive from it has to stay open here.
+        it("answers our live receive source, and keeps receiving from it", function()
             receiveFrom("OfficerB")
 
             GBL:HandleNack("OfficerB", { chunk = 2 })
 
-            assert.equals(0, #MockAce.sentCommMessages,
-                "a BUSY would end OfficerB's send to us on a build without the word")
-            assert.is_true(GBL:GetSyncStatus().receiving)
-            assert.is_true(hasLine("NACK from OfficerB for chunk 2, not sending to them"
-                .. " - no BUSY: receiving from them, and a BUSY would end their send"))
+            local busy = Sync.busySent(GBL)
+            assert.equals(1, #busy)
+            assert.equals("OfficerB", busy[1].target)
+            assert.equals("not-sending", busy[1].reason)
+            assert.equals("NORMAL", busy[1].prio)
+            assert.equals(1, #MockAce.sentCommMessages, "the BUSY and nothing else")
+            assert.is_true(GBL:GetSyncStatus().receiving,
+                "our own receive from OfficerB stays open")
+            assert.equals("OfficerB", GBL:GetSyncStatus().receiveSource)
+            assert.is_true(hasLine(
+                "NACK from OfficerB for chunk 2, not sending to them - sent BUSY"))
+            assert.is_false(hasLine("no BUSY"))
         end)
 
-        it("stays silent to our receive source while we send to someone else", function()
+        it("answers our receive source while we send to someone else", function()
             serve("OfficerC")
             local progress = GBL:GetSyncStatus().sendProgress
             receiveFrom("OfficerB")
 
             GBL:HandleNack("OfficerB", { chunk = 2 })
 
-            assert.equals(0, #Sync.busySent(GBL))
+            local busy = Sync.busySent(GBL)
+            assert.equals(1, #busy)
+            assert.equals("OfficerB", busy[1].target)
+            assert.equals("not-sending", busy[1].reason)
+            assert.is_true(GBL:GetSyncStatus().receiving,
+                "our own receive from OfficerB stays open")
             assert.equals(0, dataSent(), "OfficerC's send is not resent")
             assert.equals("OfficerC", GBL:GetSyncStatus().sendTarget)
             assert.equals(progress, GBL:GetSyncStatus().sendProgress)
-        end)
-
-        -- The receive source is stored as the request named it; the NACK
-        -- arrives in whatever form AceComm gives. Both go through
-        -- CanonicalPeerKey, as in HandleBusy.
-        it("knows our receive source by its canonical name", function()
-            receiveFrom("OfficerB")
-
-            GBL:HandleNack("OfficerB-TestRealm", { chunk = 2 })
-
-            assert.equals(0, #Sync.busySent(GBL))
         end)
 
         -- The #279 rule: a log never claims a BUSY the roster refused.
