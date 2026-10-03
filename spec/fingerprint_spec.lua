@@ -707,9 +707,9 @@ describe("Fingerprint", function()
         -- The contract every id-rewriting caller depends on. Only record.id
         -- feeds a bucket hash, so rewriting one in place changes the correct
         -- answer while leaving the record count identical, and the cache cannot
-        -- see it. That is why the migrations and CleanupWithEventCounts call
-        -- ResetHashCache, and why anything added later that rewrites an id has
-        -- to do the same.
+        -- see it. That is why the migrations, CleanupWithEventCounts and a sync
+        -- receive's NormalizeRecordId call ResetHashCache, and why anything
+        -- added later that rewrites an id has to do the same.
         it("does not notice an id rewritten in place until the cache is reset", function()
             addRecord("deposit|A|100|1|1|472222:0", 1700000000)
             local stale = GBL:GetBucketHashes(guildData)[math.floor(472222 / 6)]

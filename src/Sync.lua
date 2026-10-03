@@ -5078,9 +5078,9 @@ function GBL:HandleBusy(sender, data)
         if syncState.receiveGot > 0 then
             -- A session that took chunks ends the way the NACK ladder's abort
             -- ends it, which a not-sending BUSY now replaces at the first
-            -- NACK (#320): the checkpoint, the event-count trim, the hash
-            -- cache reset after an in-place id rewrite, the report and the
-            -- post-sync HELLO. Named first, as OnCombatStart names its abort.
+            -- NACK (#320): the checkpoint, the event-count trim, the report
+            -- and the post-sync HELLO. Named first, as OnCombatStart names
+            -- its abort.
             self:AddAuditEntry(cleanSender .. " busy - ending receive after "
                 .. syncState.receiveGot .. " chunk(s)")
             self:FinishReceiving(syncState.receiveSource)

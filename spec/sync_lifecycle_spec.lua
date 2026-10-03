@@ -1907,8 +1907,8 @@ describe("Sync session lifecycle", function()
 
         -- A BUSY that ends a receive which has taken chunks ends it the way the
         -- NACK ladder's abort did: through FinishReceiving, which checkpoints,
-        -- trims with the merged event counts, resets the hash cache after an
-        -- in-place id rewrite, writes the session's report and re-advertises.
+        -- trims with the merged event counts, writes the session's report and
+        -- re-advertises.
         -- #320 moves that abort from 140s to the first NACK, so the quiet clear
         -- it used to take would have skipped all of it (#320). A refusal of a
         -- request that has delivered nothing keeps the quiet clear.
