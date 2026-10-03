@@ -1609,7 +1609,7 @@ function GBL:MigrateRecoverPeerRealms(guildData)
     return rewrites
 end
 
---- Schema 11 -> 12: drop the copies one client stamped with its own realm (#332).
+--- Drop the copies one client stamped with its own realm (#332).
 -- Before v0.13.0 a client resolved bare names against a cold roster cache and
 -- stamped its own realm on members of other realms. Sync carried those records
 -- everywhere, and correctly named records of the same events came from other
@@ -1617,29 +1617,29 @@ end
 --
 -- A candidate is a record whose player's realm the guild's roster cache
 -- contradicts. It is dropped when a record of the same prefix under the roster
--- realm sits under an hour away (IsDuplicate's proximity), one copy per twin.
--- A candidate with no twin is renamed to the roster realm only when twins
--- prove its name and realm were stamped; otherwise it may be a real realm
--- transfer and is left alone. A record with an invalid timestamp is never a
--- candidate, because its new id would come from each peer's own clock.
+-- realm sits under an hour away (IsDuplicate's proximity), each twin taking one
+-- copy. Both sides are walked in time order and each copy takes the earliest
+-- twin still in reach, which pairs as many as any assignment can. A candidate
+-- with no twin is left alone: it may be a real realm transfer, and renaming it
+-- would mint an id another peer could hold for a different event. A record
+-- with an invalid timestamp is never a candidate.
 --
--- Every choice walks in (timestamp, id) order, so peers holding the same
--- records decide the same way. The release that ships this raises
--- MIN_SYNC_VERSION to itself, or an unrepaired peer would hand the dropped
--- copies straight back as new records.
+-- Run once by the ladder (MigrateForeignRealmTwins) and again after every sync
+-- receive (FinishReceiving), because peers whose stores differ at the update
+-- decide differently: a copy kept for want of its twin goes when the twin
+-- arrives, and a copy handed back goes again. Idempotent. The release that
+-- ships it raises MIN_SYNC_VERSION to itself, or a peer that never runs it
+-- would hand the copies back every round.
 -- @param guildData table Guild data from AceDB
 -- @param name string|nil Guild name, for the log line only
--- @return number dropped, number renamed, number eventCounts keys moved
-function GBL:MigrateForeignRealmTwins(guildData, name)
-    -- Strict, like the three rungs before it: MigrateRecoverPeerRealms leaves a
-    -- cold-roster guild at 10, and a loose gate would let this one bump it past.
-    if not guildData or (guildData.schemaVersion or 0) ~= 11 then return 0, 0, 0 end
-
+-- @return number dropped, number eventCounts keys moved
+function GBL:DropForeignRealmTwins(guildData, name)
+    if not guildData then return 0, 0 end
     local realms = type(guildData.playerRealms) == "table" and guildData.playerRealms or {}
     local lists = { guildData.transactions or {}, guildData.moneyTransactions or {} }
 
-    -- Candidates apart; everything else indexed by prefix, the twin lookup.
-    local candidates, byPrefix = {}, {}
+    -- Candidates first: most guilds have none, and then no prefix is built.
+    local candidates, targets = {}, {}
     for _, list in ipairs(lists) do
         for _, record in ipairs(list) do
             local base, realm
@@ -1649,12 +1649,20 @@ function GBL:MigrateForeignRealmTwins(guildData, name)
             local home = base and realms[base]
             if type(home) == "string" and self:IsValidTimestamp(record.timestamp)
                and self:NormalizeRealm(realm) ~= self:NormalizeRealm(home) then
-                candidates[#candidates + 1] = {
-                    record = record,
-                    pair = base .. "-" .. realm,
-                    target = base .. "-" .. self:NormalizeRealm(home),
-                }
-            else
+                local target = base .. "-" .. self:NormalizeRealm(home)
+                candidates[#candidates + 1] = { record = record, target = target }
+                targets[target] = true
+            end
+        end
+    end
+    if #candidates == 0 then return 0, 0 end
+
+    -- The twin index holds records under a target name only. No candidate is
+    -- one: its realm differs from the roster's, and a target's does not.
+    local byPrefix = {}
+    for _, list in ipairs(lists) do
+        for _, record in ipairs(list) do
+            if targets[record.player] then
                 local prefix = self:BuildTxPrefix(record)
                 local bucket = byPrefix[prefix]
                 if not bucket then
@@ -1666,76 +1674,75 @@ function GBL:MigrateForeignRealmTwins(guildData, name)
         end
     end
 
-    if #candidates == 0 then
-        guildData.schemaVersion = 12
-        return 0, 0, 0
+    -- The target prefix is read through a probe, so the stored record is
+    -- never written, not even for the length of one call.
+    local groups = {}
+    for _, c in ipairs(candidates) do
+        c.prefix = self:BuildTxPrefix(c.record)
+        c.targetPrefix = self:BuildTxPrefix(setmetatable({ player = c.target },
+            { __index = c.record }))
+        local group = groups[c.targetPrefix]
+        if not group then
+            group = {}
+            groups[c.targetPrefix] = group
+        end
+        group[#group + 1] = c
     end
 
-    table.sort(candidates, function(a, b)
-        local ta, tb = a.record.timestamp, b.record.timestamp
+    local function earlier(a, b)
+        local ta, tb = a.timestamp or 0, b.timestamp or 0
         if ta ~= tb then return ta < tb end
-        return tostring(a.record.id) < tostring(b.record.id)
-    end)
-
-    -- Each copy claims the nearest twin nobody has claimed, ties to the lower id.
-    local claimed, drop, twinned = {}, {}, {}
-    for _, c in ipairs(candidates) do
-        local r = c.record
-        c.prefix = self:BuildTxPrefix(r)
-        local player = r.player
-        r.player = c.target
-        c.targetPrefix = self:BuildTxPrefix(r)
-        r.player = player
-
-        local best, bestDt, bestId
-        for _, t in ipairs(byPrefix[c.targetPrefix] or {}) do
-            if not claimed[t] then
-                local dt = math.abs((t.timestamp or 0) - r.timestamp)
-                local tid = tostring(t.id)
-                if dt < 3600 and (not bestDt or dt < bestDt
-                                  or (dt == bestDt and tid < bestId)) then
-                    best, bestDt, bestId = t, dt, tid
-                end
+        return tostring(a.id) < tostring(b.id)
+    end
+    local drop, dropped = {}, 0
+    for targetPrefix, group in pairs(groups) do
+        table.sort(group, function(a, b) return earlier(a.record, b.record) end)
+        local twins = byPrefix[targetPrefix] or {}
+        table.sort(twins, earlier)
+        local j = 1
+        for _, c in ipairs(group) do
+            local t = c.record.timestamp
+            -- A twin an hour or more before this copy is out of reach of every
+            -- later copy too.
+            while twins[j] and (twins[j].timestamp or 0) <= t - 3600 do j = j + 1 end
+            if twins[j] and (twins[j].timestamp or 0) < t + 3600 then
+                drop[c.record] = true
+                dropped = dropped + 1
+                j = j + 1
             end
         end
-        if best then
-            claimed[best] = true
-            drop[r] = true
-            twinned[c.pair] = true
-        end
     end
+    if dropped == 0 then return 0, 0 end
 
-    -- Renames take the next free index at their new hour, written into
-    -- seenTxHashes at once so a second stray in that hour sees the first.
-    local seen = guildData.seenTxHashes
-    local dropped, renamed, moves = 0, 0, {}
+    -- Counts follow their records: a prefix left with no record hands every
+    -- hour of its counts to the roster name. A prefix that still holds a
+    -- record keeps them, since they still describe it.
+    local moves, movedPlayers = {}, {}
     for _, c in ipairs(candidates) do
-        local r = c.record
-        if drop[r] then
-            dropped = dropped + 1
+        if drop[c.record] then
             moves[c.prefix] = c.targetPrefix
-        elseif twinned[c.pair] then
-            if type(seen) == "table" and r.id then seen[r.id] = nil end
-            r.player = c.target
-            local baseHash = self:ComputeTxHash(r)
-            local occ = self:MaxOccurrenceAtSlot(baseHash, guildData)
-            r._occurrence = occ
-            r.id = baseHash .. ":" .. occ
-            if type(seen) == "table" then seen[r.id] = self:SafeRecordTimestamp(r) end
-            renamed = renamed + 1
-            moves[c.prefix] = c.targetPrefix
+            movedPlayers[c.record.player] = true
+        end
+    end
+    for _, list in ipairs(lists) do
+        for _, record in ipairs(list) do
+            if not drop[record] and movedPlayers[record.player] then
+                moves[self:BuildTxPrefix(record)] = nil
+            end
         end
     end
 
-    -- Counts follow their records: every hour under a moved prefix, merged by
-    -- max (the rule both eventCounts writers use), the old key deleted.
+    -- Merged by max, the rule both eventCounts writers use.
     local countsMoved = 0
     if type(guildData.eventCounts) == "table" and next(moves) then
         local rekey = {}
         for key in pairs(guildData.eventCounts) do
-            local prefix, slot = self:SplitBaseHash(key)
-            if prefix and slot and moves[prefix] then
-                rekey[#rekey + 1] = { from = key, to = moves[prefix] .. slot }
+            -- Intake merges a peer's keys without checking their type.
+            if type(key) == "string" then
+                local prefix, slot = self:SplitBaseHash(key)
+                if prefix and slot and moves[prefix] then
+                    rekey[#rekey + 1] = { from = key, to = moves[prefix] .. slot }
+                end
             end
         end
         for _, k in ipairs(rekey) do
@@ -1750,36 +1757,47 @@ function GBL:MigrateForeignRealmTwins(guildData, name)
         end
     end
 
-    if dropped > 0 or renamed > 0 then
-        -- Compacted in place: AceDB holds these array tables.
-        if dropped > 0 then
-            for _, list in ipairs(lists) do
-                local keep = {}
-                for _, record in ipairs(list) do
-                    if not drop[record] then keep[#keep + 1] = record end
-                end
-                for i = #list, 1, -1 do list[i] = nil end
-                for i, record in ipairs(keep) do list[i] = record end
-            end
+    -- Compacted in place: AceDB holds these array tables.
+    for _, list in ipairs(lists) do
+        local keep = {}
+        for _, record in ipairs(list) do
+            if not drop[record] then keep[#keep + 1] = record end
         end
-
-        if type(seen) == "table" then
-            for k in pairs(seen) do seen[k] = nil end
-            for _, list in ipairs(lists) do
-                for _, record in ipairs(list) do
-                    if record.id then seen[record.id] = self:SafeRecordTimestamp(record) end
-                end
-            end
-        end
-
-        self:RebuildPlayerStats(guildData)
-        self:ResetHashCache()
-        self:SystemInfo("Foreign-realm twins for %s: dropped %d, renamed %d, counts moved %d",
-            tostring(name or "a guild"), dropped, renamed, countsMoved)
+        for i = #list, 1, -1 do list[i] = nil end
+        for i, record in ipairs(keep) do list[i] = record end
     end
 
+    local seen = guildData.seenTxHashes
+    if type(seen) == "table" then
+        for k in pairs(seen) do seen[k] = nil end
+        for _, list in ipairs(lists) do
+            for _, record in ipairs(list) do
+                if record.id then seen[record.id] = self:SafeRecordTimestamp(record) end
+            end
+        end
+    end
+
+    self:RebuildPlayerStats(guildData)
+    -- The count moved, so both caches would miss anyway; reset for the
+    -- contract every pass that removes records follows.
+    self:ResetHashCache()
+    self:SystemInfo("Foreign-realm twins for %s: dropped %d, counts moved %d",
+        tostring(name or "a guild"), dropped, countsMoved)
+    return dropped, countsMoved
+end
+
+--- Schema 11 -> 12: the first run of DropForeignRealmTwins (#332).
+-- A raise leaves the guild at 11, so the next session's ladder runs it again.
+-- @param guildData table Guild data from AceDB
+-- @param name string|nil Guild name, for the log line only
+-- @return number dropped, number eventCounts keys moved
+function GBL:MigrateForeignRealmTwins(guildData, name)
+    -- Strict, like the three rungs before it: MigrateRecoverPeerRealms leaves a
+    -- cold-roster guild at 10, and a loose gate would let this one bump it past.
+    if not guildData or (guildData.schemaVersion or 0) ~= 11 then return 0, 0 end
+    local dropped, moved = self:DropForeignRealmTwins(guildData, name)
     guildData.schemaVersion = 12
-    return dropped, renamed, countsMoved
+    return dropped, moved
 end
 
 --- Run the migration ladder for one guild.

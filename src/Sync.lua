@@ -4301,6 +4301,27 @@ function GBL:FinishReceiving(sender, completed)
         end
     end
 
+    -- The #332 twin check, after every receive as well as at the update: a
+    -- copy kept for want of its twin goes once the twin arrives, and a copy
+    -- handed back goes again. Under pcall, because it walks the history and a
+    -- raise here would leave this teardown half done; the failure branch
+    -- resets the hash cache in case it raised mid-compaction.
+    if guildData then
+        local ok, dropped = pcall(self.DropForeignRealmTwins, self, guildData,
+            self:GetGuildName())
+        if ok then
+            self._twinCheckFailed = nil
+            if dropped > 0 then totalStored = math.max(0, totalStored - dropped) end
+        else
+            self:ResetHashCache()
+            if not self._twinCheckFailed then
+                self._twinCheckFailed = true
+                self:SystemError("Foreign-realm twin check failed after the receive from %s: %s",
+                    tostring(sender), tostring(dropped))
+            end
+        end
+    end
+
     local totalDuped = syncState.receiveDuped
     local totalNormalized = syncState.receiveNormalized or 0
     local elapsed = GetServerTime() - syncState.receiveStartTime
@@ -4310,7 +4331,8 @@ function GBL:FinishReceiving(sender, completed)
         and (", " .. syncState.receiveRepeats .. " repeated") or ""
 
     -- No reset here: an id this session rewrote in place reset the hash cache
-    -- when it was rewritten (NormalizeRecordId, #330), so the hash below is
+    -- when it was rewritten (NormalizeRecordId, #330), and the twin check
+    -- above resets it whenever it drops a record (#332), so the hash below is
     -- already current.
     local totalTxAfter = guildData
         and (#guildData.transactions + #guildData.moneyTransactions) or 0
