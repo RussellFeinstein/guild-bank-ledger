@@ -485,7 +485,13 @@ local syncState = {
     receiveRequested = false,
     receiveSource = nil,
     receiveExpected = 0,
+    -- Chunks taken, a count. The chunk the stream is on is receiveLastChunk,
+    -- read from each chunk's own number; the two differ after a joined
+    -- stream or a copy from further back (#290).
     receiveGot = 0,
+    receiveLastChunk = 0,
+    -- Copies of the chunk just taken, acknowledged and not walked (#290).
+    receiveRepeats = 0,
     receiveStored = 0,
     receiveDuped = 0,
     receiveTimer = nil,
@@ -814,7 +820,7 @@ function GBL:DisableSync()
     if syncState.receiving then
         self:AddAuditEntry("Receive from "
             .. tostring(syncState.receiveSource or "?")
-            .. " aborted - sync disabled at chunk " .. syncState.receiveGot
+            .. " aborted - sync disabled at chunk " .. syncState.receiveLastChunk
             .. "/" .. syncState.receiveExpected)
     end
     self:_ClearReceiveSession()
@@ -1882,6 +1888,8 @@ end
 local function clearReceiveCounters()
     syncState.receiveExpected = 0
     syncState.receiveGot = 0
+    syncState.receiveLastChunk = 0
+    syncState.receiveRepeats = 0
     syncState.receiveStored = 0
     syncState.receiveDuped = 0
     syncState.receiveItemStored = 0
@@ -3877,6 +3885,42 @@ function GBL:HandleSyncData(sender, data)
     local guildData = self:GetGuildData()
     if not guildData then return end
 
+    -- A stream we asked for starts at chunk 1, because the sender waits for
+    -- each chunk's ACK before sending the next. One whose first chunk is
+    -- later was already running and ignored our request as a repeat, so it
+    -- is not the session we asked for: no receipt for its tail, and a stall
+    -- closes it rather than NACKing (#321). A straggler from a dead stream
+    -- landing first costs the real session its receipt, and nothing else.
+    if syncState.receiveRequested and syncState.receiveGot == 0
+        and type(data.chunk) == "number" and data.chunk > 1 then
+        syncState.receiveRequested = false
+        self:SyncInfo("Receive from %s opened at chunk %d: joined a stream"
+            .. " already running, not the one we asked for (no receipt)",
+            tostring(sender), data.chunk)
+    end
+
+    -- A copy of the chunk just taken: its ACK was lost or late, or a loading
+    -- screen resent it. The sender is waiting on that ACK, so it goes out
+    -- again, but the records are already here, and walked again they count
+    -- as duped, which the figures and the receipt read as the bucket filter
+    -- sending them twice (#290). Only the chunk just taken: in stop-and-wait
+    -- that is the only copy a sender makes, and "at or below the highest"
+    -- would skip a new stream's first chunks after a straggler from a dead
+    -- one. The total has to match as well, or it is another stream.
+    if type(data.chunk) == "number"
+        and data.chunk == syncState.receiveLastChunk
+        and (data.totalChunks or 1) == syncState.receiveExpected then
+        syncState.receiveRepeats = syncState.receiveRepeats + 1
+        -- A copy shows the sender is alive, as any chunk does.
+        syncState.receiveNackCount = 0
+        self:ScheduleReceiveTimeout()
+        sendAck(self, sender, data.chunk, 0)
+        self:AddAuditEntry("Repeated chunk " .. data.chunk .. "/"
+            .. (data.totalChunks or "?") .. " from " .. sender
+            .. ", already taken - ACKed, records skipped")
+        return
+    end
+
     -- Build ID lookup table for O(1) record access during normalization
     local idIndex = {}
     for _, tx in ipairs(guildData.transactions) do
@@ -3999,6 +4043,13 @@ function GBL:HandleSyncData(sender, data)
     -- arriving means the session is still running.
     syncState.receiveRemaining = data.remaining
     syncState.receiveGot = syncState.receiveGot + 1
+    -- The chunk the stream is on, from the chunk's own number (#290). A
+    -- chunk with no number steps it on, which is how the count read it.
+    if type(data.chunk) == "number" then
+        syncState.receiveLastChunk = data.chunk
+    else
+        syncState.receiveLastChunk = syncState.receiveLastChunk + 1
+    end
     syncState.receiveStored = syncState.receiveStored + stored
     syncState.receiveDuped = syncState.receiveDuped + duped
     syncState.receiveItemStored = (syncState.receiveItemStored or 0) + itemStored
@@ -4242,6 +4293,9 @@ function GBL:FinishReceiving(sender, completed)
     local totalNormalized = syncState.receiveNormalized or 0
     local elapsed = GetServerTime() - syncState.receiveStartTime
     local chunksGot = syncState.receiveGot
+    -- Named only when there were any, so a clean session's line is unchanged.
+    local repeatsText = (syncState.receiveRepeats or 0) > 0
+        and (", " .. syncState.receiveRepeats .. " repeated") or ""
 
     -- CRITICAL: If any IDs were normalized in-place, the hash cache is stale
     -- (its key, the guild table and the record count, did not move). Must
@@ -4258,7 +4312,7 @@ function GBL:FinishReceiving(sender, completed)
     self:AddAuditEntry("Sync complete from " .. (sender or "unknown")
         .. " - " .. totalStored .. " new, " .. totalDuped .. " duped"
         .. ", " .. totalNormalized .. " normalized"
-        .. ", " .. chunksGot .. " chunks, " .. elapsed .. "s"
+        .. ", " .. chunksGot .. " chunks" .. repeatsText .. ", " .. elapsed .. "s"
         .. " - total tx now: " .. totalTxAfter .. ", hash: " .. newHash)
 
     -- v0.28.8: redundancy metric — measures bucket-granularity inefficiency.
@@ -4541,7 +4595,7 @@ function GBL:GetSyncStatus()
         sendTarget = syncState.sendTarget,
         receiveSource = syncState.receiveSource,
         sendProgress = syncState.sendChunkIndex .. "/" .. #syncState.sendChunks,
-        receiveProgress = syncState.receiveGot .. "/" .. syncState.receiveExpected,
+        receiveProgress = syncState.receiveLastChunk .. "/" .. syncState.receiveExpected,
         zonePaused = syncState.zonePaused,
         combatPaused = syncState.combatPaused,
         receiveNackCount = syncState.receiveNackCount,
@@ -4782,15 +4836,16 @@ function GBL:ScheduleReceiveTimeout()
 
         if syncState.receiveNackCount >= MAX_NACK_RETRIES then
             self:SyncError("Retry limit reached waiting on chunk "
-                .. (syncState.receiveGot + 1) .. " from "
+                .. (syncState.receiveLastChunk + 1) .. " from "
                 .. (syncState.receiveSource or "unknown") .. ", aborting")
             self:FinishReceiving(syncState.receiveSource)
         elseif not syncState.receiveRequested then
             -- We did not ask for this stream, so there is no request to
             -- repeat (#293's receive reaches here with no chunk counted), and
-            -- a NACK reaches a sender that has stopped, or rewinds a live one
-            -- by an arrival count (#290). No BUSY: a live sender's next chunk
-            -- opens a fresh receive (#309).
+            -- a NACK reaches a sender that has stopped, which a sender older
+            -- than #320 discards for the whole ladder. That includes a stream
+            -- our request joined part-way (#321). No BUSY: a live sender's
+            -- next chunk opens a fresh receive (#309).
             self:SyncInfo("Unrequested receive from %s went quiet after %d chunk(s), closing",
                 tostring(syncState.receiveSource or "?"), syncState.receiveGot)
             self:FinishReceiving(syncState.receiveSource)
@@ -4816,7 +4871,10 @@ function GBL:ScheduleReceiveTimeout()
             end
             self:ScheduleReceiveTimeout()
         else
-            self:SendNack(syncState.receiveSource, syncState.receiveGot + 1)
+            -- The chunk after the last one taken, by its number. A count of
+            -- chunks taken named one too high after a copy and too low after
+            -- a joined stream, and the sender jumps or rewinds to it (#290).
+            self:SendNack(syncState.receiveSource, syncState.receiveLastChunk + 1)
             -- Reschedule with increased backoff
             self:ScheduleReceiveTimeout()
         end
