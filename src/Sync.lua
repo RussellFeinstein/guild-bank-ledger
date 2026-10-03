@@ -2001,11 +2001,14 @@ end
 -- against the synchronous version before any of this moved.
 --
 -- Mutation tolerance: rescan and intake append at the array tail, so a walk
--- holding a cursor can miss a late arrival, and a receive finishing mid-prep
--- can rewrite record ids underneath it. Neither can lose data or diverge,
--- because the receiver dedups by id: the worst case is a record riding the
--- next session instead of this one, or a redundant one the far side drops. No
--- locking, and none needed.
+-- holding a cursor can miss a late arrival, and a receive running beside the
+-- preparation can rewrite record ids underneath it. Neither can lose data or
+-- diverge, because the receiver dedups by id: the worst case is a record
+-- riding the next session instead of this one, or a redundant one the far side
+-- drops. No locking, and none needed. What a rewrite must not do is reach the
+-- shared cache, so each one resets it and the walk then declines to stamp its
+-- map (#330). A cleanup that reorders the arrays under the walk is not yet
+-- caught that way (#342).
 
 local prepStages = {}
 local prepStep  -- forward declaration; the watchdog and the accept both call it
@@ -2064,7 +2067,8 @@ end
 
 -- 1. Bucket hashes. Free when the cache is already current, otherwise the same
 --    walk ComputeBucketHashes does, a slice at a time, stamping the cache on
---    the way past so the work is not thrown away.
+--    the way past so the work is not thrown away, unless a reset landed after
+--    the walk began (#330).
 prepStages[1] = function(self, prep, budget)
     if prep.localBuckets then return 0, true end
 
@@ -3805,6 +3809,13 @@ function GBL:NormalizeRecordId(incomingRecord, matchedKey, guildData, idIndex)
         localRecord._occurrence = incomingRecord._occurrence
         -- Normalize timestamp for consistent bucket hash placement
         localRecord.timestamp = newTs
+        -- Both fingerprint caches key on the record count, which a rewrite in
+        -- place does not move, so reset here at the rewrite rather than at
+        -- one of the ways a receive ends. A stale hash on the next HELLO
+        -- restarts an all-duplicate session every round until the count
+        -- moves. Reset at session end only, a receive turned off mid-stream
+        -- never reset at all (#330).
+        self:ResetHashCache()
     end
     -- If the record itself is absent (removed by dedup cleanup):
     -- only seenTxHashes updated (harmless)
@@ -4298,14 +4309,9 @@ function GBL:FinishReceiving(sender, completed)
     local repeatsText = (syncState.receiveRepeats or 0) > 0
         and (", " .. syncState.receiveRepeats .. " repeated") or ""
 
-    -- CRITICAL: If any IDs were normalized in-place, the hash cache is stale
-    -- (its key, the guild table and the record count, did not move). Must
-    -- reset before GetDataHash or the next HELLO sends a stale hash →
-    -- infinite sync loop.
-    if totalNormalized > 0 then
-        self:ResetHashCache()
-    end
-
+    -- No reset here: an id this session rewrote in place reset the hash cache
+    -- when it was rewritten (NormalizeRecordId, #330), so the hash below is
+    -- already current.
     local totalTxAfter = guildData
         and (#guildData.transactions + #guildData.moneyTransactions) or 0
     local newHash = guildData and self:GetDataHash(guildData) or 0
@@ -5076,9 +5082,9 @@ function GBL:HandleBusy(sender, data)
         if syncState.receiveGot > 0 then
             -- A session that took chunks ends the way the NACK ladder's abort
             -- ends it, which a not-sending BUSY now replaces at the first
-            -- NACK (#320): the checkpoint, the event-count trim, the hash
-            -- cache reset after an in-place id rewrite, the report and the
-            -- post-sync HELLO. Named first, as OnCombatStart names its abort.
+            -- NACK (#320): the checkpoint, the event-count trim, the report
+            -- and the post-sync HELLO. Named first, as OnCombatStart names
+            -- its abort.
             self:AddAuditEntry(cleanSender .. " busy - ending receive after "
                 .. syncState.receiveGot .. " chunk(s)")
             self:FinishReceiving(syncState.receiveSource)

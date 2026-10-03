@@ -707,9 +707,9 @@ describe("Fingerprint", function()
         -- The contract every id-rewriting caller depends on. Only record.id
         -- feeds a bucket hash, so rewriting one in place changes the correct
         -- answer while leaving the record count identical, and the cache cannot
-        -- see it. That is why the migrations and CleanupWithEventCounts call
-        -- ResetHashCache, and why anything added later that rewrites an id has
-        -- to do the same.
+        -- see it. That is why the migrations, CleanupWithEventCounts and a sync
+        -- receive's NormalizeRecordId call ResetHashCache, and why anything
+        -- added later that rewrites an id has to do the same.
         it("does not notice an id rewritten in place until the cache is reset", function()
             addRecord("deposit|A|100|1|1|472222:0", 1700000000)
             local stale = GBL:GetBucketHashes(guildData)[math.floor(472222 / 6)]
@@ -1046,6 +1046,35 @@ describe("Fingerprint", function()
 
             assert.same(expected, scan.buckets)
             assert.is_not_nil(scan.buckets[math.floor(472240 / 6)])
+        end)
+
+        -- #330. The serve chain runs this scan a slice per tick, and a sync
+        -- receive can rewrite an id in place between two slices and reset the
+        -- cache. A record the scan has already walked then sits in the map
+        -- under its old id, and the stamp carries a record count the rewrite
+        -- did not move, so stamping it would hand the next reader a map the
+        -- reset existed to throw away.
+        it("does not stamp a map a reset overtook", function()
+            seed(6)
+            GBL:ResetHashCache()
+            local before = GBL:ComputeBucketHashes(guildData)
+
+            local scan = GBL:StartBucketHashScan(guildData)
+            GBL:StepBucketHashScan(guildData, scan, 2)
+            -- Record 1 has been walked. Rewrite it in place the way a sync
+            -- normalization does, and reset as every rewriter must.
+            guildData.transactions[1].id = "deposit|P1|100|1|1|472300:0"
+            local after = GBL:ComputeBucketHashes(guildData)
+            assert.are_not.same(before, after, "the rewrite must move a bucket hash")
+            GBL:ResetHashCache()
+
+            local done = false
+            while not done do
+                local _, finished = GBL:StepBucketHashScan(guildData, scan, 2)
+                done = finished
+            end
+
+            assert.same(after, GBL:GetBucketHashes(guildData))
         end)
     end)
 end)

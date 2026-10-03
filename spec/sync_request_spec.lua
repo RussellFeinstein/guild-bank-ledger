@@ -1762,6 +1762,44 @@ describe("Sync request and serve", function()
 
             assert.is_true(auditHas("Tranche rotation for PeerA"))
         end)
+
+        -- #330. The first stage builds the bucket map a slice per tick and
+        -- stamps the cache when it finishes. A receive running beside the
+        -- preparation can rewrite the id of a record the walk has already
+        -- passed and reset the cache, and the record count does not move, so
+        -- a stamp landing after that reset put the old id back for every
+        -- later reader. Cold at the request on purpose: a warm map is taken
+        -- as it stands and no scan runs, which would test nothing here.
+        it("does not put back a bucket map a receive's id rewrite outdated",
+        function()
+            -- First, so the first tick's walk passes it before the receive.
+            Sync.seedRewritable(guildData)
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+            local held = #guildData.transactions
+            local before = GBL:ComputeBucketHashes(guildData)
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "the walk must still be in flight when the receive lands")
+            assert.is_nil(GBL:PeekBucketHashes(guildData),
+                "nothing may have stamped the cache yet")
+
+            -- An unrequested one-chunk session from another peer: the same
+            -- event under the sender's id, adopted in place and complete.
+            GBL:HandleSyncData("PeerB", Sync.rewriteChunk(1, 1))
+            assert.equals(Sync.REWRITE_NEW_ID, guildData.transactions[1].id,
+                "the receive must have rewritten the walked record in place")
+            assert.equals(held, #guildData.transactions,
+                "the receive must store nothing, or the record count moves")
+            local after = GBL:ComputeBucketHashes(guildData)
+            assert.are_not.same(before, after, "the rewrite must move a bucket hash")
+
+            Helpers.drainZeroDelayTimers()
+            assert.is_false(GBL:GetSyncStatus().preparing,
+                "the preparation must have finished its walk")
+
+            assert.same(after, GBL:GetBucketHashes(guildData))
+        end)
     end)
 
     ---------------------------------------------------------------------------

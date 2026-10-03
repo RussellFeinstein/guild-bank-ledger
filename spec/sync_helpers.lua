@@ -192,4 +192,45 @@ function M.fireReceiveTimeout()
     return false
 end
 
+--- One event held under two ids, for a receive that adopts the sender's id in
+-- place (NormalizeRecordId, sender wins). The fuzzy match needs the local id in
+-- seenTxHashes, and the two slots share a bucket, so the rewrite changes that
+-- bucket's hash without moving the record into another (#330).
+M.REWRITE_OLD_ID = "deposit|Thrall-TestRealm|12345|5|1|475101:0"
+M.REWRITE_NEW_ID = "deposit|Thrall-TestRealm|12345|5|1|475100:0"
+
+--- Store the local copy under the id a sender will replace, at the end of the
+-- item list.
+-- @param guildData table The guild data from setup()
+function M.seedRewritable(guildData)
+    table.insert(guildData.transactions, {
+        type = "deposit", player = "Thrall-TestRealm", itemID = 12345,
+        classID = 0, subclassID = 5,
+        count = 5, tab = 1, timestamp = 3600 * 475101 + 1800,
+        id = M.REWRITE_OLD_ID, _occurrence = 0,
+    })
+    guildData.seenTxHashes[M.REWRITE_OLD_ID] = 3600 * 475101 + 1800
+end
+
+--- A SYNC_DATA payload carrying that event under the sender's id, so the
+-- receive adopts it in place and stores nothing.
+-- @param n number This chunk's number
+-- @param total number The session's chunk count
+-- @return table The payload, for HandleSyncData
+function M.rewriteChunk(n, total)
+    return {
+        chunk = n, totalChunks = total,
+        transactions = {
+            {
+                type = "deposit", player = "Thrall",
+                itemID = 12345, classID = 0, subclassID = 5,
+                count = 5, tab = 1,
+                timestamp = 3600 * 475100 + 2400,
+                id = M.REWRITE_NEW_ID, _occurrence = 0,
+            },
+        },
+        moneyTransactions = {},
+    }
+end
+
 return M
