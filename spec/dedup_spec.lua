@@ -1768,8 +1768,8 @@ describe("Dedup", function()
             assertInPlace(gold, guildData.moneyTransactions, "money")
         end)
 
-        it("stays in place when only the other array is trimmed", function()
-            -- Three copies of one event against a count of one: two go.
+        -- Three copies of one event against a count of one: two go.
+        local function trimmableItems()
             local cluster = {}
             for i = 1, 3 do
                 cluster[i] = item("Thrall-TestRealm", 475103)
@@ -1778,10 +1778,14 @@ describe("Dedup", function()
                 cluster[i]._occurrence = i - 1
             end
             guildData.transactions = cluster
-            guildData.moneyTransactions = splitPair(money)
             guildData.eventCounts = {
                 ["deposit|Thrall-TestRealm|1|1|1|475103"] = { count = 1, asOf = 0 },
             }
+        end
+
+        it("stays in place when only the other array is trimmed", function()
+            trimmableItems()
+            guildData.moneyTransactions = splitPair(money)
             local gold = snapshot(guildData.moneyTransactions)
 
             local removed = GBL:CleanupWithEventCounts(guildData)
@@ -1789,6 +1793,34 @@ describe("Dedup", function()
             assert.equals(2, removed, "the fixture must make the pass trim the items")
             assert.equals(1, #guildData.transactions)
             assertInPlace(gold, guildData.moneyTransactions, "money")
+        end)
+
+        -- A pass that moves records has to reset, because the reset is what
+        -- tells a walk in flight. The reset sits at the write-back for that
+        -- reason: the money pass and the id rebuild after it can both raise
+        -- on a corrupt record (#263), and a reset at the end of the pass
+        -- would then never run.
+        it("resets where it writes an array back, so a raise later in the pass cannot skip it",
+        function()
+            trimmableItems()
+            -- Building this record's prefix raises: a table cannot be joined
+            -- into a string.
+            guildData.moneyTransactions = {
+                { type = {}, player = "Bob-TestRealm", amount = 500,
+                    timestamp = 475100 * 3600 + 10, id = "broken" },
+            }
+            assert.is_not_nil(GBL:GetBucketHashes(guildData))
+            local generation = GBL:_HashCacheGeneration()
+
+            local ok = pcall(GBL.CleanupWithEventCounts, GBL, guildData)
+
+            assert.is_false(ok, "the fixture must make the money pass raise")
+            assert.equals(1, #guildData.transactions,
+                "the item array must have been written back before the raise")
+            assert.is_true(GBL:_HashCacheGeneration() > generation,
+                "a walk in flight has to be told the array moved")
+            assert.is_nil(GBL:PeekBucketHashes(guildData),
+                "the cached map must be gone")
         end)
     end)
 
