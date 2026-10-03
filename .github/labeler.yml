@@ -159,6 +159,7 @@
           - 'spec/ui/tab_visibility_spec.lua'
           - 'docs/PLAN-visual-overhaul.md'
           - 'docs/PLAN-views-and-access.md'
+          - 'docs/PLAN-account-view.md'
 
 "area: accessibility":
   - changed-files:
