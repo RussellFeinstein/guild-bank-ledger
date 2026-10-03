@@ -2783,9 +2783,10 @@ describe("Sync send path", function()
         end)
 
         -- A NACK moves the send index back and leaves the retry count alone,
-        -- and it can name a chunk the peer has already acked: #290's arrival
-        -- count does that after a mid-stream bootstrap. If the peer then goes
-        -- quiet, the ladder runs out on a chunk that was delivered.
+        -- and it can name a chunk the peer has already acked: a receiver
+        -- before #290 does that after joining a stream part-way, and #296
+        -- decides what to do with one. If the peer then goes quiet, the ladder
+        -- runs out on a chunk that was delivered.
         it("leaves an acked chunk alone when the ladder gives up on it", function()
             startSend(8)
             assert.is_true(#state().sendChunks >= 2, "fixture needs two chunks")

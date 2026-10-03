@@ -182,8 +182,8 @@ describe("Member view (own_transactions)", function()
             GBL:SelectTab("transactions")
             GBL:RefreshUI()
 
-            -- What a received chunk does: append to the guild's array, then
-            -- refresh the open tab (src/Sync.lua:3629).
+            -- What a sync receive does: append to the guild's array, then
+            -- refresh the open tab (FinishReceiving in src/Sync.lua).
             gd.transactions[#gd.transactions + 1] = record(FOREIGN, 5)
             GBL:RefreshUI()
 

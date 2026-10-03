@@ -5,6 +5,14 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- When a piece of sync data reached you twice (its receipt was lost or late, or a loading screen made the sender repeat it), your addon counted it twice. If the sync then stalled, it asked the sender for the wrong piece, and the sender skipped ahead past pieces it had not sent yet, which only came in at a later sync. Your addon now asks for the piece after the last one it took, and the Sync tab's progress and the sync log name that piece too.
+- A repeated piece is now acknowledged without being read again. Its records were already counted, so reading them again added them to the duplicate figures: the Redundancy line in your sync log and the report your addon sends back to the guildmate who sent the data. Those figures now count only what the sync sent twice, not what the connection repeated, so figures from this version on are not directly comparable with earlier ones.
+- When your addon asked a guildmate for data while they were already sending you some, their send carried on and your addon took it as the sync it had asked for. If that send stalled, your addon asked them to go back to an early piece and resend everything from there, and at the end it sent them a report covering only the part it saw. It now treats that send as one it did not ask for: no report, and it closes after 20 seconds of quiet.
+- A guildmate on an older version could ask your addon to resend a piece past anything it had sent, and your addon jumped ahead and skipped the pieces in between. It now ignores such a request, notes it in the sync log, and carries on with the piece it is sending.
+
 ## [0.41.30] - 2026-10-02
 
 ### Removed
