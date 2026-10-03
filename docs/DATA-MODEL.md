@@ -48,7 +48,7 @@ GuildBankLedgerAuditDB = {
     { addonVersion, protocolVersion, player, realm, guild, startedAt,
       dropped = { sync = <n>, sort = <n>, system = <n>, ledger = <n> },
       entries = { sync = { {ts, level, message}, ... }, sort = {...}, system = {...},
-                  ledger = {...} } },     -- ledger from v0.42.0 (#85); older sessions lack it
+                  ledger = {...} } },     -- ledger since #85; older sessions lack it
     ...
   },
 }

@@ -42,8 +42,8 @@ local MAX_AUDIT_SESSIONS = 10
 -- sort gets the largest cap because one sort run emits hundreds of per-op
 -- INFO lines. system holds the slot scan and a restock run (about 13 lines
 -- a purchase); ledger one line per bank log read that changed something.
--- A session saved before v0.42.0 has no ledger list, and readers treat it
--- as empty.
+-- A session saved before the ledger channel existed (#85) has no ledger
+-- list, and readers treat it as empty.
 local ENTRY_CAPS = { sync = 1000, sort = 1500, system = 300, ledger = 300 }
 
 GBL.AUDIT_DB_SCHEMA = AUDIT_DB_SCHEMA
@@ -207,7 +207,7 @@ function GBL:HandleAuditCommand(rest)
             st.enabled and "ON" or "off", st.sessionCount, st.maxSessions))
         if st.enabled then
             local counts, evicted = {}, {}
-            for _, ch in ipairs(self.LOG_CHANNELS) do
+            for _, ch in ipairs(self.LOG_CHANNELS or {}) do
                 counts[#counts + 1] = string.format("%s %d/%d",
                     ch, st.currentEntries[ch] or 0, st.caps[ch] or 0)
                 evicted[#evicted + 1] = tostring(st.dropped[ch] or 0)

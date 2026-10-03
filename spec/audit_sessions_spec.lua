@@ -103,7 +103,7 @@ describe("audit session reader", function()
 
         it("reads a session saved before the ledger channel as empty (#85)", function()
             -- Both fixture sessions predate the channel, as every session
-            -- captured before v0.42.0 does.
+            -- captured before it shipped does.
             local db = Reader.load(FIXTURE)
             local entries, err = Reader.channel(db, 1, "ledger")
 

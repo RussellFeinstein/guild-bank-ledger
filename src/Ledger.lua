@@ -437,8 +437,12 @@ GBL.LEDGER_RESCAN_FALLBACK = RESCAN_FALLBACK
 -- log's counts moved since the previous read, and DEBUG otherwise.
 --
 -- The previous read is kept for the session and for one guild (the
--- guildData table), never reset with the batch caches at bank close: a
--- nameless entry re-read on every visit would otherwise warn on each one.
+-- guildData table), never reset with the batch caches at bank close.
+-- The WARNs compare against the most this session has already warned
+-- about for that log, not the previous read: the same nameless or
+-- refused entry is read again after every bank reopen and every cache
+-- reset, and a tab that has not answered reads 0 and then comes back
+-- (#336), so a comparison with the previous read would repeat them.
 -- @param kind string "open" or "rescan"
 -- @param via string "event" or "timeout", the timer that ran the read
 -- @param guildData table The guild the read was for
@@ -446,6 +450,7 @@ GBL.LEDGER_RESCAN_FALLBACK = RESCAN_FALLBACK
 local function logRead(self, kind, via, guildData, summary)
     local last = self._lastLogRead
     if not (last and last.guildData == guildData) then last = nil end
+    local warned = (last and last.warned) or { skipped = {}, refused = {} }
 
     local reads, parts, rose, refusedAt = {}, {}, {}, {}
     local read, skipped, refused = 0, 0, 0
@@ -458,15 +463,17 @@ local function logRead(self, kind, via, guildData, summary)
         if not prev or prev.read ~= d.read or prev.skipped ~= d.skipped then
             moved = true
         end
-        if (d.skipped or 0) > ((prev and prev.skipped) or 0) then
+        if (d.skipped or 0) > (warned.skipped[d.key] or 0) then
             rose[#rose + 1] = d.key .. "=" .. d.skipped
+            warned.skipped[d.key] = d.skipped
         end
-        if (d.refused or 0) > 0 then
+        if (d.refused or 0) > (warned.refused[d.key] or 0) then
             refusedAt[#refusedAt + 1] = d.key .. "=" .. d.refused
+            warned.refused[d.key] = d.refused
         end
         reads[d.key] = { read = d.read, skipped = d.skipped }
     end
-    self._lastLogRead = { guildData = guildData, reads = reads }
+    self._lastLogRead = { guildData = guildData, reads = reads, warned = warned }
 
     local new = (summary.items or 0) + (summary.money or 0)
     local level = "DEBUG"
@@ -529,8 +536,16 @@ function GBL:ScanTransactions(callback)
             return
         end
 
-        local totalStored, summary = self:ReadAllTransactions(guildData)
-        safeLogRead(self, "open", via, guildData, summary)
+        -- Protected like the rescan's read: the callback is what marks the
+        -- first scan complete and starts the periodic rescan.
+        local ok, totalStored, summary = pcall(self.ReadAllTransactions, self, guildData)
+        if ok then
+            safeLogRead(self, "open", via, guildData, summary)
+        else
+            self:LedgerError("Bank log read: on=open via=%s failed: %s",
+                via, tostring(totalStored))
+            totalStored = 0
+        end
         self:SendMessage("GBL_LEDGER_SCAN_COMPLETE", totalStored)
         if callback then callback(totalStored) end
     end
@@ -604,8 +619,13 @@ function GBL:RescanTransactionLogs(callback)
             if not freshGuildData then return 0 end
             return self:ReadAllTransactions(freshGuildData)
         end)
-        if ok then
+        if ok and summary then
             safeLogRead(self, "rescan", via, freshGuildData, summary)
+        elseif ok then
+            -- DEBUG, not the open read's INFO: every bank close ends a
+            -- rescan chain this way.
+            self:LedgerDebug("Bank log read: on=rescan via=%s abandoned, %s", via,
+                self.bankOpen and "no guild data" or "the guild bank window closed before the read")
         else
             self:LedgerError("Bank log read: on=rescan via=%s failed: %s",
                 via, tostring(newCount))
