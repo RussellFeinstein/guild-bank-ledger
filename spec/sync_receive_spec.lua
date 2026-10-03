@@ -1677,6 +1677,152 @@ describe("Sync receive and intake", function()
             GBL.ResetHashCache = originalReset
             assert.is_false(resetCalled)
         end)
+
+        -- #330. The two cases above pin the reset at the end of a completed
+        -- session. These pin the outcome wherever the session ends: both
+        -- caches in src/Fingerprint.lua key on the guild table and the record
+        -- count, an id rewritten in place moves neither, and a receive turned
+        -- off by the Enable Sync checkbox ends through _ClearReceiveSession,
+        -- which is not FinishReceiving. Asserted against an uncached compute
+        -- of the records as they now are, as #265's pins are, rather than by
+        -- counting resets.
+        describe("an in-place rewrite and the cached fingerprint (#330)", function()
+            local OLD_ID = "deposit|Thrall-TestRealm|12345|5|1|475101:0"
+            local NEW_ID = "deposit|Thrall-TestRealm|12345|5|1|475100:0"
+
+            -- GetBucketHashes hands back the cache's own table, so a read is
+            -- copied before anything is compared with it.
+            local function copyOf(map)
+                local copy = {}
+                for k, v in pairs(map) do copy[k] = v end
+                return copy
+            end
+
+            --- The local copy under the id the sender will replace, with both
+            -- caches warm over it, as a client that has been running has them.
+            -- @return number, table The uncached hash and bucket map before
+            local function seedWarm()
+                GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "Thrall-TestRealm", itemID = 12345,
+                    classID = 0, subclassID = 5,
+                    count = 5, tab = 1, timestamp = 3600 * 475101 + 1800,
+                    id = OLD_ID, _occurrence = 0,
+                })
+                guildData.seenTxHashes[OLD_ID] = 3600 * 475101 + 1800
+                GBL:GetDataHash(guildData)
+                GBL:GetBucketHashes(guildData)
+                return GBL:ComputeDataHash(guildData),
+                    copyOf(GBL:ComputeBucketHashes(guildData))
+            end
+
+            --- Chunk `n` of `total`, carrying the same event under the sender's
+            -- id, so the receive adopts it in place and stores nothing.
+            local function deliverRewrite(n, total)
+                GBL:HandleSyncData("OfficerB", {
+                    chunk = n, totalChunks = total,
+                    transactions = {
+                        {
+                            type = "deposit", player = "Thrall",
+                            itemID = 12345, classID = 0, subclassID = 5,
+                            count = 5, tab = 1,
+                            timestamp = 3600 * 475100 + 2400,
+                            id = NEW_ID, _occurrence = 0,
+                        },
+                    },
+                    moneyTransactions = {},
+                })
+            end
+
+            --- Both cached answers against an uncached compute, after proving
+            -- the fixture moved that compute: a cache that was never warm would
+            -- otherwise pass by computing fresh.
+            local function assertCurrent(hashBefore, bucketsBefore)
+                assert.equals(NEW_ID, guildData.transactions[1].id,
+                    "the fixture must have rewritten the id in place")
+                assert.equals(1, #guildData.transactions,
+                    "the rewrite must store nothing, or the record count moves")
+                local hashNow = GBL:ComputeDataHash(guildData)
+                local bucketsNow = copyOf(GBL:ComputeBucketHashes(guildData))
+                assert.are_not.equals(hashBefore, hashNow,
+                    "the rewrite must change the dataset hash")
+                assert.are_not.same(bucketsBefore, bucketsNow,
+                    "the rewrite must change a bucket hash")
+
+                assert.equals(hashNow, GBL:GetDataHash(guildData))
+                assert.same(bucketsNow, copyOf(GBL:GetBucketHashes(guildData)))
+            end
+
+            it("leaves no stale fingerprint when sync is turned off mid-receive",
+            function()
+                local hashBefore, bucketsBefore = seedWarm()
+
+                deliverRewrite(1, 3)
+                assert.is_true(GBL:GetSyncStatus().receiving,
+                    "the receive must still be open when sync is turned off")
+                GBL:DisableSync()
+
+                assertCurrent(hashBefore, bucketsBefore)
+            end)
+
+            it("is current as soon as the chunk that rewrote the id is taken",
+            function()
+                local hashBefore, bucketsBefore = seedWarm()
+
+                deliverRewrite(1, 2)
+                assert.is_true(GBL:GetSyncStatus().receiving,
+                    "the session must still be open, so FinishReceiving has not run")
+
+                assertCurrent(hashBefore, bucketsBefore)
+            end)
+
+            it("holds every id rewrite in src/Sync.lua to the reset contract",
+            function()
+                -- Structural on purpose, after #265's case for the migration
+                -- ladder: it reads which methods rewrite an id out of the
+                -- source rather than from a list kept by hand, so a rewrite
+                -- added later joins this case. Any other function defined at
+                -- column zero ends the method above it: a file-scope local
+                -- function, which is what keeps the incoming record
+                -- reconstructSyncRecord fills out of the list, and an assigned
+                -- one, the form the serve chain's prepStages and prepStep use.
+                local fh = io.open("src/Sync.lua", "rb")
+                assert.is_not_nil(fh, "could not read src/Sync.lua, so this proves nothing")
+                local source = fh:read("*a")
+                fh:close()
+
+                -- An assignment to a field named id, not a comparison with one.
+                local function assignsId(line)
+                    return line:match("%.id%s*=[^=]") or line:match("%.id%s*=%s*$")
+                end
+
+                local rewriters, writes, resets, current = {}, {}, {}, nil
+                for line in source:gmatch("[^\r\n]+") do
+                    local fn = line:match("^function GBL:([%w_]+)")
+                    if fn then
+                        current = fn
+                    elseif line:match("^function ") or line:match("^local function ")
+                        or line:match("^[%w_%.%[%]]+%s*=%s*function") then
+                        current = nil
+                    end
+                    if current and not line:match("^%s*%-%-") then
+                        if assignsId(line) and not writes[current] then
+                            writes[current] = true
+                            rewriters[#rewriters + 1] = current
+                        end
+                        if line:match("ResetHashCache%s*%(") then resets[current] = true end
+                    end
+                end
+
+                -- Pinned as a list, because a scan that finds nothing would
+                -- otherwise pass the loop below having checked nothing.
+                assert.same({ "NormalizeRecordId" }, rewriters)
+                for _, name in ipairs(rewriters) do
+                    assert.is_true(resets[name] or false,
+                        name .. " rewrites record.id and never calls ResetHashCache (#330)")
+                end
+            end)
+        end)
     end)
 
     ---------------------------------------------------------------------------
