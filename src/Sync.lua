@@ -4905,7 +4905,7 @@ end
 
 --- Handle an incoming NACK — re-transmit the requested chunk.
 -- A NACK for a send we are not making is answered with BUSY (#320), except
--- from our live receive source.
+-- from our live receive source. One past any chunk we sent is ignored (#290).
 -- @param sender string Sender name
 -- @param data table Deserialized NACK payload
 function GBL:HandleNack(sender, data)
@@ -4933,6 +4933,20 @@ function GBL:HandleNack(sender, data)
     local requestedChunk = data and data.chunk
     if not requestedChunk or requestedChunk < 1
         or requestedChunk > #syncState.sendChunks then
+        return
+    end
+
+    -- A NACK for chunk K says the receiver holds chunk K-1, so one whose K-1
+    -- was never sent cannot be true. A receiver before #290 named the chunk
+    -- by a count that a copy put ahead, and following it jumped the send
+    -- past chunks it never sent. Ignored, so the ACK ladder carries on with
+    -- the chunk in flight, and read from the outcome table rather than
+    -- sendChunkIndex, which the ladder's step-back and a second send chain
+    -- both move (#296, #306). A NACK below the chunk owed is #296's.
+    if requestedChunk > 1
+        and not (syncState.chunkOutcomes or {})[requestedChunk - 1] then
+        self:SyncInfo("NACK from %s for chunk %d, but chunk %d was never sent - ignored",
+            tostring(sender), requestedChunk, requestedChunk - 1)
         return
     end
 
