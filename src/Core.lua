@@ -3203,6 +3203,8 @@ end
 -- cluster to the max known eventCount for its baseHash, across the window
 -- EventCountWindow above sets.
 -- Safe default: clusters with no eventCount data are never trimmed.
+-- An array it removes nothing from is left exactly as it was, position for
+-- position (#342): the serve's bucket walk reads these arrays across frames.
 -- @param guildData table Guild data from AceDB
 -- @return number Total records removed
 function GBL:CleanupWithEventCounts(guildData)
