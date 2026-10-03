@@ -3917,9 +3917,8 @@ function GBL:HandleSyncData(sender, data)
         syncState.receiveNackCount = 0
         self:ScheduleReceiveTimeout()
         sendAck(self, sender, data.chunk, 0)
-        self:AddAuditEntry("Repeated chunk " .. data.chunk .. "/"
-            .. (data.totalChunks or "?") .. " from " .. sender
-            .. ", already taken - ACKed, records skipped")
+        self:SyncInfo("Repeated chunk %d/%s from %s, already taken - ACKed, records skipped",
+            data.chunk, tostring(data.totalChunks or "?"), tostring(sender))
         return
     end
 
@@ -4946,7 +4945,7 @@ function GBL:HandleNack(sender, data)
     -- sendChunkIndex, which the ladder's step-back and a second send chain
     -- both move (#296, #306). A NACK below the chunk owed is #296's.
     if requestedChunk > 1
-        and not (syncState.chunkOutcomes or {})[requestedChunk - 1] then
+        and not syncState.chunkOutcomes[requestedChunk - 1] then
         self:SyncInfo("NACK from %s for chunk %d, but chunk %d was never sent - ignored",
             tostring(sender), requestedChunk, requestedChunk - 1)
         return
