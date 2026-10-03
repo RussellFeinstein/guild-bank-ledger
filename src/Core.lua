@@ -1609,12 +1609,186 @@ function GBL:MigrateRecoverPeerRealms(guildData)
     return rewrites
 end
 
+--- Schema 11 -> 12: drop the copies one client stamped with its own realm (#332).
+-- Before v0.13.0 a client resolved bare names against a cold roster cache and
+-- stamped its own realm on members of other realms. Sync carried those records
+-- everywhere, and correctly named records of the same events came from other
+-- clients, so each such event was stored twice and counted twice.
+--
+-- A candidate is a record whose player's realm the guild's roster cache
+-- contradicts. It is dropped when a record of the same prefix under the roster
+-- realm sits under an hour away (IsDuplicate's proximity), one copy per twin.
+-- A candidate with no twin is renamed to the roster realm only when twins
+-- prove its name and realm were stamped; otherwise it may be a real realm
+-- transfer and is left alone. A record with an invalid timestamp is never a
+-- candidate, because its new id would come from each peer's own clock.
+--
+-- Every choice walks in (timestamp, id) order, so peers holding the same
+-- records decide the same way. The release that ships this raises
+-- MIN_SYNC_VERSION to itself, or an unrepaired peer would hand the dropped
+-- copies straight back as new records.
+-- @param guildData table Guild data from AceDB
+-- @param name string|nil Guild name, for the log line only
+-- @return number dropped, number renamed, number eventCounts keys moved
+function GBL:MigrateForeignRealmTwins(guildData, name)
+    -- Strict, like the three rungs below it: MigrateRecoverPeerRealms leaves a
+    -- cold-roster guild at 10, and a loose gate would let this one bump it past.
+    if not guildData or (guildData.schemaVersion or 0) ~= 11 then return 0, 0, 0 end
+
+    local realms = type(guildData.playerRealms) == "table" and guildData.playerRealms or {}
+    local lists = { guildData.transactions or {}, guildData.moneyTransactions or {} }
+
+    -- Candidates apart; everything else indexed by prefix, the twin lookup.
+    local candidates, byPrefix = {}, {}
+    for _, list in ipairs(lists) do
+        for _, record in ipairs(list) do
+            local base, realm
+            if type(record.player) == "string" then
+                base, realm = record.player:match("^([^%-]+)%-(.+)$")
+            end
+            local home = base and realms[base]
+            if type(home) == "string" and self:IsValidTimestamp(record.timestamp)
+               and self:NormalizeRealm(realm) ~= self:NormalizeRealm(home) then
+                candidates[#candidates + 1] = {
+                    record = record,
+                    pair = base .. "-" .. realm,
+                    target = base .. "-" .. self:NormalizeRealm(home),
+                }
+            else
+                local prefix = self:BuildTxPrefix(record)
+                local bucket = byPrefix[prefix]
+                if not bucket then
+                    bucket = {}
+                    byPrefix[prefix] = bucket
+                end
+                bucket[#bucket + 1] = record
+            end
+        end
+    end
+
+    if #candidates == 0 then
+        guildData.schemaVersion = 12
+        return 0, 0, 0
+    end
+
+    table.sort(candidates, function(a, b)
+        local ta, tb = a.record.timestamp, b.record.timestamp
+        if ta ~= tb then return ta < tb end
+        return tostring(a.record.id) < tostring(b.record.id)
+    end)
+
+    -- Each copy claims the nearest twin nobody has claimed, ties to the lower id.
+    local claimed, drop, twinned = {}, {}, {}
+    for _, c in ipairs(candidates) do
+        local r = c.record
+        c.prefix = self:BuildTxPrefix(r)
+        local player = r.player
+        r.player = c.target
+        c.targetPrefix = self:BuildTxPrefix(r)
+        r.player = player
+
+        local best, bestDt, bestId
+        for _, t in ipairs(byPrefix[c.targetPrefix] or {}) do
+            if not claimed[t] then
+                local dt = math.abs((t.timestamp or 0) - r.timestamp)
+                local tid = tostring(t.id)
+                if dt < 3600 and (not bestDt or dt < bestDt
+                                  or (dt == bestDt and tid < bestId)) then
+                    best, bestDt, bestId = t, dt, tid
+                end
+            end
+        end
+        if best then
+            claimed[best] = true
+            drop[r] = true
+            twinned[c.pair] = true
+        end
+    end
+
+    -- Renames take the next free index at their new hour, written into
+    -- seenTxHashes at once so a second stray in that hour sees the first.
+    local seen = guildData.seenTxHashes
+    local dropped, renamed, moves = 0, 0, {}
+    for _, c in ipairs(candidates) do
+        local r = c.record
+        if drop[r] then
+            dropped = dropped + 1
+            moves[c.prefix] = c.targetPrefix
+        elseif twinned[c.pair] then
+            if type(seen) == "table" and r.id then seen[r.id] = nil end
+            r.player = c.target
+            local baseHash = self:ComputeTxHash(r)
+            local occ = self:MaxOccurrenceAtSlot(baseHash, guildData)
+            r._occurrence = occ
+            r.id = baseHash .. ":" .. occ
+            if type(seen) == "table" then seen[r.id] = self:SafeRecordTimestamp(r) end
+            renamed = renamed + 1
+            moves[c.prefix] = c.targetPrefix
+        end
+    end
+
+    -- Counts follow their records: every hour under a moved prefix, merged by
+    -- max (the rule both eventCounts writers use), the old key deleted.
+    local countsMoved = 0
+    if type(guildData.eventCounts) == "table" and next(moves) then
+        local rekey = {}
+        for key in pairs(guildData.eventCounts) do
+            local prefix, slot = self:SplitBaseHash(key)
+            if prefix and slot and moves[prefix] then
+                rekey[#rekey + 1] = { from = key, to = moves[prefix] .. slot }
+            end
+        end
+        for _, k in ipairs(rekey) do
+            local old = guildData.eventCounts[k.from]
+            local existing = guildData.eventCounts[k.to]
+            if type(old) == "table" and (type(existing) ~= "table"
+                                         or (old.count or 0) > (existing.count or 0)) then
+                guildData.eventCounts[k.to] = old
+            end
+            guildData.eventCounts[k.from] = nil
+            countsMoved = countsMoved + 1
+        end
+    end
+
+    if dropped > 0 or renamed > 0 then
+        -- Compacted in place: AceDB holds these array tables.
+        if dropped > 0 then
+            for _, list in ipairs(lists) do
+                local keep = {}
+                for _, record in ipairs(list) do
+                    if not drop[record] then keep[#keep + 1] = record end
+                end
+                for i = #list, 1, -1 do list[i] = nil end
+                for i, record in ipairs(keep) do list[i] = record end
+            end
+        end
+
+        if type(seen) == "table" then
+            for k in pairs(seen) do seen[k] = nil end
+            for _, list in ipairs(lists) do
+                for _, record in ipairs(list) do
+                    if record.id then seen[record.id] = self:SafeRecordTimestamp(record) end
+                end
+            end
+        end
+
+        self:RebuildPlayerStats(guildData)
+        self:ResetHashCache()
+        self:SystemInfo("Foreign-realm twins for %s: dropped %d, renamed %d, counts moved %d",
+            tostring(name or "a guild"), dropped, renamed, countsMoved)
+    end
+
+    guildData.schemaVersion = 12
+    return dropped, renamed, countsMoved
+end
+
 --- Run the migration ladder for one guild.
 -- Split out of MigrateAllGuilds so a raise costs one guild instead of every
 -- guild after it in the walk (#263). Every rung is dispatched through self:
 -- so a spec can observe or stub an individual one.
 -- @param guildData table Guild data from AceDB
-function GBL:MigrateGuild(guildData)
+-- @param name string|nil Guild name, passed on for a rung's log line
+function GBL:MigrateGuild(guildData, name)
     -- Every rung below opens with this same guard, and this is advertised as the
     -- per-guild entry point, so it answers a nil the way the layer under it does
     -- rather than raising on its first statement.
@@ -1640,6 +1814,7 @@ function GBL:MigrateGuild(guildData)
     self:MigrateNormalizePeerNames(guildData)
     self:MigrateNormalizeStoredRealms(guildData)
     self:MigrateRecoverPeerRealms(guildData)
+    self:MigrateForeignRealmTwins(guildData, name)
 end
 
 --- Run migration for all guild data namespaces.
@@ -1672,7 +1847,7 @@ function GBL:MigrateAllGuilds()
         local entered = isTable and guildData.schemaVersion or nil
         local ok, err
         if isTable then
-            ok, err = pcall(self.MigrateGuild, self, guildData)
+            ok, err = pcall(self.MigrateGuild, self, guildData, name)
         else
             ok, err = false, "guild data is a " .. type(guildData) .. ", not a table"
         end
@@ -1680,12 +1855,11 @@ function GBL:MigrateAllGuilds()
             self._migrationFailed[name] = nil
         else
             failed = failed + 1
-            -- Rungs 1 to 5 rewrite record ids in place and reset the hash cache
-            -- on their way out, so a raise between the two leaves a warm cache
-            -- describing ids that no longer exist. Cold at OnEnable, warm at
-            -- the roster-warm retrigger and at every bank open after it.
-            -- Rungs 7 and 10 rewrite ids and never reset it at all, which is a
-            -- separate defect filed as #265.
+            -- Every rung that rewrites record ids resets the hash cache on its
+            -- way out (rungs 7 and 10 since #265), so a raise between the
+            -- rewrite and the reset leaves a warm cache describing ids that no
+            -- longer exist. Cold at OnEnable, warm at the roster-warm retrigger
+            -- and at every bank open after it.
             self:ResetHashCache()
             if not self._migrationFailed[name] then
                 self._migrationFailed[name] = true
@@ -3155,16 +3329,30 @@ function GBL:CleanupWithEventCounts(guildData)
             end
         end
 
-        -- Rebuild playerStats
-        local statsDefaults = {
-            totalWithdrawCount = 0, totalDepositCount = 0,
-            moneyWithdrawn = 0, moneyDeposited = 0,
-            firstSeen = 0, lastSeen = 0,
-        }
-        for k in pairs(guildData.playerStats) do
-            guildData.playerStats[k] = nil
-        end
-        for _, record in ipairs(allRecords) do
+        self:RebuildPlayerStats(guildData)
+
+        self:ResetHashCache()
+    end
+
+    return totalRemoved
+end
+
+--- Recount every player's stats from the stored records, from zero.
+-- For a pass that removes or renames records: stats are counted once, when a
+-- record is stored, so they would go on counting what is gone. Read by
+-- CleanupWithEventCounts and MigrateForeignRealmTwins (#332).
+-- @param guildData table Guild data from AceDB
+function GBL:RebuildPlayerStats(guildData)
+    local statsDefaults = {
+        totalWithdrawCount = 0, totalDepositCount = 0,
+        moneyWithdrawn = 0, moneyDeposited = 0,
+        firstSeen = 0, lastSeen = 0,
+    }
+    for k in pairs(guildData.playerStats) do
+        guildData.playerStats[k] = nil
+    end
+    for _, list in ipairs({ guildData.transactions or {}, guildData.moneyTransactions or {} }) do
+        for _, record in ipairs(list) do
             if record.player then
                 if not guildData.playerStats[record.player]
                     or not guildData.playerStats[record.player].totalWithdrawCount then
@@ -3177,11 +3365,7 @@ function GBL:CleanupWithEventCounts(guildData)
                 self:UpdatePlayerStats(record, guildData)
             end
         end
-
-        self:ResetHashCache()
     end
-
-    return totalRemoved
 end
 
 --- Manually run the deduplication cleanup with user feedback.
