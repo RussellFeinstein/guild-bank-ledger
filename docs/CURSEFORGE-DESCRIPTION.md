@@ -63,7 +63,9 @@ Settings sync to all guild members automatically.
 - `/gbl restock`: Open the Restock tab
 - `/gbl synclog` — Pop up the sync session log
 - `/gbl sortlog` — Pop up the sort session log
-- `/gbl logs` — Pop up the master log (sync + sort + system, interleaved by timestamp)
+- `/gbl systemlog`: Pop up the system session log (Restock purchases, bank scans)
+- `/gbl ledgerlog`: Pop up what each guild bank log read recorded, and any entry it could not record
+- `/gbl logs`: Pop up the master log (every log, interleaved by timestamp)
 - `/gbl audit on|off|status|clear` — Manage persistent log capture for troubleshooting (on by default; nothing is sent anywhere)
 - `/gbl help` — Show all commands
 
