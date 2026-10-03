@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.42.1] - 2026-10-03
 
 ### Fixed
 - When a sync tells your addon that a transaction you already hold has a different identifier on the sender's side, your addon renames its own copy to match. Turning sync off in the middle of such a sync left your addon describing its records by the old names. Once sync was back on, a guildmate holding the same records could see a mismatch every time the addons checked in with each other, and start a sync made entirely of duplicates, round after round, until your addon recorded something new (from the bank or from a sync) or you used `/reload`. The description now updates the moment a record is renamed, however the sync ends.
