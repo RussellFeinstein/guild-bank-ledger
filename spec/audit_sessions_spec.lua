@@ -89,6 +89,30 @@ describe("audit session reader", function()
             assert.is_string(err)
         end)
 
+        it("lists a ledger count column for every session (#85)", function()
+            local lines = {}
+            local realPrint = _G.print
+            _G.print = function(s) lines[#lines + 1] = tostring(s) end
+            local ok, code = pcall(Reader.main, { FIXTURE })
+            _G.print = realPrint
+
+            assert.is_true(ok, tostring(code))
+            assert.equals(0, code)
+            assert.is_truthy(lines[1]:find("ledger", 1, true), lines[1])
+        end)
+
+        it("reads a session saved before the ledger channel as empty (#85)", function()
+            -- Both fixture sessions predate the channel, as every session
+            -- captured before it shipped does.
+            local db = Reader.load(FIXTURE)
+            local entries, err = Reader.channel(db, 1, "ledger")
+
+            assert.is_nil(err)
+            assert.same({}, entries)
+            assert.equals(0, Reader.list(db)[1].counts.ledger)
+            assert.equals(0, Reader.list(db)[1].dropped.ledger)
+        end)
+
         it("refuses an unknown channel with a message", function()
             local db = Reader.load(FIXTURE)
             local entries, err = Reader.channel(db, 1, "restock")

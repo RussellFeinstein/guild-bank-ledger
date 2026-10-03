@@ -49,11 +49,12 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 - Purchases stay counted as in the mail until the bank log records the deposit, so a second search does not offer them again; the search's preconditions are disabled states with the reason on the banner
 
 **Logging** (v0.32.0):
-- Per-channel session logs (sync cap 2000, sort cap 3000, system cap 500)
+- Per-channel session logs (sync cap 2000, sort cap 3000, system cap 500, ledger cap 500)
 - Severity levels (DEBUG / INFO / WARN / ERROR) with `pcall(string.format)` fallback
-- Surfaced on demand via `/gbl synclog`, `/gbl sortlog`, `/gbl logs` (master, interleaved by timestamp)
+- Surfaced on demand via `/gbl synclog`, `/gbl sortlog`, `/gbl systemlog`, `/gbl ledgerlog`, `/gbl logs` (master, interleaved by timestamp)
 - Audit panel removed from the Sync tab; logs are diagnostic artifacts, not always-visible UI
-- Persistent capture (v0.36.0): all three channels persist to `GuildBankLedgerAuditDB` per session (version-stamped headers, per-channel caps, 10-session rotation), managed via `/gbl audit`. On by default; nothing is transmitted. The opt-in uploader is phases 2-3 of docs/PLAN-audit-log-upload.md and stays unbuilt
+- Transaction recording logs every bank log read to its own ledger channel (v0.42.0, #85): what each read found and stored per tab, and the entries it could not record
+- Persistent capture (v0.36.0): every channel persists to `GuildBankLedgerAuditDB` per session (version-stamped headers, per-channel caps, 10-session rotation), managed via `/gbl audit`. On by default; nothing is transmitted. The opt-in uploader is phases 2-3 of docs/PLAN-audit-log-upload.md and stays unbuilt
 
 **Access control** (v0.15.0):
 - GM-configurable rank threshold with 3 restriction modes (full / sync-only / own-transactions-only)
@@ -73,7 +74,7 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full version history.
 
 ---
 
-## Current: Beta (v0.41.x)
+## Current: Beta (v0.42.x)
 
 Per-area status:
 

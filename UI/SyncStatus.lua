@@ -140,7 +140,7 @@ function GBL:BuildSyncTab(container)
     end)
     controlRow:AddChild(logBtn)
 
-    -- Open Master Log button (sync + sort + system, interleaved by timestamp)
+    -- Open Master Log button (every log channel, interleaved by timestamp)
     local masterLogBtn = AceGUI:Create("Button")
     masterLogBtn:SetText("Open Master Log")
     masterLogBtn:SetWidth(140)

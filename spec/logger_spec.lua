@@ -1,5 +1,5 @@
 ------------------------------------------------------------------------
--- Tests for Logger.lua: per-channel sync/sort/system logging
+-- Tests for Logger.lua: per-channel sync/sort/system/ledger logging
 ------------------------------------------------------------------------
 
 local Helpers = require("spec.helpers")
@@ -15,9 +15,14 @@ describe("Logger", function()
         -- Reset all channels before each test (fresh state guarantee).
         GBL:ClearLog(nil)
         -- Defaults: chatLog and debugChat are false on every channel.
-        for _, ch in ipairs({ "sync", "sort", "system" }) do
-            GBL.db.profile[ch].chatLog = false
-            GBL.db.profile[ch].debugChat = false
+        -- Guarded per channel so a missing profile block fails the
+        -- "one list of channels" pins below rather than every test here.
+        for _, ch in ipairs({ "sync", "sort", "system", "ledger" }) do
+            local cfg = GBL.db.profile[ch]
+            if cfg then
+                cfg.chatLog = false
+                cfg.debugChat = false
+            end
         end
     end)
 
@@ -260,7 +265,7 @@ describe("Logger", function()
             assert.equal(1, #GBL:GetLog("system"))
         end)
 
-        it("ClearLog(nil) empties all three", function()
+        it("ClearLog(nil) empties every channel", function()
             GBL:SyncInfo("a")
             GBL:SortInfo("b")
             GBL:SystemInfo("c")
@@ -298,6 +303,168 @@ describe("Logger", function()
             local log = GBL:GetLog("sync")
             assert.equal(1, #log)
             assert.equal("DEBUG", log[1].level)
+        end)
+    end)
+
+    -- #85: transaction recording gets a channel of its own. Russell's
+    -- call (2026-10-02) over putting it on system: a bank log read that
+    -- stores something writes one line, 1 to 157 of them a day, and the
+    -- system capture's 300 lines are the budget #199 kept a restock run
+    -- inside.
+    describe("ledger channel (#85)", function()
+        it("LedgerInfo lands in the ledger channel only", function()
+            GBL:LedgerInfo("read %d", 3)
+            assert.equal(1, #GBL:GetLog("ledger"))
+            assert.equal(0, #GBL:GetLog("sync"))
+            assert.equal(0, #GBL:GetLog("system"))
+            local entry = GBL:GetLog("ledger")[1]
+            assert.equal("read 3", entry.message)
+            assert.equal("ledger", entry.channel)
+            assert.equal("INFO", entry.level)
+        end)
+
+        it("LogLedger takes a runtime level", function()
+            GBL:LogLedger("WARN", "skipped %d", 2)
+            assert.equal("WARN", GBL:GetLog("ledger")[1].level)
+        end)
+
+        it("LedgerWarn and LedgerError record their levels", function()
+            GBL:LedgerWarn("w")
+            GBL:LedgerError("e")
+            local log = GBL:GetLog("ledger")
+            assert.equal("ERROR", log[1].level)
+            assert.equal("WARN", log[2].level)
+        end)
+
+        it("LedgerDebug drops unless the ledger channel's debugChat is on", function()
+            GBL:LedgerDebug("quiet rescan")
+            assert.equal(0, #GBL:GetLog("ledger"))
+            GBL.db.profile.ledger.debugChat = true
+            GBL:LedgerDebug("quiet rescan")
+            assert.equal(1, #GBL:GetLog("ledger"))
+        end)
+
+        it("chats with its own prefix", function()
+            local printed = {}
+            GBL.Print = function(_, msg) table.insert(printed, msg) end
+            GBL.db.profile.ledger.chatLog = true
+            GBL:LedgerInfo("read")
+            assert.equal("Ledger: read", printed[1])
+        end)
+
+        it("ledger cap is 500", function()
+            for i = 1, 503 do
+                GBL:LedgerInfo("read %d", i)
+            end
+            local log = GBL:GetLog("ledger")
+            assert.equal(500, #log)
+            assert.equal("read 503", log[1].message)
+        end)
+
+        it("ClearLog(nil) empties the ledger channel too", function()
+            GBL:LedgerInfo("a")
+            GBL:ClearLog(nil)
+            assert.equal(0, #GBL:GetLog("ledger"))
+        end)
+    end)
+
+    -- Four places name the channels: Logger, the capture's caps, the
+    -- profile defaults and the offline reader. Each reads Logger's list
+    -- or is pinned against it here, so a channel added in one place and
+    -- missed in another fails the suite rather than going quiet.
+    describe("one list of channels (#85)", function()
+        local function asSet(list)
+            local set = {}
+            for _, v in ipairs(list) do set[v] = true end
+            return set
+        end
+
+        local function keySet(t)
+            local set = {}
+            for k in pairs(t) do set[k] = true end
+            return set
+        end
+
+        it("Logger exports its channels in order", function()
+            assert.same({ "sync", "sort", "system", "ledger" }, GBL.LOG_CHANNELS)
+        end)
+
+        it("the capture has a cap for every channel and no other", function()
+            assert.same(asSet(GBL.LOG_CHANNELS), keySet(GBL.AUDIT_ENTRY_CAPS))
+        end)
+
+        it("every channel has profile defaults with chat and debug off", function()
+            -- A fresh load, because this file's before_each sets both flags
+            -- itself and would hide a wrong default.
+            Helpers.setupMocks()
+            local fresh = Helpers.loadAddon()
+            fresh:OnInitialize()
+            for _, ch in ipairs(fresh.LOG_CHANNELS) do
+                local cfg = fresh.db.profile[ch]
+                assert.is_table(cfg, "no profile block for " .. ch)
+                assert.is_false(cfg.chatLog, ch .. ".chatLog")
+                assert.is_false(cfg.debugChat, ch .. ".debugChat")
+            end
+        end)
+
+        it("the offline reader knows every channel and no other", function()
+            local Reader = dofile("scripts/audit-sessions.lua")
+            -- Both tables first: two nils compare the same.
+            assert.is_table(GBL.LOG_CHANNELS)
+            assert.is_table(Reader.CHANNELS)
+            assert.same(GBL.LOG_CHANNELS, Reader.CHANNELS)
+        end)
+
+        it("the master log merges every channel by default", function()
+            GBL:SyncInfo("s")
+            GBL:SortInfo("o")
+            GBL:SystemInfo("y")
+            GBL:LedgerInfo("l")
+            local seen = {}
+            for _, e in ipairs(GBL:GetMasterLog()) do seen[e.channel] = true end
+            assert.same(asSet(GBL.LOG_CHANNELS), seen)
+        end)
+    end)
+
+    describe("log commands for the ledger and system channels (#85)", function()
+        before_each(function()
+            Helpers.clearPrints()
+        end)
+
+        it("/gbl ledgerlog opens the ledger channel's window", function()
+            GBL:HandleSlashCommand("ledgerlog")
+            assert.is_true(Helpers.printContains("GBL Ledger Log: no entries yet."))
+        end)
+
+        it("/gbl systemlog opens the system channel's window", function()
+            GBL:HandleSlashCommand("systemlog")
+            assert.is_true(Helpers.printContains("GBL System Log: no entries yet."))
+        end)
+
+        it("/gbl logs clear ledger empties only the ledger channel", function()
+            GBL:LedgerInfo("l")
+            GBL:SyncInfo("s")
+            GBL:HandleSlashCommand("logs clear ledger")
+            assert.equal(0, #GBL:GetLog("ledger"))
+            assert.equal(1, #GBL:GetLog("sync"))
+            assert.is_true(Helpers.printContains("Cleared ledger log."))
+        end)
+
+        it("/gbl logs clear all empties the ledger channel too", function()
+            GBL:LedgerInfo("l")
+            GBL:HandleSlashCommand("logs clear all")
+            assert.equal(0, #GBL:GetLog("ledger"))
+        end)
+
+        it("/gbl logs debug ledger on turns on the ledger channel's debug", function()
+            GBL:HandleSlashCommand("logs debug ledger on")
+            assert.is_true(GBL.db.profile.ledger.debugChat)
+            assert.is_true(Helpers.printContains("ledger debug-to-chat enabled."))
+        end)
+
+        it("the usage line names the ledger channel", function()
+            GBL:HandleSlashCommand("logs clear bogus")
+            assert.is_true(Helpers.printContains("sync||sort||system||ledger||all"))
         end)
     end)
 

@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.41.31"
+local VERSION = "0.42.0"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -151,6 +151,7 @@ local defaults = {
         -- that silently emptied someone's bags would be a surprise.
         sort = { chatLog = false, debugChat = false, includeBags = false },
         system = { chatLog = false, debugChat = false },
+        ledger = { chatLog = false, debugChat = false },
         -- confirmAtPrice (#211): a Restock purchase pauses on the quoted
         -- total and waits for a Confirm click. On by default: the quote is
         -- the only point at which the real cost is known before the gold
@@ -2411,6 +2412,10 @@ function GBL:HandleSlashCommand(input)
         self:ShowSyncLog()
     elseif command == "sortlog" then
         self:ShowSortLog()
+    elseif command == "systemlog" then
+        self:ShowSystemLog()
+    elseif command == "ledgerlog" then
+        self:ShowLedgerLog()
     elseif command == "logs" then
         self:HandleLogsCommand(rest)
     elseif command == "cleanup" then
@@ -2885,10 +2890,12 @@ function GBL:PrintHelp()
     self:Print("  /gbl sortcancel  - Cancel a running sort")
     self:Print("  /gbl synclog     - Show the sync-channel session log")
     self:Print("  /gbl sortlog     - Show the sort-channel session log")
-    self:Print("  /gbl logs        - Show the master log (sync + sort + system)")
+    self:Print("  /gbl systemlog   - Show the system-channel session log (restock, scans)")
+    self:Print("  /gbl ledgerlog   - Show what each guild bank log read recorded")
+    self:Print("  /gbl logs        - Show the master log (every channel, by time)")
     self:Print("  /gbl logs dump [N]                       - Dump last N master entries to chat")
-    self:Print("  /gbl logs clear sync||sort||system||all     - Truncate channel(s)")
-    self:Print("  /gbl logs debug sync||sort||system on||off  - Toggle DEBUG-to-chat for a channel")
+    self:Print("  /gbl logs clear sync||sort||system||ledger||all     - Truncate channel(s)")
+    self:Print("  /gbl logs debug sync||sort||system||ledger on||off  - Toggle DEBUG-to-chat for a channel")
     self:Print("  /gbl audit on||off||status||clear           - Persistent log capture (on by default)")
     self:Print("  /gbl syncdiag    - Compare your addon version against every peer's")
     self:Print("  /gbl deviations  - List where the bank differs from the layout")
@@ -3213,16 +3220,18 @@ function GBL:PrintSyncDiag()
 end
 
 ------------------------------------------------------------------------
--- Log viewers (sync / sort / master) -- copy-pastable AceGUI pop-ups
+-- Log viewers (one per channel, plus the master) -- copy-pastable AceGUI pop-ups
 --
 -- One-shot snapshot windows, no live-refresh. Callers reach this through
--- /gbl synclog, /gbl sortlog, and /gbl logs (see HandleSlashCommand).
+-- /gbl synclog, /gbl sortlog, /gbl systemlog, /gbl ledgerlog and /gbl logs
+-- (see HandleSlashCommand).
 ------------------------------------------------------------------------
 
 local LOG_TITLES = {
     sync   = "GBL Sync Log",
     sort   = "GBL Sort Log",
     system = "GBL System Log",
+    ledger = "GBL Ledger Log",
 }
 
 --- Format an entry for the master view (channel + level prefix).
@@ -3291,12 +3300,17 @@ function GBL:ShowSortLog()
     self:_ShowLogFrame(LOG_TITLES.sort, self:GetLog("sort"), channelLine)
 end
 
---- Pop up the system-channel log.
+--- Pop up the system-channel log (also reached via /gbl systemlog).
 function GBL:ShowSystemLog()
     self:_ShowLogFrame(LOG_TITLES.system, self:GetLog("system"), channelLine)
 end
 
---- Pop up the master log (sync + sort + system, interleaved by timestamp).
+--- Pop up the ledger-channel log (also reached via /gbl ledgerlog, #85).
+function GBL:ShowLedgerLog()
+    self:_ShowLogFrame(LOG_TITLES.ledger, self:GetLog("ledger"), channelLine)
+end
+
+--- Pop up the master log (every channel, interleaved by timestamp).
 function GBL:ShowMasterLog()
     local merged = self:GetMasterLog()
     self:_ShowLogFrame("GBL Master Log", merged, masterLine)
@@ -3321,13 +3335,26 @@ end
 -- Slash command helper: /gbl logs ...
 ------------------------------------------------------------------------
 
-local LOG_CHANNEL_KEYS = { sync = true, sort = true, system = true, all = true }
+--- Is `name` one of Logger's channels? Read at call time, because this
+-- file loads before src/Logger.lua defines GBL.LOG_CHANNELS.
+local function isLogChannel(self, name)
+    for _, ch in ipairs(self.LOG_CHANNELS or {}) do
+        if ch == name then return true end
+    end
+    return false
+end
+
+--- The channel names as usage text, "sync||sort||...". The doubled pipe
+-- is WoW's escape for one literal "|".
+local function logChannelUsage(self)
+    return table.concat(self.LOG_CHANNELS or {}, "||")
+end
 
 --- Dispatch /gbl logs subcommands. Format:
 --   /gbl logs                          → master pop-up
 --   /gbl logs dump [N]                 → chat dump of master log
---   /gbl logs clear sync|sort|system|all
---   /gbl logs debug sync|sort|system on|off
+--   /gbl logs clear <channel>|all
+--   /gbl logs debug <channel> on|off
 function GBL:HandleLogsCommand(rest)
     rest = rest and strtrim(rest) or ""
 
@@ -3347,13 +3374,13 @@ function GBL:HandleLogsCommand(rest)
 
     if sub == "clear" then
         local target = (tail or ""):lower()
-        if not LOG_CHANNEL_KEYS[target] then
-            self:Print("Usage: /gbl logs clear sync||sort||system||all")
+        if target ~= "all" and not isLogChannel(self, target) then
+            self:Print("Usage: /gbl logs clear " .. logChannelUsage(self) .. "||all")
             return
         end
         if target == "all" then
             self:ClearLog(nil)
-            self:Print("Cleared sync, sort, and system logs.")
+            self:Print("Cleared every log.")
         else
             self:ClearLog(target)
             self:Print("Cleared " .. target .. " log.")
@@ -3365,9 +3392,9 @@ function GBL:HandleLogsCommand(rest)
         local channel, state = tail:match("^(%S+)%s+(%S+)$")
         channel = channel and channel:lower() or nil
         state = state and state:lower() or nil
-        if not channel or not LOG_CHANNEL_KEYS[channel] or channel == "all"
+        if not channel or not isLogChannel(self, channel)
            or (state ~= "on" and state ~= "off") then
-            self:Print("Usage: /gbl logs debug sync||sort||system on||off")
+            self:Print("Usage: /gbl logs debug " .. logChannelUsage(self) .. " on||off")
             return
         end
         local enable = state == "on"
@@ -3380,7 +3407,9 @@ function GBL:HandleLogsCommand(rest)
         return
     end
 
-    self:Print("Usage: /gbl logs [dump N || clear sync||sort||system||all || debug sync||sort||system on||off]")
+    local names = logChannelUsage(self)
+    self:Print("Usage: /gbl logs [dump N || clear " .. names .. "||all || debug "
+        .. names .. " on||off]")
 end
 
 function GBL:ManualScan()

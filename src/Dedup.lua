@@ -340,8 +340,10 @@ end
 -- @param prevCounts table|nil Session-local previous batch counts (nil for initial scan)
 -- @return number stored Count of newly stored records
 -- @return table currentCounts The batch counts for session cache update
+-- @return number refused New records the type and player check turned away,
+--   which the ledger log reports (#85)
 function GBL:StoreBatchRecords(batch, guildData, storageKey, prevCounts)
-    if not guildData then return 0, {} end
+    if not guildData then return 0, {}, 0 end
 
     -- Group by baseHash (preserve first-seen order for deterministic storage)
     local groups = {}
@@ -367,7 +369,7 @@ function GBL:StoreBatchRecords(batch, guildData, storageKey, prevCounts)
         storedIndex = self:BuildStoredRecordIndex(guildData, storageKey)
     end
 
-    local stored = 0
+    local stored, refused = 0, 0
     for _, baseHash in ipairs(order) do
         local group = groups[baseHash]
         local batchCount = #group
@@ -411,6 +413,8 @@ function GBL:StoreBatchRecords(batch, guildData, storageKey, prevCounts)
                         self:_RestockOnRecordStored(record, guildData)
                     end
                     stored = stored + 1
+                else
+                    refused = refused + 1
                 end
             end
         end
@@ -429,7 +433,7 @@ function GBL:StoreBatchRecords(batch, guildData, storageKey, prevCounts)
         end
     end
 
-    return stored, currentCounts
+    return stored, currentCounts, refused
 end
 
 ------------------------------------------------------------------------

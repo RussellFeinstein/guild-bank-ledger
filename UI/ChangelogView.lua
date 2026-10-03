@@ -29,6 +29,17 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.42.0
+    {"0.42.0", "2026-10-02", {
+        Added = {
+            "Recording guild bank transactions now leaves a record of its own, in a new ledger log opened with /gbl ledgerlog. Before, the addon's core job was the one thing it never wrote down, so a transaction that did not show up could not be traced. Each time the addon reads the bank's logs it writes one line: how many entries it read and how many were new, tab by tab and for the money log.",
+            "The read when you open the guild bank is always written to the ledger log. The check every few seconds while the bank is open is written only when it found something new or a log changed. The rest are kept out unless you turn on /gbl logs debug ledger on.",
+            "The ledger log warns about any log entry the addon could not record, such as one the game lists with no name (the bank's own Log tab shows those as Unknown). Until now these were dropped without a trace. Each one is warned about once per session, not on every check.",
+            "The ledger log names a read that failed. A failed check was silent before, and a failed read when you opened the bank also stopped the checks every few seconds for the rest of that visit. They now carry on.",
+            "The ledger log has its own space in the saved diagnostics, so a long sort or a Restock run cannot push its lines out, and /gbl audit status counts it beside the others. /gbl logs clear ledger and /gbl logs debug ledger on||off work on it like the other logs.",
+            "/gbl systemlog opens the system log on its own: the Restock purchase steps, the bank scans and the migration notes. Before, those lines were only readable mixed in with every other log under /gbl logs.",
+        },
+    }},
     -- v0.41.31
     {"0.41.31", "2026-10-02", {
         Fixed = {

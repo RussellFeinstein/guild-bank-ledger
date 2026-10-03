@@ -117,7 +117,21 @@ describe("AuditCapture", function()
             assert.equals(0, #sessions())
         end)
 
-        it("captures all three channels into per-channel lists", function()
+        it("captures the ledger channel into its own list (#85)", function()
+            enable()
+            GBL:LedgerInfo("ledger line")
+            local s = sessions()[1]
+            assert.equals(1, #s.entries.ledger)
+            assert.equals("ledger line", s.entries.ledger[1].message)
+            assert.equals(0, s.dropped.ledger)
+            assert.equals(0, #s.entries.sync)
+        end)
+
+        it("caps the ledger capture at 300 (#85)", function()
+            assert.equals(300, GBL.AUDIT_ENTRY_CAPS.ledger)
+        end)
+
+        it("captures the sync, sort and system channels into per-channel lists", function()
             enable()
             GBL:SyncInfo("sync line")
             GBL:SortWarn("sort line")
@@ -228,6 +242,13 @@ describe("AuditCapture", function()
             assert.is_true(Helpers.printContains("1 of "
                 .. GBL.AUDIT_MAX_SESSIONS .. " saved sessions"))
             assert.is_true(Helpers.printContains("This session: sync 1/"))
+        end)
+
+        it("status counts the ledger channel (#85)", function()
+            enable()
+            GBL:LedgerInfo("x")
+            GBL:HandleSlashCommand("audit status")
+            assert.is_true(Helpers.printContains("ledger 1/300"))
         end)
 
         it("clear wipes sessions and says the scope is the whole account", function()
