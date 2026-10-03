@@ -313,17 +313,23 @@ end
 -- @param tab number Tab index
 -- @param guildData table Guild data from AceDB
 -- @return number Count of newly stored (non-duplicate) records
+-- @return table { read, new, skipped, refused } for the ledger log (#85)
 function GBL:ReadTabTransactions(tab, guildData)
     if not guildData then return 0 end
 
     local numTx = GetNumGuildBankTransactions(tab)
     local batch = {}
+    -- An entry with no type or name is never recorded. The client does
+    -- return a nil name: Blizzard's own UI shows it as Unknown (#335).
+    local skipped = 0
 
     for i = 1, numTx do
         local txType, name, itemLink, count, tab1, tab2, year, month, day, hour =
             GetGuildBankTransaction(tab, i)
 
-        if txType and name then
+        if not (txType and name) then
+            skipped = skipped + 1
+        else
             -- WoW fills tab1 only for moves, where it is the source tab. For a
             -- deposit or withdrawal it is nil, so fall back to the log we are
             -- actually reading, which IS the tab the transaction happened in.
@@ -340,28 +346,32 @@ function GBL:ReadTabTransactions(tab, guildData)
     if not self._lastTabBatchCounts then self._lastTabBatchCounts = {} end
     local prevCounts = self._lastTabBatchCounts[tab]
 
-    local stored, currentCounts = self:StoreBatchRecords(
+    local stored, currentCounts, refused = self:StoreBatchRecords(
         batch, guildData, "transactions", prevCounts)
 
     self._lastTabBatchCounts[tab] = currentCounts
-    return stored
+    return stored, { read = numTx, new = stored, skipped = skipped, refused = refused or 0 }
 end
 
 --- Read all money transactions from the guild bank money log.
 -- Uses count-based batch dedup (same approach as ReadTabTransactions).
 -- @param guildData table Guild data from AceDB
 -- @return number Count of newly stored (non-duplicate) records
+-- @return table { read, new, skipped, refused } for the ledger log (#85)
 function GBL:ReadMoneyTransactions(guildData)
     if not guildData then return 0 end
 
     local numTx = GetNumGuildBankMoneyTransactions()
     local batch = {}
+    local skipped = 0
 
     for i = 1, numTx do
         local txType, name, amount, year, month, day, hour =
             GetGuildBankMoneyTransaction(i)
 
-        if txType and name then
+        if not (txType and name) then
+            skipped = skipped + 1
+        else
             local record = self:CreateMoneyTxRecord(
                 txType, name, amount,
                 year, month, day, hour
@@ -372,11 +382,11 @@ function GBL:ReadMoneyTransactions(guildData)
 
     local prevCounts = self._lastMoneyBatchCounts
 
-    local stored, currentCounts = self:StoreBatchRecords(
+    local stored, currentCounts, refused = self:StoreBatchRecords(
         batch, guildData, "moneyTransactions", prevCounts)
 
     self._lastMoneyBatchCounts = currentCounts
-    return stored
+    return stored, { read = numTx, new = stored, skipped = skipped, refused = refused or 0 }
 end
 
 ------------------------------------------------------------------------
@@ -386,18 +396,103 @@ end
 --- Read all available transaction data and return count of new records.
 -- @param guildData table Guild data from AceDB
 -- @return number count of newly stored records
+-- @return table|nil what each log answered, for the ledger log (#85):
+--   { tabs = { [i] = { key = "T1", read, new, skipped, refused } },
+--     items = n, money = n }, the money log last under key "M"
 function GBL:ReadAllTransactions(guildData)
     if not guildData then return 0 end
 
-    local totalStored = 0
+    local summary = { tabs = {}, items = 0, money = 0 }
     local numTabs = GetNumGuildBankTabs()
 
     for tab = 1, numTabs do
-        totalStored = totalStored + self:ReadTabTransactions(tab, guildData)
+        local stored, detail = self:ReadTabTransactions(tab, guildData)
+        detail.key = "T" .. tab
+        summary.tabs[#summary.tabs + 1] = detail
+        summary.items = summary.items + stored
     end
-    totalStored = totalStored + self:ReadMoneyTransactions(guildData)
+    local moneyStored, moneyDetail = self:ReadMoneyTransactions(guildData)
+    moneyDetail.key = "M"
+    summary.tabs[#summary.tabs + 1] = moneyDetail
+    summary.money = moneyStored
 
-    return totalStored
+    return summary.items + summary.money, summary
+end
+
+------------------------------------------------------------------------
+-- The ledger log (#85)
+------------------------------------------------------------------------
+
+-- The read timers. Exported so the specs fire them by name.
+local SCAN_DEBOUNCE, SCAN_FALLBACK = 0.5, 2
+local RESCAN_DEBOUNCE, RESCAN_FALLBACK = 0.3, 1.5
+GBL.LEDGER_SCAN_DEBOUNCE = SCAN_DEBOUNCE
+GBL.LEDGER_SCAN_FALLBACK = SCAN_FALLBACK
+GBL.LEDGER_RESCAN_DEBOUNCE = RESCAN_DEBOUNCE
+GBL.LEDGER_RESCAN_FALLBACK = RESCAN_FALLBACK
+
+--- Write one read's summary line, and a WARN for anything it could not
+-- record. The open read is INFO on every visit. A rescan runs every few
+-- seconds at the bank, so it is INFO only when it stored something or a
+-- log's counts moved since the previous read, and DEBUG otherwise.
+--
+-- The previous read is kept for the session and for one guild (the
+-- guildData table), never reset with the batch caches at bank close: a
+-- nameless entry re-read on every visit would otherwise warn on each one.
+-- @param kind string "open" or "rescan"
+-- @param via string "event" or "timeout", the timer that ran the read
+-- @param guildData table The guild the read was for
+-- @param summary table The second return of ReadAllTransactions
+local function logRead(self, kind, via, guildData, summary)
+    local last = self._lastLogRead
+    if not (last and last.guildData == guildData) then last = nil end
+
+    local reads, parts, rose, refusedAt = {}, {}, {}, {}
+    local read, skipped, refused = 0, 0, 0
+    local moved = (last == nil)
+    for _, d in ipairs(summary.tabs or {}) do
+        parts[#parts + 1] = string.format("%s=%d/%d", d.key, d.new or 0, d.read or 0)
+        read, skipped, refused = read + (d.read or 0),
+            skipped + (d.skipped or 0), refused + (d.refused or 0)
+        local prev = last and last.reads[d.key]
+        if not prev or prev.read ~= d.read or prev.skipped ~= d.skipped then
+            moved = true
+        end
+        if (d.skipped or 0) > ((prev and prev.skipped) or 0) then
+            rose[#rose + 1] = d.key .. "=" .. d.skipped
+        end
+        if (d.refused or 0) > 0 then
+            refusedAt[#refusedAt + 1] = d.key .. "=" .. d.refused
+        end
+        reads[d.key] = { read = d.read, skipped = d.skipped }
+    end
+    self._lastLogRead = { guildData = guildData, reads = reads }
+
+    local new = (summary.items or 0) + (summary.money or 0)
+    local level = "DEBUG"
+    if kind == "open" or new > 0 or moved then level = "INFO" end
+    self:LogLedger(level,
+        "Bank log read: on=%s via=%s new=%d items=%d money=%d read=%d skipped=%d refused=%d [%s]",
+        kind, via, new, summary.items or 0, summary.money or 0, read, skipped, refused,
+        table.concat(parts, " "))
+    if #rose > 0 then
+        self:LedgerWarn("Bank log read: on=%s entries with no type or name, not recorded: %s",
+            kind, table.concat(rose, " "))
+    end
+    if #refusedAt > 0 then
+        self:LedgerWarn("Bank log read: on=%s records refused at store (no type or player): %s",
+            kind, table.concat(refusedAt, " "))
+    end
+end
+
+--- logRead, protected: a fault in the log line must not stop the read
+-- chain it is reporting on (the rescan reschedules from its callback).
+local function safeLogRead(self, kind, via, guildData, summary)
+    if not summary then return end
+    local ok, err = pcall(logRead, self, kind, via, guildData, summary)
+    if not ok then
+        self:LedgerError("Bank log read: on=%s could not be logged: %s", kind, tostring(err))
+    end
 end
 
 --- Query all transaction logs and read them when the server responds.
@@ -420,32 +515,36 @@ function GBL:ScanTransactions(callback)
     local completed = false
     local debounceTimer = nil
 
-    local function finishScan()
+    -- @param via string "event" or "timeout": which timer ran the read
+    local function finishScan(via)
         if completed then return end
         completed = true
         debounceTimer = nil
         pcall(function() self:UnregisterEvent("GUILDBANKLOG_UPDATE") end)
 
         if not self.bankOpen then
+            self:LedgerInfo("Bank log read: on=open via=%s abandoned, the guild bank"
+                .. " window closed before the read", via)
             if callback then callback(0) end
             return
         end
 
-        local totalStored = self:ReadAllTransactions(guildData)
+        local totalStored, summary = self:ReadAllTransactions(guildData)
+        safeLogRead(self, "open", via, guildData, summary)
         self:SendMessage("GBL_LEDGER_SCAN_COMPLETE", totalStored)
         if callback then callback(totalStored) end
     end
 
-    -- Listen for server response — debounce so we wait for all tabs
-    -- including money tab to arrive before reading
+    -- Listen for server response, debounced so the read waits for every
+    -- tab. The cancel needs a handle, and the live client's C_Timer.After
+    -- returns none (#118), so there each event schedules its own read and
+    -- the first one to fire wins (#336). The mock returns a handle.
     self.GUILDBANKLOG_UPDATE = function()
         if completed then return end
-        -- Cancel previous timer and restart — ensures we wait 0.5s
-        -- after the LAST event, giving all tab responses time to arrive
         if debounceTimer then
             debounceTimer.cancelled = true
         end
-        debounceTimer = C_Timer.After(0.5, finishScan)
+        debounceTimer = C_Timer.After(SCAN_DEBOUNCE, function() finishScan("event") end)
     end
     self:RegisterEvent("GUILDBANKLOG_UPDATE")
 
@@ -456,7 +555,7 @@ function GBL:ScanTransactions(callback)
     QueryGuildBankLog(moneyTab)
 
     -- Fallback: if event never fires (data already cached), read after 2s
-    C_Timer.After(2, finishScan)
+    C_Timer.After(SCAN_FALLBACK, function() finishScan("timeout") end)
 
     return 0
 end
@@ -491,28 +590,37 @@ function GBL:RescanTransactionLogs(callback)
     local completed = false
     local debounceTimer = nil
 
-    local function finishRescan()
+    -- @param via string "event" or "timeout": which timer ran the read
+    local function finishRescan(via)
         if completed then return end
         completed = true
         pcall(function() self:UnregisterEvent("GUILDBANKLOG_UPDATE") end)
 
         -- Protected read so errors never break the rescan chain
-        local ok, newCount = pcall(function()
+        local freshGuildData
+        local ok, newCount, summary = pcall(function()
             if not self.bankOpen then return 0 end
-            local freshGuildData = self:GetGuildData()
+            freshGuildData = self:GetGuildData()
             if not freshGuildData then return 0 end
             return self:ReadAllTransactions(freshGuildData)
         end)
+        if ok then
+            safeLogRead(self, "rescan", via, freshGuildData, summary)
+        else
+            self:LedgerError("Bank log read: on=rescan via=%s failed: %s",
+                via, tostring(newCount))
+        end
         if callback then callback(ok and newCount or 0) end
     end
 
-    -- Listen for server response — 0.3s debounce so we wait for all tabs
+    -- Listen for server response, debounced as ScanTransactions is, with
+    -- the same live-client caveat (#118, #336).
     self.GUILDBANKLOG_UPDATE = function()
         if completed then return end
         if debounceTimer then
             debounceTimer.cancelled = true
         end
-        debounceTimer = C_Timer.After(0.3, finishRescan)
+        debounceTimer = C_Timer.After(RESCAN_DEBOUNCE, function() finishRescan("event") end)
     end
     self:RegisterEvent("GUILDBANKLOG_UPDATE")
 
@@ -525,7 +633,7 @@ function GBL:RescanTransactionLogs(callback)
     QueryGuildBankLog(moneyTab)
 
     -- Fallback if event never fires (data already cached)
-    C_Timer.After(1.5, finishRescan)
+    C_Timer.After(RESCAN_FALLBACK, function() finishRescan("timeout") end)
 end
 
 --- Start the periodic transaction log re-scan timer.
