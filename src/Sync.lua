@@ -3808,6 +3808,22 @@ function GBL:NormalizeRecordId(incomingRecord, matchedKey, guildData, idIndex)
     return true
 end
 
+--- Whisper the ACK for one chunk to its sender.
+-- @param sender string The peer the chunk came from
+-- @param chunk number|nil The chunk's own number, echoed back
+-- @param stored number Records this chunk stored
+local function sendAck(self, sender, chunk, stored)
+    local ackMsg = self:Serialize({
+        type = "ACK",
+        chunk = chunk,
+        stored = stored,
+        protocolVersion = PROTOCOL_VERSION,
+        guild = self:GetGuildName(),
+    })
+    ackMsg = compressMessage(ackMsg)
+    self:SendSyncWhisper(PREFIX, ackMsg, sender, "ALERT")
+end
+
 --- Process an incoming SYNC_DATA chunk — dedup, normalize IDs, and store.
 -- When a fuzzy duplicate is detected, adopts the sender's ID and timestamp
 -- (sender-wins) so the receiver fully converges in a single sync cycle.
@@ -4002,16 +4018,7 @@ function GBL:HandleSyncData(sender, data)
         syncState.receiveTimer = nil
     end
 
-    -- Send ACK
-    local ackMsg = self:Serialize({
-        type = "ACK",
-        chunk = data.chunk,
-        stored = stored,
-        protocolVersion = PROTOCOL_VERSION,
-        guild = self:GetGuildName(),
-    })
-    ackMsg = compressMessage(ackMsg)
-    self:SendSyncWhisper(PREFIX, ackMsg, sender, "ALERT")
+    sendAck(self, sender, data.chunk, stored)
 
     local runningTotal = syncState.receiveStored + syncState.receiveDuped
     local dupPctSuffix = ""
