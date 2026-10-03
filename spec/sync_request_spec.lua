@@ -2155,6 +2155,30 @@ describe("Sync request and serve", function()
                 "a bucket whose id was rewritten mid-preparation is not unchanged")
         end)
 
+        -- The other side of reading the records: a reset that changed nothing
+        -- in the bucket must still leave it demoted, or every reset would
+        -- switch the rotation off for that serve.
+        it("still demotes a bucket no reset touched", function()
+            Sync.seedRewritable(guildData)
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 99)
+            local bucket = GBL:BucketKeyForTimeSlot(475100)
+
+            Sync.serveRequest(GBL, "PeerA", requestDifferingIn(bucket))
+            Sync.drainSend(GBL, "PeerA")
+            GBL:ClearLog("sync")
+
+            GBL:HandleSyncRequest("PeerA", requestDifferingIn(bucket))
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "the collect must still be running when the reset lands")
+            GBL:ResetHashCache()
+
+            Helpers.drainZeroDelayTimers()
+            assert.is_false(GBL:GetSyncStatus().preparing)
+
+            assert.is_true(auditHas("1 in last tranche, 1 unchanged (demoted)"),
+                "the records give the hash the bucket was sent with")
+        end)
+
         -- Out of restarts is not out of options: if something has warmed the
         -- cache since the reset, that map is current and costs nothing.
         it("takes a warm cache instead of going ahead on an overtaken walk", function()
