@@ -2001,11 +2001,14 @@ end
 -- against the synchronous version before any of this moved.
 --
 -- Mutation tolerance: rescan and intake append at the array tail, so a walk
--- holding a cursor can miss a late arrival, and a receive finishing mid-prep
--- can rewrite record ids underneath it. Neither can lose data or diverge,
--- because the receiver dedups by id: the worst case is a record riding the
--- next session instead of this one, or a redundant one the far side drops. No
--- locking, and none needed.
+-- holding a cursor can miss a late arrival, and a receive running beside the
+-- preparation can rewrite record ids underneath it. Neither can lose data or
+-- diverge, because the receiver dedups by id: the worst case is a record
+-- riding the next session instead of this one, or a redundant one the far side
+-- drops. No locking, and none needed. What a rewrite must not do is reach the
+-- shared cache, so each one resets it and the walk then declines to stamp its
+-- map (#330). A cleanup that reorders the arrays under the walk is not yet
+-- caught that way (#342).
 
 local prepStages = {}
 local prepStep  -- forward declaration; the watchdog and the accept both call it
@@ -2064,7 +2067,8 @@ end
 
 -- 1. Bucket hashes. Free when the cache is already current, otherwise the same
 --    walk ComputeBucketHashes does, a slice at a time, stamping the cache on
---    the way past so the work is not thrown away.
+--    the way past so the work is not thrown away, unless a reset landed after
+--    the walk began (#330).
 prepStages[1] = function(self, prep, budget)
     if prep.localBuckets then return 0, true end
 

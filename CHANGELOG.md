@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- When a sync tells your addon that a transaction you already hold has a different identifier on the sender's side, your addon renames its own copy to match. Turning sync off in the middle of such a sync left your addon describing its records by the old names. Once sync was back on, a guildmate holding the same records could see a mismatch every time the addons checked in with each other, and start a sync made entirely of duplicates, round after round, until your next bank scan, a sync that brought in something new, or a `/reload`. The description now updates the moment a record is renamed, however the sync ends.
+- When a sync tells your addon that a transaction you already hold has a different identifier on the sender's side, your addon renames its own copy to match. Turning sync off in the middle of such a sync left your addon describing its records by the old names. Once sync was back on, a guildmate holding the same records could see a mismatch every time the addons checked in with each other, and start a sync made entirely of duplicates, round after round, until your addon recorded something new (from the bank or from a sync) or you used `/reload`. The description now updates the moment a record is renamed, however the sync ends.
 - The same out-of-date description could also come back when such a sync finished while your addon was getting ready to send data to someone else. Getting ready no longer puts back a description that the rename has made out of date.
 
 ## [0.42.0] - 2026-10-02

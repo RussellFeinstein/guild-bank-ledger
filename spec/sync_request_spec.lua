@@ -1772,16 +1772,8 @@ describe("Sync request and serve", function()
         -- as it stands and no scan runs, which would test nothing here.
         it("does not put back a bucket map a receive's id rewrite outdated",
         function()
-            local OLD_ID = "deposit|Thrall-TestRealm|12345|5|1|475101:0"
-            local NEW_ID = "deposit|Thrall-TestRealm|12345|5|1|475100:0"
             -- First, so the first tick's walk passes it before the receive.
-            table.insert(guildData.transactions, {
-                type = "deposit", player = "Thrall-TestRealm", itemID = 12345,
-                classID = 0, subclassID = 5,
-                count = 5, tab = 1, timestamp = 3600 * 475101 + 1800,
-                id = OLD_ID, _occurrence = 0,
-            })
-            guildData.seenTxHashes[OLD_ID] = 3600 * 475101 + 1800
+            Sync.seedRewritable(guildData)
             seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
             local held = #guildData.transactions
             local before = GBL:ComputeBucketHashes(guildData)
@@ -1794,20 +1786,8 @@ describe("Sync request and serve", function()
 
             -- An unrequested one-chunk session from another peer: the same
             -- event under the sender's id, adopted in place and complete.
-            GBL:HandleSyncData("PeerB", {
-                chunk = 1, totalChunks = 1,
-                transactions = {
-                    {
-                        type = "deposit", player = "Thrall",
-                        itemID = 12345, classID = 0, subclassID = 5,
-                        count = 5, tab = 1,
-                        timestamp = 3600 * 475100 + 2400,
-                        id = NEW_ID, _occurrence = 0,
-                    },
-                },
-                moneyTransactions = {},
-            })
-            assert.equals(NEW_ID, guildData.transactions[1].id,
+            GBL:HandleSyncData("PeerB", Sync.rewriteChunk(1, 1))
+            assert.equals(Sync.REWRITE_NEW_ID, guildData.transactions[1].id,
                 "the receive must have rewritten the walked record in place")
             assert.equals(held, #guildData.transactions,
                 "the receive must store nothing, or the record count moves")

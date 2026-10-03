@@ -1687,8 +1687,7 @@ describe("Sync receive and intake", function()
         -- of the records as they now are, as #265's pins are, rather than by
         -- counting resets.
         describe("an in-place rewrite and the cached fingerprint (#330)", function()
-            local OLD_ID = "deposit|Thrall-TestRealm|12345|5|1|475101:0"
-            local NEW_ID = "deposit|Thrall-TestRealm|12345|5|1|475100:0"
+            local NEW_ID = Sync.REWRITE_NEW_ID
 
             -- GetBucketHashes hands back the cache's own table, so a read is
             -- copied before anything is compared with it.
@@ -1703,13 +1702,7 @@ describe("Sync receive and intake", function()
             -- @return number, table The uncached hash and bucket map before
             local function seedWarm()
                 GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
-                table.insert(guildData.transactions, {
-                    type = "deposit", player = "Thrall-TestRealm", itemID = 12345,
-                    classID = 0, subclassID = 5,
-                    count = 5, tab = 1, timestamp = 3600 * 475101 + 1800,
-                    id = OLD_ID, _occurrence = 0,
-                })
-                guildData.seenTxHashes[OLD_ID] = 3600 * 475101 + 1800
+                Sync.seedRewritable(guildData)
                 GBL:GetDataHash(guildData)
                 GBL:GetBucketHashes(guildData)
                 return GBL:ComputeDataHash(guildData),
@@ -1719,19 +1712,7 @@ describe("Sync receive and intake", function()
             --- Chunk `n` of `total`, carrying the same event under the sender's
             -- id, so the receive adopts it in place and stores nothing.
             local function deliverRewrite(n, total)
-                GBL:HandleSyncData("OfficerB", {
-                    chunk = n, totalChunks = total,
-                    transactions = {
-                        {
-                            type = "deposit", player = "Thrall",
-                            itemID = 12345, classID = 0, subclassID = 5,
-                            count = 5, tab = 1,
-                            timestamp = 3600 * 475100 + 2400,
-                            id = NEW_ID, _occurrence = 0,
-                        },
-                    },
-                    moneyTransactions = {},
-                })
+                GBL:HandleSyncData("OfficerB", Sync.rewriteChunk(n, total))
             end
 
             --- Both cached answers against an uncached compute, after proving
@@ -1786,6 +1767,10 @@ describe("Sync receive and intake", function()
                 -- function, which is what keeps the incoming record
                 -- reconstructSyncRecord fills out of the list, and an assigned
                 -- one, the form the serve chain's prepStages and prepStep use.
+                -- What it cannot see: an id written as ["id"] or through
+                -- rawset, a whole record replaced at the same index, and
+                -- whether the reset is on the path the rewrite takes. The
+                -- behavioural cases above are what cover the one rewrite there is.
                 local fh = io.open("src/Sync.lua", "rb")
                 assert.is_not_nil(fh, "could not read src/Sync.lua, so this proves nothing")
                 local source = fh:read("*a")
@@ -1798,7 +1783,9 @@ describe("Sync receive and intake", function()
 
                 local rewriters, writes, resets, current = {}, {}, {}, nil
                 for line in source:gmatch("[^\r\n]+") do
-                    local fn = line:match("^function GBL:([%w_]+)")
+                    -- Both spellings of a method: the file defines some with a
+                    -- dot (GBL._syncState_setLastChunkBytes).
+                    local fn = line:match("^function GBL[:.]([%w_]+)")
                     if fn then
                         current = fn
                     elseif line:match("^function ") or line:match("^local function ")
