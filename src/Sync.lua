@@ -3906,8 +3906,10 @@ function GBL:HandleSyncData(sender, data)
     -- sending them twice (#290). Only the chunk just taken: in stop-and-wait
     -- that is the only copy a sender makes, and "at or below the highest"
     -- would skip a new stream's first chunks after a straggler from a dead
-    -- one. The total has to match as well, or it is another stream.
-    if type(data.chunk) == "number"
+    -- one. The total has to match as well, or it is another stream. And a
+    -- chunk has to have been taken: both start at 0, which a malformed chunk
+    -- numbered 0 with a total of 0 would match.
+    if syncState.receiveGot > 0 and type(data.chunk) == "number"
         and data.chunk == syncState.receiveLastChunk
         and (data.totalChunks or 1) == syncState.receiveExpected then
         syncState.receiveRepeats = syncState.receiveRepeats + 1
