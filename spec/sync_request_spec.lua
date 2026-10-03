@@ -1920,10 +1920,22 @@ describe("Sync request and serve", function()
                 "a walk that read the old id offers a bucket the requester already matches")
         end)
 
+        local function auditCount(fragment)
+            local n = 0
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message and entry.message:find(fragment, 1, true) then
+                    n = n + 1
+                end
+            end
+            return n
+        end
+
         -- The bound is the literal on purpose: three is a decision, and
-        -- moving it should show in this file.
+        -- moving it should show in this file. Two ticks of walking past the
+        -- budget, so the walk the serve goes ahead on is still running on the
+        -- tick after the one that gave up on it, and gets reset under again.
         it("stops walking again after three restarts and still finishes", function()
-            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+            seed(2 * GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
 
             GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
             local rounds = 0
@@ -1937,8 +1949,32 @@ describe("Sync request and serve", function()
 
             assert.is_true(auditHas("3 walk restart(s)"),
                 "the finished preparation must say how often it walked again")
-            assert.is_true(auditHas("Bucket walk for PeerA overtaken after 3 restart(s)"),
-                "a serve that goes ahead on an overtaken walk must say so")
+            assert.equals(1, auditCount("Bucket walk for PeerA overtaken after 3 restart(s)"),
+                "a serve that goes ahead on an overtaken walk must say so, once")
+        end)
+
+        -- A walk the serve went ahead on belongs to the generation it began
+        -- in, not the one it was handed over in, so the last stage must not
+        -- take its hashes for the tranche even if nothing resets afterwards.
+        it("does not record the tranche from a walk it went ahead on", function()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            local rounds = 0
+            while not auditHas("overtaken after 3 restart(s)") do
+                rounds = rounds + 1
+                assert.is_true(rounds <= 20, "the walk never used up its restarts")
+                GBL:ResetHashCache()
+                Helpers.fireZeroDelayRound()
+            end
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "the collect must still be ahead, with no reset left to come")
+
+            Helpers.drainZeroDelayTimers()
+            assert.is_false(GBL:GetSyncStatus().preparing)
+
+            assert.is_true(auditHas("Tranche for PeerA recorded from the records sent"),
+                "the map of an overtaken walk cannot vouch for the tranche")
         end)
 
         it("says nothing about restarts when the walk was never overtaken", function()
@@ -2007,22 +2043,32 @@ describe("Sync request and serve", function()
         -- when something moved. On the time-filtered path a session carries
         -- part of a bucket, so the hash of what was sent is not the bucket's,
         -- and recording it would stop that bucket ever being demoted.
-        it("records the bucket's own hash when nothing overtook the preparation",
-        function()
-            seed(5)
-            -- Slots +2 to +5 share a bucket, and only +4 and +5 are newer
-            -- than the requester's timestamp.
-            local bucket = GBL:BucketKeyForTimeSlot(BASE_SLOT + 4)
-            assert.equals(bucket, GBL:BucketKeyForTimeSlot(BASE_SLOT + 2),
-                "the fixture needs an older record in the same bucket")
+        -- Both ways a preparation comes by its map: walking for it, and
+        -- taking a cache that is already current.
+        for _, case in ipairs({
+            { name = "walked for its map", warm = false },
+            { name = "took a warm cache", warm = true },
+        }) do
+            it("records the bucket's own hash when nothing overtook a preparation that "
+                .. case.name, function()
+                seed(5)
+                if case.warm then GBL:GetBucketHashes(guildData) end
+                assert.equals(case.warm, GBL:_FreshBucketHashes(guildData) ~= nil,
+                    "the fixture must start the preparation the way the case says")
+                -- Slots +2 to +5 share a bucket, and only +4 and +5 are newer
+                -- than the requester's timestamp.
+                local bucket = GBL:BucketKeyForTimeSlot(BASE_SLOT + 4)
+                assert.equals(bucket, GBL:BucketKeyForTimeSlot(BASE_SLOT + 2),
+                    "the fixture needs an older record in the same bucket")
 
-            Sync.serveRequest(GBL, "PeerA",
-                request{ sinceTimestamp = (BASE_SLOT + 3) * 3600 })
+                Sync.serveRequest(GBL, "PeerA",
+                    request{ sinceTimestamp = (BASE_SLOT + 3) * 3600 })
 
-            assert.equals(GBL:ComputeBucketHashes(guildData)[bucket],
-                trancheFor("PeerA")[bucket])
-            assert.is_false(auditHas("recorded from the records sent"))
-        end)
+                assert.equals(GBL:ComputeBucketHashes(guildData)[bucket],
+                    trancheFor("PeerA")[bucket])
+                assert.is_false(auditHas("recorded from the records sent"))
+            end)
+        end
     end)
 
     ---------------------------------------------------------------------------

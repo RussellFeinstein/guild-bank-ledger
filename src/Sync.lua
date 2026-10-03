@@ -2097,8 +2097,8 @@ prepStages[1] = function(self, prep, budget)
     local scan = prep.bucketScan
     if scan and not prep.walkOvertaken
         and scan.generation ~= self:_HashCacheGeneration() then
-        if (prep.walkRestarts or 0) < SYNC_PREP_WALK_RESTARTS then
-            prep.walkRestarts = (prep.walkRestarts or 0) + 1
+        if prep.walkRestarts < SYNC_PREP_WALK_RESTARTS then
+            prep.walkRestarts = prep.walkRestarts + 1
             prep.bucketScan = nil
         else
             prep.walkOvertaken = true
@@ -2529,7 +2529,7 @@ prepStages[7] = function(self, prep, _budget)
     local sender = prep.sender
     local elapsed = GetTime() - (prep.startedAt or GetTime())
     -- Named only when there were any, so a clean preparation's line is unchanged.
-    local restartText = (prep.walkRestarts or 0) > 0
+    local restartText = prep.walkRestarts > 0
         and (", " .. prep.walkRestarts .. " walk restart(s)") or ""
     self:AddAuditEntry(string.format(
         "Prep complete for %s: %d examined, %d selected, %d tick(s), %.2fs%s",
@@ -2762,6 +2762,7 @@ function GBL:HandleSyncRequest(sender, data)
         stage = 1,
         ticks = 0,
         examined = 0,
+        walkRestarts = 0,
         startedAt = GetTime(),
     }
     syncState.prep = prep
