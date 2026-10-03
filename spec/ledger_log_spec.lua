@@ -128,6 +128,25 @@ describe("Ledger log lines (#85)", function()
             assert.is_true(has(line, "via=timeout"), line)
         end)
 
+        it("writes INFO again when the bank is reopened with nothing changed", function()
+            -- The first read of a session counts as moved on its own, so
+            -- only a second open read with the same counts shows that the
+            -- open read is INFO for being the open read.
+            Helpers.addTabTransactions(1, {
+                Helpers.makeTransaction("deposit", "Raider1", link, 5, 1, nil, 0),
+            })
+            openRead()
+            GBL:OnBankClosed()
+            GBL.bankOpen = true
+
+            assert.equals(0, openRead())
+            local info = lines("INFO")
+            assert.equals(2, #info)
+            assert.is_true(has(info[2], "on=open"), info[2])
+            assert.is_true(has(info[2], "new=0"), info[2])
+            assert.is_true(has(info[2], "T1=0/1"), info[2])
+        end)
+
         it("says so when the guild bank window closed before the read", function()
             local result
             GBL:ScanTransactions(function(n) result = n end)
@@ -242,6 +261,22 @@ describe("Ledger log lines (#85)", function()
             local warns = lines("WARN")
             assert.equals(2, #warns)
             assert.is_true(has(warns[2], "T1=2"), warns[2])
+        end)
+
+        it("counts a money log entry with no name and warns", function()
+            -- Blizzard guards the money log the same way (#335).
+            Helpers.addMoneyTransactions({
+                Helpers.makeMoneyTransaction("deposit", "Raider1", 10000, 0),
+                Helpers.makeMoneyTransaction("deposit", nil, 20000, 0),
+            })
+
+            openRead()
+            local info = lines("INFO")[1]
+            assert.is_true(has(info, "skipped=1"), info)
+            assert.is_true(has(info, "M=1/2"), info)
+            local warns = lines("WARN")
+            assert.equals(1, #warns)
+            assert.is_true(has(warns[1], "M=1"), warns[1])
         end)
 
         it("compares a guild's read only with that guild's previous one", function()

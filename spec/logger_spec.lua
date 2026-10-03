@@ -394,8 +394,13 @@ describe("Logger", function()
         end)
 
         it("every channel has profile defaults with chat and debug off", function()
-            for _, ch in ipairs(GBL.LOG_CHANNELS) do
-                local cfg = GBL.db.profile[ch]
+            -- A fresh load, because this file's before_each sets both flags
+            -- itself and would hide a wrong default.
+            Helpers.setupMocks()
+            local fresh = Helpers.loadAddon()
+            fresh:OnInitialize()
+            for _, ch in ipairs(fresh.LOG_CHANNELS) do
+                local cfg = fresh.db.profile[ch]
                 assert.is_table(cfg, "no profile block for " .. ch)
                 assert.is_false(cfg.chatLog, ch .. ".chatLog")
                 assert.is_false(cfg.debugChat, ch .. ".debugChat")
