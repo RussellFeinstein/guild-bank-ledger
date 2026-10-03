@@ -874,6 +874,261 @@ describe("Sync receive and intake", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- The receive position (#290, #321)
+    --
+    -- The NACK named receiveGot + 1, and receiveGot counts chunks taken, not
+    -- the chunk the stream is on. A copy of the chunk just taken (its ACK was
+    -- lost or late, or a loading screen resent it) put the count one ahead,
+    -- and a receive that joined a stream part-way counted from zero. The NACK
+    -- now names the chunk after the last one taken, read from the chunk's own
+    -- number, and a copy of that chunk is acknowledged and skipped.
+    ---------------------------------------------------------------------------
+
+    describe("NACK names the chunk after the last one taken (#290)", function()
+        -- One record per chunk, keyed on k, so a copy whose records are
+        -- walked moves the stored or the duped count.
+        local function chunkOf(n, total, k)
+            return {
+                chunk = n, totalChunks = total,
+                transactions = {
+                    {
+                        type = "deposit", player = "Thrall" .. k,
+                        itemID = 12340 + k, count = 5, tab = 1,
+                        timestamp = 2000, scanTime = 2000,
+                        scannedBy = "OfficerB",
+                        id = "deposit|Thrall" .. k .. "|" .. (12340 + k) .. "|5|1|0",
+                    },
+                },
+                moneyTransactions = {},
+                protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
+                guild = "Test Guild",
+            }
+        end
+
+        local function deliver(n, total, k)
+            GBL:HandleSyncData("OfficerB", chunkOf(n, total, k or n))
+        end
+
+        local function sent(kind) return Sync.messagesOfType(GBL, kind) end
+
+        local function chunksOf(kind)
+            local out = {}
+            for _, msg in ipairs(sent(kind)) do
+                out[#out + 1] = msg.data.chunk
+            end
+            return out
+        end
+
+        local function logEntry(text)
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message:find(text, 1, true) then return entry end
+            end
+            return nil
+        end
+
+        local function state() return GBL:GetSyncStateForTests() end
+
+        before_each(function()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            GBL:RequestSync("OfficerB", 0)
+            assert.is_true(state().receiveRequested,
+                "fixture: a receive we asked for")
+            MockAce.sentCommMessages = {}
+        end)
+
+        it("names the chunk after a copy of the last one", function()
+            deliver(1, 5)
+            deliver(2, 5)
+            deliver(2, 5)
+            MockAce.sentCommMessages = {}
+
+            assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
+
+            assert.same({ 3 }, chunksOf("NACK"))
+        end)
+
+        it("acknowledges a copy of the last chunk and skips its records", function()
+            deliver(1, 5)
+            deliver(2, 5)
+            -- A real copy carries the records the first one did. This one
+            -- carries a record nothing has seen, so a walk would store it.
+            deliver(2, 5, 99)
+
+            assert.same({ 1, 2, 2 }, chunksOf("ACK"), "the copy is acknowledged")
+            assert.equals(2, #guildData.transactions, "the copy's records are not walked")
+            assert.equals(2, state().receiveGot, "a copy is not a chunk taken")
+            local entry = logEntry(
+                "Repeated chunk 2/5 from OfficerB, already taken - ACKed, records skipped")
+            assert.is_truthy(entry, "the skip must say so in the sync log")
+            assert.equals("INFO", entry.level, "a DEBUG line never reaches a capture")
+        end)
+
+        -- The figures measure what the bucket filter sent twice, not what
+        -- the wire did: a copy's records counted as duped inflated both the
+        -- Redundancy line and the receipt the sender reads.
+        it("leaves a copy out of the session's figures", function()
+            deliver(1, 3)
+            deliver(2, 3)
+            deliver(2, 3)
+            deliver(3, 3)
+
+            assert.is_false(GBL:GetSyncStatus().receiving,
+                "fixture: the session completed")
+            local redundancy = logEntry("Redundancy from OfficerB: ")
+            assert.is_truthy(redundancy, "fixture: a session with figures")
+            assert.is_truthy(
+                redundancy.message:find("0% duped (0/3 received)", 1, true),
+                redundancy.message)
+            local receipts = sent("SYNC_RECEIPT")
+            assert.equals(1, #receipts)
+            assert.equals(0, receipts[1].data.duped)
+            assert.equals(3, receipts[1].data.stored)
+            local complete = logEntry("Sync complete from OfficerB")
+            assert.is_truthy(complete)
+            assert.is_truthy(complete.message:find(", 3 chunks, 1 repeated, ", 1, true),
+                complete.message)
+        end)
+
+        it("re-arms the receive timer on a copy, as on any chunk", function()
+            deliver(1, 5)
+            deliver(2, 5)
+            assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
+            assert.equals(1, state().receiveNackCount, "fixture: one NACK out")
+            local before = state().receiveTimer
+
+            deliver(2, 5)
+
+            assert.equals(0, state().receiveNackCount,
+                "a copy shows the sender is alive, so the NACK ladder starts over")
+            assert.is_true(before.cancelled, "the NACK's timer is replaced")
+            assert.is_truthy(state().receiveTimer)
+            assert.are_not.equals(before, state().receiveTimer)
+        end)
+
+        it("takes a chunk with the same number and a different total", function()
+            deliver(1, 5)
+            deliver(2, 5)
+            deliver(2, 6, 3)
+
+            assert.equals(3, #guildData.transactions,
+                "a different total is a different stream")
+            assert.equals(3, state().receiveGot)
+            assert.is_nil(logEntry("Repeated chunk"))
+        end)
+
+        -- Before anything is taken the position and the total are both 0,
+        -- so a malformed chunk numbered 0 with a total of 0 matches them. A
+        -- copy needs a chunk taken first; this one is read, as it was before.
+        it("reads a chunk numbered 0 that arrives before any other", function()
+            deliver(0, 0, 1)
+
+            assert.equals(1, #guildData.transactions, "its record is read")
+            assert.is_nil(logEntry("Repeated chunk"))
+        end)
+
+        -- In stop-and-wait a copy is of the chunk just taken. One from
+        -- further back is walked and the position follows it, which costs
+        -- that chunk once more. "At or below the highest" would instead skip
+        -- a new stream's first chunks after a straggler from a dead one.
+        it("walks a copy from further back and follows its number", function()
+            deliver(1, 5)
+            deliver(2, 5)
+            deliver(1, 5)
+            assert.equals(1, state().receiveDuped,
+                "the copy's record is walked and counted as duped")
+            MockAce.sentCommMessages = {}
+
+            assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
+
+            assert.same({ 2 }, chunksOf("NACK"))
+        end)
+
+        it("names the chunk after the last one taken when the NACKs run out", function()
+            deliver(1, 5)
+            deliver(2, 5)
+            deliver(1, 5)
+
+            for _ = 1, GBL.SYNC_MAX_NACK_RETRIES do
+                assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
+            end
+            assert.is_true(Sync.fireReceiveTimeout(), "the last timer gives up")
+
+            assert.is_false(GBL:GetSyncStatus().receiving)
+            assert.is_truthy(
+                logEntry("Retry limit reached waiting on chunk 2 from OfficerB"),
+                "the give-up names the chunk after the last one taken, not a count")
+        end)
+
+        it("reports the chunk a joined stream is on", function()
+            deliver(5, 7)
+
+            assert.equals("5/7", GBL:GetSyncStatus().receiveProgress)
+            GBL:DisableSync()
+            assert.is_truthy(logEntry("aborted - sync disabled at chunk 5/7"),
+                "the disable names the chunk the stream was on, not a count")
+        end)
+
+        it("adds no repeat count to a clean session's summary", function()
+            deliver(1, 3)
+            deliver(2, 3)
+            deliver(3, 3)
+
+            local complete = logEntry("Sync complete from OfficerB")
+            assert.is_truthy(complete)
+            assert.is_truthy(complete.message:find(", 3 chunks, ", 1, true),
+                complete.message)
+            assert.is_nil(complete.message:find("repeated", 1, true), complete.message)
+        end)
+
+        -- The sender waits for each chunk's ACK before the next, so a stream
+        -- we asked for starts at chunk 1. One that starts later was already
+        -- running, and our request was ignored as a repeat.
+        describe("a requested receive that joins a stream part-way (#321)", function()
+            it("is marked as one we did not ask for", function()
+                deliver(5, 7)
+
+                assert.is_false(state().receiveRequested)
+                local entry = logEntry("Receive from OfficerB opened at chunk 5:"
+                    .. " joined a stream already running, not the one we asked for"
+                    .. " (no receipt)")
+                assert.is_truthy(entry, "the join must say so in the sync log")
+                assert.equals("INFO", entry.level)
+            end)
+
+            it("sends no receipt for the part it saw", function()
+                deliver(5, 7)
+                deliver(6, 7)
+                deliver(7, 7)
+
+                assert.is_false(GBL:GetSyncStatus().receiving,
+                    "fixture: the stream completed")
+                assert.is_truthy(logEntry("Redundancy from OfficerB: "),
+                    "fixture: a session with figures, which a request would earn a receipt for")
+                assert.equals(0, #sent("SYNC_RECEIPT"))
+            end)
+
+            it("closes when it goes quiet instead of sending a NACK", function()
+                deliver(5, 7)
+                MockAce.sentCommMessages = {}
+
+                assert.is_true(Sync.fireReceiveTimeout(), "a receive timer must be armed")
+
+                assert.is_false(GBL:GetSyncStatus().receiving)
+                assert.equals(0, #sent("NACK"))
+                assert.is_truthy(logEntry(
+                    "Unrequested receive from OfficerB went quiet after 1 chunk(s), closing"))
+            end)
+
+            it("keeps a receive that opens at chunk 1 as ours", function()
+                deliver(1, 7)
+
+                assert.is_true(state().receiveRequested)
+                assert.is_nil(logEntry("joined a stream"))
+            end)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- NormalizeRecordId
     ---------------------------------------------------------------------------
 

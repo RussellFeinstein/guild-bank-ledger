@@ -1378,8 +1378,9 @@ describe("Sync send path", function()
             assert.is_false(hasLine("sent BUSY"))
         end)
 
-        -- Our own send target's NACK for a chunk we never built is #290's
-        -- and #296's to answer, not this: it stays silent.
+        -- Our own send target's NACK for a chunk we never built is not this
+        -- branch's to answer: the range check ahead of #290's guard drops it
+        -- without a word.
         it("still ignores our send target's NACK for a chunk out of range", function()
             serve("OfficerB")
 
@@ -1387,6 +1388,122 @@ describe("Sync send path", function()
             GBL:HandleNack("OfficerB", { chunk = 99 })
 
             assert.equals(0, #MockAce.sentCommMessages)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- A NACK past any chunk we sent (#290)
+    --
+    -- A NACK for chunk K says the receiver holds chunk K-1. A receiver on a
+    -- build before #290 named the chunk by a count of chunks taken, which a
+    -- copy put ahead, and the send jumped past chunks it had never sent and
+    -- still ended complete. A NACK whose K-1 was never issued cannot be true,
+    -- so it is ignored and the ACK ladder carries on. The other direction, a
+    -- NACK below the chunk owed, is #296's.
+    ---------------------------------------------------------------------------
+
+    describe("a NACK past any chunk we sent (#290)", function()
+        local function state() return GBL:GetSyncStateForTests() end
+
+        local function lineWith(needle)
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message and entry.message:find(needle, 1, true) then
+                    return entry
+                end
+            end
+            return nil
+        end
+
+        --- The SYNC_DATA chunk numbers sent since `mark`, in order.
+        local function chunksSentSince(mark)
+            local out = {}
+            for i = mark + 1, #MockAce.sentCommMessages do
+                local ok, data = GBL:Deserialize(MockAce.sentCommMessages[i].text)
+                if ok and type(data) == "table" and data.type == "SYNC_DATA" then
+                    out[#out + 1] = data.chunk
+                end
+            end
+            return out
+        end
+
+        local function liveTimers()
+            local n = 0
+            for _, t in ipairs(MockWoW.pendingTimers) do
+                if not t.cancelled and not t.fired then n = n + 1 end
+            end
+            return n
+        end
+
+        --- A send of three or more chunks, with chunk 1 in flight.
+        local function startSend()
+            GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
+            MockWoW.guildRoster = {
+                { name = "OfficerB-TestRealm", isOnline = true },
+            }
+            for i = 1, 12 do
+                table.insert(guildData.transactions, {
+                    type = "deposit", player = "X", timestamp = 1000 + i,
+                    scanTime = 1000, id = "nackpast_" .. i .. ":0",
+                })
+            end
+            Sync.serveRequest(GBL, "OfficerB", request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().sending,
+                "fixture must reach a live send")
+            assert.is_true(#state().sendChunks >= 3, "fixture needs three chunks")
+            assert.equals(1, state().sendChunkIndex, "fixture: chunk 1 in flight")
+        end
+
+        --- Let a NACK's resend go, clear of the gap floor.
+        local function fireResend()
+            MockWoW.serverTime = MockWoW.serverTime + 10
+            Helpers.fireTimersAt(0.5)
+        end
+
+        it("ignores a NACK for a chunk past any it has sent", function()
+            startSend()
+            local timer = state().sendTimer
+            assert.is_truthy(timer, "fixture: chunk 1's ACK timer is armed")
+            local timers = liveTimers()
+            local mark = #MockAce.sentCommMessages
+
+            GBL:HandleNack("OfficerB", { chunk = 3 })
+
+            assert.equals(1, state().sendChunkIndex, "the send stays on chunk 1")
+            assert.equals(timer, state().sendTimer)
+            assert.is_false(timer.cancelled, "chunk 1's ACK ladder carries on")
+            assert.equals(timers, liveTimers(), "and no resend is scheduled")
+            assert.equals(0, state().nacksReceivedDuringSync,
+                "a NACK that cannot be true is not counted as one")
+            assert.same({}, chunksSentSince(mark))
+            local entry = lineWith(
+                "NACK from OfficerB for chunk 3, but chunk 2 was never sent - ignored")
+            assert.is_truthy(entry, "the refusal must say so in the sync log")
+            assert.equals("INFO", entry.level)
+        end)
+
+        it("follows a NACK for the chunk after the one in flight", function()
+            startSend()
+            local mark = #MockAce.sentCommMessages
+
+            GBL:HandleNack("OfficerB", { chunk = 2 })
+
+            assert.is_nil(lineWith("was never sent"),
+                "chunk 1 was sent, so a NACK for chunk 2 is a true one")
+            fireResend()
+            assert.same({ 2 }, chunksSentSince(mark),
+                "the receiver holds chunk 1, so chunk 2 goes")
+        end)
+
+        it("resends chunk 1 on a NACK for it", function()
+            startSend()
+            local mark = #MockAce.sentCommMessages
+
+            GBL:HandleNack("OfficerB", { chunk = 1 })
+
+            assert.is_nil(lineWith("was never sent"),
+                "a NACK for chunk 1 has no chunk below it to check")
+            fireResend()
+            assert.same({ 1 }, chunksSentSince(mark))
         end)
     end)
 
@@ -2666,9 +2783,10 @@ describe("Sync send path", function()
         end)
 
         -- A NACK moves the send index back and leaves the retry count alone,
-        -- and it can name a chunk the peer has already acked: #290's arrival
-        -- count does that after a mid-stream bootstrap. If the peer then goes
-        -- quiet, the ladder runs out on a chunk that was delivered.
+        -- and it can name a chunk the peer has already acked: a receiver
+        -- before #290 does that after joining a stream part-way, and #296
+        -- decides what to do with one. If the peer then goes quiet, the ladder
+        -- runs out on a chunk that was delivered.
         it("leaves an acked chunk alone when the ladder gives up on it", function()
             startSend(8)
             assert.is_true(#state().sendChunks >= 2, "fixture needs two chunks")
