@@ -2202,6 +2202,80 @@ describe("Sync request and serve", function()
             assert.is_false(auditHas("overtaken"),
                 "a current map was in the cache, so no overtaken walk was served on")
         end)
+
+        -- The same, a tick later: the walk has already been given up on and
+        -- is carrying on as walked when something warms the cache. That map
+        -- is still current and still free, and the old walk read an id the
+        -- requester no longer has.
+        it("takes a cache warmed after the walk was given up on", function()
+            -- First, so every walk reads it on its first tick.
+            Sync.seedRewritable(guildData)
+            -- Three ticks of walking, so the walk given up on is still
+            -- running on the tick after.
+            seed(2 * GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+            -- The requester holds that event under the id the receive is
+            -- about to give it, and matches us everywhere else.
+            guildData.transactions[1].id = Sync.REWRITE_NEW_ID
+            local theirs = bucketMap()
+            guildData.transactions[1].id = Sync.REWRITE_OLD_ID
+
+            GBL:HandleSyncRequest("PeerA",
+                request{ sinceTimestamp = 0, bucketHashes = theirs })
+            for _ = 1, 3 do
+                GBL:ResetHashCache()
+                Helpers.fireZeroDelayRound()
+            end
+            -- The fourth reset is the rewrite itself, so the walk carried on
+            -- from here holds the old id.
+            GBL:HandleSyncData("PeerB", Sync.rewriteChunk(1, 1))
+            assert.equals(Sync.REWRITE_NEW_ID, guildData.transactions[1].id)
+            assert.is_nil(GBL:PeekBucketHashes(guildData),
+                "the cache must be cold when the restarts run out")
+            Helpers.fireZeroDelayRound()
+            assert.is_true(auditHas("overtaken after 3 restart(s)"),
+                "the fixture must have given up on the walk")
+            assert.is_not_nil(GBL:GetSyncStateForTests().prep.bucketScan,
+                "the walk given up on must still be running")
+
+            GBL:GetBucketHashes(guildData)
+            Helpers.drainZeroDelayTimers()
+            assert.is_false(GBL:GetSyncStatus().preparing)
+
+            assert.is_true(auditHas("Sent empty sync to PeerA"),
+                "the warm map matches the requester, so there is nothing to offer")
+        end)
+
+        -- The rotation line counts every bucket of the last tranche that has
+        -- not moved, offered this time or not. A reset that touched none of
+        -- them must not change that count, or a capture would read a reset
+        -- as rotation demoting less.
+        it("counts an unchanged bucket the same way after a reset", function()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 99)
+            local a = GBL:BucketKeyForTimeSlot(BASE_SLOT + 10)
+            local b = GBL:BucketKeyForTimeSlot(BASE_SLOT + 40)
+            assert.are_not.equals(a, b, "the fixture needs two buckets")
+
+            local both = bucketMap()
+            both[a], both[b] = 12345, 12345
+            Sync.serveRequest(GBL, "PeerA",
+                request{ sinceTimestamp = 0, bucketHashes = both })
+            Sync.drainSend(GBL, "PeerA")
+            assert.is_number(trancheFor("PeerA")[a])
+            assert.is_number(trancheFor("PeerA")[b])
+            GBL:ClearLog("sync")
+
+            -- The peer now differs only in the first, and a reset lands
+            -- during the collect.
+            GBL:HandleSyncRequest("PeerA", requestDifferingIn(a))
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "the collect must still be running when the reset lands")
+            GBL:ResetHashCache()
+            Helpers.drainZeroDelayTimers()
+            assert.is_false(GBL:GetSyncStatus().preparing)
+
+            assert.is_true(auditHas("2 in last tranche, 2 unchanged (demoted), 1 still selected"),
+                "the bucket not offered this time is unchanged all the same")
+        end)
     end)
 
     ---------------------------------------------------------------------------
