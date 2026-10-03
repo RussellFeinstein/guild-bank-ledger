@@ -181,6 +181,11 @@ local bucketCache = {
     buckets = nil,
 }
 
+-- Bumped by every ResetHashCache. A sliced scan records it at its start and
+-- stamps its finished map only if it has not moved, because a reset in
+-- between can mean an id it already walked was rewritten in place (#330).
+local resetGeneration = 0
+
 --- Compute per-bucket fingerprints for delta sync.
 -- Groups records by 6-hour window derived from the timeSlot in their ID
 -- (not tx.timestamp) so that bucket placement is consistent across peers
@@ -217,8 +222,9 @@ end
 -- every caller that already invalidates one invalidates both. That contract
 -- holds because only `record.id` feeds a bucket hash: changing any other field
 -- on a record cannot strand this cache, while rewriting an id in place without
--- changing the record count can, which is exactly what the migrations and
--- CleanupWithEventCounts call ResetHashCache for.
+-- changing the record count can, which is exactly what the migrations,
+-- CleanupWithEventCounts and a sync receive's NormalizeRecordId call
+-- ResetHashCache for.
 --
 -- Returns the cached table itself rather than a copy. Treat it as read-only:
 -- mutating it corrupts every bucket diff that follows, until something
@@ -298,7 +304,10 @@ function GBL:StartBucketHashScan(guildData)
         nTx = #guildData.transactions
         nMoney = #guildData.moneyTransactions
     end
-    return { buckets = {}, cursor = 0, nTx = nTx, total = nTx + nMoney }
+    return {
+        buckets = {}, cursor = 0, nTx = nTx, total = nTx + nMoney,
+        generation = resetGeneration,
+    }
 end
 
 --- Advance a bucket-hash scan by at most `budget` records.
@@ -312,11 +321,17 @@ end
 -- records; reporting the starting count makes the next read see a mismatch and
 -- recompute instead. Wrong in the direction that costs a walk, not the
 -- direction that loses records.
+--
+-- And no stamp at all when ResetHashCache ran after the scan started (#330).
+-- A sync receive can rewrite an id in place between two steps, and a record
+-- the scan had already walked then sits in this map under its old id, with a
+-- count the rewrite did not move: stamped, the map would undo the reset. The
+-- caller still gets the map it walked.
 -- @param guildData table Guild data from AceDB
 -- @param scan table State from StartBucketHashScan
 -- @param budget number Maximum records to walk on this step
 -- @return number How many records were walked
--- @return boolean True when the scan is complete and the cache is stamped
+-- @return boolean True when the scan is complete
 function GBL:StepBucketHashScan(guildData, scan, budget)
     if not guildData or not scan then return 0, true end
 
@@ -342,9 +357,11 @@ function GBL:StepBucketHashScan(guildData, scan, budget)
     end
 
     if scan.cursor >= scan.total then
-        bucketCache.buckets = scan.buckets
-        bucketCache.source = guildData
-        bucketCache.txCount = scan.total
+        if scan.generation == resetGeneration then
+            bucketCache.buckets = scan.buckets
+            bucketCache.source = guildData
+            bucketCache.txCount = scan.total
+        end
         return spent, true
     end
     return spent, false
@@ -458,7 +475,9 @@ end
 -- computed from the same record ids, so anything that strands one strands the
 -- other, and every existing caller already fires at exactly those moments.
 -- The count of -1 is what forces the next read to recompute; the source is
--- cleared as well so neither cache holds a guild table past a reset.
+-- cleared as well so neither cache holds a guild table past a reset. The
+-- generation bump stops a sliced scan already in flight from stamping its map
+-- back over the reset (#330).
 function GBL:ResetHashCache()
     hashCache.source = nil
     hashCache.dataHash = 0
@@ -466,4 +485,5 @@ function GBL:ResetHashCache()
     bucketCache.source = nil
     bucketCache.txCount = -1
     bucketCache.buckets = nil
+    resetGeneration = resetGeneration + 1
 end

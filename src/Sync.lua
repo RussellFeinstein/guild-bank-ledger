@@ -3805,6 +3805,13 @@ function GBL:NormalizeRecordId(incomingRecord, matchedKey, guildData, idIndex)
         localRecord._occurrence = incomingRecord._occurrence
         -- Normalize timestamp for consistent bucket hash placement
         localRecord.timestamp = newTs
+        -- Both fingerprint caches key on the record count, which a rewrite in
+        -- place does not move, so reset here at the rewrite rather than at
+        -- one of the ways a receive ends. A stale hash on the next HELLO
+        -- restarts an all-duplicate session every round until the count
+        -- moves. Reset at session end only, a receive turned off mid-stream
+        -- never reset at all (#330).
+        self:ResetHashCache()
     end
     -- If the record itself is absent (removed by dedup cleanup):
     -- only seenTxHashes updated (harmless)
@@ -4298,14 +4305,9 @@ function GBL:FinishReceiving(sender, completed)
     local repeatsText = (syncState.receiveRepeats or 0) > 0
         and (", " .. syncState.receiveRepeats .. " repeated") or ""
 
-    -- CRITICAL: If any IDs were normalized in-place, the hash cache is stale
-    -- (its key, the guild table and the record count, did not move). Must
-    -- reset before GetDataHash or the next HELLO sends a stale hash →
-    -- infinite sync loop.
-    if totalNormalized > 0 then
-        self:ResetHashCache()
-    end
-
+    -- No reset here: an id this session rewrote in place reset the hash cache
+    -- when it was rewritten (NormalizeRecordId, #330), so the hash below is
+    -- already current.
     local totalTxAfter = guildData
         and (#guildData.transactions + #guildData.moneyTransactions) or 0
     local newHash = guildData and self:GetDataHash(guildData) or 0
