@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.43.1
+    {"0.43.1", "2026-10-03", {
+        Fixed = {
+            "When you and a guildmate were sending data to each other and one side's send stopped partway (after a /reload, for example), the other side kept asking for the rest for over two minutes before giving up. v0.41.29 fixed this for every other case and left this one waiting, because on older versions the answer would also have stopped the send that was still running. Every version that can sync with this one understands the answer, so the addon that stopped now says so, and the other one stops asking at the first answer, usually about 20 seconds after the last piece arrived. Its own send carries on. This needs the guildmate whose send stopped to be on this version.",
+        },
+    }},
     -- v0.43.0
     {"0.43.0", "2026-10-03", {
         Fixed = {
