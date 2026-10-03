@@ -66,6 +66,7 @@ New subsystem detail goes into the matching rule file, and the Documentation Syn
 - `MAX_GUILDBANK_TABS = 8` (constant — max purchasable tabs)
 - Money log tab index: `MAX_GUILDBANK_TABS + 1` (always 9, NOT `GetNumGuildBankTabs() + 1`)
 - `GetGuildBankMoneyTransaction` returns type `"withdrawal"` (not `"withdraw"`) — normalize at record creation
+- `GetGuildBankTransaction` and `GetGuildBankMoneyTransaction` give a member on another realm than the viewer as `Name-Realm`, and a member on the viewer's own realm bare. So a bare name from the log is a same-realm member. This was read from stored data on 2026-10-03 (the evidence is on #340), by one viewer on Tichondrius. Whether a member of a connected realm arrives bare is not known (#350).
 
 ## Testing
 

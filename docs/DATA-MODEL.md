@@ -275,11 +275,25 @@ Two consequences of the current prefix that are worth knowing:
 ### One client's realm, stamped on other members' records
 
 The player is part of the prefix, so a wrong realm in `record.player` is a wrong identity. Before
-v0.13.0 records carried bare names, and the v0.13.0 migration (`MigrateSchemaV2ToV3`) qualified them
-through `ResolvePlayerName`, which falls back to the local realm for a name the roster cache does not
-hold. One client ran it with a cold cache and stamped its own realm, Nesingwary, onto members of five
-other realms. Correctly named records of the same events arrived from other clients, and the two
-copies carry different ids, so sync kept both.
+v0.13.0 a record carried the name exactly as the bank log gave it. The log gives a member of another
+realm with the realm attached and a member of the viewer's own realm bare (CLAUDE.md, Critical WoW
+API Facts). So the bare names in a store from then were each scanner's own-realm members, and sync of
+that era carried them unchanged to clients on other realms. `ResolvePlayerName` gives a bare name the
+local realm when the roster cache does not hold it. One client on Nesingwary did that to bare names
+it had received, and stamped its own realm onto members of five other realms. Correctly named records
+of the same events arrived from other clients, and the two copies carry different ids, so sync kept
+both.
+
+Which of the fallback's callers stamped them is not recorded. Sync intake has qualified a received
+record's player since v0.13.0 (`reconstructSyncRecord` step 6), and `RepairPlayerNames` has
+qualified stored ones since v0.13.2. The v0.13.0 migration, `MigrateSchemaV2ToV3`, is the third
+caller, but a store sitting at the default never ran it (section 7), so it is the least likely.
+
+The realms fit this account. The stamps fall on Tichondrius, Stormrage, Argent Dawn, Moon Guard and
+Emerald Dream, and four of those are realms where a client is known to have been scanning before
+v0.13.0. Members' events in the same window sit on 24 realms. The next five by volume carry no stamp
+at all: Area 52 (124 records), Dalaran (108), Thrall (88), Cenarius (66) and Illidan (63). A log that
+gave every name bare would have left stamps on all 24.
 
 Measured on 2026-10-02 against the live file (19,799 records), read-only:
 
@@ -292,8 +306,8 @@ Measured on 2026-10-02 against the live file (19,799 records), read-only:
   real repeat.
 - The other 34 (one name on Thrall, one on Illidan) have no twins and may be real realm transfers.
 
-`RepairPlayerNames` could not reach any of them, because `ResolvePlayerName` returns a hyphenated name
-unchanged, and dedup could not fold the pairs, because their prefixes differ.
+Once stamped, they were out of `RepairPlayerNames`' reach, because `ResolvePlayerName` returns a
+hyphenated name unchanged. Dedup could not fold the pairs either, because their prefixes differ.
 
 **Verdict: fixed in v0.43.0, issue #332.** `DropForeignRealmTwins` (`src/Core.lua`) drops each copy
 that has a twin and leaves everything else alone, the 2 strays included (Russell, 2026-10-03:
@@ -310,8 +324,14 @@ hand the copies back every round. Run against an in-memory copy of the live file
 Two limits, neither present on the live file. A coincidental twin deletes a real record: two
 characters sharing a name, one the roster no longer lists, recording the same item, count and tab
 within the hour. And a member stamped and then moved realm keeps the double count, because twins are
-looked for under the roster realm only. The producer is still reachable for a name the persistent
-cache lacks, which is #340.
+looked for under the roster realm only.
+
+The producer is still reachable when a store last run before v0.13.2 updates. At the first roster
+update, `RepairPlayerNames` qualifies its bare names, and gives the local realm to any name the
+roster no longer lists. For a name received from a scanner on another realm, that realm is wrong.
+v0.43.0's check drops each such copy once its twin arrives. #340 was filed on the belief that the
+log gives every name bare, and it was closed as not planned when that turned out to be false. What
+is left of the fallback is #350.
 
 ### Counts with no record, and records with no count
 
@@ -464,6 +484,23 @@ default value is the stored value of every guild at that version.** Raising it t
 warning, it silently advances all of those guilds to 12 without running migrations 9 to 12, and
 there is no later pass for the first three, which are realm canonicalization: that loss is permanent.
 The fourth, the #332 twin check, also runs after every sync receive, so it alone would recover.
+
+**The trap has already fired, six times.** Each migration from schema 2 to 8 shipped in the commit
+that also raised the default to the version that migration writes, behind a `>= N` gate.
+`MigrateSchemaV2ToV3` came in v0.13.0, the next four in v0.14.0 to v0.15.0, and
+`MigrateRepairEpochTimestamps` in v0.27.0. A guild sitting at the old default had no version on
+disk, loaded at the new one, and was turned away by the new migration.
+
+The maintainer's store shows that two of the six never ran:
+
+- **`MigrateSchemaV2ToV3`.** Its cleanup deletes a record with no type, no player, or a `typ*` key,
+  and 14 such records are still there, all received before this client first ran v0.13.0. So are
+  958 records whose bare `scannedBy` it rewrites.
+- **`MigrateRepairEpochTimestamps`.** 8 records with a timestamp of 0, received before v0.27.0,
+  are still there.
+
+What the other four left undone is not measured. A store last run at a default below 8 still skips
+every migration in between when it updates today. Issue #351.
 
 The mechanism is executable from #77. `spec/savedvariables_spec.lua` round-trips a guild at
 the default and reads 8 back with nothing on disk in between, and round-trips one at 11 and
@@ -855,13 +892,15 @@ All under the **Data model integrity** milestone.
 | 4 | No deposit or withdraw record knows its tab | closed in v0.37.0 (#67) |
 | 5 | Item records with no `itemID` collide in the money branch | #69 (locally scanned, unscheduled); sync-received closed in v0.37.0 (#68) |
 | 5 | `NormalizeRecordId` can rewrite a money record from an item record | closed in v0.37.0 (#68) |
-| 5 | One client's realm stamped on 563 records, 561 of them a second copy of a stored event | closed in v0.43.0 (#332); the producer is #340 |
+| 5 | One client's realm stamped on 563 records, 561 of them a second copy of a stored event | closed in v0.43.0 (#332) |
+| 5 | A bare name from the bank log is looked up in the roster before the local realm, so a same-named member elsewhere can take it | #350 |
 | 5 | 450 `eventCounts` keys name a prefix no stored record carries | explained (#333): peers' counts whose records never followed, for want of a pull (#345) |
 | 5 | Same-hour duplicates with no count are never trimmed | #346 |
 | 5 | Sync intake does not normalize the money `type` | closed in v0.37.0 (#68): rejected by the enum check |
 | 7 | Nothing stops the `schemaVersion` default being raised | closed in #76 |
 | 7 | `DeduplicateRecords` cannot restore the version it borrows, and raises on a nil | closed in #263 |
 | 7 | One guild's failed migration strands every guild after it in the walk | closed in #263 |
+| 7 | The default rose with each migration from schema 2 to 8, so a store at the default skipped them | #351 |
 | 8 | Intake accepts corrupted records | closed in v0.37.0 (#68) |
 | 8 | 223 corrupted records already stored | #75 |
 | 8 | Rejections counted as duplicates | closed in v0.37.0 (#68) |
@@ -882,5 +921,7 @@ What that leaves open, in rough order of how much it still hurts: #75 (the 223 d
 already on disk, which #68 stops growing but does not repair, and which can now reuse
 `GBL:RepairSyncRecordItemFields`), #346 (records stored twice before counts existed, which cleanup
 cannot trim; its candidate repair writes the missing counts, so a copy a peer hands back is trimmed
-again, which may spare it a floor raise), #69 (the same itemID-less shape produced by local scans
-rather than by sync, still unscheduled), and #72. None of those touch record identity.
+again, which may spare it a floor raise), #351 (what the six migrations a store at the default
+skipped left undone, an investigation), #69 (the same itemID-less shape produced by local scans
+rather than by sync, still unscheduled), and #72. None of those touch record identity, except
+possibly #351, whose answer may be to re-run a migration that rewrites ids.
