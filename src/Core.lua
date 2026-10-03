@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.43.1"
+local VERSION = "0.43.2"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -3148,9 +3148,11 @@ function GBL:DeduplicateAllGuilds()
             self._dedupFailed[name] = nil
         else
             failed = failed + 1
-            -- CleanupWithEventCounts rewrites every surviving record's id and
-            -- resets the cache at the end, and only when it removed something,
-            -- so a raise partway through leaves a warm cache over moved ids.
+            -- CleanupWithEventCounts resets the cache where it writes an array
+            -- back, before it rewrites any id (#342), so a raise inside it
+            -- leaves the cache cold or over arrays it never touched. This reset
+            -- stays for whatever else DeduplicateRecords runs, or comes to run,
+            -- that moves records and raises before resetting.
             self:ResetHashCache()
             if not self._dedupFailed[name] then
                 self._dedupFailed[name] = true
@@ -3203,6 +3205,8 @@ end
 -- cluster to the max known eventCount for its baseHash, across the window
 -- EventCountWindow above sets.
 -- Safe default: clusters with no eventCount data are never trimmed.
+-- An array it removes nothing from is left exactly as it was, position for
+-- position (#342): the serve's bucket walk reads these arrays across frames.
 -- @param guildData table Guild data from AceDB
 -- @return number Total records removed
 function GBL:CleanupWithEventCounts(guildData)
@@ -3220,6 +3224,7 @@ function GBL:CleanupWithEventCounts(guildData)
     for _, storageKey in ipairs({ "transactions", "moneyTransactions" }) do
         local records = guildData[storageKey]
         if records and #records > 0 then
+            local removedBefore = totalRemoved
             -- Group by prefix (slot-independent)
             local groups = {}
             local groupOrder = {}
@@ -3300,9 +3305,21 @@ function GBL:CleanupWithEventCounts(guildData)
                 end
             end
 
-            -- Replace storage array (preserve AceDB table ref)
-            for i = #records, 1, -1 do records[i] = nil end
-            for i, rec in ipairs(surviving) do records[i] = rec end
+            -- Replace storage array (preserve AceDB table ref), and only when
+            -- this pass took something out of it. The survivors come back
+            -- gathered by prefix, so writing them back moves records even
+            -- when none was removed, under any walk holding a cursor into
+            -- the array and with no reset to tell it (#342).
+            --
+            -- The reset is here, at the write, and not at the end of the
+            -- pass: the next array's prefixes and the id rebuild below can
+            -- raise on a corrupt record (#263), and the array has moved
+            -- whether or not the pass gets that far.
+            if totalRemoved > removedBefore then
+                for i = #records, 1, -1 do records[i] = nil end
+                for i, rec in ipairs(surviving) do records[i] = rec end
+                self:ResetHashCache()
+            end
         end
     end
 
@@ -3349,7 +3366,9 @@ function GBL:CleanupWithEventCounts(guildData)
 
         self:RebuildPlayerStats(guildData)
 
-        self:ResetHashCache()
+        -- No reset here for the ids rewritten above: every array this pass
+        -- removed from was reset at its write-back, and nothing between
+        -- there and here reads either cache.
     end
 
     return totalRemoved

@@ -280,13 +280,14 @@ Helpers.MockAce = MockAce
 ------------------------------------------------------------------------
 -- Driving the mock timer queue (#117)
 --
--- Four helpers, each with its own filter rule, and the rule is the whole
+-- Five helpers, each with its own filter rule, and the rule is the whole
 -- point: a pump that stops discriminating passes vacuously. Pick by what
 -- the test means, not by what happens to make it green.
 --
 --   fireTimersAt(delay)     exactly one delay, errors on no match
 --   timersAt(delay)         counts without firing
 --   drainZeroDelayTimers()  delay == 0 only, one hop per round
+--   fireZeroDelayRound()    one of those rounds, for work between two hops
 --   drainAllTimers()        everything, to empty, bounded
 --
 -- The sync suite keeps its own beside these in spec/sync_helpers.lua
@@ -436,20 +437,32 @@ end
 function Helpers.drainZeroDelayTimers(maxRounds)
     maxRounds = maxRounds or 200
     for round = 1, maxRounds do
-        local keep, toFire = {}, {}
-        for _, t in ipairs(MockWoW.pendingTimers) do
-            if not t.cancelled and t.delay == 0 then
-                toFire[#toFire + 1] = t
-            else
-                keep[#keep + 1] = t
-            end
-        end
-        MockWoW.pendingTimers = keep
-        if #toFire == 0 then return round - 1 end
-        for _, t in ipairs(toFire) do t.callback() end
+        if Helpers.fireZeroDelayRound() == 0 then return round - 1 end
     end
     error("drainZeroDelayTimers hit its cap of " .. maxRounds
         .. " rounds; the chain is not finishing", 2)
+end
+
+--- Fire one round of pending zero-delay timers: one hop of a work chain.
+--
+-- The single round drainZeroDelayTimers repeats, for a spec that has to do
+-- something between two hops (land a receive after the walk has handed its
+-- map on, or reset the cache before every tick). Same queue rules: every
+-- other timer stays where it is, and a hop scheduled by a callback waits for
+-- the next round.
+-- @return number How many timers fired
+function Helpers.fireZeroDelayRound()
+    local keep, toFire = {}, {}
+    for _, t in ipairs(MockWoW.pendingTimers) do
+        if not t.cancelled and t.delay == 0 then
+            toFire[#toFire + 1] = t
+        else
+            keep[#keep + 1] = t
+        end
+    end
+    MockWoW.pendingTimers = keep
+    for _, t in ipairs(toFire) do t.callback() end
+    return #toFire
 end
 
 return Helpers

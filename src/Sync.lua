@@ -117,6 +117,14 @@ local SYNC_PREP_RECORDS_PER_TICK = 1500
 -- form here: the op-88 hang is why SortExecutor grew a stall watchdog.
 local SYNC_PREP_TIMEOUT = 30
 
+-- How many times the first stage starts its bucket walk again after a hash
+-- cache reset overtook it (#342). A walk at 20k records is 13 ticks, and what
+-- resets mid-walk is a receive rewriting an id or a cleanup removing a record,
+-- about once a chunk at most, so one restart is the usual cost. The bound is
+-- for a client slow enough that every walk spans a chunk: past it the serve
+-- goes ahead on the walk it has rather than run into the timeout above.
+local SYNC_PREP_WALK_RESTARTS = 3
+
 local LAYOUT_REQUEST_THROTTLE = 30  -- min seconds between bank-layout pull requests
 local WHISPER_TRACK_EXPIRE = 30
 local MAX_RECEIVE_DURATION = 1800  -- 30 minutes absolute maximum receive time
@@ -2009,8 +2017,18 @@ end
 -- riding the next session instead of this one, or a redundant one the far side
 -- drops. No locking, and none needed. What a rewrite must not do is reach the
 -- shared cache, so each one resets it and the walk then declines to stamp its
--- map (#330). A cleanup that reorders the arrays under the walk is not yet
--- caught that way (#342).
+-- map (#330). The same reset tells the first stage its walk is no longer
+-- worth serving on, and tells the two later stages that read the map, the
+-- demote decision and the tranche, to read the records instead (#342). A pass
+-- that moves records has to reset for that reason, and the cleanup, which
+-- used to move them while removing nothing, now leaves such an array alone.
+--
+-- The reset does not reach the collect. Stage 3 holds a cursor of its own and
+-- its groups hold records by reference, so a pass that removes records
+-- mid-collect can put one in a group twice, miss one, or leave a removed one
+-- in the send. That is the tolerance above and nothing more: the receiver
+-- drops a repeat, a missed record rides the next session, and a record removed
+-- here is removed there by the same counts or the same twin check.
 
 local prepStages = {}
 local prepStep  -- forward declaration; the watchdog and the accept both call it
@@ -2067,26 +2085,69 @@ function GBL:_AbortSyncPrep(reason)
         tostring(prep.target), tostring(reason))
 end
 
+-- Whether the records this preparation holds, rather than its bucket map, are
+-- what describe a bucket (#342). True once a hash cache reset has landed since
+-- the map was taken, and only on the bucket path. There the collect holds every
+-- record of each differing bucket by reference, so their ids give the bucket's
+-- hash as it stands now. On the time-filtered path a group is part of a bucket,
+-- and the map, overtaken or not, is the only whole-bucket hash there is.
+local function mapOvertaken(self, prep)
+    return prep.diffDays ~= nil
+        and prep.bucketsGeneration ~= self:_HashCacheGeneration()
+end
+
 -- 1. Bucket hashes. Free when the cache is already current, otherwise the same
 --    walk ComputeBucketHashes does, a slice at a time, stamping the cache on
 --    the way past so the work is not thrown away, unless a reset landed after
 --    the walk began (#330).
+--
+--    A walk that reset overtook is dropped here and started again (#342): it
+--    has read an id since rewritten, or an array since rewritten under its
+--    cursor, and a diff made from it offers buckets the requester matches and
+--    can miss ones it lacks. Nothing moves the generation inside a tick, so
+--    the check sits where a tick picks the walk up. Bounded, and past the
+--    bound the serve goes ahead on the walk it has, as it did before.
+--
+--    Whenever there is no walk, or the walk is overtaken, the cache is asked
+--    first, on every tick and with restarts left or not: a map something has
+--    warmed since the reset is current and costs one comparison.
+--
+--    `bucketsGeneration` is the generation the map belongs to, for the two
+--    later stages that read the map (mapOvertaken).
 prepStages[1] = function(self, prep, budget)
     if prep.localBuckets then return 0, true end
 
-    if not prep.bucketScan then
+    local scan = prep.bucketScan
+    if not scan or scan.generation ~= self:_HashCacheGeneration() then
         local fresh = self:_FreshBucketHashes(prep.guildData)
         if fresh then
             prep.localBuckets = fresh
+            prep.bucketsGeneration = self:_HashCacheGeneration()
+            prep.bucketScan = nil
             return 0, true
         end
-        prep.bucketScan = self:StartBucketHashScan(prep.guildData)
+        if not scan then
+            prep.bucketScan = self:StartBucketHashScan(prep.guildData)
+        elseif not prep.walkOvertaken then
+            if prep.walkRestarts < SYNC_PREP_WALK_RESTARTS then
+                prep.walkRestarts = prep.walkRestarts + 1
+                prep.bucketScan = self:StartBucketHashScan(prep.guildData)
+            else
+                -- Said once; the walk then carries on as walked, and the
+                -- cache is still asked on each tick it has left.
+                prep.walkOvertaken = true
+                self:AddAuditEntry(("Bucket walk for %s overtaken after %d restart(s),"
+                    .. " serving on it as walked"):format(
+                    tostring(prep.target), prep.walkRestarts))
+            end
+        end
     end
 
     local spent, done =
         self:StepBucketHashScan(prep.guildData, prep.bucketScan, budget)
     if done then
         prep.localBuckets = prep.bucketScan.buckets
+        prep.bucketsGeneration = prep.bucketScan.generation
         prep.bucketScan = nil
     end
     return spent, done
@@ -2288,10 +2349,25 @@ prepStages[4] = function(self, prep, _budget)
     local demoteSet
     local demoted, stillSelected = 0, 0
     local lastTranche = syncState.capLastTranche[sendTarget]
+
+    -- "Not moved" is read off the bucket map, unless a reset has landed since
+    -- the map was taken (#342). The collect runs between the walk and here,
+    -- and a bucket rewritten during it still carries its old hash in the map,
+    -- which would put the one bucket that just changed to the back as
+    -- unchanged. The collected records are read instead.
     if lastTranche then
         demoteSet = {}
+        -- A key with no group did not differ this time, so it is not a
+        -- candidate whatever it reads. It keeps the map's reading, so the
+        -- rotation line counts it the same way with or without a reset.
+        local overtaken = mapOvertaken(self, prep)
         for key, hashWhenSent in pairs(lastTranche) do
-            if prep.localBuckets[key] == hashWhenSent then
+            local hashNow = prep.localBuckets[key]
+            local group = overtaken and prep.groups[key]
+            if group then
+                hashNow = self:BucketHashesOfRecords(group.tx, group.money)[key]
+            end
+            if hashNow == hashWhenSent then
                 demoteSet[key] = true
                 demoted = demoted + 1
             end
@@ -2471,18 +2547,43 @@ prepStages[7] = function(self, prep, _budget)
     -- next session it had already handed these buckets over. Every path that
     -- gets here stamps, the empty one included, which is what keeps an empty
     -- diff clearing the demote memory the way it always has.
+    --
+    -- The hashes come from the bucket map, unless a reset has landed since the
+    -- map was taken (#342). The walk is a third of a preparation, so most
+    -- resets land after it, and the map then holds a hash for the rewritten
+    -- bucket that no later walk will produce: the next serve reads that
+    -- bucket as moved and sends it again. The records just stripped are what
+    -- this peer is being sent, so their ids give the hash to remember. Only
+    -- on the bucket path, where whole buckets go out (mapOvertaken), and only
+    -- when there is a tranche to record.
+    --
+    -- They are the stripped copies, not the stored records stage 4 reads, on
+    -- purpose. A rewrite after the strip leaves the copies on the old id,
+    -- which is what the peer is sent, so the next serve reads that bucket as
+    -- moved and sends it again. That resend is the one that carries the new
+    -- id to the peer, so it is not the one this choice exists to prevent.
+    local sentHashes = prep.localBuckets
+    if mapOvertaken(self, prep) and next(prep.sentBuckets or {}) then
+        sentHashes = self:BucketHashesOfRecords(txToSend, moneyToSend)
+        self:AddAuditEntry("Tranche for " .. tostring(prep.target)
+            .. " recorded from the records sent: the hash cache was reset"
+            .. " during the preparation")
+    end
     local tranche = {}
     for key in pairs(prep.sentBuckets or {}) do
-        tranche[key] = prep.localBuckets[key]
+        tranche[key] = sentHashes[key]
     end
     syncState.capLastTranche[prep.target] = tranche
 
     local sender = prep.sender
     local elapsed = GetTime() - (prep.startedAt or GetTime())
+    -- Named only when there were any, so a clean preparation's line is unchanged.
+    local restartText = prep.walkRestarts > 0
+        and (", " .. prep.walkRestarts .. " walk restart(s)") or ""
     self:AddAuditEntry(string.format(
-        "Prep complete for %s: %d examined, %d selected, %d tick(s), %.2fs",
+        "Prep complete for %s: %d examined, %d selected, %d tick(s), %.2fs%s",
         tostring(prep.target), prep.examined or 0,
-        #txToSend + #moneyToSend, prep.ticks or 0, elapsed))
+        #txToSend + #moneyToSend, prep.ticks or 0, elapsed, restartText))
 
     local deferredBuckets = prep.deferredBuckets or 0
     self:_ClearSyncPrep()
@@ -2710,6 +2811,7 @@ function GBL:HandleSyncRequest(sender, data)
         stage = 1,
         ticks = 0,
         examined = 0,
+        walkRestarts = 0,
         startedAt = GetTime(),
     }
     syncState.prep = prep

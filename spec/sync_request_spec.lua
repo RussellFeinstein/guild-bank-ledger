@@ -1800,6 +1800,482 @@ describe("Sync request and serve", function()
 
             assert.same(after, GBL:GetBucketHashes(guildData))
         end)
+
+        -----------------------------------------------------------------------
+        -- #342. Two things the #330 guard left. A cleanup that removed nothing
+        -- still wrote the arrays back in a new order, under the walk's cursor
+        -- and without a reset, so the stamp carried a map with one record
+        -- cancelled out and another never read. And a walk a reset did
+        -- overtake was still handed to that serve, whose diff and tranche
+        -- memory then described records it no longer held.
+        -----------------------------------------------------------------------
+
+        local function bucketMap()
+            local map = {}
+            for key, hash in pairs(GBL:ComputeBucketHashes(guildData)) do
+                map[key] = hash
+            end
+            return map
+        end
+
+        -- A requester that matches us in every bucket but the one named, so
+        -- that bucket is the whole of the session and of its tranche.
+        local function requestDifferingIn(bucket)
+            local theirs = bucketMap()
+            theirs[bucket] = 12345
+            return request{ sinceTimestamp = 0, bucketHashes = theirs }
+        end
+
+        local function trancheFor(peer)
+            return GBL:GetSyncStateForTests().capLastTranche[peer] or {}
+        end
+
+        it("keeps the bucket map true when a receive with nothing new ends mid-walk",
+        function()
+            local function bob(slot)
+                return {
+                    type = "deposit", player = "Bob-TestRealm", itemID = 1, count = 1,
+                    tab = 1, timestamp = slot * 3600 + 10,
+                    id = "deposit|Bob-TestRealm|1|1|1|" .. slot .. ":0", _occurrence = 0,
+                }
+            end
+            -- One prefix at both ends of the array, days apart. Gathered by
+            -- prefix the far one comes second and every record between them
+            -- moves up a place, across the cursor the first tick leaves.
+            table.insert(guildData.transactions, bob(477000))
+            Sync.seedRewritable(guildData)
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+            table.insert(guildData.transactions, bob(477500))
+            -- One count, for a prefix no record carries: the cleanup runs
+            -- and has nothing to trim.
+            guildData.eventCounts = {
+                ["deposit|Nobody|9|9|9|475100"] = { count = 1, asOf = 0 },
+            }
+            GBL:ResetHashCache()
+            local held = #guildData.transactions
+            local truth = GBL:ComputeBucketHashes(guildData)
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "the walk must still be in flight when the receive ends")
+            assert.is_nil(GBL:PeekBucketHashes(guildData),
+                "nothing may have stamped the cache yet")
+
+            -- A one-chunk session from another peer carrying a record we
+            -- hold, under the id we hold it by: nothing stored, nothing
+            -- rewritten, and the cleanup its end runs removes nothing.
+            GBL:HandleSyncData("PeerB", {
+                chunk = 1, totalChunks = 1,
+                transactions = {
+                    {
+                        type = "deposit", player = "Thrall",
+                        itemID = 12345, classID = 0, subclassID = 5,
+                        count = 5, tab = 1,
+                        timestamp = 3600 * 475101 + 1800,
+                        id = Sync.REWRITE_OLD_ID, _occurrence = 0,
+                    },
+                },
+                moneyTransactions = {},
+            })
+            assert.is_false(GBL:GetSyncStatus().receiving,
+                "the receive must have ended: its end is what runs the cleanup")
+            assert.equals(held, #guildData.transactions,
+                "the receive must store nothing, or the record count moves")
+            assert.same(truth, GBL:ComputeBucketHashes(guildData),
+                "the receive must rewrite no id, or this is the #330 case")
+
+            Helpers.drainZeroDelayTimers()
+            assert.is_false(GBL:GetSyncStatus().preparing,
+                "the preparation must have finished its walk")
+
+            assert.same(truth, GBL:GetBucketHashes(guildData))
+        end)
+
+        it("walks again when a reset overtakes the walk, and offers nothing the requester holds",
+        function()
+            -- First, so the first tick's walk passes it before the receive.
+            Sync.seedRewritable(guildData)
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+            -- The requester already holds that event under the id the
+            -- receive is about to give it here, and matches us elsewhere.
+            guildData.transactions[1].id = Sync.REWRITE_NEW_ID
+            local theirs = bucketMap()
+            guildData.transactions[1].id = Sync.REWRITE_OLD_ID
+
+            GBL:HandleSyncRequest("PeerA",
+                request{ sinceTimestamp = 0, bucketHashes = theirs })
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "the walk must still be in flight when the receive lands")
+
+            GBL:HandleSyncData("PeerB", Sync.rewriteChunk(1, 1))
+            assert.equals(Sync.REWRITE_NEW_ID, guildData.transactions[1].id,
+                "the receive must have rewritten the walked record in place")
+            assert.same(theirs, GBL:ComputeBucketHashes(guildData),
+                "the two stores must match after the rewrite, or the fixture proves nothing")
+
+            Helpers.drainZeroDelayTimers()
+            assert.is_false(GBL:GetSyncStatus().preparing)
+
+            assert.is_true(auditHas("Sent empty sync to PeerA"),
+                "a walk that read the old id offers a bucket the requester already matches")
+        end)
+
+        local function auditCount(fragment)
+            local n = 0
+            for _, entry in ipairs(GBL:GetAuditTrail()) do
+                if entry.message and entry.message:find(fragment, 1, true) then
+                    n = n + 1
+                end
+            end
+            return n
+        end
+
+        -- The bound is the literal on purpose: three is a decision, and
+        -- moving it should show in this file. Two ticks of walking past the
+        -- budget, so the walk the serve goes ahead on is still running on the
+        -- tick after the one that gave up on it, and gets reset under again.
+        it("stops walking again after three restarts and still finishes", function()
+            seed(2 * GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            local rounds = 0
+            while GBL:GetSyncStatus().preparing do
+                rounds = rounds + 1
+                assert.is_true(rounds <= 50,
+                    "a reset before every tick must not hold the preparation")
+                GBL:ResetHashCache()
+                Helpers.fireZeroDelayRound()
+            end
+
+            assert.is_true(auditHas("3 walk restart(s)"),
+                "the finished preparation must say how often it walked again")
+            assert.equals(1, auditCount("Bucket walk for PeerA overtaken after 3 restart(s)"),
+                "a serve that goes ahead on an overtaken walk must say so, once")
+        end)
+
+        -- A walk the serve went ahead on belongs to the generation it began
+        -- in, not the one it was handed over in, so the last stage must not
+        -- take its hashes for the tranche even if nothing resets afterwards.
+        it("does not record the tranche from a walk it went ahead on", function()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+
+            -- A bucket request with one bucket to send: the sent records
+            -- stand in for the map only where whole buckets go out.
+            GBL:HandleSyncRequest("PeerA",
+                requestDifferingIn(GBL:BucketKeyForTimeSlot(BASE_SLOT + 10)))
+            local rounds = 0
+            while not auditHas("overtaken after 3 restart(s)") do
+                rounds = rounds + 1
+                assert.is_true(rounds <= 20, "the walk never used up its restarts")
+                GBL:ResetHashCache()
+                Helpers.fireZeroDelayRound()
+            end
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "the collect must still be ahead, with no reset left to come")
+
+            Helpers.drainZeroDelayTimers()
+            assert.is_false(GBL:GetSyncStatus().preparing)
+
+            assert.is_true(auditHas("Tranche for PeerA recorded from the records sent"),
+                "the map of an overtaken walk cannot vouch for the tranche")
+        end)
+
+        it("says nothing about restarts when the walk was never overtaken", function()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+
+            Sync.serveRequest(GBL, "PeerA", request{ sinceTimestamp = 0 })
+
+            assert.is_true(auditHas("Prep complete for PeerA"))
+            assert.is_false(auditHas("walk restart"),
+                "a clean preparation's line must read as it always has")
+            assert.is_false(auditHas("overtaken"))
+        end)
+
+        it("records the hash of the rewritten bucket when the reset lands mid-walk",
+        function()
+            Sync.seedRewritable(guildData)
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 99)
+            local bucket = GBL:BucketKeyForTimeSlot(475100)
+
+            GBL:HandleSyncRequest("PeerA", requestDifferingIn(bucket))
+            assert.is_true(GBL:GetSyncStatus().preparing)
+            assert.is_nil(GBL:PeekBucketHashes(guildData),
+                "the walk must still be in flight when the receive lands")
+
+            GBL:HandleSyncData("PeerB", Sync.rewriteChunk(1, 1))
+            assert.equals(Sync.REWRITE_NEW_ID, guildData.transactions[1].id)
+
+            Helpers.drainZeroDelayTimers()
+            assert.is_false(GBL:GetSyncStatus().preparing)
+
+            assert.equals(GBL:ComputeBucketHashes(guildData)[bucket],
+                trancheFor("PeerA")[bucket],
+                "the tranche must hold the hash the records give now")
+        end)
+
+        -- The walk is a third of a preparation. A reset that lands once it
+        -- has handed its map on cannot be cured by walking again, so the
+        -- tranche is recorded from the ids that went out instead.
+        it("records the hash of the rewritten bucket when the reset lands after the walk",
+        function()
+            Sync.seedRewritable(guildData)
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 99)
+            local bucket = GBL:BucketKeyForTimeSlot(475100)
+
+            GBL:HandleSyncRequest("PeerA", requestDifferingIn(bucket))
+            Helpers.fireZeroDelayRound()
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "the collect must still be running when the receive lands")
+            assert.is_not_nil(GBL:PeekBucketHashes(guildData),
+                "the walk must have finished and stamped its map")
+
+            GBL:HandleSyncData("PeerB", Sync.rewriteChunk(1, 1))
+            assert.equals(Sync.REWRITE_NEW_ID, guildData.transactions[1].id)
+
+            Helpers.drainZeroDelayTimers()
+            assert.is_false(GBL:GetSyncStatus().preparing)
+
+            assert.equals(GBL:ComputeBucketHashes(guildData)[bucket],
+                trancheFor("PeerA")[bucket],
+                "the tranche must hold the hash of the ids that were sent")
+            assert.is_true(auditHas("Tranche for PeerA recorded from the records sent"),
+                "a capture has to be able to see which source the tranche took")
+        end)
+
+        -- The other side of that: the sent records stand in for the map only
+        -- when something moved. On the time-filtered path a session carries
+        -- part of a bucket, so the hash of what was sent is not the bucket's,
+        -- and recording it would stop that bucket ever being demoted.
+        -- Both ways a preparation comes by its map: walking for it, and
+        -- taking a cache that is already current.
+        for _, case in ipairs({
+            { name = "walked for its map", warm = false },
+            { name = "took a warm cache", warm = true },
+        }) do
+            it("records the bucket's own hash when nothing overtook a preparation that "
+                .. case.name, function()
+                seed(5)
+                if case.warm then GBL:GetBucketHashes(guildData) end
+                assert.equals(case.warm, GBL:_FreshBucketHashes(guildData) ~= nil,
+                    "the fixture must start the preparation the way the case says")
+                -- Slots +2 to +5 share a bucket, and only +4 and +5 are newer
+                -- than the requester's timestamp.
+                local bucket = GBL:BucketKeyForTimeSlot(BASE_SLOT + 4)
+                assert.equals(bucket, GBL:BucketKeyForTimeSlot(BASE_SLOT + 2),
+                    "the fixture needs an older record in the same bucket")
+
+                Sync.serveRequest(GBL, "PeerA",
+                    request{ sinceTimestamp = (BASE_SLOT + 3) * 3600 })
+
+                assert.equals(GBL:ComputeBucketHashes(guildData)[bucket],
+                    trancheFor("PeerA")[bucket])
+                assert.is_false(auditHas("recorded from the records sent"))
+            end)
+        end
+
+        -- The same path with a reset after the walk. The session still
+        -- carries part of a bucket, so the sent records cannot stand in for
+        -- the map here whatever has moved.
+        it("keeps the bucket's own hash on the time-filtered path when a reset lands after the walk",
+        function()
+            local n = GBL.SYNC_PREP_RECORDS_PER_TICK + 99
+            seed(n)
+            -- The newest record that shares its bucket with the one before
+            -- it, with the requester's timestamp between the two.
+            local slot = n
+            while GBL:BucketKeyForTimeSlot(BASE_SLOT + slot)
+                ~= GBL:BucketKeyForTimeSlot(BASE_SLOT + slot - 1) do
+                slot = slot - 1
+            end
+            local bucket = GBL:BucketKeyForTimeSlot(BASE_SLOT + slot)
+
+            GBL:HandleSyncRequest("PeerA",
+                request{ sinceTimestamp = (BASE_SLOT + slot - 1) * 3600 })
+            Helpers.fireZeroDelayRound()
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "the collect must still be running when the reset lands")
+            assert.is_not_nil(GBL:PeekBucketHashes(guildData),
+                "the walk must have finished and stamped its map")
+
+            GBL:ResetHashCache()
+            Helpers.drainZeroDelayTimers()
+            assert.is_false(GBL:GetSyncStatus().preparing)
+
+            assert.equals(GBL:ComputeBucketHashes(guildData)[bucket],
+                trancheFor("PeerA")[bucket],
+                "a bucket sent in part must keep its whole hash in the tranche")
+        end)
+
+        -- An empty diff records an empty tranche, and there is nothing for
+        -- the line to describe.
+        it("says nothing about the tranche's source when nothing was sent", function()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 99)
+
+            GBL:HandleSyncRequest("PeerA",
+                request{ sinceTimestamp = 0, bucketHashes = bucketMap() })
+            Helpers.fireZeroDelayRound()
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "the collect must still be running when the reset lands")
+
+            GBL:ResetHashCache()
+            Helpers.drainZeroDelayTimers()
+
+            assert.is_true(auditHas("Sent empty sync to PeerA"),
+                "the fixture must give the serve nothing to send")
+            assert.is_false(auditHas("recorded from the records sent"))
+        end)
+
+        -- The demote decision reads the same map, a stage before the commit.
+        -- A bucket rewritten during the collect has moved since it was last
+        -- sent, so it must not be put to the back as unchanged.
+        it("does not demote a bucket that was rewritten after the walk", function()
+            Sync.seedRewritable(guildData)
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 99)
+            local bucket = GBL:BucketKeyForTimeSlot(475100)
+
+            Sync.serveRequest(GBL, "PeerA", requestDifferingIn(bucket))
+            Sync.drainSend(GBL, "PeerA")
+            assert.is_number(trancheFor("PeerA")[bucket],
+                "the first session must have carried the bucket")
+            GBL:ClearLog("sync")
+
+            -- The peer asks again, still differing there. The cache is warm
+            -- from the first session's walk, so this one goes straight to
+            -- its collect.
+            GBL:HandleSyncRequest("PeerA", requestDifferingIn(bucket))
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "the collect must still be running when the receive lands")
+            GBL:HandleSyncData("PeerB", Sync.rewriteChunk(1, 1))
+            assert.equals(Sync.REWRITE_NEW_ID, guildData.transactions[1].id)
+
+            Helpers.drainZeroDelayTimers()
+            assert.is_false(GBL:GetSyncStatus().preparing)
+
+            assert.is_true(auditHas("1 in last tranche, 0 unchanged (demoted)"),
+                "a bucket whose id was rewritten mid-preparation is not unchanged")
+        end)
+
+        -- The other side of reading the records: a reset that changed nothing
+        -- in the bucket must still leave it demoted, or every reset would
+        -- switch the rotation off for that serve.
+        it("still demotes a bucket no reset touched", function()
+            Sync.seedRewritable(guildData)
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 99)
+            local bucket = GBL:BucketKeyForTimeSlot(475100)
+
+            Sync.serveRequest(GBL, "PeerA", requestDifferingIn(bucket))
+            Sync.drainSend(GBL, "PeerA")
+            GBL:ClearLog("sync")
+
+            GBL:HandleSyncRequest("PeerA", requestDifferingIn(bucket))
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "the collect must still be running when the reset lands")
+            GBL:ResetHashCache()
+
+            Helpers.drainZeroDelayTimers()
+            assert.is_false(GBL:GetSyncStatus().preparing)
+
+            assert.is_true(auditHas("1 in last tranche, 1 unchanged (demoted)"),
+                "the records give the hash the bucket was sent with")
+        end)
+
+        -- Out of restarts is not out of options: if something has warmed the
+        -- cache since the reset, that map is current and costs nothing.
+        it("takes a warm cache instead of going ahead on an overtaken walk", function()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+
+            GBL:HandleSyncRequest("PeerA", request{ sinceTimestamp = 0 })
+            for _ = 1, 3 do
+                GBL:ResetHashCache()
+                Helpers.fireZeroDelayRound()
+            end
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "the walk must still be in flight after its third restart")
+            GBL:ResetHashCache()
+            GBL:GetBucketHashes(guildData)
+
+            Helpers.drainZeroDelayTimers()
+            assert.is_false(GBL:GetSyncStatus().preparing)
+
+            assert.is_true(auditHas("3 walk restart(s)"),
+                "the fixture must have used every restart")
+            assert.is_false(auditHas("overtaken"),
+                "a current map was in the cache, so no overtaken walk was served on")
+        end)
+
+        -- The same, a tick later: the walk has already been given up on and
+        -- is carrying on as walked when something warms the cache. That map
+        -- is still current and still free, and the old walk read an id the
+        -- requester no longer has.
+        it("takes a cache warmed after the walk was given up on", function()
+            -- First, so every walk reads it on its first tick.
+            Sync.seedRewritable(guildData)
+            -- Three ticks of walking, so the walk given up on is still
+            -- running on the tick after.
+            seed(2 * GBL.SYNC_PREP_RECORDS_PER_TICK + 50)
+            -- The requester holds that event under the id the receive is
+            -- about to give it, and matches us everywhere else.
+            guildData.transactions[1].id = Sync.REWRITE_NEW_ID
+            local theirs = bucketMap()
+            guildData.transactions[1].id = Sync.REWRITE_OLD_ID
+
+            GBL:HandleSyncRequest("PeerA",
+                request{ sinceTimestamp = 0, bucketHashes = theirs })
+            for _ = 1, 3 do
+                GBL:ResetHashCache()
+                Helpers.fireZeroDelayRound()
+            end
+            -- The fourth reset is the rewrite itself, so the walk carried on
+            -- from here holds the old id.
+            GBL:HandleSyncData("PeerB", Sync.rewriteChunk(1, 1))
+            assert.equals(Sync.REWRITE_NEW_ID, guildData.transactions[1].id)
+            assert.is_nil(GBL:PeekBucketHashes(guildData),
+                "the cache must be cold when the restarts run out")
+            Helpers.fireZeroDelayRound()
+            assert.is_true(auditHas("overtaken after 3 restart(s)"),
+                "the fixture must have given up on the walk")
+            assert.is_not_nil(GBL:GetSyncStateForTests().prep.bucketScan,
+                "the walk given up on must still be running")
+
+            GBL:GetBucketHashes(guildData)
+            Helpers.drainZeroDelayTimers()
+            assert.is_false(GBL:GetSyncStatus().preparing)
+
+            assert.is_true(auditHas("Sent empty sync to PeerA"),
+                "the warm map matches the requester, so there is nothing to offer")
+        end)
+
+        -- The rotation line counts every bucket of the last tranche that has
+        -- not moved, offered this time or not. A reset that touched none of
+        -- them must not change that count, or a capture would read a reset
+        -- as rotation demoting less.
+        it("counts an unchanged bucket the same way after a reset", function()
+            seed(GBL.SYNC_PREP_RECORDS_PER_TICK + 99)
+            local a = GBL:BucketKeyForTimeSlot(BASE_SLOT + 10)
+            local b = GBL:BucketKeyForTimeSlot(BASE_SLOT + 40)
+            assert.are_not.equals(a, b, "the fixture needs two buckets")
+
+            local both = bucketMap()
+            both[a], both[b] = 12345, 12345
+            Sync.serveRequest(GBL, "PeerA",
+                request{ sinceTimestamp = 0, bucketHashes = both })
+            Sync.drainSend(GBL, "PeerA")
+            assert.is_number(trancheFor("PeerA")[a])
+            assert.is_number(trancheFor("PeerA")[b])
+            GBL:ClearLog("sync")
+
+            -- The peer now differs only in the first, and a reset lands
+            -- during the collect.
+            GBL:HandleSyncRequest("PeerA", requestDifferingIn(a))
+            assert.is_true(GBL:GetSyncStatus().preparing,
+                "the collect must still be running when the reset lands")
+            GBL:ResetHashCache()
+            Helpers.drainZeroDelayTimers()
+            assert.is_false(GBL:GetSyncStatus().preparing)
+
+            assert.is_true(auditHas("2 in last tranche, 2 unchanged (demoted), 1 still selected"),
+                "the bucket not offered this time is unchanged all the same")
+        end)
     end)
 
     ---------------------------------------------------------------------------

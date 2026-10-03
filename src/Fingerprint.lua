@@ -183,7 +183,10 @@ local bucketCache = {
 
 -- Bumped by every ResetHashCache. A sliced scan records it at its start and
 -- stamps its finished map only if it has not moved, because a reset in
--- between can mean an id it already walked was rewritten in place (#330).
+-- between can mean an id it already walked was rewritten in place (#330), or
+-- that a pass which removed records rewrote an array under its cursor (#342).
+-- The serve reads it through _HashCacheGeneration, to drop a walk a reset
+-- overtook and to know whether its map still describes the records.
 local resetGeneration = 0
 
 --- Compute per-bucket fingerprints for delta sync.
@@ -194,14 +197,28 @@ local resetGeneration = 0
 -- @return table Map of bucketKey (number) → bucket hash (number)
 function GBL:ComputeBucketHashes(guildData)
     if not guildData then return {} end
+    return self:BucketHashesOfRecords(guildData.transactions, guildData.moneyTransactions)
+end
+
+--- Per-bucket fingerprints of two record arrays.
+--
+-- The walk ComputeBucketHashes does, over arrays handed in rather than a
+-- guild's own. The serve calls it on the records it has just stripped for the
+-- wire when its bucket map can no longer vouch for them (#342), and the two
+-- have to agree on which records count and which bucket each falls in, so
+-- there is one walk and ComputeBucketHashes calls it.
+-- @param itemRecords table|nil Array of item records
+-- @param moneyRecords table|nil Array of money records
+-- @return table Map of bucketKey (number) to bucket hash (number)
+function GBL:BucketHashesOfRecords(itemRecords, moneyRecords)
     local buckets = {}
-    for _, tx in ipairs(guildData.transactions) do
+    for _, tx in ipairs(itemRecords or {}) do
         if tx.id then
             local key = bucketKeyForRecord(tx)
             buckets[key] = xor32(buckets[key] or 0, self:HashString(tx.id))
         end
     end
-    for _, tx in ipairs(guildData.moneyTransactions) do
+    for _, tx in ipairs(moneyRecords or {}) do
         if tx.id then
             local key = bucketKeyForRecord(tx)
             buckets[key] = xor32(buckets[key] or 0, self:HashString(tx.id))
@@ -326,7 +343,9 @@ end
 -- A sync receive can rewrite an id in place between two steps, and a record
 -- the scan had already walked then sits in this map under its old id, with a
 -- count the rewrite did not move: stamped, the map would undo the reset. The
--- caller still gets the map it walked.
+-- caller still gets the map it walked, and `scan.generation` beside
+-- _HashCacheGeneration is how it tells that the map is one a reset overtook;
+-- the serve's first stage starts the walk again on that (#342).
 -- @param guildData table Guild data from AceDB
 -- @param scan table State from StartBucketHashScan
 -- @param budget number Maximum records to walk on this step
@@ -365,6 +384,18 @@ function GBL:StepBucketHashScan(guildData, scan, budget)
         return spent, true
     end
     return spent, false
+end
+
+--- The reset generation, for a caller that holds a bucket map across frames.
+--
+-- A map from a scan or from the cache describes the records as of the
+-- generation it was taken in: a scan carries its own in `scan.generation`,
+-- and a map taken from the cache belongs to the generation at that moment.
+-- When this has moved since, an id was rewritten or a record removed, and the
+-- map no longer describes what is stored (#342).
+-- @return number A counter that only ever goes up
+function GBL:_HashCacheGeneration()
+    return resetGeneration
 end
 
 ------------------------------------------------------------------------
