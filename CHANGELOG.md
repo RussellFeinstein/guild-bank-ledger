@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.41.31] - 2026-10-02
 
 ### Fixed
 - When a piece of sync data reached you twice (its receipt was lost or late, or a loading screen made the sender repeat it), your addon counted it twice. If the sync then stalled, it asked the sender for the wrong piece, and the sender skipped ahead past pieces it had not sent yet, which only came in at a later sync. Your addon now asks for the piece after the last one it took, and the Sync tab's progress and the sync log name that piece too.
