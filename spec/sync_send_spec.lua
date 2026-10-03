@@ -1486,11 +1486,12 @@ describe("Sync send path", function()
             local mark = #MockAce.sentCommMessages
 
             GBL:HandleNack("OfficerB", { chunk = 2 })
-            fireResend()
 
+            assert.is_nil(lineWith("was never sent"),
+                "chunk 1 was sent, so a NACK for chunk 2 is a true one")
+            fireResend()
             assert.same({ 2 }, chunksSentSince(mark),
                 "the receiver holds chunk 1, so chunk 2 goes")
-            assert.is_nil(lineWith("was never sent"))
         end)
 
         it("resends chunk 1 on a NACK for it", function()
@@ -1498,10 +1499,11 @@ describe("Sync send path", function()
             local mark = #MockAce.sentCommMessages
 
             GBL:HandleNack("OfficerB", { chunk = 1 })
-            fireResend()
 
+            assert.is_nil(lineWith("was never sent"),
+                "a NACK for chunk 1 has no chunk below it to check")
+            fireResend()
             assert.same({ 1 }, chunksSentSince(mark))
-            assert.is_nil(lineWith("was never sent"))
         end)
     end)
 

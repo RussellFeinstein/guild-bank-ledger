@@ -1045,7 +1045,8 @@ describe("Sync receive and intake", function()
 
             assert.is_false(GBL:GetSyncStatus().receiving)
             assert.is_truthy(
-                logEntry("Retry limit reached waiting on chunk 2 from OfficerB"))
+                logEntry("Retry limit reached waiting on chunk 2 from OfficerB"),
+                "the give-up names the chunk after the last one taken, not a count")
         end)
 
         it("reports the chunk a joined stream is on", function()
@@ -1053,7 +1054,8 @@ describe("Sync receive and intake", function()
 
             assert.equals("5/7", GBL:GetSyncStatus().receiveProgress)
             GBL:DisableSync()
-            assert.is_truthy(logEntry("aborted - sync disabled at chunk 5/7"))
+            assert.is_truthy(logEntry("aborted - sync disabled at chunk 5/7"),
+                "the disable names the chunk the stream was on, not a count")
         end)
 
         it("adds no repeat count to a clean session's summary", function()
