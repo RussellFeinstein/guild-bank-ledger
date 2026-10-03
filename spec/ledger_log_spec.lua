@@ -147,6 +147,18 @@ describe("Ledger log lines (#85)", function()
             assert.is_true(has(info[2], "T1=0/1"), info[2])
         end)
 
+        it("writes ERROR when its read raises, and still answers 0", function()
+            -- The callback is what marks the first scan complete and starts
+            -- the periodic rescan, so a raise must not skip it.
+            GBL.ReadAllTransactions = function() error("open explosion") end
+
+            assert.equals(0, openRead())
+            local errors = lines("ERROR")
+            assert.equals(1, #errors)
+            assert.is_true(has(errors[1], "on=open"), errors[1])
+            assert.is_true(has(errors[1], "open explosion"), errors[1])
+        end)
+
         it("says so when the guild bank window closed before the read", function()
             local result
             GBL:ScanTransactions(function(n) result = n end)
@@ -213,6 +225,20 @@ describe("Ledger log lines (#85)", function()
             GBL:RescanTransactionLogs(function() end)
             Helpers.fireTimersAt(GBL.LEDGER_RESCAN_FALLBACK)
             assert.is_true(has(lines("DEBUG")[1], "via=timeout"))
+        end)
+
+        it("says at DEBUG when the guild bank window closed before the read", function()
+            GBL.db.profile.ledger.debugChat = true
+            local result
+            GBL:RescanTransactionLogs(function(n) result = n end)
+            GBL.bankOpen = false
+            Helpers.fireTimersAt(GBL.LEDGER_RESCAN_FALLBACK)
+
+            assert.equals(0, result)
+            local debug = lines("DEBUG")
+            assert.equals(1, #debug)
+            assert.is_true(has(debug[1], "on=rescan"), debug[1])
+            assert.is_true(has(debug[1], "abandoned"), debug[1])
         end)
 
         it("writes ERROR when its read raises, and still answers 0", function()
@@ -305,6 +331,37 @@ describe("Ledger log lines (#85)", function()
             assert.equals(1, #warns)
             assert.is_true(has(warns[1], "refused"), warns[1])
             assert.is_true(has(warns[1], "T1=1"), warns[1])
+        end)
+
+        it("does not warn again about a refused record when the bank is reopened", function()
+            -- Closing the bank resets the batch caches, so the reopened
+            -- read tries the same record again and refuses it again.
+            Helpers.addTabTransactions(1, {
+                Helpers.makeTransaction("deposit", "", link, 2, 1, nil, 0),
+            })
+            openRead()
+            GBL:OnBankClosed()
+            GBL.bankOpen = true
+            openRead()
+
+            assert.equals(1, #lines("WARN"))
+            assert.is_true(has(lines("INFO")[2], "refused=1"), lines("INFO")[2])
+        end)
+
+        it("does not warn again when a tab drops out of a read and comes back", function()
+            -- A tab that has not answered reads 0 entries, so its skipped
+            -- count dips to 0 and returns on the next read (#336).
+            Helpers.addTabTransactions(1, {
+                Helpers.makeTransaction("deposit", nil, link, 2, 1, nil, 0),
+            })
+            openRead()
+            local saved = MockWoW.guildBank.transactionLogs[1]
+            MockWoW.guildBank.transactionLogs[1] = {}
+            rescan()
+            MockWoW.guildBank.transactionLogs[1] = saved
+            rescan()
+
+            assert.equals(1, #lines("WARN"))
         end)
     end)
 
