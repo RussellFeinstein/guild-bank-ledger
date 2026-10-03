@@ -3308,9 +3308,15 @@ function GBL:CleanupWithEventCounts(guildData)
             -- gathered by prefix, so writing them back moves records even
             -- when none was removed, under any walk holding a cursor into
             -- the array and with no reset to tell it (#342).
+            --
+            -- The reset is here, at the write, and not at the end of the
+            -- pass: the next array's prefixes and the id rebuild below can
+            -- raise on a corrupt record (#263), and the array has moved
+            -- whether or not the pass gets that far.
             if totalRemoved > removedBefore then
                 for i = #records, 1, -1 do records[i] = nil end
                 for i, rec in ipairs(surviving) do records[i] = rec end
+                self:ResetHashCache()
             end
         end
     end
@@ -3358,7 +3364,9 @@ function GBL:CleanupWithEventCounts(guildData)
 
         self:RebuildPlayerStats(guildData)
 
-        self:ResetHashCache()
+        -- No reset here for the ids rewritten above: every array this pass
+        -- removed from was reset at its write-back, and nothing between
+        -- there and here reads either cache.
     end
 
     return totalRemoved

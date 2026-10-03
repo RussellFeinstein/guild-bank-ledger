@@ -2018,10 +2018,17 @@ end
 -- drops. No locking, and none needed. What a rewrite must not do is reach the
 -- shared cache, so each one resets it and the walk then declines to stamp its
 -- map (#330). The same reset tells the first stage its walk is no longer
--- worth serving on, and the last one that its map cannot vouch for the
--- tranche (#342). A pass that moves records has to reset for that reason, and
--- the cleanup, which used to move them while removing nothing, now leaves
--- such an array alone.
+-- worth serving on, and tells the two later stages that read the map, the
+-- demote decision and the tranche, to read the records instead (#342). A pass
+-- that moves records has to reset for that reason, and the cleanup, which
+-- used to move them while removing nothing, now leaves such an array alone.
+--
+-- The reset does not reach the collect. Stage 3 holds a cursor of its own and
+-- its groups hold records by reference, so a pass that removes records
+-- mid-collect can put one in a group twice, miss one, or leave a removed one
+-- in the send. That is the tolerance above and nothing more: the receiver
+-- drops a repeat, a missed record rides the next session, and a record removed
+-- here is removed there by the same counts or the same twin check.
 
 local prepStages = {}
 local prepStep  -- forward declaration; the watchdog and the accept both call it
@@ -2078,6 +2085,17 @@ function GBL:_AbortSyncPrep(reason)
         tostring(prep.target), tostring(reason))
 end
 
+-- Whether the records this preparation holds, rather than its bucket map, are
+-- what describe a bucket (#342). True once a hash cache reset has landed since
+-- the map was taken, and only on the bucket path. There the collect holds every
+-- record of each differing bucket by reference, so their ids give the bucket's
+-- hash as it stands now. On the time-filtered path a group is part of a bucket,
+-- and the map, overtaken or not, is the only whole-bucket hash there is.
+local function mapOvertaken(self, prep)
+    return prep.diffDays ~= nil
+        and prep.bucketsGeneration ~= self:_HashCacheGeneration()
+end
+
 -- 1. Bucket hashes. Free when the cache is already current, otherwise the same
 --    walk ComputeBucketHashes does, a slice at a time, stamping the cache on
 --    the way past so the work is not thrown away, unless a reset landed after
@@ -2088,16 +2106,23 @@ end
 --    cursor, and a diff made from it offers buckets the requester matches and
 --    can miss ones it lacks. Nothing moves the generation inside a tick, so
 --    the check sits where a tick picks the walk up. Bounded, and past the
---    bound the serve goes ahead on the walk it has, as it did before.
+--    bound the serve takes the cache if something has warmed it since, and
+--    otherwise goes ahead on the walk it has, as it did before.
 --
---    `bucketsGeneration` is the generation the map belongs to, for stage 7.
+--    `bucketsGeneration` is the generation the map belongs to, for the two
+--    later stages that read the map (mapOvertaken).
 prepStages[1] = function(self, prep, budget)
     if prep.localBuckets then return 0, true end
 
     local scan = prep.bucketScan
     if scan and not prep.walkOvertaken
         and scan.generation ~= self:_HashCacheGeneration() then
-        if prep.walkRestarts < SYNC_PREP_WALK_RESTARTS then
+        if self:_FreshBucketHashes(prep.guildData) then
+            -- Something has warmed the cache since the reset. That map is
+            -- current and free, with restarts left or without: the block
+            -- below takes it.
+            prep.bucketScan = nil
+        elseif prep.walkRestarts < SYNC_PREP_WALK_RESTARTS then
             prep.walkRestarts = prep.walkRestarts + 1
             prep.bucketScan = nil
         else
@@ -2324,10 +2349,23 @@ prepStages[4] = function(self, prep, _budget)
     local demoteSet
     local demoted, stillSelected = 0, 0
     local lastTranche = syncState.capLastTranche[sendTarget]
+
+    -- "Not moved" is read off the bucket map, unless a reset has landed since
+    -- the map was taken (#342). The collect runs between the walk and here,
+    -- and a bucket rewritten during it still carries its old hash in the map,
+    -- which would put the one bucket that just changed to the back as
+    -- unchanged. The collected records are read instead.
     if lastTranche then
         demoteSet = {}
+        local overtaken = mapOvertaken(self, prep)
         for key, hashWhenSent in pairs(lastTranche) do
-            if prep.localBuckets[key] == hashWhenSent then
+            local hashNow = prep.localBuckets[key]
+            if overtaken then
+                local group = prep.groups[key]
+                hashNow = group
+                    and self:BucketHashesOfRecords(group.tx, group.money)[key]
+            end
+            if hashNow == hashWhenSent then
                 demoteSet[key] = true
                 demoted = demoted + 1
             end
@@ -2513,12 +2551,15 @@ prepStages[7] = function(self, prep, _budget)
     -- resets land after it, and the map then holds a hash for the rewritten
     -- bucket that no later walk will produce: the next serve reads that
     -- bucket as moved and sends it again. The records just stripped are what
-    -- this peer is being sent, so their ids give the hash to remember.
+    -- this peer is being sent, so their ids give the hash to remember. Only
+    -- on the bucket path, where whole buckets go out (mapOvertaken), and only
+    -- when there is a tranche to record.
     local sentHashes = prep.localBuckets
-    if prep.bucketsGeneration ~= self:_HashCacheGeneration() then
+    if mapOvertaken(self, prep) and next(prep.sentBuckets or {}) then
         sentHashes = self:BucketHashesOfRecords(txToSend, moneyToSend)
         self:AddAuditEntry("Tranche for " .. tostring(prep.target)
-            .. " recorded from the records sent: stored ids moved during the preparation")
+            .. " recorded from the records sent: the hash cache was reset"
+            .. " during the preparation")
     end
     local tranche = {}
     for key in pairs(prep.sentBuckets or {}) do
