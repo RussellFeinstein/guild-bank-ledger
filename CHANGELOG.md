@@ -5,7 +5,7 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.43.2] - 2026-10-03
 
 ### Fixed
 - While your addon gets ready to send data to a guildmate, it reads through every record it holds, a little at a time, to build its description of them. A tidy-up that runs at the end of every sync rearranged the stored records even when it had nothing to remove. If one finished while that read was partway through, the read could count one record twice and miss another, and your addon kept the wrong description. It could then leave out parts of its history that a guildmate was missing, offer parts they already had, and ask for parts it already held, until it recorded something new or you used `/reload`. The tidy-up now leaves the records where they are unless it removes one.
