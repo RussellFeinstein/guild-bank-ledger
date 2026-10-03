@@ -2003,6 +2003,30 @@ describe("Sync session lifecycle", function()
                 assert.is_true(GBL:IsPeerBusy("PeerA"))
             end)
 
+            -- The state a not-sending BUSY usually finds us in (#334): we send
+            -- to PeerA, PeerA sends to us and has delivered chunks, and PeerA
+            -- answers our NACK. Only a receive that has taken a chunk NACKs,
+            -- so the refusal arrives with a report to write and a send of
+            -- ours to leave alone.
+            it("reports the receive and leaves our send to the same peer running", function()
+                enterSendingState()
+                local progress = GBL:GetSyncStatus().sendProgress
+                receiveOneChunk(true)
+
+                GBL:HandleBusy("PeerA", { reason = "not-sending" })
+
+                local status = GBL:GetSyncStatus()
+                assert.is_false(status.receiving)
+                assert.is_true(hasLine("PeerA busy - ending receive after 1 chunk(s)"))
+                assert.is_true(hasLine("Sync complete from PeerA - 1 new"))
+                assert.is_true(status.sending, "PeerA is still receiving our send")
+                assert.equals("PeerA", status.sendTarget)
+                assert.equals(progress, status.sendProgress)
+                assert.is_true(hasLine(
+                    "PeerA busy - refused our request, our send to them continues"))
+                assert.is_false(hasLine("Send complete"))
+            end)
+
             -- Nothing arrived, so there is no session to report: the BUSY
             -- refused the request itself.
             it("keeps the quiet clear when no chunk has arrived", function()

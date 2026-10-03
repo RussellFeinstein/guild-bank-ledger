@@ -1370,6 +1370,20 @@ describe("Sync send path", function()
             assert.equals(progress, GBL:GetSyncStatus().sendProgress)
         end)
 
+        -- The send target is stored canonical; the NACK arrives in whatever
+        -- form AceComm gives. Both sides of the compare go through
+        -- CanonicalPeerKey, or our own target's NACK reads as a stranger's
+        -- and draws the BUSY that ends the receive we are feeding.
+        it("knows our send target by its realm-qualified name", function()
+            serve("OfficerB")
+
+            GBL:HandleNack("OfficerB-TestRealm", { chunk = 1 })
+
+            assert.equals(0, #Sync.busySent(GBL), "our own target is not told we stopped")
+            assert.is_true(hasLine(
+                "NACK from OfficerB-TestRealm for chunk 1 - re-transmitting"))
+        end)
+
         -- The #279 rule: a log never claims a BUSY the roster refused.
         it("does not claim a BUSY to a requester gone offline", function()
             MockWoW.guildRoster = {
