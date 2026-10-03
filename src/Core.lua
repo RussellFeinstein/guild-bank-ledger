@@ -3148,9 +3148,11 @@ function GBL:DeduplicateAllGuilds()
             self._dedupFailed[name] = nil
         else
             failed = failed + 1
-            -- CleanupWithEventCounts rewrites every surviving record's id and
-            -- resets the cache at the end, and only when it removed something,
-            -- so a raise partway through leaves a warm cache over moved ids.
+            -- CleanupWithEventCounts resets the cache where it writes an array
+            -- back, before it rewrites any id (#342), so a raise inside it
+            -- leaves the cache cold or over arrays it never touched. This reset
+            -- stays for whatever else DeduplicateRecords runs, or comes to run,
+            -- that moves records and raises before resetting.
             self:ResetHashCache()
             if not self._dedupFailed[name] then
                 self._dedupFailed[name] = true

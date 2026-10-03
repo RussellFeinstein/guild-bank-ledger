@@ -2106,8 +2106,11 @@ end
 --    cursor, and a diff made from it offers buckets the requester matches and
 --    can miss ones it lacks. Nothing moves the generation inside a tick, so
 --    the check sits where a tick picks the walk up. Bounded, and past the
---    bound the serve takes the cache if something has warmed it since, and
---    otherwise goes ahead on the walk it has, as it did before.
+--    bound the serve goes ahead on the walk it has, as it did before.
+--
+--    Whenever there is no walk, or the walk is overtaken, the cache is asked
+--    first, on every tick and with restarts left or not: a map something has
+--    warmed since the reset is current and costs one comparison.
 --
 --    `bucketsGeneration` is the generation the map belongs to, for the two
 --    later stages that read the map (mapOvertaken).
@@ -2115,32 +2118,29 @@ prepStages[1] = function(self, prep, budget)
     if prep.localBuckets then return 0, true end
 
     local scan = prep.bucketScan
-    if scan and not prep.walkOvertaken
-        and scan.generation ~= self:_HashCacheGeneration() then
-        if self:_FreshBucketHashes(prep.guildData) then
-            -- Something has warmed the cache since the reset. That map is
-            -- current and free, with restarts left or without: the block
-            -- below takes it.
-            prep.bucketScan = nil
-        elseif prep.walkRestarts < SYNC_PREP_WALK_RESTARTS then
-            prep.walkRestarts = prep.walkRestarts + 1
-            prep.bucketScan = nil
-        else
-            prep.walkOvertaken = true
-            self:AddAuditEntry(("Bucket walk for %s overtaken after %d restart(s),"
-                .. " serving on it as walked"):format(
-                tostring(prep.target), prep.walkRestarts))
-        end
-    end
-
-    if not prep.bucketScan then
+    if not scan or scan.generation ~= self:_HashCacheGeneration() then
         local fresh = self:_FreshBucketHashes(prep.guildData)
         if fresh then
             prep.localBuckets = fresh
             prep.bucketsGeneration = self:_HashCacheGeneration()
+            prep.bucketScan = nil
             return 0, true
         end
-        prep.bucketScan = self:StartBucketHashScan(prep.guildData)
+        if not scan then
+            prep.bucketScan = self:StartBucketHashScan(prep.guildData)
+        elseif not prep.walkOvertaken then
+            if prep.walkRestarts < SYNC_PREP_WALK_RESTARTS then
+                prep.walkRestarts = prep.walkRestarts + 1
+                prep.bucketScan = self:StartBucketHashScan(prep.guildData)
+            else
+                -- Said once; the walk then carries on as walked, and the
+                -- cache is still asked on each tick it has left.
+                prep.walkOvertaken = true
+                self:AddAuditEntry(("Bucket walk for %s overtaken after %d restart(s),"
+                    .. " serving on it as walked"):format(
+                    tostring(prep.target), prep.walkRestarts))
+            end
+        end
     end
 
     local spent, done =
@@ -2357,13 +2357,15 @@ prepStages[4] = function(self, prep, _budget)
     -- unchanged. The collected records are read instead.
     if lastTranche then
         demoteSet = {}
+        -- A key with no group did not differ this time, so it is not a
+        -- candidate whatever it reads. It keeps the map's reading, so the
+        -- rotation line counts it the same way with or without a reset.
         local overtaken = mapOvertaken(self, prep)
         for key, hashWhenSent in pairs(lastTranche) do
             local hashNow = prep.localBuckets[key]
-            if overtaken then
-                local group = prep.groups[key]
-                hashNow = group
-                    and self:BucketHashesOfRecords(group.tx, group.money)[key]
+            local group = overtaken and prep.groups[key]
+            if group then
+                hashNow = self:BucketHashesOfRecords(group.tx, group.money)[key]
             end
             if hashNow == hashWhenSent then
                 demoteSet[key] = true
@@ -2554,6 +2556,12 @@ prepStages[7] = function(self, prep, _budget)
     -- this peer is being sent, so their ids give the hash to remember. Only
     -- on the bucket path, where whole buckets go out (mapOvertaken), and only
     -- when there is a tranche to record.
+    --
+    -- They are the stripped copies, not the stored records stage 4 reads, on
+    -- purpose. A rewrite after the strip leaves the copies on the old id,
+    -- which is what the peer is sent, so the next serve reads that bucket as
+    -- moved and sends it again. That resend is the one that carries the new
+    -- id to the peer, so it is not the one this choice exists to prevent.
     local sentHashes = prep.localBuckets
     if mapOvertaken(self, prep) and next(prep.sentBuckets or {}) then
         sentHashes = self:BucketHashesOfRecords(txToSend, moneyToSend)
