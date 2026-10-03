@@ -1,12 +1,12 @@
 ------------------------------------------------------------------------
 -- schema_version_spec.lua - the schemaVersion ladder (#76)
 --
--- schemaVersion defaults to 8 (the defaults block in src/Core.lua) while migrations run to 11,
+-- schemaVersion defaults to 8 (the defaults block in src/Core.lua) while migrations run to 12,
 -- and that is correct rather than stale. AceDB strips a value equal to its
 -- default before the SavedVariables file is written, so the default IS the
 -- stored version of every guild sitting at it: raise it and every one of
--- those guilds becomes 11 without having run migrations 9 to 11, and nothing
--- comes back for them.
+-- those guilds jumps past migrations 9 and up without having run them, and
+-- nothing comes back for them.
 --
 -- The default and that round trip were already pinned before this file existed:
 -- spec/savedvariables_spec.lua asserts them against a real AceDB, and that
@@ -15,21 +15,22 @@
 -- pins is the other half of the property: nothing advances the version except
 -- the migration that earned it.
 --
--- The version is written by the ladder's ten rungs, plus exactly one write
+-- The version is written by the ladder's eleven rungs, plus exactly one write
 -- that is not a rung, and that one sits INSIDE a rung. There were two until
 -- #263; the second was GBL:DeduplicateRecords forcing the version to 5, and it
 -- is deleted rather than repaired (see section 5 below).
 --
---   The ladder. GBL:MigrateAllGuilds makes twelve calls per guild through
---   GBL:MigrateGuild, and ten of them bump one rung: RepairCorruptedPlayerRealms
+--   The ladder. GBL:MigrateAllGuilds makes thirteen calls per guild through
+--   GBL:MigrateGuild, and eleven of them bump one rung: RepairCorruptedPlayerRealms
 --   runs first and writes no version, and MigrateSortAccessShape sits between
---   rungs 8 and 9 and writes none either. Three gates are strict: `~= 8` in
---   MigrateNormalizePeerNames, `~= 9` in MigrateNormalizeStoredRealms and
---   `~= 10` in MigrateRecoverPeerRealms. The first of those three was the loose
---   `>= 9` until #263. All three are strict for one reason:
---   MigrateNormalizePeerNames short-circuits on cold realm APIs and leaves the
---   guild at 8, so a loose gate above it lets 9, 10 or 11 be reached from 8 and
---   strands the 8 to 9 work for good. Below them the gates are the loose
+--   rungs 8 and 9 and writes none either. Four gates are strict: `~= 8` in
+--   MigrateNormalizePeerNames, `~= 9` in MigrateNormalizeStoredRealms,
+--   `~= 10` in MigrateRecoverPeerRealms and `~= 11` in MigrateForeignRealmTwins
+--   (#332). The first of those was the loose `>= 9` until #263. They are strict
+--   for one reason: MigrateNormalizePeerNames and MigrateRecoverPeerRealms
+--   short-circuit on cold APIs and leave the guild where it was, so a loose
+--   gate above either lets a later rung be reached early and strands the
+--   skipped work for good. Below them the gates are the loose
 --   `(schemaVersion or 0) >= N` form and what protects those rungs is the CALL
 --   ORDER, since each one bumps on every path it returns from.
 --
@@ -70,7 +71,7 @@ local MockWoW = Helpers.MockWoW
 -- MigrateSortAccessShape is in the list deliberately: it is called between
 -- rungs 8 and 9 and writes no version, so a future edit giving it one shows up
 -- here as a changed ladder rather than as nothing. RepairCorruptedPlayerRealms
--- is the twelfth call and is pinned by its own case below rather than here,
+-- is the thirteenth call and is pinned by its own case below rather than here,
 -- because it runs ahead of rung 1 and is conditional on playerRealms.
 local LADDER = {
     { name = "MigrateOccurrenceScheme",      before = 1,  after = 2 },
@@ -84,6 +85,7 @@ local LADDER = {
     { name = "MigrateNormalizePeerNames",    before = 8,  after = 9 },
     { name = "MigrateNormalizeStoredRealms", before = 9,  after = 10 },
     { name = "MigrateRecoverPeerRealms",     before = 10, after = 11 },
+    { name = "MigrateForeignRealmTwins",     before = 11, after = 12 },
 }
 
 -- The one call in LADDER that must NOT move the version.
@@ -108,7 +110,7 @@ describe("schemaVersion", function()
         }
         -- Named as a precondition rather than left implicit: if the mock field
         -- is ever renamed, the ladder cases would otherwise fail as
-        -- "expected 11, was 10" and read as a regression in the 10 to 11 gate.
+        -- "expected 12, was 10" and read as a regression in the 10 to 11 gate.
         assert.is_true(GetNumGuildMembers() > 0)
     end)
 
@@ -170,11 +172,11 @@ describe("schemaVersion", function()
     ---------------------------------------------------------------------------
 
     describe("the migration ladder", function()
-        it("walks a guild at 1 to 11 one rung at a time, in order", function()
+        it("walks a guild at 1 to 12 one rung at a time, in order", function()
             guildData.schemaVersion = 1
 
             assert.same(LADDER, walk())
-            assert.equals(11, guildData.schemaVersion)
+            assert.equals(12, guildData.schemaVersion)
         end)
 
         it("bumps each rung by exactly one, and moves nothing on the shape step", function()
@@ -182,7 +184,7 @@ describe("schemaVersion", function()
             -- one has to compare the whole table rather than walk it: a chain
             -- can read continuous while a rung is missing. Deleting a rung and
             -- editing its LADDER row to match leaves every `before` equal to
-            -- the previous `after` and the endpoint still 11.
+            -- the previous `after` and the endpoint still 12.
             guildData.schemaVersion = 1
 
             local seen = walk()
@@ -201,30 +203,30 @@ describe("schemaVersion", function()
                         i, entry.name, tostring(entry.after), tostring(expected)))
                 version = entry.after
             end
-            assert.equals(11, version)
+            assert.equals(12, version)
             -- Read off the guild rather than off the last recorded entry, or an
-            -- unlisted rung appended after MigrateRecoverPeerRealms is invisible.
+            -- unlisted rung appended after MigrateForeignRealmTwins is invisible.
             assert.equals(version, guildData.schemaVersion)
         end)
 
-        it("moves no version for a guild already at 11", function()
+        it("moves no version for a guild already at 12", function()
             -- "No version", not "no work": MigrateSortAccessShape has no
             -- schemaVersion gate at all (src/Core.lua) and rebuilds
             -- guildData.sortAccess on every run at any version. This case is
             -- about the version field only.
-            guildData.schemaVersion = 11
+            guildData.schemaVersion = 12
 
             local seen = walk()
             assert.equals(#LADDER, #seen)
             for _, entry in ipairs(seen) do
-                assert.equals(11, entry.before, entry.name .. " saw a version below 11")
-                assert.equals(11, entry.after, entry.name .. " moved a guild already at 11")
+                assert.equals(12, entry.before, entry.name .. " saw a version below 12")
+                assert.equals(12, entry.after, entry.name .. " moved a guild already at 12")
             end
-            assert.equals(11, guildData.schemaVersion)
+            assert.equals(12, guildData.schemaVersion)
         end)
 
         it("calls RepairCorruptedPlayerRealms once per guild, ahead of rung 1", function()
-            -- The twelfth call in the per-guild loop (MigrateGuild, src/Core.lua).
+            -- The thirteenth call in the per-guild loop (MigrateGuild, src/Core.lua).
             -- It writes no version, so the LADDER table cannot see it, and the
             -- comment on that call says it has to run before any migration that
             -- consults the roster cache. Nothing else in the suite pins either.
@@ -386,7 +388,7 @@ describe("schemaVersion", function()
             GBL:MigrateAllGuilds()
             GBL.MigrateOccurrenceToPerSlot = original
 
-            assert.equals(11, guildData.schemaVersion)
+            assert.equals(12, guildData.schemaVersion)
             assert.same({ 3 }, enteredAt,
                 "the ladder did not reach the owed rung below 4")
         end)
@@ -469,7 +471,7 @@ describe("schemaVersion", function()
             GBL.MigrateOccurrenceToPerSlot = original
             assert.is_not_nil(victim, "the stub never fired")
             local survivor = (victim == guildData) and other or guildData
-            assert.equals(11, survivor.schemaVersion,
+            assert.equals(12, survivor.schemaVersion,
                 "the guild after the failing one did not finish its ladder")
             assert.equals(3, victim.schemaVersion,
                 "the failing guild should be left where the raise happened")
@@ -589,7 +591,7 @@ describe("schemaVersion", function()
             local failures = GBL:MigrateAllGuilds()
 
             assert.equals(1, failures)
-            assert.equals(11, guildData.schemaVersion,
+            assert.equals(12, guildData.schemaVersion,
                 "a non-table entry must not cost the other guilds their ladder")
             local errors = {}
             for _, e in ipairs(GBL:GetLog("system")) do
@@ -945,6 +947,7 @@ describe("schemaVersion", function()
                 "MigrateCrossSlotDedup",
                 "MigrateRepairEpochTimestamps",
                 "MigrateNormalizeStoredRealms",
+                "MigrateForeignRealmTwins",
             }, rewriters)
 
             for _, name in ipairs(rewriters) do
