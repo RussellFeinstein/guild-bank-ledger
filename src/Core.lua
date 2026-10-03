@@ -3220,6 +3220,7 @@ function GBL:CleanupWithEventCounts(guildData)
     for _, storageKey in ipairs({ "transactions", "moneyTransactions" }) do
         local records = guildData[storageKey]
         if records and #records > 0 then
+            local removedBefore = totalRemoved
             -- Group by prefix (slot-independent)
             local groups = {}
             local groupOrder = {}
@@ -3300,9 +3301,15 @@ function GBL:CleanupWithEventCounts(guildData)
                 end
             end
 
-            -- Replace storage array (preserve AceDB table ref)
-            for i = #records, 1, -1 do records[i] = nil end
-            for i, rec in ipairs(surviving) do records[i] = rec end
+            -- Replace storage array (preserve AceDB table ref), and only when
+            -- this pass took something out of it. The survivors come back
+            -- gathered by prefix, so writing them back moves records even
+            -- when none was removed, under any walk holding a cursor into
+            -- the array and with no reset to tell it (#342).
+            if totalRemoved > removedBefore then
+                for i = #records, 1, -1 do records[i] = nil end
+                for i, rec in ipairs(surviving) do records[i] = rec end
+            end
         end
     end
 

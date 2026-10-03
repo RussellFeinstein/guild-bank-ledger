@@ -117,6 +117,14 @@ local SYNC_PREP_RECORDS_PER_TICK = 1500
 -- form here: the op-88 hang is why SortExecutor grew a stall watchdog.
 local SYNC_PREP_TIMEOUT = 30
 
+-- How many times the first stage starts its bucket walk again after a hash
+-- cache reset overtook it (#342). A walk at 20k records is 13 ticks, and what
+-- resets mid-walk is a receive rewriting an id or a cleanup removing a record,
+-- about once a chunk at most, so one restart is the usual cost. The bound is
+-- for a client slow enough that every walk spans a chunk: past it the serve
+-- goes ahead on the walk it has rather than run into the timeout above.
+local SYNC_PREP_WALK_RESTARTS = 3
+
 local LAYOUT_REQUEST_THROTTLE = 30  -- min seconds between bank-layout pull requests
 local WHISPER_TRACK_EXPIRE = 30
 local MAX_RECEIVE_DURATION = 1800  -- 30 minutes absolute maximum receive time
@@ -2009,8 +2017,11 @@ end
 -- riding the next session instead of this one, or a redundant one the far side
 -- drops. No locking, and none needed. What a rewrite must not do is reach the
 -- shared cache, so each one resets it and the walk then declines to stamp its
--- map (#330). A cleanup that reorders the arrays under the walk is not yet
--- caught that way (#342).
+-- map (#330). The same reset tells the first stage its walk is no longer
+-- worth serving on, and the last one that its map cannot vouch for the
+-- tranche (#342). A pass that moves records has to reset for that reason, and
+-- the cleanup, which used to move them while removing nothing, now leaves
+-- such an array alone.
 
 local prepStages = {}
 local prepStep  -- forward declaration; the watchdog and the accept both call it
@@ -2071,13 +2082,37 @@ end
 --    walk ComputeBucketHashes does, a slice at a time, stamping the cache on
 --    the way past so the work is not thrown away, unless a reset landed after
 --    the walk began (#330).
+--
+--    A walk that reset overtook is dropped here and started again (#342): it
+--    has read an id since rewritten, or an array since rewritten under its
+--    cursor, and a diff made from it offers buckets the requester matches and
+--    can miss ones it lacks. Nothing moves the generation inside a tick, so
+--    the check sits where a tick picks the walk up. Bounded, and past the
+--    bound the serve goes ahead on the walk it has, as it did before.
+--
+--    `bucketsGeneration` is the generation the map belongs to, for stage 7.
 prepStages[1] = function(self, prep, budget)
     if prep.localBuckets then return 0, true end
+
+    local scan = prep.bucketScan
+    if scan and not prep.walkOvertaken
+        and scan.generation ~= self:_HashCacheGeneration() then
+        if (prep.walkRestarts or 0) < SYNC_PREP_WALK_RESTARTS then
+            prep.walkRestarts = (prep.walkRestarts or 0) + 1
+            prep.bucketScan = nil
+        else
+            prep.walkOvertaken = true
+            self:AddAuditEntry(("Bucket walk for %s overtaken after %d restart(s),"
+                .. " serving on it as walked"):format(
+                tostring(prep.target), prep.walkRestarts))
+        end
+    end
 
     if not prep.bucketScan then
         local fresh = self:_FreshBucketHashes(prep.guildData)
         if fresh then
             prep.localBuckets = fresh
+            prep.bucketsGeneration = self:_HashCacheGeneration()
             return 0, true
         end
         prep.bucketScan = self:StartBucketHashScan(prep.guildData)
@@ -2087,6 +2122,7 @@ prepStages[1] = function(self, prep, budget)
         self:StepBucketHashScan(prep.guildData, prep.bucketScan, budget)
     if done then
         prep.localBuckets = prep.bucketScan.buckets
+        prep.bucketsGeneration = prep.bucketScan.generation
         prep.bucketScan = nil
     end
     return spent, done
@@ -2471,18 +2507,34 @@ prepStages[7] = function(self, prep, _budget)
     -- next session it had already handed these buckets over. Every path that
     -- gets here stamps, the empty one included, which is what keeps an empty
     -- diff clearing the demote memory the way it always has.
+    --
+    -- The hashes come from the bucket map, unless a reset has landed since the
+    -- map was taken (#342). The walk is a third of a preparation, so most
+    -- resets land after it, and the map then holds a hash for the rewritten
+    -- bucket that no later walk will produce: the next serve reads that
+    -- bucket as moved and sends it again. The records just stripped are what
+    -- this peer is being sent, so their ids give the hash to remember.
+    local sentHashes = prep.localBuckets
+    if prep.bucketsGeneration ~= self:_HashCacheGeneration() then
+        sentHashes = self:BucketHashesOfRecords(txToSend, moneyToSend)
+        self:AddAuditEntry("Tranche for " .. tostring(prep.target)
+            .. " recorded from the records sent: stored ids moved during the preparation")
+    end
     local tranche = {}
     for key in pairs(prep.sentBuckets or {}) do
-        tranche[key] = prep.localBuckets[key]
+        tranche[key] = sentHashes[key]
     end
     syncState.capLastTranche[prep.target] = tranche
 
     local sender = prep.sender
     local elapsed = GetTime() - (prep.startedAt or GetTime())
+    -- Named only when there were any, so a clean preparation's line is unchanged.
+    local restartText = (prep.walkRestarts or 0) > 0
+        and (", " .. prep.walkRestarts .. " walk restart(s)") or ""
     self:AddAuditEntry(string.format(
-        "Prep complete for %s: %d examined, %d selected, %d tick(s), %.2fs",
+        "Prep complete for %s: %d examined, %d selected, %d tick(s), %.2fs%s",
         tostring(prep.target), prep.examined or 0,
-        #txToSend + #moneyToSend, prep.ticks or 0, elapsed))
+        #txToSend + #moneyToSend, prep.ticks or 0, elapsed, restartText))
 
     local deferredBuckets = prep.deferredBuckets or 0
     self:_ClearSyncPrep()
