@@ -606,7 +606,11 @@ describe("Sync HELLO", function()
 
         it("accepts a peer above the floor that advertises one", function()
             GBL:RegisterComm(GBL.SYNC_PREFIX, "OnSyncMessage")
-            GBL.version = "0.40.0"
+            -- Both versions read off the floor, so a floor raise (#332 moved it
+            -- to 0.43.0) cannot push the peer below it under a fixed literal.
+            local maj, min, patch = GBL.MIN_SYNC_VERSION:match("^(%d+)%.(%d+)%.(%d+)")
+            local function above(by) return maj .. "." .. min .. "." .. (tonumber(patch) + by) end
+            GBL.version = above(2)
 
             for i = 1, 5 do
                 table.insert(guildData.transactions, {
@@ -616,7 +620,7 @@ describe("Sync HELLO", function()
             end
 
             GBL:HandleHello("OfficerB", {
-                version = "0.38.0",
+                version = above(1),
                 minSyncVersion = GBL.MIN_SYNC_VERSION,
                 protocolVersion = GBL.SYNC_PROTOCOL_VERSION,
                 txCount = 5,

@@ -1513,8 +1513,9 @@ describe("Core", function()
 
             GBL:GUILD_ROSTER_UPDATE()
 
-            -- Migration ran on the warm roster, schema reached 11, bare key recovered
-            assert.equals(11, guildData.schemaVersion)
+            -- Migration ran on the warm roster and recovered the bare key; the
+            -- ladder then took the guild on through the #332 rung to 12
+            assert.equals(12, guildData.schemaVersion)
             assert.is_true(GBL._migrationsRetried)
             assert.is_nil(guildData.knownPeers["Katorriwl"])
             assert.is_not_nil(guildData.knownPeers["Katorriwl-Stormrage"])
@@ -1528,7 +1529,7 @@ describe("Core", function()
 
             GBL:GUILD_ROSTER_UPDATE()  -- first fire: retriggers
             assert.is_true(GBL._migrationsRetried)
-            assert.equals(11, guildData.schemaVersion)
+            assert.equals(12, guildData.schemaVersion)
 
             -- Reset schema to detect a second migration run via the strict gate.
             -- knownPeers entry uses a name with NO playerRealms mapping so

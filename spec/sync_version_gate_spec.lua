@@ -67,6 +67,21 @@ describe("Sync version gate", function()
                 "MIN_SYNC_VERSION must not exceed VERSION")
         end)
 
+        it("keeps the floor at or above 0.43.0, the release that drops #332's copies", function()
+            -- A peer below it never runs the twin check, so it would hand every
+            -- copy the check dropped back as a new record, round after round.
+            assert.is_true(GBL:CompareSemver(GBL.MIN_SYNC_VERSION, "0.43.0") >= 0,
+                "the floor no longer covers the #332 repair")
+        end)
+
+        it("refuses a 0.42.x peer, which still holds the stamped copies", function()
+            GBL.version = "0.43.0"
+            GBL:HandleHello("OfficerB", floorHello("0.42.1", "0.37.0"))
+
+            assert.is_nil(sentTypes()["SYNC_REQUEST"])
+            assert.is_true(GBL:GetSyncPeers()["OfficerB"].outdated)
+        end)
+
         it("refuses a peer below the floor", function()
             GBL.version = "0.40.0"
             GBL:HandleHello("OfficerB", floorHello("0.20.0", "0.20.0"))
@@ -227,10 +242,14 @@ describe("Sync version gate", function()
             end)
 
             it("serves a compatible requester", function()
-                GBL.version = "0.40.0"
+                -- Read off the floor, so a floor raise cannot push the
+                -- requester below it under a fixed literal.
+                local maj, min, patch = GBL.MIN_SYNC_VERSION:match("^(%d+)%.(%d+)%.(%d+)")
+                local function above(by) return maj .. "." .. min .. "." .. (tonumber(patch) + by) end
+                GBL.version = above(2)
                 GBL:HandleSyncRequest("OfficerB", request{
                     sinceTimestamp = 0,
-                    version = "0.38.0",
+                    version = above(1),
                     minSyncVersion = GBL.MIN_SYNC_VERSION,
                 })
 
