@@ -272,6 +272,38 @@ Two consequences of the current prefix that are worth knowing:
   cannot grow through sync. And #75 repairs the sync-received records that lost `itemID` as part of its
   own sweep. Neither touches these 108, which were all scanned locally.
 
+### One client's realm, stamped on other members' records
+
+The player is part of the prefix, so a wrong realm in `record.player` is a wrong identity. Before
+v0.13.0 records carried bare names, and the v0.13.0 migration (`MigrateSchemaV2ToV3`) qualified them
+through `ResolvePlayerName`, which falls back to the local realm for a name the roster cache does not
+hold. One client ran it with a cold cache and stamped its own realm, Nesingwary, onto members of five
+other realms. Correctly named records of the same events arrived from other clients, and the two
+copies carry different ids, so sync kept both.
+
+Measured on 2026-10-02 against the live file (19,799 records), read-only:
+
+- 597 records name a realm the roster contradicts, 563 of them Nesingwary, all dated 2026-01-16 to
+  2026-04-13.
+- 560 of the 563 have a twin: a record of the same prefix under the roster realm, under an hour away.
+  560 events were counted twice in every total.
+- 3 have no twin.
+- The other 34 (one name on Thrall, one on Illidan) have no twins and may be real realm transfers.
+
+`RepairPlayerNames` could not reach any of them, because `ResolvePlayerName` returns a hyphenated name
+unchanged, and dedup could not fold the pairs, because their prefixes differ.
+
+**Verdict: fixed in v0.43.0, issue #332.** Rung 12, `MigrateForeignRealmTwins` (`src/Core.lua`):
+- drops each copy that has a twin, one copy per twin;
+- renames a copy with no twin to the roster realm, but only when twins prove its name and realm were
+  stamped, and leaves everything else alone;
+- merges the `eventCounts` keys under every moved prefix into the roster key by max.
+
+Every choice walks in (timestamp, id) order, so peers holding the same records decide the same way.
+The release raised `MIN_SYNC_VERSION` to itself, so a peer that has not run the rung cannot hand the
+dropped copies back. The producer is still reachable for a name the persistent cache lacks, which is
+#340.
+
 ### One identity namespace, two arrays
 
 Records live in two arrays but identity is pooled. `seenTxHashes` (`GBL:MarkSeen` in
@@ -382,7 +414,7 @@ timestamp as `hourSlot * 3600`, which is the start of the hour rather than the o
 ## 7. The schema ladder, and why the default is 8
 
 `schemaVersion` defaults to **8** (the `defaults` table at the top of `src/Core.lua`) even though
-migrations exist through 11. This
+migrations exist through 12. This
 reads as a stale value and it is not one. Do not raise it.
 
 The reason is AceDB before it is anything about the migration chain. `removeDefaults` strips any scalar
@@ -401,13 +433,14 @@ the default being raised**, and it shipped in PR #261 under #77. #76 shipped the
 `spec/schema_version_spec.lua`, which pins the ladder the default is the entry point to. Raising
 the default reds the first file and leaves the second green, which is the split to expect.
 
-The migration chain is the second half of the story. The 8 to 9, 9 to 10 and 10 to 11 migrations
-gate on **strict equality**, not `>=`:
+The migration chain is the second half of the story. The 8 to 9, 9 to 10, 10 to 11 and 11 to 12
+migrations gate on **strict equality**, not `>=`:
 
 ```lua
 if not guildData or (guildData.schemaVersion or 0) ~= 8  then return 0 end   -- MigrateNormalizePeerNames
 if not guildData or (guildData.schemaVersion or 0) ~= 9  then return 0 end   -- MigrateNormalizeStoredRealms
 if not guildData or (guildData.schemaVersion or 0) ~= 10 then return 0 end   -- MigrateRecoverPeerRealms
+if not guildData or (guildData.schemaVersion or 0) ~= 11 then return 0, 0, 0 end   -- MigrateForeignRealmTwins (#332)
 ```
 
 Both sites carry comments explaining it. Several migrations short-circuit when the realm APIs are
@@ -782,6 +815,7 @@ All under the **Data model integrity** milestone.
 | 4 | No deposit or withdraw record knows its tab | closed in v0.37.0 (#67) |
 | 5 | Item records with no `itemID` collide in the money branch | #69 (locally scanned, unscheduled); sync-received closed in v0.37.0 (#68) |
 | 5 | `NormalizeRecordId` can rewrite a money record from an item record | closed in v0.37.0 (#68) |
+| 5 | One client's realm stamped on 563 records, 560 of them a second copy of a stored event | closed in v0.43.0 (#332); the producer is #340 |
 | 5 | Sync intake does not normalize the money `type` | closed in v0.37.0 (#68): rejected by the enum check |
 | 7 | Nothing stops the `schemaVersion` default being raised | closed in #76 |
 | 7 | `DeduplicateRecords` cannot restore the version it borrows, and raises on a nil | closed in #263 |
@@ -798,7 +832,9 @@ The compatibility break several of these rode was #74, **and it has now been spe
 the version floor along with #67 and #68. Two peers on different releases now sync, so any later
 change to `buildPrefix` would silently duplicate the guild's dataset unless `MIN_SYNC_VERSION` is
 raised again, and raising it re-imposes the lockstep split the floor removed. Treat every remaining
-identity-affecting idea in this document as costing a forced guild-wide update from here on.
+identity-affecting idea in this document as costing a forced guild-wide update from here on. The
+first one paid was #332 (v0.43.0): a repair that deletes stored records needs the raise too, or a
+peer that has not run it hands the deleted records back as new ones.
 
 What that leaves open, in rough order of how much it still hurts: #75 (the 223 damaged records
 already on disk, which #68 stops growing but does not repair, and which can now reuse

@@ -1631,7 +1631,7 @@ end
 -- @param name string|nil Guild name, for the log line only
 -- @return number dropped, number renamed, number eventCounts keys moved
 function GBL:MigrateForeignRealmTwins(guildData, name)
-    -- Strict, like the three rungs below it: MigrateRecoverPeerRealms leaves a
+    -- Strict, like the three rungs before it: MigrateRecoverPeerRealms leaves a
     -- cold-roster guild at 10, and a loose gate would let this one bump it past.
     if not guildData or (guildData.schemaVersion or 0) ~= 11 then return 0, 0, 0 end
 

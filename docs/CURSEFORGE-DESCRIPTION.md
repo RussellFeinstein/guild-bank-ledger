@@ -22,7 +22,7 @@ Every guild member running the addon automatically logs and shares data. No setu
 - Catching up happens in short sessions rather than one long one, so a member joining a guild with years of history fills in over a series of handovers instead of tying up a partner for hours
 - Delta sync only transfers what's actually different
 - Compressed transfers, retry on failure, FPS-adaptive throttling
-- **Members on different versions keep syncing** (0.37.0 and later). Your guild does not have to update in lockstep for data to keep flowing
+- **Members on different versions keep syncing** (0.43.0 and later). Your guild does not have to update in lockstep for data to keep flowing. Version 0.43.0 removed duplicate records from early 2026 and syncs only with 0.43.0 and later, so ask your guild to update
 
 ## UI (`/gbl` or minimap button)
 
