@@ -418,6 +418,30 @@ describe("History tabs leave out the proven money copies (#346)", function()
             end
             assert.equals(1, lines)
         end)
+
+        it("says so once for each guild whose check raises", function()
+            -- A player can change guild without logging out (#287).
+            GBL.MoneyScanCopies = function() error("a record the check cannot read") end
+            local other = GBL.db.global.guilds["OtherGuild"]
+
+            GBL:RecordsForView(gd)
+            GBL:RecordsForView(other)
+            GBL:RecordsForView(gd)
+
+            local lines = 0
+            for _, e in ipairs(GBL:GetLog("system")) do
+                if e.message:find("Duplicate check failed", 1, true) then lines = lines + 1 end
+            end
+            assert.equals(2, lines)
+        end)
+
+        it("leaves the hidden list alone for a caller that wants the item rows only", function()
+            GBL:RecordsForView(gd)
+            GBL:RecordsForView(gd, true)
+
+            assert.equals(1, #GBL._hiddenMoneyCopies)
+            assert.equals(copy, GBL._hiddenMoneyCopies[1])
+        end)
     end)
 
     ---------------------------------------------------------------------------
@@ -425,10 +449,9 @@ describe("History tabs leave out the proven money copies (#346)", function()
     ---------------------------------------------------------------------------
 
     describe("/gbl cleanup", function()
-        it("refreshes the window, so a record it removed leaves the Gold log", function()
-            -- A pair of one transaction with a count of 1: the cleanup removes
-            -- the later-scanned one. The copy keeps the Gold log on a fresh
-            -- array, which only a refresh replaces.
+        -- A pair of one transaction with a count of 1: the cleanup removes the
+        -- later-scanned one.
+        local function trimmablePair()
             local first = money({
                 player = FOREIGN, amount = 1234, timestamp = S - 3 * HOUR - 5,
                 scanTime = S - 2 * HOUR, scannedBy = ME,
@@ -440,6 +463,23 @@ describe("History tabs leave out the proven money copies (#346)", function()
             store("moneyTransactions", first, second)
             gd.eventCounts[GBL:BuildTxPrefix(first) .. math.floor(first.timestamp / HOUR)] =
                 { count = 1, asOf = 1 }
+            return first, second
+        end
+
+        local function counting(method)
+            local n = { calls = 0 }
+            local orig = GBL[method]
+            GBL[method] = function(...)
+                n.calls = n.calls + 1
+                return orig(...)
+            end
+            return n
+        end
+
+        it("refreshes the window, so a record it removed leaves the Gold log", function()
+            -- The copy keeps the Gold log on a fresh array, which only a
+            -- refresh replaces.
+            local _, second = trimmablePair()
             GBL:ToggleMainFrame()
             GBL:SelectTab("goldlog")
             assert.is_true(holds(GBL._goldLogTransactions, second))
@@ -449,6 +489,42 @@ describe("History tabs leave out the proven money copies (#346)", function()
             assert.is_false(holds(gd.moneyTransactions, second))
             assert.is_false(holds(GBL._goldLogTransactions, second))
             assert.is_false(holds(GBL._goldLogTransactions, copy))
+        end)
+
+        it("rebuilds no tab that holds no history rows", function()
+            -- A refresh of Restock, Sort or Layout is a full rebuild, which
+            -- drops the focus the confirm-at-price pause set and any text not
+            -- yet committed in a Layout field.
+            local _, second = trimmablePair()
+            GBL:ToggleMainFrame()
+            GBL:SelectTab("sync")
+            local selects = counting("SelectTab")
+
+            GBL:RunCleanup()
+
+            assert.is_false(holds(gd.moneyTransactions, second))
+            assert.equals(0, selects.calls)
+        end)
+
+        it("refreshes nothing when it removed nothing", function()
+            GBL:ToggleMainFrame()
+            GBL:SelectTab("goldlog")
+            local refreshes = counting("RefreshUI")
+
+            GBL:RunCleanup()
+
+            assert.equals(0, refreshes.calls)
+        end)
+
+        it("refreshes nothing while the window is closed", function()
+            trimmablePair()
+            GBL:CreateMainFrame()
+            GBL:SelectTab("goldlog")
+            local refreshes = counting("RefreshUI")
+
+            GBL:RunCleanup()
+
+            assert.equals(0, refreshes.calls)
         end)
     end)
 
