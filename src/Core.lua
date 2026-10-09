@@ -3469,11 +3469,13 @@ end
 -- An anchor is a record this account scanned whose time is still its own
 -- scan's: NormalizeRecordId hands a stored record the sender's timestamp on
 -- a near match, and then its second is another scan's, so the remainder is
--- checked. A scan that ran exactly on the hour anchors nothing: intake gives
--- a synced record that arrives with no timestamp the start of its id's hour
--- (reconstructSyncRecord), so a second of 0 may be one no scan minted. A
--- copy is a record sync labelled, at an anchor's second, received after
--- that scan.
+-- checked. A record exactly on the hour anchors nothing, because a second
+-- of 0 can be written rather than read: intake gives a synced record that
+-- arrives with no timestamp the start of its id's hour
+-- (reconstructSyncRecord), and the epoch repair writes the start of the hour
+-- onto stored records, this account's scans included
+-- (MigrateRepairEpochTimestamps). A copy is a record sync labelled, at an
+-- anchor's second, received after that scan.
 -- @param cluster table Records of one prefix, chained under an hour apart
 -- @param isOwn function name -> boolean, the account roster test
 -- @param into table The set the copies are added to
@@ -3599,11 +3601,15 @@ function GBL:RunCleanup()
         self:Print(format("Cleanup: removed %d duplicate record%s (%d item tx, %d money tx remain).",
             totalRemoved, totalRemoved == 1 and "" or "s",
             #guildData.transactions, #guildData.moneyTransactions))
-        -- A tab can hold an array of its own rather than the live table (the
-        -- Member view, and the Gold log whenever it leaves a copy out, #346),
-        -- so only a refresh takes the removed records off the screen.
-        if self.mainFrame and self.mainFrame.frame
-            and self.mainFrame.frame:IsShown() then
+        -- A history tab can hold an array of its own rather than the live
+        -- table (every one in the Member view, Consumption always, and the
+        -- Gold log whenever it leaves a copy out, #346), so only a refresh
+        -- takes the removed records off the screen. Any other tab's refresh
+        -- is a full rebuild with nothing stale to replace, and would drop the
+        -- confirm-at-price focus or uncommitted Layout text.
+        local tab = self.activeTab
+        if self:IsMainFrameShown() and (tab == "transactions"
+            or tab == "goldlog" or tab == "consumption") then
             self:RefreshUI()
         end
     else

@@ -470,17 +470,21 @@ end
 -- (#222), and a pass that removes records has to refresh (RunCleanup).
 --
 -- The check walks every gold record, so a caller that shows no gold rows
--- passes `itemsOnly` and skips it. It runs under pcall: it reads record
--- fields the corruption class can break (#263), and a raise here would
--- blank the tab. A failure shows every gold record and says so once a
--- session on the system channel.
+-- passes `itemsOnly`, which skips it and leaves the hidden list as it was.
+-- It runs under pcall so that it adds no new way to break a tab: a failure
+-- shows every gold record and says so once a session for each guild on the
+-- system channel. That is all the pcall buys. A record the Gold log's own
+-- filters and sort cannot read (#263's corruption class) breaks the tab
+-- with or without it, as it did before.
 -- @param guildData table|nil The current guild's data
 -- @param itemsOnly boolean|nil Return the item rows and an empty money table
 -- @return table transactions, table moneyTransactions
 function GBL:RecordsForView(guildData, itemsOnly)
     local level = self:GetAccessLevel()
-    self._hiddenMoneyCopies = {}
-    if level == "sync_only" then return {}, {} end
+    if level == "sync_only" then
+        self._hiddenMoneyCopies = {}
+        return {}, {}
+    end
     local ownOnly = level == "own_transactions"
     local transactions = guildData and guildData.transactions or {}
     if ownOnly then transactions = self:FilterToOwnRecords(transactions) end
@@ -489,8 +493,10 @@ function GBL:RecordsForView(guildData, itemsOnly)
     local moneyTransactions = guildData and guildData.moneyTransactions or {}
     local ok, copies, isCopy = pcall(self.MoneyScanCopies, self, guildData)
     if not ok then
-        if not self._copyCheckFailed then
-            self._copyCheckFailed = true
+        self._copyCheckFailed = self._copyCheckFailed or setmetatable({}, { __mode = "k" })
+        local key = guildData or self
+        if not self._copyCheckFailed[key] then
+            self._copyCheckFailed[key] = true
             self:SystemWarn("Duplicate check failed, showing every gold record: %s",
                 tostring(copies))
         end
