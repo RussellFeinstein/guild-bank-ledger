@@ -369,13 +369,17 @@ this account scanned was therefore minted by that same scan: it is the scan's ow
 under another occurrence index, which intake does not match (#354). `GBL:MoneyScanCopies`
 (`src/Core.lua`) names such a record in a money cluster no count reaches, reading the cleanup's own
 clusters, and `GBL:RecordsForView` (`UI/UI.lua`) leaves it out of the rows every history tab
-renders. The Gold log's count line says how many it left out under the filters in force. Three
+renders. The Gold log's count line and the Consumption tab's gold line say how many it left out
+under the filters in force. Three
 conditions keep the proof sound:
 
 - **The anchor's time is its own.** `NormalizeRecordId` hands a stored record the sender's timestamp
   on a near match, so its second becomes another scan's. 476 of the 17,887 records this account
   scanned carry such a time, which is why the remainder is checked, and why #346's own table, which
   counted every same-second pair from two origins as a copy, overstated the items.
+- **The anchor's scan did not run exactly on the hour.** Intake gives a synced record that arrives
+  with no timestamp the start of its id's hour (`reconstructSyncRecord`), so a second of 0 may be one
+  no scan minted. A real copy of a scan that ran at hh:00:00 stays counted, about one scan in 3,600.
 - **The copy arrived after that scan, and both times are valid.**
 - **"This account" is the account roster** `db.global.characters`, read through
   `GBL:IsOwnCharacterName` with `requireKnownRealm`. Before v0.7.8 sync stored a record under its
@@ -389,8 +393,10 @@ conditions keep the proof sound:
 
 On the file saved 2026-10-06 that is 18 money records and 971,478 gold, transactions from 2026-04-08
 to 2026-04-12, all synced back from one peer. Reading them takes 15 ms on desktop Lua 5.1 and the whole
-`RecordsForView` 19 ms, with no cache; `SelectTab` and `RefreshUI` call it, so every tab switch and
-every refresh pays that.
+`RecordsForView` 19 ms, with no cache, paid by the Gold log and the Consumption tab at each build and
+refresh; a tab that shows no gold rows skips it. The read runs under pcall, because it reads record
+fields the corruption class can break (#263): a failure shows every gold record and says so once a
+session on the system channel.
 
 **Why nothing is deleted.** The first build (2026-10-04 to 2026-10-06, not merged) dropped the copies
 from the store. Two costs came with deleting, found by its sixth code review and the re-audit after
@@ -441,6 +447,12 @@ Limits the code reviews raised (2026-10-05), kept:
   same-prefix events in one hour and this account's later scan, at the same second past the hour,
   saw only the second, the peer's first arrives looking like a copy and is left out. About 1 in 3,600
   per pair of scans.
+- **A bare scanner name read through today's roster.** `playerRealms` records who holds a bare name in
+  the guild now, not who scanned under it. Before v0.7.8 sync stored a record under its scanner's bare
+  name with no `sync:` label, so a record another account's same-named character scanned, after that
+  character left and the name came to place on this account's character, can anchor a copy, and a
+  second real event at the same second from the same scan, synced later, would be left out. On the
+  live file all 521 bare-named money records carry this account's one name.
 - **A scanner name a migration qualified by guessing.** Rung 3 (`MigrateSchemaV2ToV3`) qualified every
   bare `scannedBy` through `ResolvePlayerName`, the logged-in guild's roster and then the local realm,
   and stored the result. `IsOwnCharacterName` takes a qualified name as it stands, so on a store that

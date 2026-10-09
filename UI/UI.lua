@@ -316,7 +316,7 @@ function GBL:RefreshUI()
         self._goldLogTransactions = moneyTransactions
         self:RefreshGoldLog()
     elseif tab == "transactions" and self._ledgerContainer then
-        self._ledgerTransactions = self:RecordsForView(guildData)
+        self._ledgerTransactions = self:RecordsForView(guildData, true)
         self:RefreshLedgerView()
     elseif tab == "consumption" and self._consumptionContainer then
         local transactions, moneyTransactions = self:RecordsForView(guildData)
@@ -370,15 +370,20 @@ function GBL:SelectTab(tabName)
     end
 
     -- The rows this access level may see (#222). RefreshUI reads the same
-    -- helper, so the build and every later re-render cannot disagree.
-    local transactions, moneyTransactions = self:RecordsForView(self:GetGuildData())
+    -- helper, so the build and every later re-render cannot disagree. Read
+    -- in the three history branches only, and for the item rows alone where
+    -- that is all the tab shows: the gold rows cost a pass over every gold
+    -- record for the copies they leave out (#346).
+    local guildData = self:GetGuildData()
 
     if tabName == "transactions" then
-        self:BuildTransactionsTab(self.tabGroup, transactions)
+        self:BuildTransactionsTab(self.tabGroup, (self:RecordsForView(guildData, true)))
     elseif tabName == "goldlog" then
+        local _, moneyTransactions = self:RecordsForView(guildData)
         self:BuildGoldLogTab(self.tabGroup, moneyTransactions)
     elseif tabName == "consumption" then
         -- Merge item + money transactions for consumption aggregation
+        local transactions, moneyTransactions = self:RecordsForView(guildData)
         local allTx = {}
         for i = 1, #transactions do allTx[#allTx + 1] = transactions[i] end
         for i = 1, #moneyTransactions do allTx[#allTx + 1] = moneyTransactions[i] end
@@ -458,19 +463,39 @@ end
 -- out at every level (MoneyScanCopies, #346), so the Gold log and the
 -- Consumption tab count each such transaction once under every filter.
 -- They stay stored. The records left out, filtered for the level as the
--- rows are, go on `self._hiddenMoneyCopies`, which the Gold log's count
--- line reads. With one to leave out, full access gets a fresh money array
--- per call rather than the live table, so every control reads the array
--- its tab holds at call time and never one captured at the build (#222).
+-- rows are, go on `self._hiddenMoneyCopies`, which both tabs' notes read
+-- (HiddenCopiesNote). With one to leave out, full access gets a fresh money
+-- array per call rather than the live table, so every control reads the
+-- array its tab holds at call time and never one captured at the build
+-- (#222), and a pass that removes records has to refresh (RunCleanup).
+--
+-- The check walks every gold record, so a caller that shows no gold rows
+-- passes `itemsOnly` and skips it. It runs under pcall: it reads record
+-- fields the corruption class can break (#263), and a raise here would
+-- blank the tab. A failure shows every gold record and says so once a
+-- session on the system channel.
 -- @param guildData table|nil The current guild's data
+-- @param itemsOnly boolean|nil Return the item rows and an empty money table
 -- @return table transactions, table moneyTransactions
-function GBL:RecordsForView(guildData)
+function GBL:RecordsForView(guildData, itemsOnly)
     local level = self:GetAccessLevel()
     self._hiddenMoneyCopies = {}
     if level == "sync_only" then return {}, {} end
+    local ownOnly = level == "own_transactions"
     local transactions = guildData and guildData.transactions or {}
+    if ownOnly then transactions = self:FilterToOwnRecords(transactions) end
+    if itemsOnly then return transactions, {} end
+
     local moneyTransactions = guildData and guildData.moneyTransactions or {}
-    local copies, isCopy = self:MoneyScanCopies(guildData)
+    local ok, copies, isCopy = pcall(self.MoneyScanCopies, self, guildData)
+    if not ok then
+        if not self._copyCheckFailed then
+            self._copyCheckFailed = true
+            self:SystemWarn("Duplicate check failed, showing every gold record: %s",
+                tostring(copies))
+        end
+        copies, isCopy = {}, {}
+    end
     if #copies > 0 then
         local kept = {}
         for _, rec in ipairs(moneyTransactions) do
@@ -478,13 +503,23 @@ function GBL:RecordsForView(guildData)
         end
         moneyTransactions = kept
     end
-    if level ~= "own_transactions" then
-        self._hiddenMoneyCopies = copies
-        return transactions, moneyTransactions
+    if ownOnly then
+        self._hiddenMoneyCopies = self:FilterToOwnRecords(copies)
+        return transactions, self:FilterToOwnRecords(moneyTransactions)
     end
-    self._hiddenMoneyCopies = self:FilterToOwnRecords(copies)
-    return self:FilterToOwnRecords(transactions),
-        self:FilterToOwnRecords(moneyTransactions)
+    self._hiddenMoneyCopies = copies
+    return transactions, moneyTransactions
+end
+
+--- The note a tab adds where it left gold records out (#346): the copies
+-- RecordsForView left out that these filters would have shown, so a
+-- missing row or a lower total is never silent.
+-- @param filters table|nil The filters in force
+-- @return string " (N duplicate(s) hidden)", or "" when none
+function GBL:HiddenCopiesNote(filters)
+    local hidden = self:CountFilterResults(self._hiddenMoneyCopies or {}, filters)
+    if hidden == 0 then return "" end
+    return " (" .. hidden .. (hidden == 1 and " duplicate" or " duplicates") .. " hidden)"
 end
 
 --- Show a yellow banner indicating restricted access mode.
@@ -871,14 +906,8 @@ function GBL:RenderGoldLog(container, moneyTransactions, filters)
         end
     end
 
-    -- Status line. It names the copies RecordsForView left out (#346) that
-    -- these filters would have shown, so a missing row is never silent.
-    local hidden = #self:FilterTransactions(self._hiddenMoneyCopies or {}, filters)
-    local hiddenText = ""
-    if hidden > 0 then
-        hiddenText = " (" .. hidden .. (hidden == 1 and " duplicate" or " duplicates")
-            .. " hidden)"
-    end
+    -- Status line, with the copies RecordsForView left out (#346)
+    local hiddenText = self:HiddenCopiesNote(filters)
     local status = AceGUI:Create("Label")
     status:SetFullWidth(true)
     if #filtered > pageSize then
@@ -1263,7 +1292,7 @@ function GBL:RenderConsumptionDashboard(container, transactions, filters)
     )
     container:AddChild(itemsLine)
 
-    -- Gold line
+    -- Gold line, with the copies RecordsForView left out of it (#346)
     local goldNetColor = totals.goldNet >= 0 and depositColor or withdrawColor
     local goldLine = AceGUI:Create("Label")
     goldLine:SetFullWidth(true)
@@ -1272,7 +1301,8 @@ function GBL:RenderConsumptionDashboard(container, transactions, filters)
         colorHex(depositColor) .. self:FormatMoney(totals.goldDeposited) .. " in|r  ||  " ..
         colorHex(withdrawColor) .. self:FormatMoney(totals.goldWithdrawn) .. " out|r  ||  " ..
         "Net: " .. colorHex(goldNetColor) ..
-        (totals.goldNet >= 0 and "+" or "") .. self:FormatMoney(totals.goldNet) .. "|r"
+        (totals.goldNet >= 0 and "+" or "") .. self:FormatMoney(totals.goldNet) .. "|r" ..
+        self:HiddenCopiesNote(filters)
     )
     container:AddChild(goldLine)
 

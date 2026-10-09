@@ -3469,8 +3469,11 @@ end
 -- An anchor is a record this account scanned whose time is still its own
 -- scan's: NormalizeRecordId hands a stored record the sender's timestamp on
 -- a near match, and then its second is another scan's, so the remainder is
--- checked. A copy is a record sync labelled, at an anchor's second, received
--- after that scan.
+-- checked. A scan that ran exactly on the hour anchors nothing: intake gives
+-- a synced record that arrives with no timestamp the start of its id's hour
+-- (reconstructSyncRecord), so a second of 0 may be one no scan minted. A
+-- copy is a record sync labelled, at an anchor's second, received after
+-- that scan.
 -- @param cluster table Records of one prefix, chained under an hour apart
 -- @param isOwn function name -> boolean, the account roster test
 -- @param into table The set the copies are added to
@@ -3479,7 +3482,7 @@ local function markScanCopies(self, cluster, isOwn, into)
     for _, rec in ipairs(cluster) do
         local ts, st = rec.timestamp, rec.scanTime
         if self:IsValidTimestamp(ts) and type(st) == "number"
-            and (st - ts) % 3600 == 0
+            and (st - ts) % 3600 == 0 and ts % 3600 ~= 0
             and not isSyncedRecord(rec) and isOwn(rec.scannedBy) then
             anchors = anchors or {}
             if not anchors[ts] or st < anchors[ts] then anchors[ts] = st end
@@ -3596,6 +3599,13 @@ function GBL:RunCleanup()
         self:Print(format("Cleanup: removed %d duplicate record%s (%d item tx, %d money tx remain).",
             totalRemoved, totalRemoved == 1 and "" or "s",
             #guildData.transactions, #guildData.moneyTransactions))
+        -- A tab can hold an array of its own rather than the live table (the
+        -- Member view, and the Gold log whenever it leaves a copy out, #346),
+        -- so only a refresh takes the removed records off the screen.
+        if self.mainFrame and self.mainFrame.frame
+            and self.mainFrame.frame:IsShown() then
+            self:RefreshUI()
+        end
     else
         self:Print("Cleanup: no duplicates found.")
     end
