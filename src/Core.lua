@@ -4,7 +4,7 @@
 ------------------------------------------------------------------------
 
 local ADDON_NAME = "GuildBankLedger"
-local VERSION = "0.43.2"
+local VERSION = "0.43.3"
 local DEV_BUILD = nil  -- MUST be nil on main; set to a string (e.g. "sync") on dev branches
 
 local GBL = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME,
@@ -565,6 +565,67 @@ function GBL:RecordOwnCharacter()
     if not realm or realm == "" or realm == "UnknownRealm" then return end
     self.db.global.characters = self.db.global.characters or {}
     self.db.global.characters[name .. "-" .. realm] = GetServerTime()
+end
+
+--- The characters this account has played, in the qualified Name-Realm
+-- form records carry (#222, docs/PLAN-views-and-access.md section 7).
+-- The logged-in character is added the way RecordOwnCharacter writes it,
+-- so a member's own rows show before the first roster tick has recorded
+-- the character. Both skip the "UnknownRealm" sentinel: a key built from
+-- it matches no record, so while the realm APIs are cold the set can come
+-- back empty and the member sees nothing rather than someone else's rows.
+-- @return table [Name-Realm] = true
+function GBL:GetOwnCharacterNames()
+    local names = {}
+    local me = UnitName("player")
+    local realm = self:GetLocalRealm()
+    if me and me ~= "" and realm and realm ~= "" and realm ~= "UnknownRealm" then
+        names[me .. "-" .. realm] = true
+    end
+    local chars = self.db and self.db.global and self.db.global.characters
+    if type(chars) == "table" then
+        for name in pairs(chars) do names[name] = true end
+    end
+    return names
+end
+
+--- Is this name one of this account's characters? The one test both readers
+-- of the roster share: the Member view's row filter (FilterToOwnRecords) and
+-- MoneyScanCopies' test for a scan this account made (#346).
+--
+-- Matched on the qualified name, never on a bare-name compare: a same-named
+-- character on another realm is someone else, and the member's own alts are
+-- not. A bare name (everything before 2026-04-13) takes its realm from the
+-- playerRealms the caller passes, the roster of the guild the records belong
+-- to, and otherwise the local realm. Not through ResolvePlayerName, whose
+-- fallback reads the logged-in guild's roster: a caller reading another
+-- guild's records would be told who a bare name is in the wrong guild.
+--
+-- One case is refused rather than resolved: a bare name playerRealms marks
+-- ambiguous (`playerRealms[name] == false`, two characters of that name on
+-- connected realms). It would fall back to the local realm, so the viewer's
+-- name and a stranger's would match. A bare name playerRealms has no entry
+-- for at all is read on the local realm for the Member view, so a same-named
+-- stranger from another realm still matches there; nothing can tell those
+-- apart. MoneyScanCopies passes requireKnownRealm and gets no for that name
+-- instead: it is proving a record a copy, and a guess is not a proof.
+-- @param name string|nil A player name, bare or qualified
+-- @param own table The set GetOwnCharacterNames returns
+-- @param playerRealms table|nil The playerRealms of the guild the name came
+--   from: its members' realms, not the account roster `own` is built from
+-- @param requireKnownRealm boolean|nil Refuse a bare name that playerRealms
+--   holds no realm for, instead of reading it on the local realm
+-- @return boolean
+function GBL:IsOwnCharacterName(name, own, playerRealms, requireKnownRealm)
+    if type(name) ~= "string" or name == "" then return false end
+    if name:find("%-") then return own[name] == true end
+    local realm = playerRealms and playerRealms[name]
+    if realm == false then return false end
+    if type(realm) ~= "string" then
+        if requireKnownRealm then return false end
+        realm = self:GetLocalRealm()
+    end
+    return own[name .. "-" .. realm] == true
 end
 
 --- Build/update the persistent guild roster cache.
@@ -3200,6 +3261,83 @@ function GBL:EventCountWindow()
     return -radius, radius
 end
 
+--- Group a storage array by prefix and chain each group into clusters.
+-- What a cluster is, read by CleanupWithEventCounts and MoneyScanCopies
+-- (#346) so the two cannot disagree about it. Groups come back in the order
+-- their first record appears; a group's records are sorted by timestamp and
+-- chained while each is under an hour from the one before. The cleanup
+-- writes its survivors back in exactly this order (#342).
+-- @param records table A storage array, read and never written
+-- @return table prefixes in first-seen order, table prefix -> array of clusters
+local function clusterByPrefix(self, records)
+    local groups, groupOrder = {}, {}
+    for _, record in ipairs(records) do
+        local prefix = self:BuildTxPrefix(record)
+        if not groups[prefix] then
+            groups[prefix] = {}
+            groupOrder[#groupOrder + 1] = prefix
+        end
+        groups[prefix][#groups[prefix] + 1] = record
+    end
+
+    local clustersOf = {}
+    for _, prefix in ipairs(groupOrder) do
+        local group = groups[prefix]
+        if #group <= 1 then
+            clustersOf[prefix] = { group }
+        else
+            -- Sort by timestamp to identify event clusters
+            table.sort(group, function(a, b)
+                return (a.timestamp or 0) < (b.timestamp or 0)
+            end)
+
+            -- Cluster records by timestamp proximity (< 3600 = same hour event)
+            local clusters = {}
+            local currentCluster = { group[1] }
+            for i = 2, #group do
+                local diff = math.abs(
+                    (group[i].timestamp or 0) - (group[i-1].timestamp or 0))
+                if diff < 3600 then
+                    currentCluster[#currentCluster + 1] = group[i]
+                else
+                    clusters[#clusters + 1] = currentCluster
+                    currentCluster = { group[i] }
+                end
+            end
+            clusters[#clusters + 1] = currentCluster
+            clustersOf[prefix] = clusters
+        end
+    end
+    return groupOrder, clustersOf
+end
+
+--- The largest event count the cleanup's window reaches from a cluster.
+-- Every baseHash within EventCountWindow of any of its records' slots is
+-- read, because two scans of one transaction can round its hour differently.
+-- @param eventCounts table|nil The guild's counts; anything else reads as none
+-- @return number 0 when no count reaches the cluster
+local function maxCountNear(eventCounts, prefix, cluster, first, last)
+    if type(eventCounts) ~= "table" then return 0 end
+    local slotsChecked = {}
+    for _, rec in ipairs(cluster) do
+        local slot = math.floor((rec.timestamp or GetServerTime()) / 3600)
+        slotsChecked[slot] = true
+    end
+
+    local maxKnownCount = 0
+    for slot in pairs(slotsChecked) do
+        for s = slot + first, slot + last do
+            local entry = eventCounts[prefix .. s]
+            if entry and type(entry) == "table"
+                and type(entry.count) == "number"
+                and entry.count > maxKnownCount then
+                maxKnownCount = entry.count
+            end
+        end
+    end
+    return maxKnownCount
+end
+
 --- Remove excess records using persisted eventCounts as ground truth.
 -- Groups records by prefix, clusters by timestamp proximity, then trims each
 -- cluster to the max known eventCount for its baseHash, across the window
@@ -3225,82 +3363,31 @@ function GBL:CleanupWithEventCounts(guildData)
         local records = guildData[storageKey]
         if records and #records > 0 then
             local removedBefore = totalRemoved
-            -- Group by prefix (slot-independent)
-            local groups = {}
-            local groupOrder = {}
-            for _, record in ipairs(records) do
-                local prefix = self:BuildTxPrefix(record)
-                if not groups[prefix] then
-                    groups[prefix] = {}
-                    groupOrder[#groupOrder + 1] = prefix
-                end
-                groups[prefix][#groups[prefix] + 1] = record
-            end
+            local groupOrder, clustersOf = clusterByPrefix(self, records)
 
             local surviving = {}
             for _, prefix in ipairs(groupOrder) do
-                local group = groups[prefix]
-                if #group <= 1 then
-                    surviving[#surviving + 1] = group[1]
-                else
-                    -- Sort by timestamp to identify event clusters
-                    table.sort(group, function(a, b)
-                        return (a.timestamp or 0) < (b.timestamp or 0)
-                    end)
-
-                    -- Cluster records by timestamp proximity (< 3600 = same hour event)
-                    local clusters = {}
-                    local currentCluster = { group[1] }
-                    for i = 2, #group do
-                        local diff = math.abs(
-                            (group[i].timestamp or 0) - (group[i-1].timestamp or 0))
-                        if diff < 3600 then
-                            currentCluster[#currentCluster + 1] = group[i]
-                        else
-                            clusters[#clusters + 1] = currentCluster
-                            currentCluster = { group[i] }
-                        end
+                for _, cluster in ipairs(clustersOf[prefix]) do
+                    local maxKnownCount = 0
+                    if #cluster > 1 then
+                        maxKnownCount = maxCountNear(guildData.eventCounts,
+                            prefix, cluster, first, last)
                     end
-                    clusters[#clusters + 1] = currentCluster
 
-                    for _, cluster in ipairs(clusters) do
-                        -- Find max eventCount across every baseHash the
-                        -- window reaches, because two scans of one transaction
-                        -- can round its hour differently.
-                        local slotsChecked = {}
+                    if maxKnownCount == 0 or #cluster <= maxKnownCount then
+                        -- No count data or within bounds: keep all
                         for _, rec in ipairs(cluster) do
-                            local slot = math.floor((rec.timestamp or GetServerTime()) / 3600)
-                            slotsChecked[slot] = true
+                            surviving[#surviving + 1] = rec
                         end
-
-                        local maxKnownCount = 0
-                        for slot in pairs(slotsChecked) do
-                            for s = slot + first, slot + last do
-                                local baseHash = prefix .. s
-                                local entry = guildData.eventCounts[baseHash]
-                                if entry and type(entry) == "table"
-                                    and type(entry.count) == "number"
-                                    and entry.count > maxKnownCount then
-                                    maxKnownCount = entry.count
-                                end
-                            end
+                    else
+                        -- Trim to maxKnownCount, preferring oldest by scanTime
+                        table.sort(cluster, function(a, b)
+                            return (a.scanTime or 0) < (b.scanTime or 0)
+                        end)
+                        for i = 1, maxKnownCount do
+                            surviving[#surviving + 1] = cluster[i]
                         end
-
-                        if maxKnownCount == 0 or #cluster <= maxKnownCount then
-                            -- No count data or within bounds: keep all
-                            for _, rec in ipairs(cluster) do
-                                surviving[#surviving + 1] = rec
-                            end
-                        else
-                            -- Trim to maxKnownCount, preferring oldest by scanTime
-                            table.sort(cluster, function(a, b)
-                                return (a.scanTime or 0) < (b.scanTime or 0)
-                            end)
-                            for i = 1, maxKnownCount do
-                                surviving[#surviving + 1] = cluster[i]
-                            end
-                            totalRemoved = totalRemoved + (#cluster - maxKnownCount)
-                        end
+                        totalRemoved = totalRemoved + (#cluster - maxKnownCount)
                     end
                 end
             end
@@ -3374,6 +3461,101 @@ function GBL:CleanupWithEventCounts(guildData)
     return totalRemoved
 end
 
+local function isSyncedRecord(rec)
+    return type(rec.scannedBy) == "string" and rec.scannedBy:match("^sync:") ~= nil
+end
+
+--- Mark the records of one cluster that are a scan's own record come back.
+-- An anchor is a record this account scanned whose time is still its own
+-- scan's: NormalizeRecordId hands a stored record the sender's timestamp on
+-- a near match, and then its second is another scan's, so the remainder is
+-- checked. A record exactly on the hour anchors nothing, because a second
+-- of 0 can be written rather than read: intake gives a synced record that
+-- arrives with no timestamp the start of its id's hour
+-- (reconstructSyncRecord), and the epoch repair writes the start of the hour
+-- onto stored records, this account's scans included
+-- (MigrateRepairEpochTimestamps). A copy is a record sync labelled, at an
+-- anchor's second, received after that scan.
+-- @param cluster table Records of one prefix, chained under an hour apart
+-- @param isOwn function name -> boolean, the account roster test
+-- @param into table The set the copies are added to
+local function markScanCopies(self, cluster, isOwn, into)
+    local anchors
+    for _, rec in ipairs(cluster) do
+        local ts, st = rec.timestamp, rec.scanTime
+        if self:IsValidTimestamp(ts) and type(st) == "number"
+            and (st - ts) % 3600 == 0 and ts % 3600 ~= 0
+            and not isSyncedRecord(rec) and isOwn(rec.scannedBy) then
+            anchors = anchors or {}
+            if not anchors[ts] or st < anchors[ts] then anchors[ts] = st end
+        end
+    end
+    if not anchors then return end
+
+    for _, rec in ipairs(cluster) do
+        local scannedAt = anchors[rec.timestamp]
+        if scannedAt and isSyncedRecord(rec)
+            and type(rec.scanTime) == "number" and rec.scanTime > scannedAt then
+            into[rec] = true
+        end
+    end
+end
+
+--- The money records sync carried back to the scan of this account's that
+-- minted them (#346), which the history tabs leave out (RecordsForView).
+--
+-- A scan's timestamps are its scan time minus whole hours, so every record
+-- one scan stores carries that scan's second past the hour. A synced record
+-- at the exact second of a record this account scanned was therefore minted
+-- by that scan: it is the scan's own record come back under another
+-- occurrence index, which intake does not match (#354). The cleanup keeps
+-- such a record whenever no event count reaches its cluster, and counts
+-- began on 2026-04-15, so the April copies stayed stored twice.
+--
+-- This reads and never writes. Deleting the copies was built and declined
+-- (docs/DATA-MODEL.md, #346): every guildmate holding them would differ from
+-- this store for good, since only the store that scanned can prove a copy,
+-- and a deleted copy's next arrival could fuzzy-match a real record. Kept
+-- stored, a copy that comes back is matched by id as any record is, and a
+-- wrong call hides a record rather than destroying it.
+--
+-- The clusters are the cleanup's own (clusterByPrefix, maxCountNear), and
+-- one that a count reaches is the cleanup's to trim, so it is not read
+-- here. "This account" is the account roster through IsOwnCharacterName
+-- with requireKnownRealm: a bare scanner name counts only where this
+-- guild's playerRealms gives its realm. Money only: items were never
+-- measured, and reaching them is a decision of its own.
+-- @param guildData table|nil Guild data from AceDB
+-- @return table the copies, in the order the money array holds them
+-- @return table the same records as a set, record -> true
+function GBL:MoneyScanCopies(guildData)
+    local list, isCopy = {}, {}
+    local records = guildData and guildData.moneyTransactions
+    if type(records) ~= "table" then return list, isCopy end
+
+    local own = self:GetOwnCharacterNames()
+    local playerRealms = guildData.playerRealms
+    local function isOwn(name)
+        return self:IsOwnCharacterName(name, own, playerRealms, true)
+    end
+    local first, last = self:EventCountWindow()
+
+    local groupOrder, clustersOf = clusterByPrefix(self, records)
+    for _, prefix in ipairs(groupOrder) do
+        for _, cluster in ipairs(clustersOf[prefix]) do
+            if #cluster > 1 and maxCountNear(guildData.eventCounts,
+                    prefix, cluster, first, last) == 0 then
+                markScanCopies(self, cluster, isOwn, isCopy)
+            end
+        end
+    end
+
+    for _, rec in ipairs(records) do
+        if isCopy[rec] then list[#list + 1] = rec end
+    end
+    return list, isCopy
+end
+
 --- Recount every player's stats from the stored records, from zero.
 -- For a pass that removes or renames records: stats are counted once, when a
 -- record is stored, so they would go on counting what is gone. Read by
@@ -3419,6 +3601,17 @@ function GBL:RunCleanup()
         self:Print(format("Cleanup: removed %d duplicate record%s (%d item tx, %d money tx remain).",
             totalRemoved, totalRemoved == 1 and "" or "s",
             #guildData.transactions, #guildData.moneyTransactions))
+        -- A history tab can hold an array of its own rather than the live
+        -- table (every one in the Member view, Consumption always, and the
+        -- Gold log whenever it leaves a copy out, #346), so only a refresh
+        -- takes the removed records off the screen. Any other tab's refresh
+        -- is a full rebuild with nothing stale to replace, and would drop the
+        -- confirm-at-price focus or uncommitted Layout text.
+        local tab = self.activeTab
+        if self:IsMainFrameShown() and (tab == "transactions"
+            or tab == "goldlog" or tab == "consumption") then
+            self:RefreshUI()
+        end
     else
         self:Print("Cleanup: no duplicates found.")
     end

@@ -362,6 +362,106 @@ count near any of them, which `CleanupWithEventCounts` keeps whole. Counts began
 the duplicates stored before then are this case. After #332's repair the file holds 81 such money
 records, all from April and about 1.12M gold counted twice, and about 670 item records. Issue #346.
 
+**Verdict: the copies that can be proven are left out of the history tabs in v0.43.3 (#346), and
+every record stays stored.** A scan's timestamps are its scan time minus whole hours, so every record one scan
+stores carries that scan's second past the hour. A synced record at the exact second of a record
+this account scanned was therefore minted by that same scan: it is the scan's own record come back
+under another occurrence index, which intake does not match (#354). `GBL:MoneyScanCopies`
+(`src/Core.lua`) names such a record in a money cluster no count reaches, reading the cleanup's own
+clusters, and `GBL:RecordsForView` (`UI/UI.lua`) leaves it out of the rows every history tab
+renders. The Gold log's count line and the Consumption tab's gold line say how many it left out
+under the filters in force. Four conditions keep the proof sound:
+
+- **The anchor's time is its own.** `NormalizeRecordId` hands a stored record the sender's timestamp
+  on a near match, so its second becomes another scan's. 476 of the 17,887 records this account
+  scanned carry such a time, which is why the remainder is checked, and why #346's own table, which
+  counted every same-second pair from two origins as a copy, overstated the items.
+- **The anchor is not exactly on the hour.** A second of 0 can be written rather than read: intake
+  gives a synced record that arrives with no timestamp the start of its id's hour
+  (`reconstructSyncRecord`, when the id holds one), and the epoch repair writes the start of the hour
+  onto stored records, this account's scans included (`MigrateRepairEpochTimestamps`). A real copy
+  of a scan that ran at hh:00:00 stays counted, about one scan in 3,600.
+- **The copy arrived after that scan, and both times are valid.**
+- **"This account" is the account roster** `db.global.characters`, read through
+  `GBL:IsOwnCharacterName` with `requireKnownRealm`. Before v0.7.8 sync stored a record under its
+  original scanner's name with no `sync:` prefix, so an unprefixed name alone does not mean this
+  account. A bare scanner name (every scan before 2026-04-13) counts only where the guild's own
+  `playerRealms` gives its realm. The Member view reads such a name on the local realm instead, but
+  this reader is proving a record a copy, and a guess is not a proof. On the live file all 521 money
+  records with a bare scanner name carry one name, and `playerRealms` places it. The roster holds only
+  characters that have logged in since #222, so an alt's older scans anchor nothing until it does,
+  which leaves copies counted rather than hiding anything wrongly.
+
+On the file saved 2026-10-06 that is 18 money records and 971,478 gold, transactions from 2026-04-08
+to 2026-04-12, all synced back from one peer. Reading them takes 15 ms on desktop Lua 5.1 and the whole
+`RecordsForView` 19 ms, with no cache, paid by the Gold log and the Consumption tab at each build and
+refresh, including a refresh while the window is closed when one of them was the last tab open; a
+tab that shows no gold rows skips it. The read runs under pcall so that it adds no new way to break a
+tab: a failure shows every gold record and says so once a session for each guild on the system
+channel. A record the Gold log's own filters and sort cannot read (#263's corruption class) breaks the
+tab either way, as it did before.
+
+**Why nothing is deleted.** The first build (2026-10-04 to 2026-10-06, not merged) dropped the copies
+from the store. Two costs came with deleting, found by its sixth code review and the re-audit after
+it:
+
+- **The store stops matching its guildmates.** Sync compares six-hour buckets by a hash of the record
+  ids in each. The copies sit on every store that pulled April from this one or from the peer that
+  sent them, under the same ids, and no other store can prove them copies, because only the store
+  that scanned can. Deleting them here leaves those buckets differing from every such guildmate for
+  good: on that file, 4 buckets and 779 records, sent again in every session that reaches them and
+  stored by nobody. A count written beside the drop would have let guildmates trim theirs, but a
+  count merges by max and is never lowered, so an inferred one could delete real records on every
+  store it reached (Russell, 2026-10-06).
+- **A deleted copy's next arrival can take a real record with it.** Its id leaves `seenTxHashes`, so
+  the copy misses the exact match and falls to `IsDuplicate`'s near match: a record of the same
+  prefix and occurrence index in the next hour, under an hour away, matches, `NormalizeRecordId`
+  renames it onto the copy's id and second, and the next cleanup deletes it as a copy.
+
+Left stored, a copy keeps its id, so a guildmate sending it again is matched by id as before, the
+buckets match as they did, and a wrong call hides a record rather than destroying it: fixing the rule
+brings it back. #332 declined a mark of this kind because a floor raise let every store delete its
+copies; here only this store can prove them, so a deletion could not hold anywhere else.
+
+**Anything that reads `moneyTransactions` directly sees the copies.** The history tabs read through
+`RecordsForView`. The planned export (#186, #187) does not yet exist, and would count the copies
+unless it asks `MoneyScanCopies`.
+
+What stays counted twice, and why:
+
+- **The 63 money records at another second (149,483 gold).** Each came from another scan. It is that
+  scan's reading of the same event or a second real event, and nothing stored tells which; the guild
+  does repeat round sums inside an hour (counts of 2 or 3 are on record for 20,000, 100,000 and
+  500,000 gold withdrawals).
+- **Every item record.** The first build left items out because the count it wrote would have capped
+  what every peer keeps, and for items more than one event of a prefix in an hour is common (31.7% of
+  item counts on the live file are 2 or more, against 0.6% of money counts). Nothing here writes a
+  count, so that reason is gone; whether to read items is a decision of its own, and the rule has not
+  been measured on them.
+- **Every guildmate's copies.** Only the store that scanned can prove one.
+
+Limits the code reviews raised (2026-10-05), kept:
+
+- **A synced record whose time intake rewrote.** `NormalizeRecordId` gives a stored record the
+  sender's id and timestamp on a near match, and a synced record's scan time is its receipt, so no
+  remainder test can see it. A different event rewritten to the anchor's second reads as a copy and
+  is left out; intake had already judged it the same event as the sender's record.
+- **A log read that started late.** The money log holds about 25 entries. If a peer read two
+  same-prefix events in one hour and this account's later scan, at the same second past the hour,
+  saw only the second, the peer's first arrives looking like a copy and is left out. About 1 in 3,600
+  per pair of scans.
+- **A bare scanner name read through today's roster.** `playerRealms` records who holds a bare name in
+  the guild now, not who scanned under it. Before v0.7.8 sync stored a record under its scanner's bare
+  name with no `sync:` label, so a record another account's same-named character scanned, after that
+  character left and the name came to place on this account's character, can anchor a copy, and a
+  second real event at the same second from the same scan, synced later, would be left out. On the
+  live file all 521 bare-named money records carry this account's one name.
+- **A scanner name a migration qualified by guessing.** Rung 3 (`MigrateSchemaV2ToV3`) qualified every
+  bare `scannedBy` through `ResolvePlayerName`, the logged-in guild's roster and then the local realm,
+  and stored the result. `IsOwnCharacterName` takes a qualified name as it stands, so on a store that
+  ran rung 3 such a guess can anchor a copy. The live file still holds bare scanner names, so rung 3
+  never ran on it (#351). The resolver's fallback is #355.
+
 ### One identity namespace, two arrays
 
 Records live in two arrays but identity is pooled. `seenTxHashes` (`GBL:MarkSeen` in
@@ -895,7 +995,8 @@ All under the **Data model integrity** milestone.
 | 5 | One client's realm stamped on 563 records, 561 of them a second copy of a stored event | closed in v0.43.0 (#332) |
 | 5 | A bare name from the bank log is looked up in the roster before the local realm, so a same-named member elsewhere can take it | #350 |
 | 5 | 450 `eventCounts` keys name a prefix no stored record carries | explained (#333): peers' counts whose records never followed, for want of a pull (#345) |
-| 5 | Same-hour duplicates with no count are never trimmed | #346 |
+| 5 | Same-hour duplicates with no count are never trimmed | money copies of this account's own scans left out of the history tabs in v0.43.3 (#346), every record kept; the rest stay, with the reasons above |
+| 5 | A synced copy numbered differently from the stored record is stored again | #354 |
 | 5 | Sync intake does not normalize the money `type` | closed in v0.37.0 (#68): rejected by the enum check |
 | 7 | Nothing stops the `schemaVersion` default being raised | closed in #76 |
 | 7 | `DeduplicateRecords` cannot restore the version it borrows, and raises on a nil | closed in #263 |
@@ -915,13 +1016,13 @@ change to `buildPrefix` would silently duplicate the guild's dataset unless `MIN
 raised again, and raising it re-imposes the lockstep split the floor removed. Treat every remaining
 identity-affecting idea in this document as costing a forced guild-wide update from here on. The
 first one paid was #332 (v0.43.0): a repair that deletes stored records needs the raise too, or a
-peer that has not run it hands the deleted records back as new ones.
+peer that has not run it hands the deleted records back as new ones. #346 deletes nothing: its
+copies stay stored and only leave the views, so it needs no raise.
 
 What that leaves open, in rough order of how much it still hurts: #75 (the 223 damaged records
 already on disk, which #68 stops growing but does not repair, and which can now reuse
-`GBL:RepairSyncRecordItemFields`), #346 (records stored twice before counts existed, which cleanup
-cannot trim; its candidate repair writes the missing counts, so a copy a peer hands back is trimmed
-again, which may spare it a floor raise), #351 (what the six migrations a store at the default
-skipped left undone, an investigation), #69 (the same itemID-less shape produced by local scans
+`GBL:RepairSyncRecordItemFields`), #354 (the intake gap that produced #346's duplicates and still
+stores a copy wherever no count covers the cluster), #351 (what the six migrations a store at the
+default skipped left undone, an investigation), #69 (the same itemID-less shape produced by local scans
 rather than by sync, still unscheduled), and #72. None of those touch record identity, except
 possibly #351, whose answer may be to re-run a migration that rewrites ids.

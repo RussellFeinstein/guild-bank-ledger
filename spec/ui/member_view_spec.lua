@@ -255,11 +255,27 @@ describe("Member view (own_transactions)", function()
             assert.equals(ME, kept[1].player)
         end)
 
-        -- The resolver falls back to the local realm for a bare name the
-        -- roster marks ambiguous (playerRealms[name] = false, two characters
-        -- of that name on connected realms), so both the viewer's name and a
-        -- stranger's resolve to the same string. Under a promise that the
-        -- addon shows nobody else's rows, that has to fail closed.
+        -- A bare name playerRealms has no entry for is read on the local realm,
+        -- as the view has done since #222: the member's own rows from before
+        -- 2026-04-13 show even when the guild's realm record lacks the name.
+        -- This pins the behaviour as it stands. Reading the name on a guess
+        -- is a known limit here (.claude/rules/ui.md); failing closed would be
+        -- a decision of its own, as requireKnownRealm was for the #346 copies.
+        it("claims a bare name playerRealms has no entry for, on the local realm", function()
+            memberFixture()
+            local gd = GBL:GetGuildData()
+            gd.playerRealms = {}
+
+            local kept = GBL:FilterToOwnRecords({ { player = "TestOfficer", type = "deposit" } })
+
+            assert.equals(1, #kept)
+        end)
+
+        -- A bare name the roster marks ambiguous (playerRealms[name] = false,
+        -- two characters of that name on connected realms) would fall back to
+        -- the local realm, so both the viewer's name and a stranger's would
+        -- match. Under a promise that the addon shows nobody else's rows, that
+        -- has to fail closed.
         it("does not claim a bare name the roster marks ambiguous", function()
             memberFixture()
             local gd = GBL:GetGuildData()
@@ -278,8 +294,8 @@ describe("Member view (own_transactions)", function()
             local gd = GBL:GetGuildData()
             gd.playerRealms = {}
 
-            -- ResolvePlayerName would key the player as Name-UnknownRealm,
-            -- which matches no record, so the set must not carry it.
+            -- A cold realm would key the player as Name-UnknownRealm, which
+            -- matches no record, so the set must not carry it.
             local own = GBL:GetOwnCharacterNames()
             assert.is_nil(own["TestOfficer-UnknownRealm"])
             assert.equals(0, #GBL:FilterToOwnRecords({ record(ME, 1) }))

@@ -316,7 +316,7 @@ function GBL:RefreshUI()
         self._goldLogTransactions = moneyTransactions
         self:RefreshGoldLog()
     elseif tab == "transactions" and self._ledgerContainer then
-        self._ledgerTransactions = self:RecordsForView(guildData)
+        self._ledgerTransactions = self:RecordsForView(guildData, true)
         self:RefreshLedgerView()
     elseif tab == "consumption" and self._consumptionContainer then
         local transactions, moneyTransactions = self:RecordsForView(guildData)
@@ -370,15 +370,20 @@ function GBL:SelectTab(tabName)
     end
 
     -- The rows this access level may see (#222). RefreshUI reads the same
-    -- helper, so the build and every later re-render cannot disagree.
-    local transactions, moneyTransactions = self:RecordsForView(self:GetGuildData())
+    -- helper, so the build and every later re-render cannot disagree. Read
+    -- in the three history branches only, and for the item rows alone where
+    -- that is all the tab shows: the gold rows cost a pass over every gold
+    -- record for the copies they leave out (#346).
+    local guildData = self:GetGuildData()
 
     if tabName == "transactions" then
-        self:BuildTransactionsTab(self.tabGroup, transactions)
+        self:BuildTransactionsTab(self.tabGroup, (self:RecordsForView(guildData, true)))
     elseif tabName == "goldlog" then
+        local _, moneyTransactions = self:RecordsForView(guildData)
         self:BuildGoldLogTab(self.tabGroup, moneyTransactions)
     elseif tabName == "consumption" then
         -- Merge item + money transactions for consumption aggregation
+        local transactions, moneyTransactions = self:RecordsForView(guildData)
         local allTx = {}
         for i = 1, #transactions do allTx[#allTx + 1] = transactions[i] end
         for i = 1, #moneyTransactions do allTx[#allTx + 1] = moneyTransactions[i] end
@@ -420,46 +425,14 @@ function GBL:OnMainFrameHidden()
     self._restockInView = false
 end
 
---- The characters this account has played, in the qualified Name-Realm
--- form records carry (#222, docs/PLAN-views-and-access.md section 7).
--- The logged-in character is added the way RecordOwnCharacter writes it,
--- so a member's own rows show before the first roster tick has recorded
--- the character. Both skip the "UnknownRealm" sentinel: a key built from
--- it matches no record, so while the realm APIs are cold the set can come
--- back empty and the member sees nothing rather than someone else's rows.
--- @return table [Name-Realm] = true
-function GBL:GetOwnCharacterNames()
-    local names = {}
-    local me = UnitName("player")
-    local realm = self:GetLocalRealm()
-    if me and me ~= "" and realm and realm ~= "" and realm ~= "UnknownRealm" then
-        names[me .. "-" .. realm] = true
-    end
-    local chars = self.db and self.db.global and self.db.global.characters
-    if type(chars) == "table" then
-        for name in pairs(chars) do names[name] = true end
-    end
-    return names
-end
-
---- Filter a records array to this account's own rows.
--- Matched through ResolvePlayerName against the account roster, never on
--- a bare-name compare: a same-named character on another realm is
--- someone else, and the member's own alts are not. A bare-name record
--- (everything before 2026-04-13) resolves through the guild's
--- playerRealms cache the way every migration reads those rows.
---
--- One case is refused rather than resolved: a bare name the roster marks
--- ambiguous (`playerRealms[name] == false`, two characters of that name
--- on connected realms). The resolver falls back to the local realm there,
--- so the viewer's name and a stranger's resolve to the same string and
--- the stranger's rows would render as the member's own. Under a promise
--- that the addon shows nobody else's rows, that has to fail closed, at
--- the cost of hiding the member's own bare-name rows in that case.
---
--- The limit that stays: a bare name the roster has no entry for at all
--- resolves to the local realm for both sides, so a same-named stranger
--- from another realm still matches. Nothing here can tell those apart.
+--- Filter a records array to this account's own rows, through the roster
+-- (GetOwnCharacterNames) and the one ownership test (IsOwnCharacterName),
+-- both in src/Core.lua beside the roster's writer since #346, which reads
+-- them too. That test refuses a bare name the roster marks ambiguous: the
+-- local-realm fallback would give the viewer's name and a stranger's the
+-- same realm, and the stranger's rows would render as the member's own.
+-- Under a promise that the addon shows nobody else's rows, that has to
+-- fail closed, at the cost of hiding the member's own bare-name rows there.
 -- @param records table Array of transaction records
 -- @return table Filtered array
 function GBL:FilterToOwnRecords(records)
@@ -468,10 +441,7 @@ function GBL:FilterToOwnRecords(records)
     local playerRealms = guildData and guildData.playerRealms
     local filtered = {}
     for _, record in ipairs(records or {}) do
-        local name = record.player
-        local ambiguous = name and playerRealms and not name:find("%-")
-            and playerRealms[name] == false
-        if name and not ambiguous and own[self:ResolvePlayerName(name)] then
+        if self:IsOwnCharacterName(record.player, own, playerRealms) then
             filtered[#filtered + 1] = record
         end
     end
@@ -488,18 +458,74 @@ end
 -- offering the tabs and RefreshUI's container guards, and a demotion that
 -- arrives over HELLO while the window is open on Transactions leaves both
 -- true until the rebuild lands.
+--
+-- The money records sync carried back to this account's own scan are left
+-- out at every level (MoneyScanCopies, #346), so the Gold log and the
+-- Consumption tab count each such transaction once under every filter.
+-- They stay stored. The records left out, filtered for the level as the
+-- rows are, go on `self._hiddenMoneyCopies`, which both tabs' notes read
+-- (HiddenCopiesNote). With one to leave out, full access gets a fresh money
+-- array per call rather than the live table, so every control reads the
+-- array its tab holds at call time and never one captured at the build
+-- (#222), and a pass that removes records has to refresh (RunCleanup).
+--
+-- The check walks every gold record, so a caller that shows no gold rows
+-- passes `itemsOnly`, which skips it and leaves the hidden list as it was.
+-- It runs under pcall so that it adds no new way to break a tab: a failure
+-- shows every gold record and says so once a session for each guild on the
+-- system channel. That is all the pcall buys. A record the Gold log's own
+-- filters and sort cannot read (#263's corruption class) breaks the tab
+-- with or without it, as it did before.
 -- @param guildData table|nil The current guild's data
+-- @param itemsOnly boolean|nil Return the item rows and an empty money table
 -- @return table transactions, table moneyTransactions
-function GBL:RecordsForView(guildData)
+function GBL:RecordsForView(guildData, itemsOnly)
     local level = self:GetAccessLevel()
-    if level == "sync_only" then return {}, {} end
-    local transactions = guildData and guildData.transactions or {}
-    local moneyTransactions = guildData and guildData.moneyTransactions or {}
-    if level ~= "own_transactions" then
-        return transactions, moneyTransactions
+    if level == "sync_only" then
+        self._hiddenMoneyCopies = {}
+        return {}, {}
     end
-    return self:FilterToOwnRecords(transactions),
-        self:FilterToOwnRecords(moneyTransactions)
+    local ownOnly = level == "own_transactions"
+    local transactions = guildData and guildData.transactions or {}
+    if ownOnly then transactions = self:FilterToOwnRecords(transactions) end
+    if itemsOnly then return transactions, {} end
+
+    local moneyTransactions = guildData and guildData.moneyTransactions or {}
+    local ok, copies, isCopy = pcall(self.MoneyScanCopies, self, guildData)
+    if not ok then
+        self._copyCheckFailed = self._copyCheckFailed or setmetatable({}, { __mode = "k" })
+        local key = guildData or self
+        if not self._copyCheckFailed[key] then
+            self._copyCheckFailed[key] = true
+            self:SystemWarn("Duplicate check failed, showing every gold record: %s",
+                tostring(copies))
+        end
+        copies, isCopy = {}, {}
+    end
+    if #copies > 0 then
+        local kept = {}
+        for _, rec in ipairs(moneyTransactions) do
+            if not isCopy[rec] then kept[#kept + 1] = rec end
+        end
+        moneyTransactions = kept
+    end
+    if ownOnly then
+        self._hiddenMoneyCopies = self:FilterToOwnRecords(copies)
+        return transactions, self:FilterToOwnRecords(moneyTransactions)
+    end
+    self._hiddenMoneyCopies = copies
+    return transactions, moneyTransactions
+end
+
+--- The note a tab adds where it left gold records out (#346): the copies
+-- RecordsForView left out that these filters would have shown, so a
+-- missing row or a lower total is never silent.
+-- @param filters table|nil The filters in force
+-- @return string " (N duplicate(s) hidden)", or "" when none
+function GBL:HiddenCopiesNote(filters)
+    local hidden = self:CountFilterResults(self._hiddenMoneyCopies or {}, filters)
+    if hidden == 0 then return "" end
+    return " (" .. hidden .. (hidden == 1 and " duplicate" or " duplicates") .. " hidden)"
 end
 
 --- Show a yellow banner indicating restricted access mode.
@@ -886,13 +912,15 @@ function GBL:RenderGoldLog(container, moneyTransactions, filters)
         end
     end
 
-    -- Status line
+    -- Status line, with the copies RecordsForView left out (#346)
+    local hiddenText = self:HiddenCopiesNote(filters)
     local status = AceGUI:Create("Label")
     status:SetFullWidth(true)
     if #filtered > pageSize then
-        status:SetText("Showing " .. startIdx .. "-" .. endIdx .. " of " .. #filtered .. " gold transactions")
+        status:SetText("Showing " .. startIdx .. "-" .. endIdx .. " of " .. #filtered
+            .. " gold transactions" .. hiddenText)
     else
-        status:SetText(#filtered .. " gold transactions")
+        status:SetText(#filtered .. " gold transactions" .. hiddenText)
     end
     container:AddChild(status)
 
@@ -1270,7 +1298,7 @@ function GBL:RenderConsumptionDashboard(container, transactions, filters)
     )
     container:AddChild(itemsLine)
 
-    -- Gold line
+    -- Gold line, with the copies RecordsForView left out of it (#346)
     local goldNetColor = totals.goldNet >= 0 and depositColor or withdrawColor
     local goldLine = AceGUI:Create("Label")
     goldLine:SetFullWidth(true)
@@ -1279,7 +1307,8 @@ function GBL:RenderConsumptionDashboard(container, transactions, filters)
         colorHex(depositColor) .. self:FormatMoney(totals.goldDeposited) .. " in|r  ||  " ..
         colorHex(withdrawColor) .. self:FormatMoney(totals.goldWithdrawn) .. " out|r  ||  " ..
         "Net: " .. colorHex(goldNetColor) ..
-        (totals.goldNet >= 0 and "+" or "") .. self:FormatMoney(totals.goldNet) .. "|r"
+        (totals.goldNet >= 0 and "+" or "") .. self:FormatMoney(totals.goldNet) .. "|r" ..
+        self:HiddenCopiesNote(filters)
     )
     container:AddChild(goldLine)
 
