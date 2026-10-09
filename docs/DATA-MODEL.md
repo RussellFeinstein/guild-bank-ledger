@@ -362,8 +362,8 @@ count near any of them, which `CleanupWithEventCounts` keeps whole. Counts began
 the duplicates stored before then are this case. After #332's repair the file holds 81 such money
 records, all from April and about 1.12M gold counted twice, and about 670 item records. Issue #346.
 
-**Verdict: the copies that can be proven are left out of the history tabs (#346), and every record
-stays stored.** A scan's timestamps are its scan time minus whole hours, so every record one scan
+**Verdict: the copies that can be proven are left out of the history tabs in v0.43.3 (#346), and
+every record stays stored.** A scan's timestamps are its scan time minus whole hours, so every record one scan
 stores carries that scan's second past the hour. A synced record at the exact second of a record
 this account scanned was therefore minted by that same scan: it is the scan's own record come back
 under another occurrence index, which intake does not match (#354). `GBL:MoneyScanCopies`
@@ -995,7 +995,7 @@ All under the **Data model integrity** milestone.
 | 5 | One client's realm stamped on 563 records, 561 of them a second copy of a stored event | closed in v0.43.0 (#332) |
 | 5 | A bare name from the bank log is looked up in the roster before the local realm, so a same-named member elsewhere can take it | #350 |
 | 5 | 450 `eventCounts` keys name a prefix no stored record carries | explained (#333): peers' counts whose records never followed, for want of a pull (#345) |
-| 5 | Same-hour duplicates with no count are never trimmed | money copies of this account's own scans left out of the history tabs (#346), every record kept; the rest stay, with the reasons above |
+| 5 | Same-hour duplicates with no count are never trimmed | money copies of this account's own scans left out of the history tabs in v0.43.3 (#346), every record kept; the rest stay, with the reasons above |
 | 5 | A synced copy numbered differently from the stored record is stored again | #354 |
 | 5 | Sync intake does not normalize the money `type` | closed in v0.37.0 (#68): rejected by the enum check |
 | 7 | Nothing stops the `schemaVersion` default being raised | closed in #76 |
