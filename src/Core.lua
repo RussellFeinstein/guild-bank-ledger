@@ -3200,6 +3200,83 @@ function GBL:EventCountWindow()
     return -radius, radius
 end
 
+--- Group a storage array by prefix and chain each group into clusters.
+-- What a cluster is, read by CleanupWithEventCounts and MoneyScanCopies
+-- (#346) so the two cannot disagree about it. Groups come back in the order
+-- their first record appears; a group's records are sorted by timestamp and
+-- chained while each is under an hour from the one before. The cleanup
+-- writes its survivors back in exactly this order (#342).
+-- @param records table A storage array, read and never written
+-- @return table prefixes in first-seen order, table prefix -> array of clusters
+local function clusterByPrefix(self, records)
+    local groups, groupOrder = {}, {}
+    for _, record in ipairs(records) do
+        local prefix = self:BuildTxPrefix(record)
+        if not groups[prefix] then
+            groups[prefix] = {}
+            groupOrder[#groupOrder + 1] = prefix
+        end
+        groups[prefix][#groups[prefix] + 1] = record
+    end
+
+    local clustersOf = {}
+    for _, prefix in ipairs(groupOrder) do
+        local group = groups[prefix]
+        if #group <= 1 then
+            clustersOf[prefix] = { group }
+        else
+            -- Sort by timestamp to identify event clusters
+            table.sort(group, function(a, b)
+                return (a.timestamp or 0) < (b.timestamp or 0)
+            end)
+
+            -- Cluster records by timestamp proximity (< 3600 = same hour event)
+            local clusters = {}
+            local currentCluster = { group[1] }
+            for i = 2, #group do
+                local diff = math.abs(
+                    (group[i].timestamp or 0) - (group[i-1].timestamp or 0))
+                if diff < 3600 then
+                    currentCluster[#currentCluster + 1] = group[i]
+                else
+                    clusters[#clusters + 1] = currentCluster
+                    currentCluster = { group[i] }
+                end
+            end
+            clusters[#clusters + 1] = currentCluster
+            clustersOf[prefix] = clusters
+        end
+    end
+    return groupOrder, clustersOf
+end
+
+--- The largest event count the cleanup's window reaches from a cluster.
+-- Every baseHash within EventCountWindow of any of its records' slots is
+-- read, because two scans of one transaction can round its hour differently.
+-- @param eventCounts table|nil The guild's counts; anything else reads as none
+-- @return number 0 when no count reaches the cluster
+local function maxCountNear(eventCounts, prefix, cluster, first, last)
+    if type(eventCounts) ~= "table" then return 0 end
+    local slotsChecked = {}
+    for _, rec in ipairs(cluster) do
+        local slot = math.floor((rec.timestamp or GetServerTime()) / 3600)
+        slotsChecked[slot] = true
+    end
+
+    local maxKnownCount = 0
+    for slot in pairs(slotsChecked) do
+        for s = slot + first, slot + last do
+            local entry = eventCounts[prefix .. s]
+            if entry and type(entry) == "table"
+                and type(entry.count) == "number"
+                and entry.count > maxKnownCount then
+                maxKnownCount = entry.count
+            end
+        end
+    end
+    return maxKnownCount
+end
+
 --- Remove excess records using persisted eventCounts as ground truth.
 -- Groups records by prefix, clusters by timestamp proximity, then trims each
 -- cluster to the max known eventCount for its baseHash, across the window
@@ -3225,82 +3302,31 @@ function GBL:CleanupWithEventCounts(guildData)
         local records = guildData[storageKey]
         if records and #records > 0 then
             local removedBefore = totalRemoved
-            -- Group by prefix (slot-independent)
-            local groups = {}
-            local groupOrder = {}
-            for _, record in ipairs(records) do
-                local prefix = self:BuildTxPrefix(record)
-                if not groups[prefix] then
-                    groups[prefix] = {}
-                    groupOrder[#groupOrder + 1] = prefix
-                end
-                groups[prefix][#groups[prefix] + 1] = record
-            end
+            local groupOrder, clustersOf = clusterByPrefix(self, records)
 
             local surviving = {}
             for _, prefix in ipairs(groupOrder) do
-                local group = groups[prefix]
-                if #group <= 1 then
-                    surviving[#surviving + 1] = group[1]
-                else
-                    -- Sort by timestamp to identify event clusters
-                    table.sort(group, function(a, b)
-                        return (a.timestamp or 0) < (b.timestamp or 0)
-                    end)
-
-                    -- Cluster records by timestamp proximity (< 3600 = same hour event)
-                    local clusters = {}
-                    local currentCluster = { group[1] }
-                    for i = 2, #group do
-                        local diff = math.abs(
-                            (group[i].timestamp or 0) - (group[i-1].timestamp or 0))
-                        if diff < 3600 then
-                            currentCluster[#currentCluster + 1] = group[i]
-                        else
-                            clusters[#clusters + 1] = currentCluster
-                            currentCluster = { group[i] }
-                        end
+                for _, cluster in ipairs(clustersOf[prefix]) do
+                    local maxKnownCount = 0
+                    if #cluster > 1 then
+                        maxKnownCount = maxCountNear(guildData.eventCounts,
+                            prefix, cluster, first, last)
                     end
-                    clusters[#clusters + 1] = currentCluster
 
-                    for _, cluster in ipairs(clusters) do
-                        -- Find max eventCount across every baseHash the
-                        -- window reaches, because two scans of one transaction
-                        -- can round its hour differently.
-                        local slotsChecked = {}
+                    if maxKnownCount == 0 or #cluster <= maxKnownCount then
+                        -- No count data or within bounds: keep all
                         for _, rec in ipairs(cluster) do
-                            local slot = math.floor((rec.timestamp or GetServerTime()) / 3600)
-                            slotsChecked[slot] = true
+                            surviving[#surviving + 1] = rec
                         end
-
-                        local maxKnownCount = 0
-                        for slot in pairs(slotsChecked) do
-                            for s = slot + first, slot + last do
-                                local baseHash = prefix .. s
-                                local entry = guildData.eventCounts[baseHash]
-                                if entry and type(entry) == "table"
-                                    and type(entry.count) == "number"
-                                    and entry.count > maxKnownCount then
-                                    maxKnownCount = entry.count
-                                end
-                            end
+                    else
+                        -- Trim to maxKnownCount, preferring oldest by scanTime
+                        table.sort(cluster, function(a, b)
+                            return (a.scanTime or 0) < (b.scanTime or 0)
+                        end)
+                        for i = 1, maxKnownCount do
+                            surviving[#surviving + 1] = cluster[i]
                         end
-
-                        if maxKnownCount == 0 or #cluster <= maxKnownCount then
-                            -- No count data or within bounds: keep all
-                            for _, rec in ipairs(cluster) do
-                                surviving[#surviving + 1] = rec
-                            end
-                        else
-                            -- Trim to maxKnownCount, preferring oldest by scanTime
-                            table.sort(cluster, function(a, b)
-                                return (a.scanTime or 0) < (b.scanTime or 0)
-                            end)
-                            for i = 1, maxKnownCount do
-                                surviving[#surviving + 1] = cluster[i]
-                            end
-                            totalRemoved = totalRemoved + (#cluster - maxKnownCount)
-                        end
+                        totalRemoved = totalRemoved + (#cluster - maxKnownCount)
                     end
                 end
             end
