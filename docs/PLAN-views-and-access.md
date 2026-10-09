@@ -153,7 +153,9 @@ record carries. `FilterByPlayer` and its bare-name compare are gone with their t
 a configured threshold with no mode as `own_transactions`, and `GBL:GuildRankIndex` caches the
 last rank read so a momentary nil does not flip the tab signature. The Sync tab's dropdown reads
 Member and Sync only over the same wire values. Section 16's roster cases are in
-`spec/core_spec.lua`.
+`spec/core_spec.lua`. Since #346 it also leaves out, at every level that sees rows, the money
+records sync carried back to this account's own scan (`GBL:MoneyScanCopies`), and the Gold log's
+count line says how many; `docs/DATA-MODEL.md` has the proof and why the records stay stored.
 
 Three things this section proposed that the build changed, each from the code review:
 

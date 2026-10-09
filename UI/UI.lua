@@ -453,16 +453,36 @@ end
 -- offering the tabs and RefreshUI's container guards, and a demotion that
 -- arrives over HELLO while the window is open on Transactions leaves both
 -- true until the rebuild lands.
+--
+-- The money records sync carried back to this account's own scan are left
+-- out at every level (MoneyScanCopies, #346), so the Gold log and the
+-- Consumption tab count each such transaction once under every filter.
+-- They stay stored. The records left out, filtered for the level as the
+-- rows are, go on `self._hiddenMoneyCopies`, which the Gold log's count
+-- line reads. With one to leave out, full access gets a fresh money array
+-- per call rather than the live table, so every control reads the array
+-- its tab holds at call time and never one captured at the build (#222).
 -- @param guildData table|nil The current guild's data
 -- @return table transactions, table moneyTransactions
 function GBL:RecordsForView(guildData)
     local level = self:GetAccessLevel()
+    self._hiddenMoneyCopies = {}
     if level == "sync_only" then return {}, {} end
     local transactions = guildData and guildData.transactions or {}
     local moneyTransactions = guildData and guildData.moneyTransactions or {}
+    local copies, isCopy = self:MoneyScanCopies(guildData)
+    if #copies > 0 then
+        local kept = {}
+        for _, rec in ipairs(moneyTransactions) do
+            if not isCopy[rec] then kept[#kept + 1] = rec end
+        end
+        moneyTransactions = kept
+    end
     if level ~= "own_transactions" then
+        self._hiddenMoneyCopies = copies
         return transactions, moneyTransactions
     end
+    self._hiddenMoneyCopies = self:FilterToOwnRecords(copies)
     return self:FilterToOwnRecords(transactions),
         self:FilterToOwnRecords(moneyTransactions)
 end
@@ -851,13 +871,21 @@ function GBL:RenderGoldLog(container, moneyTransactions, filters)
         end
     end
 
-    -- Status line
+    -- Status line. It names the copies RecordsForView left out (#346) that
+    -- these filters would have shown, so a missing row is never silent.
+    local hidden = #self:FilterTransactions(self._hiddenMoneyCopies or {}, filters)
+    local hiddenText = ""
+    if hidden > 0 then
+        hiddenText = " (" .. hidden .. (hidden == 1 and " duplicate" or " duplicates")
+            .. " hidden)"
+    end
     local status = AceGUI:Create("Label")
     status:SetFullWidth(true)
     if #filtered > pageSize then
-        status:SetText("Showing " .. startIdx .. "-" .. endIdx .. " of " .. #filtered .. " gold transactions")
+        status:SetText("Showing " .. startIdx .. "-" .. endIdx .. " of " .. #filtered
+            .. " gold transactions" .. hiddenText)
     else
-        status:SetText(#filtered .. " gold transactions")
+        status:SetText(#filtered .. " gold transactions" .. hiddenText)
     end
     container:AddChild(status)
 
