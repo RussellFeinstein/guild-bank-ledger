@@ -359,6 +359,17 @@ describe("MoneyScanCopies: a money record synced back to its own scan (#346)", f
             assertNone()
         end)
 
+        it("a synced record at the second of a scan that ran on the hour", function()
+            -- Intake gives a synced record that arrives with no timestamp the
+            -- start of its id's hour (reconstructSyncRecord), so a record on
+            -- the hour may carry a second no scan minted. A scan that ran at
+            -- hh:00:00 proves nothing about what sits on the hour beside it.
+            local onHour = SLOT * HOUR
+            store("moneyTransactions", mine({ timestamp = onHour }),
+                echo({ timestamp = onHour }))
+            assertNone()
+        end)
+
         it("a pair whose timestamp is invalid", function()
             store("moneyTransactions", mine({ timestamp = 0, scanTime = 2 * HOUR }),
                 echo({ timestamp = 0, scanTime = 30 * HOUR }))

@@ -353,31 +353,171 @@ describe("History tabs leave out the proven money copies (#346)", function()
     end)
 
     ---------------------------------------------------------------------------
+    -- The Consumption tab
+    ---------------------------------------------------------------------------
+
+    describe("the Consumption tab", function()
+        it("says how many duplicates it left out of its gold totals", function()
+            GBL:CreateMainFrame()
+            GBL:SelectTab("consumption")
+            GBL:RefreshUI()
+
+            assert.is_true(anyLabelContains("(1 duplicate hidden)"))
+        end)
+
+        it("says nothing when nothing is left out", function()
+            gd.moneyTransactions = { own, other }
+
+            GBL:CreateMainFrame()
+            GBL:SelectTab("consumption")
+            GBL:RefreshUI()
+
+            assert.is_false(anyLabelContains("hidden"))
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- What the check costs, and a check that fails
+    ---------------------------------------------------------------------------
+
+    describe("the check", function()
+        it("is not run for a tab that shows no gold rows", function()
+            local calls = 0
+            local orig = GBL.MoneyScanCopies
+            GBL.MoneyScanCopies = function(self, g)
+                calls = calls + 1
+                return orig(self, g)
+            end
+            GBL:CreateMainFrame()
+            calls = 0
+
+            GBL:SelectTab("transactions")
+            GBL:RefreshUI()
+            GBL:SelectTab("sync")
+            GBL:RefreshUI()
+            local idle = calls
+            GBL:SelectTab("goldlog")
+            GBL.MoneyScanCopies = orig
+
+            assert.equals(0, idle)
+            assert.is_true(calls > 0)
+        end)
+
+        it("shows every gold record when it raises, and says so once a session", function()
+            GBL.MoneyScanCopies = function() error("a record the check cannot read") end
+
+            local _, rows = GBL:RecordsForView(gd)
+            GBL:RecordsForView(gd)
+
+            assert.equals(3, #rows)
+            assert.is_true(holds(rows, copy))
+            assert.equals(0, #GBL._hiddenMoneyCopies)
+            local lines = 0
+            for _, e in ipairs(GBL:GetLog("system")) do
+                if e.message:find("Duplicate check failed", 1, true) then lines = lines + 1 end
+            end
+            assert.equals(1, lines)
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
+    -- /gbl cleanup
+    ---------------------------------------------------------------------------
+
+    describe("/gbl cleanup", function()
+        it("refreshes the window, so a record it removed leaves the Gold log", function()
+            -- A pair of one transaction with a count of 1: the cleanup removes
+            -- the later-scanned one. The copy keeps the Gold log on a fresh
+            -- array, which only a refresh replaces.
+            local first = money({
+                player = FOREIGN, amount = 1234, timestamp = S - 3 * HOUR - 5,
+                scanTime = S - 2 * HOUR, scannedBy = ME,
+            })
+            local second = money({
+                player = FOREIGN, amount = 1234, timestamp = S - 3 * HOUR + 55,
+                scanTime = S - HOUR, scannedBy = "sync:Aeglos-TestRealm", occ = 1,
+            })
+            store("moneyTransactions", first, second)
+            gd.eventCounts[GBL:BuildTxPrefix(first) .. math.floor(first.timestamp / HOUR)] =
+                { count = 1, asOf = 1 }
+            GBL:ToggleMainFrame()
+            GBL:SelectTab("goldlog")
+            assert.is_true(holds(GBL._goldLogTransactions, second))
+
+            GBL:RunCleanup()
+
+            assert.is_false(holds(gd.moneyTransactions, second))
+            assert.is_false(holds(GBL._goldLogTransactions, second))
+            assert.is_false(holds(GBL._goldLogTransactions, copy))
+        end)
+    end)
+
+    ---------------------------------------------------------------------------
     -- After a sync receive
     ---------------------------------------------------------------------------
 
     describe("after a sync receive", function()
         local Sync = require("spec.sync_helpers")
+        local own3
 
-        it("leaves out a copy the receive stored, which the store keeps", function()
+        -- The record as the guildmate holds it: this account's scan, which
+        -- that store numbered :1.
+        local function wireCopy()
+            local rec = echo({ scannedBy = ME, scanTime = T + 2 * HOUR })
+            return {
+                type = rec.type, player = rec.player, amount = rec.amount,
+                timestamp = rec.timestamp, scanTime = rec.scanTime,
+                scannedBy = rec.scannedBy, id = rec.id,
+            }
+        end
+
+        local function receive()
+            GBL:HandleSyncData("OfficerB", {
+                chunk = 1, totalChunks = 1,
+                transactions = {}, moneyTransactions = { wireCopy() },
+            })
+        end
+
+        local function synced()
+            local found = {}
+            for _, r in ipairs(gd.moneyTransactions) do
+                if type(r.scannedBy) == "string" and r.scannedBy:find("^sync:") then
+                    found[#found + 1] = r
+                end
+            end
+            return found
+        end
+
+        before_each(function()
             GBL, gd = Sync.setup()
             -- The sync setup logs in as OfficerA; the scans here are an alt's.
             GBL.db.global.characters = { [ME] = 1 }
             gd.playerRealms = { TestOfficer = "TestRealm" }
-            -- A count far from every record here, so the cleanup runs and
-            -- reaches none of them.
+            -- A count far from every record here, so the cleanup after the
+            -- receive runs and reaches none of them.
             gd.eventCounts = { ["deposit|Elsewhere-TestRealm|1|475000"] = { count = 1, asOf = 1 } }
             GBL:ToggleMainFrame()
             GBL:SelectTab("goldlog")
+            own3 = mine()
+            store("moneyTransactions", own3)
+        end)
 
-            local own3, copy3 = mine(), echo()
-            store("moneyTransactions", own3, copy3)
-            GBL:RequestSync("OfficerB", 0)
-            GBL:FinishReceiving("OfficerB")
+        it("leaves out the copy the receive stored, and the store keeps it", function()
+            receive()
 
+            local got = synced()
+            assert.equals(1, #got, "the receive stored the copy")
+            assert.equals(2, #gd.moneyTransactions)
             assert.is_true(holds(GBL._goldLogTransactions, own3))
-            assert.is_false(holds(GBL._goldLogTransactions, copy3))
-            assert.is_true(holds(gd.moneyTransactions, copy3))
+            assert.is_false(holds(GBL._goldLogTransactions, got[1]))
+        end)
+
+        it("matches the same copy sent again by its id, and stores nothing", function()
+            receive()
+            receive()
+
+            assert.equals(2, #gd.moneyTransactions)
+            assert.equals(1, #synced())
         end)
     end)
 end)
