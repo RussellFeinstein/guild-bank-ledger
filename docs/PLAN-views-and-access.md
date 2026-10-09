@@ -144,8 +144,9 @@ sample early and the button late. It gets no view of its own here.
 
 **Built (#222, 2026-09-22).** `GBL:RecordsForView(guildData)` in `UI/UI.lua` is the one place an
 access level decides which rows a tab renders, read by both `SelectTab` and `RefreshUI`, and it
-hands `sync_only` two empty tables. `FilterToOwnRecords` matches `ResolvePlayerName(record.player)`
-against `GetOwnCharacterNames()`, the account roster plus the logged-in character; both skip the
+hands `sync_only` two empty tables. `FilterToOwnRecords` matches `record.player` through
+`GBL:IsOwnCharacterName` (in `src/Core.lua` since #346, which reads it too) against
+`GetOwnCharacterNames()`, the account roster plus the logged-in character; both skip the
 `UnknownRealm` sentinel, so a cold realm empties the set rather than keying it to something no
 record carries. `FilterByPlayer` and its bare-name compare are gone with their three tests, and
 `spec/ui/member_view_spec.lua` renders the three history tabs in the mode. `GetAccessLevel` reads
@@ -254,7 +255,13 @@ that loads the addon can write itself into one table on this machine.
   `playerRealms` marks ambiguous (`false`) falls back to the local realm, so a pre-2026-04-13 row
   by a same-named character on another realm is attributed to the member. That is how every
   migration already reads those 961 rows, it affects no record written since the qualified form
-  landed, and the doc records it rather than adding a second resolver.
+  landed, and the doc records it rather than adding a second resolver. As built, #222 refused the
+  ambiguous name instead, and since #346 the test is `GBL:IsOwnCharacterName`: the same order, a
+  qualified name as is, a bare name through the `playerRealms` passed in, then the local realm.
+  The Member view passes the logged-in guild's `playerRealms`, the table the resolver's fallback
+  reads, so apart from the ambiguous name it refuses, its answer is the one the resolver gave. The
+  difference matters to `GBL:MoneyScanCopies`, which reads whichever guild it is handed through
+  that guild's own table, and refuses a bare name the table cannot place.
 - **A character that left the guild still matches.** Its rows are still that person's history in
   this guild, and it produces no new rows. A renamed or transferred character keeps its old rows
   under the old name; that is documented behaviour, not repaired.

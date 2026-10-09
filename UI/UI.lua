@@ -420,46 +420,14 @@ function GBL:OnMainFrameHidden()
     self._restockInView = false
 end
 
---- The characters this account has played, in the qualified Name-Realm
--- form records carry (#222, docs/PLAN-views-and-access.md section 7).
--- The logged-in character is added the way RecordOwnCharacter writes it,
--- so a member's own rows show before the first roster tick has recorded
--- the character. Both skip the "UnknownRealm" sentinel: a key built from
--- it matches no record, so while the realm APIs are cold the set can come
--- back empty and the member sees nothing rather than someone else's rows.
--- @return table [Name-Realm] = true
-function GBL:GetOwnCharacterNames()
-    local names = {}
-    local me = UnitName("player")
-    local realm = self:GetLocalRealm()
-    if me and me ~= "" and realm and realm ~= "" and realm ~= "UnknownRealm" then
-        names[me .. "-" .. realm] = true
-    end
-    local chars = self.db and self.db.global and self.db.global.characters
-    if type(chars) == "table" then
-        for name in pairs(chars) do names[name] = true end
-    end
-    return names
-end
-
---- Filter a records array to this account's own rows.
--- Matched through ResolvePlayerName against the account roster, never on
--- a bare-name compare: a same-named character on another realm is
--- someone else, and the member's own alts are not. A bare-name record
--- (everything before 2026-04-13) resolves through the guild's
--- playerRealms cache the way every migration reads those rows.
---
--- One case is refused rather than resolved: a bare name the roster marks
--- ambiguous (`playerRealms[name] == false`, two characters of that name
--- on connected realms). The resolver falls back to the local realm there,
--- so the viewer's name and a stranger's resolve to the same string and
--- the stranger's rows would render as the member's own. Under a promise
--- that the addon shows nobody else's rows, that has to fail closed, at
--- the cost of hiding the member's own bare-name rows in that case.
---
--- The limit that stays: a bare name the roster has no entry for at all
--- resolves to the local realm for both sides, so a same-named stranger
--- from another realm still matches. Nothing here can tell those apart.
+--- Filter a records array to this account's own rows, through the roster
+-- (GetOwnCharacterNames) and the one ownership test (IsOwnCharacterName),
+-- both in src/Core.lua beside the roster's writer since #346, which reads
+-- them too. That test refuses a bare name the roster marks ambiguous: the
+-- local-realm fallback would give the viewer's name and a stranger's the
+-- same realm, and the stranger's rows would render as the member's own.
+-- Under a promise that the addon shows nobody else's rows, that has to
+-- fail closed, at the cost of hiding the member's own bare-name rows there.
 -- @param records table Array of transaction records
 -- @return table Filtered array
 function GBL:FilterToOwnRecords(records)
@@ -468,10 +436,7 @@ function GBL:FilterToOwnRecords(records)
     local playerRealms = guildData and guildData.playerRealms
     local filtered = {}
     for _, record in ipairs(records or {}) do
-        local name = record.player
-        local ambiguous = name and playerRealms and not name:find("%-")
-            and playerRealms[name] == false
-        if name and not ambiguous and own[self:ResolvePlayerName(name)] then
+        if self:IsOwnCharacterName(record.player, own, playerRealms) then
             filtered[#filtered + 1] = record
         end
     end

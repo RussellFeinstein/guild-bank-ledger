@@ -567,6 +567,67 @@ function GBL:RecordOwnCharacter()
     self.db.global.characters[name .. "-" .. realm] = GetServerTime()
 end
 
+--- The characters this account has played, in the qualified Name-Realm
+-- form records carry (#222, docs/PLAN-views-and-access.md section 7).
+-- The logged-in character is added the way RecordOwnCharacter writes it,
+-- so a member's own rows show before the first roster tick has recorded
+-- the character. Both skip the "UnknownRealm" sentinel: a key built from
+-- it matches no record, so while the realm APIs are cold the set can come
+-- back empty and the member sees nothing rather than someone else's rows.
+-- @return table [Name-Realm] = true
+function GBL:GetOwnCharacterNames()
+    local names = {}
+    local me = UnitName("player")
+    local realm = self:GetLocalRealm()
+    if me and me ~= "" and realm and realm ~= "" and realm ~= "UnknownRealm" then
+        names[me .. "-" .. realm] = true
+    end
+    local chars = self.db and self.db.global and self.db.global.characters
+    if type(chars) == "table" then
+        for name in pairs(chars) do names[name] = true end
+    end
+    return names
+end
+
+--- Is this name one of this account's characters? The one test both readers
+-- of the roster share: the Member view's row filter (FilterToOwnRecords) and
+-- MoneyScanCopies' test for a scan this account made (#346).
+--
+-- Matched on the qualified name, never on a bare-name compare: a same-named
+-- character on another realm is someone else, and the member's own alts are
+-- not. A bare name (everything before 2026-04-13) takes its realm from the
+-- playerRealms the caller passes, the roster of the guild the records belong
+-- to, and otherwise the local realm. Not through ResolvePlayerName, whose
+-- fallback reads the logged-in guild's roster: a caller reading another
+-- guild's records would be told who a bare name is in the wrong guild.
+--
+-- One case is refused rather than resolved: a bare name playerRealms marks
+-- ambiguous (`playerRealms[name] == false`, two characters of that name on
+-- connected realms). It would fall back to the local realm, so the viewer's
+-- name and a stranger's would match. A bare name playerRealms has no entry
+-- for at all is read on the local realm for the Member view, so a same-named
+-- stranger from another realm still matches there; nothing can tell those
+-- apart. MoneyScanCopies passes requireKnownRealm and gets no for that name
+-- instead: it is proving a record a copy, and a guess is not a proof.
+-- @param name string|nil A player name, bare or qualified
+-- @param own table The set GetOwnCharacterNames returns
+-- @param playerRealms table|nil The playerRealms of the guild the name came
+--   from: its members' realms, not the account roster `own` is built from
+-- @param requireKnownRealm boolean|nil Refuse a bare name that playerRealms
+--   holds no realm for, instead of reading it on the local realm
+-- @return boolean
+function GBL:IsOwnCharacterName(name, own, playerRealms, requireKnownRealm)
+    if type(name) ~= "string" or name == "" then return false end
+    if name:find("%-") then return own[name] == true end
+    local realm = playerRealms and playerRealms[name]
+    if realm == false then return false end
+    if type(realm) ~= "string" then
+        if requireKnownRealm then return false end
+        realm = self:GetLocalRealm()
+    end
+    return own[name .. "-" .. realm] == true
+end
+
 --- Build/update the persistent guild roster cache.
 -- Maps bare player names to their realm, persisted in SavedVariables.
 -- Called on GUILD_ROSTER_UPDATE so the mapping survives guild departures.
@@ -3398,6 +3459,96 @@ function GBL:CleanupWithEventCounts(guildData)
     end
 
     return totalRemoved
+end
+
+local function isSyncedRecord(rec)
+    return type(rec.scannedBy) == "string" and rec.scannedBy:match("^sync:") ~= nil
+end
+
+--- Mark the records of one cluster that are a scan's own record come back.
+-- An anchor is a record this account scanned whose time is still its own
+-- scan's: NormalizeRecordId hands a stored record the sender's timestamp on
+-- a near match, and then its second is another scan's, so the remainder is
+-- checked. A copy is a record sync labelled, at an anchor's second, received
+-- after that scan.
+-- @param cluster table Records of one prefix, chained under an hour apart
+-- @param isOwn function name -> boolean, the account roster test
+-- @param into table The set the copies are added to
+local function markScanCopies(self, cluster, isOwn, into)
+    local anchors
+    for _, rec in ipairs(cluster) do
+        local ts, st = rec.timestamp, rec.scanTime
+        if self:IsValidTimestamp(ts) and type(st) == "number"
+            and (st - ts) % 3600 == 0
+            and not isSyncedRecord(rec) and isOwn(rec.scannedBy) then
+            anchors = anchors or {}
+            if not anchors[ts] or st < anchors[ts] then anchors[ts] = st end
+        end
+    end
+    if not anchors then return end
+
+    for _, rec in ipairs(cluster) do
+        local scannedAt = anchors[rec.timestamp]
+        if scannedAt and isSyncedRecord(rec)
+            and type(rec.scanTime) == "number" and rec.scanTime > scannedAt then
+            into[rec] = true
+        end
+    end
+end
+
+--- The money records sync carried back to the scan of this account's that
+-- minted them (#346), which the history tabs leave out (RecordsForView).
+--
+-- A scan's timestamps are its scan time minus whole hours, so every record
+-- one scan stores carries that scan's second past the hour. A synced record
+-- at the exact second of a record this account scanned was therefore minted
+-- by that scan: it is the scan's own record come back under another
+-- occurrence index, which intake does not match (#354). The cleanup keeps
+-- such a record whenever no event count reaches its cluster, and counts
+-- began on 2026-04-15, so the April copies stayed stored twice.
+--
+-- This reads and never writes. Deleting the copies was built and declined
+-- (docs/DATA-MODEL.md, #346): every guildmate holding them would differ from
+-- this store for good, since only the store that scanned can prove a copy,
+-- and a deleted copy's next arrival could fuzzy-match a real record. Kept
+-- stored, a copy that comes back is matched by id as any record is, and a
+-- wrong call hides a record rather than destroying it.
+--
+-- The clusters are the cleanup's own (clusterByPrefix, maxCountNear), and
+-- one that a count reaches is the cleanup's to trim, so it is not read
+-- here. "This account" is the account roster through IsOwnCharacterName
+-- with requireKnownRealm: a bare scanner name counts only where this
+-- guild's playerRealms gives its realm. Money only: items were never
+-- measured, and reaching them is a decision of its own.
+-- @param guildData table|nil Guild data from AceDB
+-- @return table the copies, in the order the money array holds them
+-- @return table the same records as a set, record -> true
+function GBL:MoneyScanCopies(guildData)
+    local list, isCopy = {}, {}
+    local records = guildData and guildData.moneyTransactions
+    if type(records) ~= "table" then return list, isCopy end
+
+    local own = self:GetOwnCharacterNames()
+    local playerRealms = guildData.playerRealms
+    local function isOwn(name)
+        return self:IsOwnCharacterName(name, own, playerRealms, true)
+    end
+    local first, last = self:EventCountWindow()
+
+    local groupOrder, clustersOf = clusterByPrefix(self, records)
+    for _, prefix in ipairs(groupOrder) do
+        for _, cluster in ipairs(clustersOf[prefix]) do
+            if #cluster > 1 and maxCountNear(guildData.eventCounts,
+                    prefix, cluster, first, last) == 0 then
+                markScanCopies(self, cluster, isOwn, isCopy)
+            end
+        end
+    end
+
+    for _, rec in ipairs(records) do
+        if isCopy[rec] then list[#list + 1] = rec end
+    end
+    return list, isCopy
 end
 
 --- Recount every player's stats from the stored records, from zero.
