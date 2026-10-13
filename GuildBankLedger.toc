@@ -1,4 +1,4 @@
-## Interface: 120100
+## Interface: 120105
 ## Title: GuildBankLedger
 ## Notes: Persistent guild bank transaction logging with guild-wide sync and consumption tracking
 ## Author: RussellFeinstein
