@@ -351,6 +351,11 @@ describe("Sandbox globals", function()
             assert.same({}, bareGlobalLines(code, "GetItemInfo"))
         end)
 
+        it("lists a line once when it holds two bare references", function()
+            assert.same({ 1 }, bareGlobalLines(
+                "local a, b = GetItemInfo(x), GetItemInfo(y)", "GetItemInfo"))
+        end)
+
         it("flags a bare call on a line that also has a namespaced one", function()
             assert.same({ 1 }, bareGlobalLines(
                 "local a, b = C_Item.GetItemInfo(x), GetItemInfo(y)", "GetItemInfo"))
