@@ -20,6 +20,21 @@
 -- spec/ascii_strings_spec.lua (where the stripper also has its own unit
 -- tests). Consolidating the pair into spec/helpers.lua is #117/#120
 -- territory, not this spec's job.
+--
+-- The same gap runs the other way for client globals the game has
+-- dropped: spec/mock_wow.lua defined GetItemInfo after the 12.1.5 client
+-- removed it, so every item lookup errored in game behind a green suite
+-- (#360). Five of the item globals C_Item replaced are banned here by
+-- name, written bare or as a field of _G. luacheck's undefined-global
+-- check covers a bare reference to the rest of that family, because
+-- .luacheckrc whitelists none of them, but it does not check fields of
+-- _G, so `_G.GetItemSpell` has no guard at all.
+--
+-- Limits of a line matcher. A local alias of the C_Item function needs a
+-- name of its own, and a string literal that names a banned global counts
+-- as a reference (both read red on healthy code). A read through another
+-- spelling of the global table passes unseen: `(_G).X`, an alias such as
+-- `local G = _G`, `getfenv(0).X`, and `_G` split from `.X` across lines.
 ------------------------------------------------------------------------
 
 --- Blank out Lua comments, leaving code and string literals in place.
@@ -128,18 +143,103 @@ local function libReferenceLines(code, lib)
     return hits
 end
 
---- Every `path:line` in shipped source referencing the given library.
-local function offendersFor(lib)
-    local offenders = {}
+local strippedSources
+
+--- Every file the .toc ships, read and comment-stripped once per run.
+-- Each ban below walks all of them, so stripping per ban would repeat the
+-- character-by-character pass over every source once per banned name.
+-- @return table Array of { path = string, code = string }
+local function shippedSources()
+    if strippedSources then return strippedSources end
+    local sources = {}
     for _, path in ipairs(tocSourceFiles() or {}) do
         local src = readFile(path)
         assert.is_string(src, "could not read " .. path)
-        for _, line in ipairs(libReferenceLines(stripComments(src), lib)) do
-            offenders[#offenders + 1] = path .. ":" .. line
+        sources[#sources + 1] = { path = path, code = stripComments(src) }
+    end
+    strippedSources = sources
+    return sources
+end
+
+--- Every `path:line` in shipped source referencing the given library.
+local function offendersFor(lib)
+    local offenders = {}
+    for _, source in ipairs(shippedSources()) do
+        for _, line in ipairs(libReferenceLines(source.code, lib)) do
+            offenders[#offenders + 1] = source.path .. ":" .. line
         end
     end
     return offenders
 end
+
+--- True when the text ends in a field or method access: a lone `.` (not
+-- the `..` concat operator) or a `:`, with any spaces after it.
+local function endsInFieldAccess(before)
+    return before:match("[^%.]%.%s*$") or before:match("^%.%s*$")
+        or before:match(":%s*$")
+end
+
+--- Line numbers where `name` is referenced as a bare global.
+-- A whole-identifier match (so GetItemInfoInstant and GetCachedItemInfo
+-- do not satisfy a GetItemInfo scan) that is not a field or method
+-- access: the last non-space character before it is not a lone `.` or a
+-- `:`. A `..` before it is the concat operator, which is still a bare
+-- reference, and so is a field of the global `_G` (not of a table field
+-- that happens to be named `_G`, like `self._G`). References are banned,
+-- not only calls, because `local f = GetItemInfo` caches the global for a
+-- later call.
+-- @param code string Source with comments already blanked
+-- @param name string Global name, letters only
+-- @return table Array of line numbers, each listed once
+local function bareGlobalLines(code, name)
+    local pattern = "%f[%w_]" .. name .. "%f[^%w_]"
+    local hits = {}
+    local lineNo = 0
+    for line in (code .. "\n"):gmatch("(.-)\n") do
+        lineNo = lineNo + 1
+        local from = 1
+        while true do
+            local s, e = line:find(pattern, from)
+            if not s then break end
+            local before = line:sub(1, s - 1)
+            local accessed = endsInFieldAccess(before)
+            if accessed then
+                local g = before:find("%f[%w_]_G%s*%.%s*$")
+                if g and not endsInFieldAccess(before:sub(1, g - 1)) then
+                    accessed = false
+                end
+            end
+            if not accessed then
+                hits[#hits + 1] = lineNo
+                break
+            end
+            from = e + 1
+        end
+    end
+    return hits
+end
+
+--- Every `path:line` in shipped source referencing `name` as a bare global.
+local function bareGlobalOffenders(name)
+    local offenders = {}
+    for _, source in ipairs(shippedSources()) do
+        for _, line in ipairs(bareGlobalLines(source.code, name)) do
+            offenders[#offenders + 1] = source.path .. ":" .. line
+        end
+    end
+    return offenders
+end
+
+-- Five of the item globals C_Item replaced, the ones this addon is likeliest
+-- to reach for. GetItemInfo is gone from the 12.1.5 client (#360); the
+-- others are superseded, and the old names are what a client drops next.
+local REPLACED_ITEM_GLOBALS = {
+    { name = "GetItemInfo",         use = "C_Item.GetItemInfo" },
+    { name = "GetItemInfoInstant",  use = "C_Item.GetItemInfoInstant" },
+    { name = "GetItemCount",        use = "C_Item.GetItemCount" },
+    { name = "GetItemIcon",         use = "C_Item.GetItemIconByID" },
+    { name = "GetItemQualityColor", use = "C_Item.GetItemQualityColor" },
+}
 
 describe("Sandbox globals", function()
     -- The denominator, so a broken .toc parse cannot turn the bans below
@@ -199,4 +299,84 @@ describe("Sandbox globals", function()
     it("calls no io API anywhere the .toc ships", function()
         assert.same({}, offendersFor("io"))
     end)
+
+    describe("the bare-global matcher", function()
+        it("flags a bare call", function()
+            assert.same({ 1 }, bareGlobalLines("local n = GetItemInfo(id)", "GetItemInfo"))
+        end)
+
+        it("flags a bare reference that caches the global", function()
+            assert.same({ 1 }, bareGlobalLines("local f = GetItemInfo", "GetItemInfo"))
+        end)
+
+        it("flags a call after the concat operator", function()
+            assert.same({ 1 }, bareGlobalLines('local s = "x" .. GetItemInfo(id)', "GetItemInfo"))
+        end)
+
+        it("flags a call at the start of a line", function()
+            assert.same({ 1 }, bareGlobalLines("GetItemInfo(id)", "GetItemInfo"))
+        end)
+
+        -- The repo reads client globals through _G in places
+        -- (src/SortExecutor.lua's _G.GetGuildBankItemInfo), and luacheck
+        -- does not flag a field of _G, so this spelling has no other guard.
+        it("flags a read through _G", function()
+            assert.same({ 1 }, bareGlobalLines("local n = _G.GetItemInfo(id)", "GetItemInfo"))
+            assert.same({ 1 }, bareGlobalLines("local n = _G . GetItemInfo(id)", "GetItemInfo"))
+            assert.same({ 1 }, bareGlobalLines("if _G.GetItemInfo then end", "GetItemInfo"))
+        end)
+
+        it("does not flag a field of a table whose name ends in _G", function()
+            assert.same({}, bareGlobalLines("local n = MY_G.GetItemInfo(id)", "GetItemInfo"))
+        end)
+
+        it("does not flag a field of a table field named _G", function()
+            assert.same({}, bareGlobalLines("local n = self._G.GetItemInfo(id)", "GetItemInfo"))
+            assert.same({}, bareGlobalLines("local n = env:_G().GetItemInfo(id)", "GetItemInfo"))
+        end)
+
+        it("flags a read through _G after the concat operator", function()
+            assert.same({ 1 }, bareGlobalLines('local s = "x" .. _G.GetItemInfo(id)', "GetItemInfo"))
+        end)
+
+        it("does not flag a namespaced call or a method", function()
+            assert.same({}, bareGlobalLines("local n = C_Item.GetItemInfo(id)", "GetItemInfo"))
+            assert.same({}, bareGlobalLines("local n = C_Item . GetItemInfo(id)", "GetItemInfo"))
+            assert.same({}, bareGlobalLines("local n = self:GetItemInfo(id)", "GetItemInfo"))
+        end)
+
+        it("does not flag a longer identifier holding the name", function()
+            local code = "a = GetItemInfoInstant(id)\nb = self:GetCachedItemInfo(id)\n"
+                .. "c = GetItemInfoFromHyperlink(l)\nd = MyGetItemInfo(id)"
+            assert.same({}, bareGlobalLines(code, "GetItemInfo"))
+        end)
+
+        it("lists a line once when it holds two bare references", function()
+            assert.same({ 1 }, bareGlobalLines(
+                "local a, b = GetItemInfo(x), GetItemInfo(y)", "GetItemInfo"))
+        end)
+
+        it("flags a bare call on a line that also has a namespaced one", function()
+            assert.same({ 1 }, bareGlobalLines(
+                "local a, b = C_Item.GetItemInfo(x), GetItemInfo(y)", "GetItemInfo"))
+        end)
+
+        it("ignores a reference in a comment", function()
+            local code = stripComments("-- GetItemInfo(id) is gone in 12.1.5\nlocal x = 1")
+            assert.same({}, bareGlobalLines(code, "GetItemInfo"))
+        end)
+
+        it("reports each offending line by number", function()
+            assert.same({ 2, 4 }, bareGlobalLines(
+                "local a = 1\nlocal b = GetItemInfo(x)\nlocal c = 2\nlocal d = GetItemInfo(y)",
+                "GetItemInfo"))
+        end)
+    end)
+
+    for _, g in ipairs(REPLACED_ITEM_GLOBALS) do
+        it("references no global " .. g.name .. " anywhere the .toc ships (use "
+            .. g.use .. ")", function()
+            assert.same({}, bareGlobalOffenders(g.name))
+        end)
+    end
 end)

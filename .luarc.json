@@ -50,7 +50,6 @@
       "C_Timer",
       "C_PlayerInteractionManager",
       "C_ChatInfo",
-      "GetAddOnMetadata",
       "GetTime",
       "format",
       "strsplit",

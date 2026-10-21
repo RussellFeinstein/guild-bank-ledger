@@ -5,6 +5,12 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.43.4] - 2026-10-21
+
+### Fixed
+- After the WoW 12.1.5 update, every place the addon looks up an item's name or link raised an error instead of showing it: the Transactions and Consumption tabs and the Layout and Restock rows. Sorting failed whenever the plan needed an item's stack size, which most sorts do, and with "Include bags" ticked the bag scan failed before planning began. `/gbl sortpreview` and `/gbl deviations` failed the same way. The game removed the item lookup the addon used, and the addon now uses the one that replaced it. Reported by Kat.
+- The same error could cut bank recording short when the addon's window had been opened earlier in the session on a tab that lists items. The bank log was read when you opened the bank but not re-read while you stayed there, so a transaction made during the visit was recorded only if it was still in the log at your next visit, and the duplicate cleanup after that read was skipped. With "Open with Guild Bank" turned on, opening the bank could stop before the log was read at all. After a sync with such a tab on screen, your addon skipped announcing its new data to the guild, and if combat started during that sync it did not tell its sync partners to stop.
+
 ## [0.43.3] - 2026-10-21
 
 ### Changed

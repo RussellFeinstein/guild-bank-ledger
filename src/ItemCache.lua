@@ -28,8 +28,9 @@ function GBL:GetCachedItemInfo(itemID)
         return nil, nil
     end
 
-    -- First request — try synchronous lookup
-    local name, link, _, _, _, _, _, stackCount = GetItemInfo(itemID)
+    -- First request: try the synchronous lookup. C_Item.GetItemInfo, since
+    -- the 12.1.5 client has no global GetItemInfo (#360).
+    local name, link, _, _, _, _, _, stackCount = C_Item.GetItemInfo(itemID)
     if name then
         cache[itemID] = {
             name = name, link = link,
@@ -60,8 +61,8 @@ function GBL:GetMaxStack(itemID)
         return entry.stackCount
     end
 
-    -- Cold cache — warm it. Re-read in case the synchronous GetItemInfo
-    -- path populated the entry.
+    -- Cold cache: warm it. Re-read in case the synchronous lookup
+    -- populated the entry.
     self:GetCachedItemInfo(itemID)
     entry = cache[itemID]
     if entry and entry.loaded then
@@ -76,7 +77,7 @@ end
 function GBL:OnItemInfoReceived(_event, itemID)
     if not itemID or not cache[itemID] then return end
 
-    local name, link, _, _, _, _, _, stackCount = GetItemInfo(itemID)
+    local name, link, _, _, _, _, _, stackCount = C_Item.GetItemInfo(itemID)
     if name then
         cache[itemID] = {
             name = name, link = link,
