@@ -299,6 +299,15 @@ describe("Sandbox globals", function()
             assert.same({}, bareGlobalLines("local n = MY_G.GetItemInfo(id)", "GetItemInfo"))
         end)
 
+        it("does not flag a field of a table field named _G", function()
+            assert.same({}, bareGlobalLines("local n = self._G.GetItemInfo(id)", "GetItemInfo"))
+            assert.same({}, bareGlobalLines("local n = env:_G().GetItemInfo(id)", "GetItemInfo"))
+        end)
+
+        it("flags a read through _G after the concat operator", function()
+            assert.same({ 1 }, bareGlobalLines('local s = "x" .. _G.GetItemInfo(id)', "GetItemInfo"))
+        end)
+
         it("does not flag a namespaced call or a method", function()
             assert.same({}, bareGlobalLines("local n = C_Item.GetItemInfo(id)", "GetItemInfo"))
             assert.same({}, bareGlobalLines("local n = C_Item . GetItemInfo(id)", "GetItemInfo"))
