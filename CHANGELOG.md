@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.43.3] - 2026-10-21
+
+### Changed
+- Updated the game version the addon declares to WoW 12.1.5 (Interface 120105), up from 12.1.0.
+
 ## [0.43.2] - 2026-10-03
 
 ### Fixed
