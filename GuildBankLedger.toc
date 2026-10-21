@@ -1,8 +1,8 @@
-## Interface: 120100
+## Interface: 120105
 ## Title: GuildBankLedger
 ## Notes: Persistent guild bank transaction logging with guild-wide sync and consumption tracking
 ## Author: RussellFeinstein
-## Version: 0.43.2
+## Version: 0.43.3
 ## SavedVariables: GuildBankLedgerDB, GuildBankLedgerAuditDB
 ## OptionalDeps: Ace3, LibDBIcon-1.0, LibDataBroker-1.1, LibDeflate, Auctionator
 ## X-Category: Guild

@@ -29,6 +29,12 @@ local SECTION_COLORS = {
 ------------------------------------------------------------------------
 
 GBL.CHANGELOG_DATA = {
+    -- v0.43.3
+    {"0.43.3", "2026-10-21", {
+        Changed = {
+            "Updated the game version the addon declares to WoW 12.1.5 (Interface 120105), up from 12.1.0.",
+        },
+    }},
     -- v0.43.2
     {"0.43.2", "2026-10-03", {
         Fixed = {
