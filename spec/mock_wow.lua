@@ -880,22 +880,25 @@ function MockWoW.install()
                m.lastLogoff or 0
     end
 
-    -- Item info (name/link/stackCount lookup for ItemCache).
-    -- Real GetItemInfo returns 16+ values; we model the slice ItemCache uses:
-    -- name (1), link (2), and stackCount (8). MockWoW.itemNames[id].stackCount
-    -- is optional — when absent, the 8th return is nil (matching legacy mock).
-    _G.GetItemInfo = function(itemID)
-        local info = MockWoW.itemNames[itemID]
-        if info then
-            return info.name, info.link,
-                   nil, nil, nil, nil, nil,
-                   info.stackCount
-        end
-        return nil
-    end
-
     -- C_Item (configurable per itemID via MockWoW.itemInfo)
+    --
+    -- No global GetItemInfo: the WoW 12.1.5 client removed it (#360), and a
+    -- mock that kept defining it is how the suite stayed green while every
+    -- item lookup errored in game. C_Item.GetItemInfo returns 18 values; we
+    -- model the slice ItemCache uses: name (1), link (2) and stackCount (8).
+    -- MockWoW.itemNames[id].stackCount is optional, and the 8th return is nil
+    -- when it is absent.
+    _G.GetItemInfo = nil
     _G.C_Item = {
+        GetItemInfo = function(itemID)
+            local info = MockWoW.itemNames[itemID]
+            if info then
+                return info.name, info.link,
+                       nil, nil, nil, nil, nil,
+                       info.stackCount
+            end
+            return nil
+        end,
         GetItemInfoInstant = function(itemID)
             -- Returns: itemID, itemType, itemSubType, itemEquipLoc, icon, classID, subclassID
             local info = MockWoW.itemInfo[itemID]

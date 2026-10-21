@@ -4,6 +4,57 @@
 local Helpers = require("spec.helpers")
 local MockWoW = Helpers.MockWoW
 
+describe("ItemCache lookup source", function()
+    local GBL
+
+    before_each(function()
+        Helpers.setupMocks()
+        MockWoW.guild.name = "TestGuild"
+        GBL = Helpers.loadAddon()
+        GBL:OnInitialize()
+        GBL:ClearItemCache()
+    end)
+
+    --- Record every itemID the cache asks C_Item.GetItemInfo about.
+    local function spyOnLookup()
+        local asked = {}
+        local real = _G.C_Item.GetItemInfo
+        _G.C_Item.GetItemInfo = function(itemID)
+            asked[#asked + 1] = itemID
+            return real(itemID)
+        end
+        return asked
+    end
+
+    -- The 12.1.5 client has no global GetItemInfo (#360).
+    it("reads C_Item.GetItemInfo on the first lookup", function()
+        local asked = spyOnLookup()
+        MockWoW.itemNames[777] = {
+            name = "Test Flask",
+            link = "|cffffffff|Hitem:777|h[Test Flask]|h|r",
+            stackCount = 20,
+        }
+        local name, link = GBL:GetCachedItemInfo(777)
+        assert.equals("Test Flask", name)
+        assert.equals("|cffffffff|Hitem:777|h[Test Flask]|h|r", link)
+        assert.same({ 777 }, asked)
+    end)
+
+    it("reads C_Item.GetItemInfo again when the item data arrives", function()
+        local asked = spyOnLookup()
+        assert.is_nil(GBL:GetCachedItemInfo(888))
+        MockWoW.itemNames[888] = {
+            name = "Late Herb",
+            link = "|cffffffff|Hitem:888|h[Late Herb]|h|r",
+            stackCount = 200,
+        }
+        GBL:OnItemInfoReceived("GET_ITEM_INFO_RECEIVED", 888)
+        assert.same({ 888, 888 }, asked)
+        assert.equals("Late Herb", (GBL:GetCachedItemInfo(888)))
+        assert.equals(200, GBL:GetMaxStack(888))
+    end)
+end)
+
 describe("ItemCache GetMaxStack", function()
     local GBL
 
