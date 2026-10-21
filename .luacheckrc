@@ -68,9 +68,9 @@ read_globals = {
     "C_Item",
     "C_Timer",
     "Item",
-    "GetAddOnMetadata",
     -- No GetItemInfo: the 12.1.5 client removed the global (#360), so a
-    -- call is an undefined-global warning. Use C_Item.GetItemInfo.
+    -- call is an undefined-global warning. Use C_Item.GetItemInfo. No
+    -- GetAddOnMetadata either: retail moved it to C_AddOns.
     "GetRealmName",
     "GetTime",
     "debugprofilestop",

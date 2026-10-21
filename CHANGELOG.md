@@ -8,7 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- After the WoW 12.1.5 update, every place the addon looks up an item's name or link raised an error instead of showing it: the Transactions and Consumption tabs, the Layout, Sort and Restock rows, the sort preview and `/gbl deviations`. Transactions were still recorded and synced. The game removed the item lookup the addon used, and the addon now uses the one that replaced it. Reported by Kat.
+- After the WoW 12.1.5 update, every place the addon looks up an item's name or link raised an error instead of showing it: the Transactions and Consumption tabs and the Layout and Restock rows. The Sort tab could not plan a sort once the overflow tabs held anything, and `/gbl sortpreview` and `/gbl deviations` failed the same way. The game removed the item lookup the addon used, and the addon now uses the one that replaced it. Reported by Kat.
+- The same error could cut bank recording short. If the addon's window had been opened earlier in the session, the bank log was read when you opened the bank but not re-read while you stayed there, so a transaction made during the visit was recorded only if it was still in the log at your next visit. With "Open with Guild Bank" turned on, opening the bank could stop before the log was read at all. After a sync with the window open, your addon also skipped announcing its new data to the guild.
 
 ## [0.43.3] - 2026-10-21
 

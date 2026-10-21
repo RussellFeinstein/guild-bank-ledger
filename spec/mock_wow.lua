@@ -1021,13 +1021,9 @@ function MockWoW.install()
         return frame
     end
 
-    -- GetAddOnMetadata
-    _G.GetAddOnMetadata = function(addon, field)
-        if addon == "GuildBankLedger" and field == "Version" then
-            return "0.9.5"
-        end
-        return nil
-    end
+    -- No global GetAddOnMetadata: retail moved it to C_AddOns and nothing
+    -- here calls it. A mock answering it is how #360's removed global
+    -- passed the suite.
 
     -- GetTime (game time in seconds, fractional)
     _G.GetTime = function()

@@ -24,7 +24,12 @@
 -- The same gap runs the other way for client globals the game has
 -- dropped: spec/mock_wow.lua defined GetItemInfo after the 12.1.5 client
 -- removed it, so every item lookup errored in game behind a green suite
--- (#360). The item globals C_Item replaced are banned here by name.
+-- (#360). Five of the item globals C_Item replaced are banned here by
+-- name, read through _G included, which luacheck cannot see. luacheck's
+-- undefined-global check covers the rest of that family, because
+-- .luacheckrc whitelists none of them. Two limits of a line matcher: a
+-- local alias of the C_Item function needs a name of its own, and a
+-- string literal that names a banned global counts as a reference.
 ------------------------------------------------------------------------
 
 --- Blank out Lua comments, leaving code and string literals in place.
@@ -151,8 +156,9 @@ end
 -- do not satisfy a GetItemInfo scan) that is not a field or method
 -- access: the last non-space character before it is not a lone `.` or a
 -- `:`. A `..` before it is the concat operator, which is still a bare
--- reference. References are banned, not only calls, because
--- `local f = GetItemInfo` caches the global for a later call.
+-- reference, and so is a field of `_G`, which is the global itself.
+-- References are banned, not only calls, because `local f = GetItemInfo`
+-- caches the global for a later call.
 -- @param code string Source with comments already blanked
 -- @param name string Global name, letters only
 -- @return table Array of line numbers, each listed once
@@ -167,8 +173,9 @@ local function bareGlobalLines(code, name)
             local s, e = line:find(pattern, from)
             if not s then break end
             local before = line:sub(1, s - 1)
-            local accessed = before:match("[^%.]%.%s*$") or before:match("^%.%s*$")
-                or before:match(":%s*$")
+            local viaG = before:match("%f[%w_]_G%s*%.%s*$")
+            local accessed = not viaG and (before:match("[^%.]%.%s*$")
+                or before:match("^%.%s*$") or before:match(":%s*$"))
             if not accessed then
                 hits[#hits + 1] = lineNo
                 break
@@ -192,9 +199,9 @@ local function bareGlobalOffenders(name)
     return offenders
 end
 
--- The item globals C_Item replaced. GetItemInfo is gone from the 12.1.5
--- client (#360); the others are superseded, and the old names are what a
--- client drops next.
+-- Five of the item globals C_Item replaced, the ones this addon is likeliest
+-- to reach for. GetItemInfo is gone from the 12.1.5 client (#360); the
+-- others are superseded, and the old names are what a client drops next.
 local REPLACED_ITEM_GLOBALS = {
     { name = "GetItemInfo",         use = "C_Item.GetItemInfo" },
     { name = "GetItemInfoInstant",  use = "C_Item.GetItemInfoInstant" },

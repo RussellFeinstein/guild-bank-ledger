@@ -15,20 +15,11 @@ describe("ItemCache lookup source", function()
         GBL:ClearItemCache()
     end)
 
-    --- Record every itemID the cache asks C_Item.GetItemInfo about.
-    local function spyOnLookup()
-        local asked = {}
-        local real = _G.C_Item.GetItemInfo
-        _G.C_Item.GetItemInfo = function(itemID)
-            asked[#asked + 1] = itemID
-            return real(itemID)
-        end
-        return asked
-    end
-
-    -- The 12.1.5 client has no global GetItemInfo (#360).
-    it("reads C_Item.GetItemInfo on the first lookup", function()
-        local asked = spyOnLookup()
+    -- The 12.1.5 client has no global GetItemInfo (#360), and the mock
+    -- answers item data through C_Item.GetItemInfo alone, so a lookup that
+    -- reaches the data read it there.
+    it("resolves an item with no global GetItemInfo", function()
+        assert.is_nil(_G.GetItemInfo)
         MockWoW.itemNames[777] = {
             name = "Test Flask",
             link = "|cffffffff|Hitem:777|h[Test Flask]|h|r",
@@ -37,11 +28,11 @@ describe("ItemCache lookup source", function()
         local name, link = GBL:GetCachedItemInfo(777)
         assert.equals("Test Flask", name)
         assert.equals("|cffffffff|Hitem:777|h[Test Flask]|h|r", link)
-        assert.same({ 777 }, asked)
+        assert.equals(20, GBL:GetMaxStack(777))
     end)
 
-    it("reads C_Item.GetItemInfo again when the item data arrives", function()
-        local asked = spyOnLookup()
+    it("resolves an item whose data arrives later, with no global GetItemInfo", function()
+        assert.is_nil(_G.GetItemInfo)
         assert.is_nil(GBL:GetCachedItemInfo(888))
         MockWoW.itemNames[888] = {
             name = "Late Herb",
@@ -49,7 +40,6 @@ describe("ItemCache lookup source", function()
             stackCount = 200,
         }
         GBL:OnItemInfoReceived("GET_ITEM_INFO_RECEIVED", 888)
-        assert.same({ 888, 888 }, asked)
         assert.equals("Late Herb", (GBL:GetCachedItemInfo(888)))
         assert.equals(200, GBL:GetMaxStack(888))
     end)
@@ -66,13 +56,13 @@ describe("ItemCache GetMaxStack", function()
         GBL:ClearItemCache()
     end)
 
-    it("returns the cached stackCount once GetItemInfo populates the entry", function()
+    it("returns the cached stackCount once the item lookup populates the entry", function()
         MockWoW.itemNames[12345] = {
             name = "Healing Potion",
             link = "|cff0070dd|Hitem:12345|h[Healing Potion]|h|r",
             stackCount = 200,
         }
-        -- First call warms the cache via the synchronous GetItemInfo path.
+        -- First call warms the cache via the synchronous lookup.
         local stack = GBL:GetMaxStack(12345)
         assert.equals(200, stack)
         -- Subsequent calls hit the cache directly.
