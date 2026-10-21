@@ -5,6 +5,11 @@ All notable changes to GuildBankLedger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- After the WoW 12.1.5 update, every place the addon looks up an item's name or link raised an error instead of showing it: the Transactions and Consumption tabs, the Layout, Sort and Restock rows, the sort preview and `/gbl deviations`. Transactions were still recorded and synced. The game removed the item lookup the addon used, and the addon now uses the one that replaced it. Reported by Kat.
+
 ## [0.43.3] - 2026-10-21
 
 ### Changed

@@ -62,6 +62,7 @@ New subsystem detail goes into the matching rule file, and the Documentation Syn
 - Must call `QueryGuildBankLog(tab)` before reading transactions; `QueryGuildBankTab(tab)` before reading slots
 - Use `GetServerTime()` — never `time()` or `os.time()`
 - Use numeric `classID`/`subclassID` via `C_Item.GetItemInfoInstant()` — never localized strings
+- The global `GetItemInfo` is gone in 12.1.5 (#360): use `C_Item.GetItemInfo`, same returns, `itemStackCount` 8th. `spec/sandbox_globals_spec.lua` bans bare references to it and the other item globals `C_Item` replaced, because the mock once defined the removed global and hid the break.
 - `MAX_GUILDBANK_SLOTS_PER_TAB = 98`
 - `MAX_GUILDBANK_TABS = 8` (constant — max purchasable tabs)
 - Money log tab index: `MAX_GUILDBANK_TABS + 1` (always 9, NOT `GetNumGuildBankTabs() + 1`)
