@@ -1,5 +1,6 @@
---- itemcache_spec.lua — Tests for ItemCache.lua, focused on GetMaxStack.
--- Existing GetCachedItemInfo coverage lives in spec/data_integrity_spec.lua.
+--- itemcache_spec.lua: tests for ItemCache.lua. The lookup's source with no
+-- global GetItemInfo (#360), then GetMaxStack. Older GetCachedItemInfo
+-- coverage lives in spec/data_integrity_spec.lua.
 
 local Helpers = require("spec.helpers")
 local MockWoW = Helpers.MockWoW

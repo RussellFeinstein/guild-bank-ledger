@@ -25,11 +25,16 @@
 -- dropped: spec/mock_wow.lua defined GetItemInfo after the 12.1.5 client
 -- removed it, so every item lookup errored in game behind a green suite
 -- (#360). Five of the item globals C_Item replaced are banned here by
--- name, read through _G included, which luacheck cannot see. luacheck's
--- undefined-global check covers the rest of that family, because
--- .luacheckrc whitelists none of them. Two limits of a line matcher: a
--- local alias of the C_Item function needs a name of its own, and a
--- string literal that names a banned global counts as a reference.
+-- name, written bare or as a field of _G. luacheck's undefined-global
+-- check covers a bare reference to the rest of that family, because
+-- .luacheckrc whitelists none of them, but it does not check fields of
+-- _G, so `_G.GetItemSpell` has no guard at all.
+--
+-- Limits of a line matcher. A local alias of the C_Item function needs a
+-- name of its own, and a string literal that names a banned global counts
+-- as a reference (both read red on healthy code). A read through another
+-- spelling of the global table passes unseen: `(_G).X`, an alias such as
+-- `local G = _G`, `getfenv(0).X`, and `_G` split from `.X` across lines.
 ------------------------------------------------------------------------
 
 --- Blank out Lua comments, leaving code and string literals in place.
@@ -138,17 +143,40 @@ local function libReferenceLines(code, lib)
     return hits
 end
 
---- Every `path:line` in shipped source referencing the given library.
-local function offendersFor(lib)
-    local offenders = {}
+local strippedSources
+
+--- Every file the .toc ships, read and comment-stripped once per run.
+-- Each ban below walks all of them, so stripping per ban would repeat the
+-- character-by-character pass over every source once per banned name.
+-- @return table Array of { path = string, code = string }
+local function shippedSources()
+    if strippedSources then return strippedSources end
+    local sources = {}
     for _, path in ipairs(tocSourceFiles() or {}) do
         local src = readFile(path)
         assert.is_string(src, "could not read " .. path)
-        for _, line in ipairs(libReferenceLines(stripComments(src), lib)) do
-            offenders[#offenders + 1] = path .. ":" .. line
+        sources[#sources + 1] = { path = path, code = stripComments(src) }
+    end
+    strippedSources = sources
+    return sources
+end
+
+--- Every `path:line` in shipped source referencing the given library.
+local function offendersFor(lib)
+    local offenders = {}
+    for _, source in ipairs(shippedSources()) do
+        for _, line in ipairs(libReferenceLines(source.code, lib)) do
+            offenders[#offenders + 1] = source.path .. ":" .. line
         end
     end
     return offenders
+end
+
+--- True when the text ends in a field or method access: a lone `.` (not
+-- the `..` concat operator) or a `:`, with any spaces after it.
+local function endsInFieldAccess(before)
+    return before:match("[^%.]%.%s*$") or before:match("^%.%s*$")
+        or before:match(":%s*$")
 end
 
 --- Line numbers where `name` is referenced as a bare global.
@@ -156,9 +184,10 @@ end
 -- do not satisfy a GetItemInfo scan) that is not a field or method
 -- access: the last non-space character before it is not a lone `.` or a
 -- `:`. A `..` before it is the concat operator, which is still a bare
--- reference, and so is a field of `_G`, which is the global itself.
--- References are banned, not only calls, because `local f = GetItemInfo`
--- caches the global for a later call.
+-- reference, and so is a field of the global `_G` (not of a table field
+-- that happens to be named `_G`, like `self._G`). References are banned,
+-- not only calls, because `local f = GetItemInfo` caches the global for a
+-- later call.
 -- @param code string Source with comments already blanked
 -- @param name string Global name, letters only
 -- @return table Array of line numbers, each listed once
@@ -173,9 +202,13 @@ local function bareGlobalLines(code, name)
             local s, e = line:find(pattern, from)
             if not s then break end
             local before = line:sub(1, s - 1)
-            local viaG = before:match("%f[%w_]_G%s*%.%s*$")
-            local accessed = not viaG and (before:match("[^%.]%.%s*$")
-                or before:match("^%.%s*$") or before:match(":%s*$"))
+            local accessed = endsInFieldAccess(before)
+            if accessed then
+                local g = before:find("%f[%w_]_G%s*%.%s*$")
+                if g and not endsInFieldAccess(before:sub(1, g - 1)) then
+                    accessed = false
+                end
+            end
             if not accessed then
                 hits[#hits + 1] = lineNo
                 break
@@ -189,11 +222,9 @@ end
 --- Every `path:line` in shipped source referencing `name` as a bare global.
 local function bareGlobalOffenders(name)
     local offenders = {}
-    for _, path in ipairs(tocSourceFiles() or {}) do
-        local src = readFile(path)
-        assert.is_string(src, "could not read " .. path)
-        for _, line in ipairs(bareGlobalLines(stripComments(src), name)) do
-            offenders[#offenders + 1] = path .. ":" .. line
+    for _, source in ipairs(shippedSources()) do
+        for _, line in ipairs(bareGlobalLines(source.code, name)) do
+            offenders[#offenders + 1] = source.path .. ":" .. line
         end
     end
     return offenders
