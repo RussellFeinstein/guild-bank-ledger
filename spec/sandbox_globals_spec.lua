@@ -279,6 +279,19 @@ describe("Sandbox globals", function()
             assert.same({ 1 }, bareGlobalLines("GetItemInfo(id)", "GetItemInfo"))
         end)
 
+        -- The repo reads client globals through _G in places
+        -- (src/SortExecutor.lua's _G.GetGuildBankItemInfo), and luacheck
+        -- does not flag a field of _G, so this spelling has no other guard.
+        it("flags a read through _G", function()
+            assert.same({ 1 }, bareGlobalLines("local n = _G.GetItemInfo(id)", "GetItemInfo"))
+            assert.same({ 1 }, bareGlobalLines("local n = _G . GetItemInfo(id)", "GetItemInfo"))
+            assert.same({ 1 }, bareGlobalLines("if _G.GetItemInfo then end", "GetItemInfo"))
+        end)
+
+        it("does not flag a field of a table whose name ends in _G", function()
+            assert.same({}, bareGlobalLines("local n = MY_G.GetItemInfo(id)", "GetItemInfo"))
+        end)
+
         it("does not flag a namespaced call or a method", function()
             assert.same({}, bareGlobalLines("local n = C_Item.GetItemInfo(id)", "GetItemInfo"))
             assert.same({}, bareGlobalLines("local n = C_Item . GetItemInfo(id)", "GetItemInfo"))
